@@ -25,16 +25,11 @@ jobs:
       - name: Set up Python
         run: uv python install 3.13
 
-      - name: Install build tools
-        run: uv tool install build
-
       - name: Build package
-        run: uv run python -m build
+        run: uv build
 
       - name: Verify package
-        run: |
-          uv tool install twine
-          uv run twine check dist/*
+        run: uvx twine check dist/*
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
