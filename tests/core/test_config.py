@@ -12,7 +12,8 @@ from leashd.core.config import LeashdConfig, build_directory_names, ensure_leash
 class TestLeashdConfig:
     def test_default_values(self, tmp_path):
         config = LeashdConfig(approved_directories=[tmp_path])
-        assert config.max_turns == 25
+        assert config.max_turns == 150
+        assert config.agent_timeout_seconds == 3600
         assert config.storage_backend == "sqlite"
         assert config.approval_timeout_seconds == 300
         assert config.interaction_timeout_seconds is None

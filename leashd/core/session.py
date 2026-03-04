@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Literal
 
 import structlog
@@ -22,8 +22,8 @@ class Session(BaseModel):
     chat_id: str
     working_directory: str
     claude_session_id: str | None = None
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    last_used: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    last_used: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     total_cost: float = 0.0
     message_count: int = 0
     mode: Literal["default", "plan", "auto", "test", "merge"] = "default"
@@ -49,7 +49,7 @@ class SessionManager:
         # Memory cache first
         session = self._sessions.get(key)
         if session and session.is_active:
-            session.last_used = datetime.now(UTC)
+            session.last_used = datetime.now(timezone.utc)
             logger.debug(
                 "session_cache_hit",
                 user_id=user_id,
@@ -62,7 +62,7 @@ class SessionManager:
         if self._store:
             session = await self._store.load(user_id, chat_id)
             if session and session.is_active:
-                session.last_used = datetime.now(UTC)
+                session.last_used = datetime.now(timezone.utc)
                 self._sessions[key] = session
                 logger.info(
                     "session_restored",
@@ -103,7 +103,7 @@ class SessionManager:
         claude_session_id: str | None = None,
         cost: float = 0.0,
     ) -> None:
-        session.last_used = datetime.now(UTC)
+        session.last_used = datetime.now(timezone.utc)
         session.message_count += 1
         session.total_cost += cost
         if claude_session_id:
@@ -131,8 +131,8 @@ class SessionManager:
         session.message_count = 0
         session.total_cost = 0.0
         session.mode = "default"
-        session.created_at = datetime.now(UTC)
-        session.last_used = datetime.now(UTC)
+        session.created_at = datetime.now(timezone.utc)
+        session.last_used = datetime.now(timezone.utc)
         session.is_active = True
         session.workspace_name = None
         session.workspace_directories = []
@@ -156,7 +156,7 @@ class SessionManager:
         logger.info("session_deactivated", user_id=user_id, chat_id=chat_id)
 
     def cleanup_expired(self, max_age_hours: int = 24) -> int:
-        now = datetime.now(UTC)
+        now = datetime.now(timezone.utc)
         expired_keys = [
             k
             for k, s in self._sessions.items()

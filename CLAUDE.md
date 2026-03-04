@@ -38,13 +38,38 @@ uv run ruff format .
 
 # Lint fix + format (equivalent to VS Code save)
 uv run ruff check --fix . && uv run ruff format .
+
+# Daemon lifecycle
+leashd start           # start as background daemon
+leashd start -f        # start in foreground (useful for dev)
+leashd stop            # graceful shutdown
+leashd status          # check if running
+
+# Config management
+leashd init            # first-time setup wizard
+leashd config          # show resolved config
+leashd add-dir <path>  # add approved directory
+leashd remove-dir <path>
+leashd dirs            # list approved dirs
+leashd clean           # remove all runtime artifacts
+
+# Type checking
+uv run mypy leashd/
 ```
 
 ## Architecture
 
 The system follows a three-layer safety pipeline: **Sandbox → Policy → Approval**.
 
-**Bootstrap** (`app.py`) wires all subsystems together: builds config, storage, connectors, middleware, plugins, safety pipeline, git handler, and engine. Entry point is `main.py` → `app.py`.
+**Bootstrap** (`app.py`) wires all subsystems together: builds config, storage, connectors, middleware, plugins, safety pipeline, git handler, and engine. Entry point is `main.py:run()` → `cli.py` → `main.py:start()` → `app.py:build_engine()`.
+
+**CLI** (`cli.py`) — argparse subcommand router. Entry point is `main.py:run()` → `cli.py:main()`. Dispatches `start`, `stop`, `status`, `init`, `add-dir`, `remove-dir`, `dirs`, `config`, `clean`, `ws`. Bare `leashd` (no subcommand) triggers smart-start: checks cwd, prompts to approve if needed, then daemonizes.
+
+**Daemon** (`daemon.py`) — background process lifecycle via PID file at `~/.leashd/leashd.pid`. `start_daemon()` spawns `leashd _run` as a detached subprocess; `stop_daemon()` sends SIGTERM with 10s grace period. `is_running()` auto-cleans stale PID files and falls back to `pgrep`.
+
+**Config Store** (`config_store.py`) — persistent global config I/O at `~/.leashd/config.yaml` and workspaces at `~/.leashd/workspaces.yaml`. `inject_global_config_as_env()` bridges YAML values to `os.environ` so pydantic-settings picks them up. Atomic writes via temp-file + rename.
+
+**Setup** (`setup.py`) — interactive first-time wizard (`leashd init`). Prompts for cwd approval, Telegram bot token, and user ID. Writes to global config store.
 
 **Engine** (`core/engine.py`) is the central orchestrator. It receives user messages from connectors, passes them through the middleware chain, routes messages to the Claude Code agent, and sends responses back through connectors. Supports `/dir`, `/plan <text>`, `/edit <text>`, `/git`, and `/workspace` (alias `/ws`) commands.
 
@@ -60,7 +85,7 @@ The system follows a three-layer safety pipeline: **Sandbox → Policy → Appro
 - `AuthMiddleware` — user whitelist via `LEASHD_ALLOWED_USER_IDS`
 - `RateLimitMiddleware` — token-bucket rate limiting per user via `LEASHD_RATE_LIMIT_RPM`
 
-**EventBus** (`core/events.py`): Pub/sub system for decoupling subsystems. Plugins and internal components subscribe to named events. Key events: `tool.gated`, `tool.allowed`, `tool.denied`, `message.in`, `message.out`, `approval.requested`, `approval.resolved`, `safety.violation`, `engine.started`, `engine.stopped`, `command.test`, `test.started`, `test.completed`, `command.merge`, `merge.started`, `merge.completed`, `interaction.requested`, `interaction.resolved`, `message.queued`, `execution.interrupted`.
+**EventBus** (`core/events.py`): Pub/sub system for decoupling subsystems. Plugins and internal components subscribe to named events. Key events: `tool.gated`, `tool.allowed`, `tool.denied`, `message.in`, `message.out`, `engine.started`, `engine.stopped`, `command.test`, `test.started`, `test.completed`, `command.merge`, `merge.started`, `merge.completed`, `interaction.requested`, `interaction.resolved`, `message.queued`, `execution.interrupted`.
 
 **Plugin system** (`plugins/`):
 - `LeashdPlugin` ABC with lifecycle hooks: `initialize → start → stop`
@@ -90,7 +115,7 @@ The system follows a three-layer safety pipeline: **Sandbox → Policy → Appro
 
 **Policies** (`policies/`): Four built-in YAML policies — `default.yaml` (balanced), `strict.yaml` (maximum restrictions, shorter timeout), `permissive.yaml` (maximum freedom for trusted environments), `dev-tools.yaml` (overlay that auto-allows common dev commands like package managers, linters, test runners — meant to be combined with other policies). All deny credential file access and destructive patterns.
 
-**Configuration** (`core/config.py`): `LeashdConfig` uses pydantic-settings, loaded from environment variables prefixed with `LEASHD_`. Required: `LEASHD_APPROVED_DIRECTORIES` (comma-separated paths). `build_directory_names()` derives short names from basenames for the `/dir` command.
+**Configuration** (`core/config.py` + `config_store.py`): `LeashdConfig` uses pydantic-settings, loaded from environment variables prefixed with `LEASHD_`. `config_store.py` manages the persistent `~/.leashd/config.yaml` and bridges it to env vars via `inject_global_config_as_env()`. Layer order: `~/.leashd/config.yaml` → `.env` → environment variables (highest priority). Required: `LEASHD_APPROVED_DIRECTORIES`. `build_directory_names()` derives short names from basenames for the `/dir` command.
 
 **Storage** (`storage/`): `SessionStore` ABC with two backends — `MemorySessionStore` (in-process dict) and `SqliteSessionStore` (persistent via aiosqlite). Sessions are keyed by user+chat pair.
 
@@ -108,14 +133,14 @@ leashd integrates with Playwright MCP for browser automation. The `.mcp.json` at
 
 ## Code Conventions
 
-- Python 3.13+ required
+- Python 3.10+ required
 - **Always use `uv run` for all Python commands** — never use `python3`, `python`, or `python3 -m`. Examples: `uv run pytest`, `uv run ruff`, `uv run mypy`, `uv run leashd`
 - Async-first: all agent/connector operations use asyncio
 - Ruff for linting and formatting (88-char line length, rules: E, F, I, N, W, UP, B, SIM, RUF, S, C4, PT, RET, ARG)
 - Pydantic models for data validation, pydantic-settings for configuration
 - structlog for structured logging — keyword args only, no string interpolation in log messages
 - Protocol classes (`BaseAgent`, `BaseConnector`) define extensibility points
-- Custom exception hierarchy in `exceptions.py`: `ConfigError`, `AgentError`, `SafetyError`, `ApprovalTimeoutError`, `SessionError`, `StorageError`, `PluginError`
+- Custom exception hierarchy in `exceptions.py`: `ConfigError`, `AgentError`, `SafetyError`, `ApprovalTimeoutError`, `SessionError`, `StorageError`, `PluginError`, `InteractionTimeoutError`, `ConnectorError`, `DaemonError`
 - Tests use `pytest-asyncio` with `asyncio_mode = "auto"`; coverage minimum: 89% (`fail_under = 89`)
 - No `__init__.py` or other boilerplate junk files — use implicit namespace packages
 - No redundant or obvious comments — only comment non-obvious logic

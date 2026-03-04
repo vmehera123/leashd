@@ -1,7 +1,7 @@
 """Append-only audit logger — JSON lines format."""
 
 import json
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +24,7 @@ class AuditLogger:
         self._path = new_path
 
     def _write(self, entry: dict[str, Any]) -> None:
-        entry["timestamp"] = datetime.now(UTC).isoformat()
+        entry["timestamp"] = datetime.now(timezone.utc).isoformat()
         try:
             with open(self._path, "a") as f:
                 f.write(json.dumps(entry, default=str) + "\n")

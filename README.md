@@ -1,225 +1,293 @@
 # leashd
 
-**Drive Claude Code from your phone via Telegram, with safety guardrails.**
+**A remotely controlled agentic coding environment. Run Claude Code as a background daemon, govern it with policy rules, approve actions from your phone.**
 
-[![Python 3.13+](https://img.shields.io/badge/python-3.13%2B-blue.svg)](https://www.python.org/downloads/)
+[![PyPI](https://img.shields.io/pypi/v/leashd.svg)](https://pypi.org/project/leashd/)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![Coverage 89%+](https://img.shields.io/badge/coverage-89%25%2B-brightgreen.svg)](#development)
 [![Status: Alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#status)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
 ---
 
-leashd lets you send natural-language coding instructions from Telegram on your phone to a Claude Code agent running on your dev machine. A three-layer safety pipeline — sandbox, policy rules, and human approval — keeps the AI from doing anything dangerous without your explicit sign-off.
+leashd runs as a **background daemon** on your dev machine. You send it natural-language coding instructions from Telegram on your phone. Each request passes through a **three-layer safety pipeline** — sandbox enforcement, YAML policy rules, and human approval — before reaching Claude Code. Risky actions surface as **Approve / Reject** buttons in your chat. Everything is logged to an audit trail.
 
-## What's New in 0.3.0
+The result: a semi-automated coding workflow you can supervise from anywhere, with guardrails you define.
 
-- **`/test` command** — 9-phase agent-driven test workflow with project config (`.leashd/test.yaml`)
-- **`/git merge`** — AI-assisted conflict resolution with auto-resolve/abort buttons
-- **`/plan <text>` and `/edit <text>`** — switch mode and start the agent in one step
-- **Message interrupt buttons** — interrupt or wait during agent execution instead of silent queuing
-- **`dev-tools.yaml` policy overlay** — auto-allows common dev commands (package managers, linters, test runners)
-- **Agent resilience** — auto-retry with exponential backoff, 30-minute execution timeout
+---
 
-See [CHANGELOG.md](CHANGELOG.md) for full details.
+## How It Works
 
-## Features
+```
+Your phone (Telegram)
+        │
+        ▼
+   leashd daemon          ← runs in background on your dev machine
+        │
+        ├─ 1. Sandbox       ← path-scoped: blocks anything outside approved dirs
+        ├─ 2. Policy rules  ← YAML: allow / deny / require_approval per tool/command
+        └─ 3. Human gate    ← Approve / Reject buttons sent to your Telegram
+                │
+                ▼
+         Claude Code agent  ← reads files, writes code, runs tests
+```
 
-- **Remote AI coding from any device** — send instructions via Telegram, Claude writes the code on your machine
-- **Three-layer safety pipeline** — sandbox boundaries, YAML policy rules, and human approval on every risky action
-- **YAML-driven policy rules** — 4 built-in policies (default, strict, permissive + dev-tools overlay) or write your own
-- **Inline approve/reject buttons** — tap to approve or block actions right from your phone
-- **Git integration** — full `/git` command suite from Telegram with inline action buttons
-- **`/test` command** — 9-phase agent-driven test workflow with browser automation
-- **Plan and edit modes** — `/plan` for review-before-execute, `/edit` for direct implementation, `/default` for balanced
-- **8 slash commands** — `/dir`, `/plan`, `/edit`, `/default`, `/git`, `/test`, `/clear`, `/status`
-- **Multi-turn sessions** — Claude remembers the full conversation, so you can iterate naturally
-- **Audit logging** — every tool attempt and decision is logged to an append-only JSONL file
-- **Streaming responses** — see Claude's output live as it types, with real-time tool activity indicators
-- **Message history** — with SQLite storage, every message is persisted with cost and duration metadata
-- **Pluggable architecture** — connectors, middleware, and plugins are all extensible
+Sessions are **multi-turn**: Claude remembers the full conversation context, so you can iterate naturally across messages ("now add tests for that", "rename it to X").
 
-## Table of Contents
-
-- [Quick Start](#quick-start)
-- [How It Works](#how-it-works)
-- [Configuration](#configuration)
-- [Safety](#safety)
-- [Session Persistence](#session-persistence)
-- [Browser Testing](#browser-testing)
-- [Streaming](#streaming)
-- [CLI Mode](#cli-mode)
-- [Architecture](#architecture)
-- [Development](#development)
-- [Status](#status)
+---
 
 ## Quick Start
 
 ### Prerequisites
 
-- **Python 3.13+**
-- **[uv](https://docs.astral.sh/uv/)** — fast Python package manager
-- **[Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)** — installed and authenticated. The `claude` command must work in your terminal. leashd delegates to it via `claude-agent-sdk`.
-- **Telegram account** — to create a bot and chat with it from your phone
-- **Node.js 18+** *(optional)* — required only for [browser testing](#browser-testing) via Playwright MCP
+- **Python 3.10+**
+- **[Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)** — installed and authenticated. The `claude` command must work in your terminal.
+- **Telegram account** — to create a bot
 
-### 1. Clone and install
+### 1. Install
 
 ```bash
-git clone git@github.com:nodenova/leashd.git && cd leashd
-uv sync
+pip install leashd
+```
+
+Or with [uv](https://docs.astral.sh/uv/) (recommended):
+
+```bash
+uv tool install leashd
 ```
 
 ### 2. Create a Telegram bot
 
-1. Open Telegram on your phone
-2. Search for **@BotFather** and start a chat
-3. Send `/newbot`
-4. Pick a display name (e.g., "My leashd Bot")
-5. Pick a username ending in `bot` (e.g., `my_leashd_bot`)
-6. BotFather replies with a **token** like `123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11` — copy it
+1. Open Telegram and search for **@BotFather**
+2. Send `/newbot` and follow the prompts
+3. Copy the **token** BotFather gives you (looks like `123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11`)
+4. Message **@userinfobot** to get your numeric **user ID** (e.g. `981234567`) — this restricts the bot to only you
 
-### 3. Find your Telegram user ID
-
-Message **@userinfobot** on Telegram. It replies instantly with your numeric user ID (e.g., `981234567`). You'll use this to restrict the bot to only you.
-
-### 4. Configure
+### 3. Run the setup wizard
 
 ```bash
-cp .env.example .env
+leashd init
 ```
 
-Edit `.env` and set these three values:
+The wizard prompts you for your approved directory/directories and optional Telegram credentials, and writes `~/.leashd/config.yaml`. No manual config file editing needed.
+
+### 4. Start the daemon
 
 ```bash
-# The project directory you want the AI to work on (must exist)
-LEASHD_APPROVED_DIRECTORIES=/path/to/your/project
-
-# Bot token from step 2
-LEASHD_TELEGRAM_BOT_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
-
-# Your Telegram user ID from step 3 (restricts access to only you)
-LEASHD_ALLOWED_USER_IDS=981234567
+leashd start
 ```
 
-### 5. Run
+leashd starts in the background. Check it with `leashd status`, stop it with `leashd stop`.
 
-```bash
-uv run -m leashd
-```
+### 5. Start coding from your phone
 
-### 6. Start coding from your phone
-
-Open Telegram, find your bot, and send a message like:
+Open Telegram, find your bot, and send something like:
 
 > "Add a health check endpoint to the FastAPI app"
 
-Claude will start working. When it needs to do something gated by policy (like writing a file), you'll see an approval request with **Approve** / **Reject** buttons right in the chat.
+Claude starts working. When it needs to do something gated by policy (e.g. write a file), you'll get an **Approve / Reject** button in the chat.
 
-## How It Works
+---
 
-You type a message in Telegram on your phone. leashd receives it, runs it through the safety pipeline, and forwards it to a Claude Code agent session scoped to your project directory. Claude reads files, writes code, runs tests — whatever you asked. Each tool call is checked against sandbox boundaries, YAML policy rules, and (when required) sent back to you as an inline Approve/Reject button. The response flows back to your Telegram chat.
+## What's New in 0.5.0
 
-Sessions are multi-turn: Claude remembers the full conversation context across messages, so you can iterate naturally ("now add tests for that", "rename it to X").
+**Daemon mode** — `leashd` now runs in the background by default. Use `leashd stop` for graceful shutdown, `leashd status` to check on it, and `leashd start -f` to run in the foreground.
+
+**First-time setup wizard** — `leashd init` guides you through approved directories and optional Telegram credentials on first run. No manual `.env` editing required.
+
+**CLI subcommands** — manage your config from the terminal without touching files:
+
+```bash
+leashd add-dir ~/projects/my-api   # add an approved directory
+leashd remove-dir ~/projects/old   # remove one
+leashd dirs                        # list all approved directories
+leashd config                      # view current resolved config
+```
+
+**Global config at `~/.leashd/config.yaml`** — a persistent base-layer config shared across all projects. Environment variables and `.env` files override it per-project.
+
+**Workspace management** — group related repos under a named workspace:
+
+```bash
+leashd ws add my-saas              # create a workspace
+leashd ws list                     # list all workspaces
+leashd ws show my-saas             # inspect a workspace
+leashd ws remove my-saas           # remove it
+```
+
+**Python 3.10+ support** — broadened from 3.13+. CI now runs a matrix across 3.10, 3.11, 3.12, and 3.13.
+
+See [CHANGELOG.md](CHANGELOG.md) for the full history.
+
+---
+
+## Daemon Mode
+
+In v0.5.0, leashd runs as a background process by default.
+
+```bash
+leashd start           # start daemon (background)
+leashd start -f        # start in foreground (useful for debugging)
+leashd status          # check if daemon is running
+leashd stop            # graceful shutdown
+```
+
+Logs go to `~/.leashd/logs/app.log` by default. Set `LEASHD_LOG_DIR` to change the path.
+
+---
 
 ## Configuration
 
-All settings are environment variables prefixed with `LEASHD_`. Set them in `.env` or export them directly.
+leashd uses a **layered config system** — each layer overrides the one before it:
 
-The three essential variables are covered in [Quick Start](#4-configure). Here's the full reference:
+```
+~/.leashd/config.yaml   ← global base (managed by leashd init / leashd config)
+.env in your project    ← per-project overrides
+environment variables   ← highest priority
+```
 
-<details>
-<summary><strong>All configuration options</strong></summary>
+### First-time setup
+
+```bash
+leashd init
+```
+
+### Inspecting resolved config
+
+```bash
+leashd config
+```
+
+### Managing approved directories
+
+```bash
+leashd add-dir /path/to/project
+leashd remove-dir /path/to/project
+leashd dirs
+```
+
+### Full configuration reference
+
+All settings are environment variables prefixed with `LEASHD_`. Set them in `~/.leashd/config.yaml`, a local `.env`, or export them directly.
 
 | Variable | Default | Description |
 |---|---|---|
-| `LEASHD_APPROVED_DIRECTORIES` | **required** | Directories the AI agent can work in (comma-separated). Must exist. |
-| `LEASHD_TELEGRAM_BOT_TOKEN` | — | Bot token from @BotFather. Without this, leashd runs in local CLI mode instead. |
-| `LEASHD_ALLOWED_USER_IDS` | *(no restriction)* | Comma-separated Telegram user IDs that can use the bot. Empty = anyone can use it. |
-| `LEASHD_MAX_TURNS` | `25` | Max conversation turns per request. |
+| `LEASHD_APPROVED_DIRECTORIES` | **required** | Directories the agent can work in (comma-separated). Must exist. |
+| `LEASHD_TELEGRAM_BOT_TOKEN` | — | Bot token from @BotFather. Without this, leashd runs in local CLI mode. |
+| `LEASHD_ALLOWED_USER_IDS` | *(no restriction)* | Comma-separated Telegram user IDs that can use the bot. Empty = anyone. |
+| `LEASHD_MAX_TURNS` | `150` | Max conversation turns per request. |
 | `LEASHD_SYSTEM_PROMPT` | — | Custom system prompt for the agent. |
 | `LEASHD_POLICY_FILES` | built-in `default.yaml` | Comma-separated paths to YAML policy files. |
-| `LEASHD_APPROVAL_TIMEOUT_SECONDS` | `300` | Seconds to wait for your approval tap before auto-denying. |
+| `LEASHD_APPROVAL_TIMEOUT_SECONDS` | `300` | Seconds to wait for approval tap before auto-denying. |
 | `LEASHD_RATE_LIMIT_RPM` | `0` *(off)* | Max requests per minute per user. |
 | `LEASHD_RATE_LIMIT_BURST` | `5` | Burst capacity for the rate limiter. |
-| `LEASHD_STORAGE_BACKEND` | `sqlite` | `sqlite` (persistent, default) or `memory` (sessions lost on restart). |
-| `LEASHD_STORAGE_PATH` | `.leashd/messages.db` | SQLite database path. Only used when backend is `sqlite`. |
+| `LEASHD_STORAGE_BACKEND` | `sqlite` | `sqlite` (persistent) or `memory` (sessions lost on restart). |
+| `LEASHD_STORAGE_PATH` | `.leashd/messages.db` | SQLite database path. |
 | `LEASHD_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, or `ERROR`. |
-| `LEASHD_AUDIT_LOG_PATH` | `.leashd/audit.jsonl` | Path for the append-only audit log of all tool decisions. |
-| `LEASHD_ALLOWED_TOOLS` | *(all)* | Allowlist of Claude tool names. Empty = all tools allowed. |
+| `LEASHD_LOG_DIR` | `~/.leashd/logs` | Directory for rotating JSON logs. |
+| `LEASHD_AUDIT_LOG_PATH` | `.leashd/audit.jsonl` | Append-only audit log of all tool decisions. |
+| `LEASHD_ALLOWED_TOOLS` | *(all)* | Allowlist of Claude tool names. Empty = all allowed. |
 | `LEASHD_DISALLOWED_TOOLS` | *(none)* | Denylist of Claude tool names. |
 | `LEASHD_STREAMING_ENABLED` | `true` | Progressive streaming updates in Telegram. |
 | `LEASHD_STREAMING_THROTTLE_SECONDS` | `1.5` | Min seconds between message edits during streaming. |
-| `LEASHD_AGENT_TIMEOUT_SECONDS` | `1800` | Agent execution timeout (30 minutes). |
+| `LEASHD_AGENT_TIMEOUT_SECONDS` | `3600` | Agent execution timeout (60 minutes). |
 | `LEASHD_DEFAULT_MODE` | `default` | Default session mode: `"default"`, `"plan"`, or `"auto"`. |
 | `LEASHD_MCP_SERVERS` | `{}` | JSON dict of MCP server configurations. |
-| `LEASHD_LOG_DIR` | `.leashd/logs` | Directory for rotating JSON file logging (`{dir}/app.log`). |
-| `LEASHD_LOG_MAX_BYTES` | `10485760` | Max log file size before rotation. Used with `LOG_DIR`. |
-| `LEASHD_LOG_BACKUP_COUNT` | `5` | Rotated log backups to keep. Used with `LOG_DIR`. |
 
-</details>
+---
 
 ## Safety
 
 Every tool call Claude makes passes through a three-layer pipeline before it can execute:
 
-**1. Sandbox** — The agent can only touch files inside `LEASHD_APPROVED_DIRECTORIES`. Any path traversal attempt is blocked immediately and logged as a security violation.
+**1. Sandbox** — The agent can only touch files inside `LEASHD_APPROVED_DIRECTORIES`. Path traversal attempts are blocked immediately and logged as security violations.
 
 **2. Policy rules** — YAML rules classify each tool call as `allow`, `deny`, or `require_approval` based on the tool name, command patterns, and file path patterns. Rules are evaluated in order; first match wins.
 
-**3. Human approval** — For `require_approval` actions, leashd sends you an inline message on Telegram with **Approve** and **Reject** buttons. If you don't respond within the timeout (default: 5 minutes), the action is denied automatically. Safe by default.
+**3. Human approval** — For `require_approval` actions, leashd sends an inline message to Telegram with **Approve** and **Reject** buttons. If you don't respond within the timeout (default: 5 minutes), the action is auto-denied.
 
 Everything is logged to `.leashd/audit.jsonl` — every tool attempt, every decision.
 
 ### Built-in policies
 
-leashd ships with four policies in `policies/`:
+leashd ships four policies in `policies/`:
 
-**`default.yaml`** (recommended) — Good starting point for phone-based vibe coding.
-- Auto-allows: file reads, search, grep, git status/log/diff, readonly browser tools (snapshots, screenshots)
-- Requires approval: file writes, edits, git push/rebase/merge, network commands, browser mutations (click, navigate, type)
+**`default.yaml`** *(recommended)* — balanced for everyday use.
+- Auto-allows: file reads, search, grep, git status/log/diff, read-only browser tools
+- Requires approval: file writes/edits, git push/rebase/merge, network commands, browser mutations
 - Hard-blocks: credential file access, `rm -rf`, `sudo`, force push, pipe-to-shell, SQL DROP/TRUNCATE
 
-**`strict.yaml`** — Maximum safety, but chatty (lots of approval taps).
-- Auto-allows: only file reads (`Read`, `Glob`, `Grep`, `LS`)
-- Requires approval: everything else, including writes, bash, web tools, and all browser tools
-- 2-minute approval timeout (vs 5 minutes for default)
+**`strict.yaml`** — maximum safety, more approval taps.
+- Auto-allows: only reads (`Read`, `Glob`, `Grep`, `LS`)
+- Requires approval: everything else
+- 2-minute approval timeout
 
-**`permissive.yaml`** — For trusted environments where you want minimal interruptions.
-- Auto-allows: reads, writes, package managers (`npm`, `pip`, `uv`, `cargo`), test runners (`pytest`, `jest`), `git add/commit/stash`, all browser tools
+**`permissive.yaml`** — for trusted environments where you want minimal interruptions.
+- Auto-allows: reads, writes, package managers, test runners, git add/commit/stash, all browser tools
 - Requires approval: git push, network commands, anything not explicitly listed
 - 10-minute approval timeout
 
-To switch policies:
-
-```bash
-LEASHD_POLICY_FILES=policies/strict.yaml
-```
-
-**`dev-tools.yaml`** (overlay) — Auto-allows common development commands. Loaded alongside `default.yaml` by default.
+**`dev-tools.yaml`** *(overlay)* — auto-allows common dev commands. Loaded alongside `default.yaml` by default.
 - Auto-allows: linters (`ruff`, `eslint`, `prettier`), test runners (`pytest`, `jest`, `vitest`), package managers (`npm install`, `pip install`, `uv sync`, `cargo build`)
-- Does not override deny rules from the base policy
 
-To switch policies:
+Switch policies:
 
 ```bash
 LEASHD_POLICY_FILES=policies/strict.yaml
 ```
 
-You can also combine multiple policy files (rules are merged, evaluated in order):
+Combine multiple policy files (rules merged, evaluated in order):
 
 ```bash
 LEASHD_POLICY_FILES=policies/default.yaml,policies/my-overrides.yaml
 ```
 
+---
+
+## Telegram Commands
+
+Once the daemon is running and your bot is set up, these slash commands are available in chat:
+
+| Command | Description |
+|---|---|
+| `/plan <text>` | Switch to plan mode and start — Claude proposes, you approve before execution |
+| `/edit <text>` | Switch to edit mode and start — direct implementation |
+| `/default` | Switch back to balanced default mode |
+| `/dir` | Switch working directory (inline buttons) |
+| `/git <subcommand>` | Full git suite: status, branch, checkout, diff, log, add, commit, push, pull |
+| `/test` | 9-phase agent-driven test workflow with browser automation |
+| `/ws` | Manage workspaces inline |
+| `/status` | Show current session, mode, and directory |
+| `/clear` | Clear conversation history and start fresh |
+
+---
+
+## Workspaces
+
+Group related repositories under named workspaces for multi-repo context:
+
+```bash
+leashd ws add my-saas        # create a workspace
+leashd ws list               # list all workspaces
+leashd ws show my-saas       # inspect repos in a workspace
+leashd ws remove my-saas     # remove it
+```
+
+Workspaces are configured in `.leashd/workspaces.yaml` and inject context into the agent's system prompt automatically.
+
+---
+
 ## Session Persistence
 
-By default, sessions are stored in SQLite (`.leashd/messages.db`) and persist across restarts — Claude remembers your conversation context between sessions. leashd also logs every message (user and assistant) with cost, duration, and session metadata — giving you a queryable conversation history.
+By default, sessions are stored in SQLite (`.leashd/messages.db`) and persist across daemon restarts — Claude remembers conversation context between sessions. Every message is stored with cost, duration, and session metadata.
 
-For development or testing, you can opt into in-memory storage (sessions lost on restart):
+For development or testing, use in-memory storage:
 
 ```bash
 LEASHD_STORAGE_BACKEND=memory
 ```
+
+---
 
 ## Browser Testing
 
@@ -231,100 +299,114 @@ leashd integrates with [Playwright MCP](https://github.com/playwright-community/
 npx playwright install chromium
 ```
 
-**It's already configured.** The `.mcp.json` at the project root tells Claude Code to spawn the Playwright MCP server (pinned to `@playwright/mcp@0.0.41`, headless). The 28 browser tools are classified in all three policy presets — readonly tools (snapshots, screenshots) are auto-allowed in default policy, while mutation tools (click, navigate, type) require your approval.
+The `.mcp.json` at the project root pre-configures Claude Code to spawn the Playwright MCP server. Read-only browser tools (snapshots, screenshots) are auto-allowed in `default.yaml`; mutation tools (click, navigate, type) require approval.
 
 **Typical workflow:**
 
-1. Start your dev server (`npm run dev`, `uv run uvicorn`, etc.)
-2. Launch Claude Code in the leashd project directory
-3. Ask Claude to test your UI — "Navigate to localhost:3000 and verify the login form"
-4. Claude uses browser tools, gated by your policy, and reports findings
-
-leashd also includes Playwright test agents (Planner, Generator, Healer) and a `/healer` slash command for automated test repair.
+1. Start your dev server (`npm run dev`, `uvicorn`, etc.)
+2. In Telegram: `/test --url http://localhost:3000`
+3. Claude navigates, verifies, and reports — each mutation tap needs your approval
 
 See [docs/browser-testing.md](docs/browser-testing.md) for the full guide.
 
+---
+
 ## Streaming
 
-When connected via Telegram, responses stream in real-time — the message updates progressively as Claude types. While tools are running, you see a live indicator (e.g., `🔧 Bash: pytest tests/`). The final message includes a tool usage summary (e.g., `🧰 Bash x3, Read, Glob`). Disable with `LEASHD_STREAMING_ENABLED=false`.
+Telegram responses stream in real time — the message updates progressively as Claude types. While tools are running, you see a live indicator (e.g., `🔧 Bash: pytest tests/`). The final message includes a tool usage summary (e.g., `🧰 Bash ×3, Read, Glob`).
 
-## Logging
+Disable with `LEASHD_STREAMING_ENABLED=false`.
 
-leashd uses [structlog](https://www.structlog.org/) for structured logging. Every important code path — session lifecycle, agent execution, safety decisions, commands, and plugin activity — emits structured log events.
-
-### Changing the log level
-
-Set `LEASHD_LOG_LEVEL` in your `.env` or environment:
-
-```bash
-# Show all logs including detailed tracing
-LEASHD_LOG_LEVEL=DEBUG
-
-# Default — operational events only
-LEASHD_LOG_LEVEL=INFO
-
-# Quieter — only warnings and errors
-LEASHD_LOG_LEVEL=WARNING
-```
-
-### Enabling file logging
-
-By default, logs go only to the console. To also write JSON logs to a rotating file (useful for production debugging):
-
-```bash
-LEASHD_LOG_DIR=logs
-```
-
-This creates `logs/app.log` with automatic rotation. You can tune rotation with `LEASHD_LOG_MAX_BYTES` (default: 10 MB) and `LEASHD_LOG_BACKUP_COUNT` (default: 5 backups).
-
-### Key log events
-
-At `INFO` level you'll see the request lifecycle:
-
-```
-engine_building → engine_built → cli_starting → session_created →
-request_started → agent_execute_started → agent_execute_completed →
-request_completed → cli_shutting_down
-```
-
-At `DEBUG` level, additional events trace safety decisions (`policy_evaluated`, `sandbox_path_denied`), session cache behavior (`session_cache_hit`, `session_updated`), and interaction routing (`message_routed_to_interaction`, `resolve_text_answer`).
+---
 
 ## CLI Mode
 
-If you don't set `LEASHD_TELEGRAM_BOT_TOKEN`, leashd runs as a local REPL in your terminal — useful for testing your configuration before going mobile. Note: actions that require approval are auto-denied in CLI mode since there's no approval UI.
+No Telegram token? leashd falls back to a local REPL — useful for testing your config before going mobile:
 
 ```bash
-# No LEASHD_TELEGRAM_BOT_TOKEN set
-uv run leashd
+# Don't set LEASHD_TELEGRAM_BOT_TOKEN, then:
+leashd start -f
 # > type your prompts here
 ```
 
+Note: actions requiring approval are auto-denied in CLI mode since there's no approval UI.
+
+---
+
+## Logging
+
+leashd uses [structlog](https://www.structlog.org/) for structured logging.
+
+```bash
+LEASHD_LOG_LEVEL=DEBUG     # full trace including policy decisions
+LEASHD_LOG_LEVEL=INFO      # default — operational events
+LEASHD_LOG_LEVEL=WARNING   # warnings and errors only
+```
+
+Enable file logging (JSON, rotating):
+
+```bash
+LEASHD_LOG_DIR=~/.leashd/logs
+```
+
+Key log event sequence at `INFO`:
+
+```
+engine_building → engine_built → daemon_starting → session_created →
+request_started → agent_execute_started → agent_execute_completed →
+request_completed
+```
+
+---
+
 ## Architecture
 
-leashd's core is the **Engine**, which receives messages from connectors, runs them through a middleware chain (auth, rate limiting), routes them to the Claude Code agent, and sends responses back. Every tool call the agent makes is intercepted by the **Gatekeeper**, which orchestrates the three-layer safety pipeline: sandbox enforcement, YAML policy matching, and async human approval. An **EventBus** decouples subsystems — plugins subscribe to events like `tool.allowed`, `tool.denied`, and `approval.requested` to extend behavior without touching core code. Connectors (Telegram, with more planned) and storage backends (memory, SQLite) are swappable via protocol classes.
+leashd's core is the **Engine**, which receives messages from connectors, runs them through middleware (auth, rate limiting), delegates to the Claude Code agent, and sends responses back. Every tool call the agent makes is intercepted by the **Gatekeeper**, which orchestrates the three-layer safety pipeline. An **EventBus** decouples subsystems — plugins subscribe to events like `tool.allowed`, `tool.denied`, and `approval.requested`. Connectors (Telegram, CLI) and storage backends (SQLite, memory) are swappable via protocol classes.
+
+```
+Telegram connector
+      │
+   Middleware (auth, rate limit)
+      │
+   Engine
+      │
+   Gatekeeper ──────────────────────────────┐
+      │                                     │
+   Claude Code agent             1. Sandbox check
+      │                          2. Policy rule match
+      └── tool call ──────────▶  3. Human approval (Telegram)
+```
+
+---
 
 ## Development
 
 ```bash
-# Install dependencies
+# Clone and install (including dev dependencies)
+git clone git@github.com:nodenova/leashd.git && cd leashd
 uv sync
 
-# Run all tests
+# Run tests
 uv run pytest tests/
+uv run pytest tests/test_policy.py -v          # single file
+uv run pytest --cov=leashd tests/              # with coverage
 
-# Run a single test file
-uv run pytest tests/test_policy.py -v
-
-# Run tests with coverage
-uv run pytest --cov=leashd tests/
-
-# Lint
+# Lint and format
 uv run ruff check .
-
-# Auto-fix lint issues
 uv run ruff check --fix .
-
-# Format
 uv run ruff format .
 ```
 
+---
+
+## Status
+
+leashd is **alpha** — the API and config schema may change between versions. Core functionality (daemon, safety pipeline, Telegram integration, policy engine) is stable and tested at 89%+ coverage. Not recommended for production environments where agent actions could have irreversible consequences without review.
+
+If you hit a bug or have a feature idea, [open an issue](https://github.com/nodenova/leashd/issues).
+
+---
+
+## License
+
+[Apache 2.0](LICENSE) — © NodeNova Ltd

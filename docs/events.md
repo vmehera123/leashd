@@ -12,7 +12,7 @@ class Event(BaseModel):
 
     name: str
     data: dict[str, Any] = Field(default_factory=dict)
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 ```
 
 ### `EventHandler`
@@ -82,6 +82,8 @@ flowchart LR
 | `test.started` | `TEST_STARTED` | `TestRunnerPlugin` | `chat_id`, `config` | Test workflow started |
 | `command.merge` | `COMMAND_MERGE` | `GitCommandHandler` | `chat_id`, `branch` | `/git merge` command received |
 | `merge.started` | `MERGE_STARTED` | `MergeResolverPlugin` | `chat_id` | Merge conflict resolution started |
+| `test.completed` | `TEST_COMPLETED` | `TestRunnerPlugin` | `chat_id`, `results` | Test workflow finished |
+| `merge.completed` | `MERGE_COMPLETED` | `MergeResolverPlugin` | `chat_id` | Merge resolution finished |
 
 ## Plugin Subscription Pattern
 

@@ -7,8 +7,9 @@ import sys
 import structlog
 
 from leashd.app import build_engine
+from leashd.config_store import inject_global_config_as_env
 from leashd.core.config import LeashdConfig
-from leashd.exceptions import ConnectorError
+from leashd.exceptions import ConfigError, ConnectorError, LeashdError
 
 logger = structlog.get_logger()
 
@@ -82,12 +83,19 @@ async def _run_telegram(config: LeashdConfig) -> None:
         print("\nShutdown complete.")
 
 
-async def main() -> None:
+async def _main() -> None:
+    from leashd.daemon import cleanup as daemon_cleanup
+
+    inject_global_config_as_env()
+
     try:
         config = LeashdConfig()  # type: ignore[call-arg]  # pydantic-settings loads from env
-    except Exception as e:
+    except (ConfigError, LeashdError, ValueError) as e:
         print(f"Configuration error: {e}", file=sys.stderr)
-        print("Set LEASHD_APPROVED_DIRECTORIES or create a .env file.", file=sys.stderr)
+        print(
+            "Run 'leashd init' or set LEASHD_APPROVED_DIRECTORIES.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     try:
@@ -98,7 +106,17 @@ async def main() -> None:
     except ConnectorError as e:
         print(f"Connector failed: {e}", file=sys.stderr)
         sys.exit(1)
+    finally:
+        daemon_cleanup()
+
+
+def start() -> None:
+    """Start the engine — called by cli.py after smart-start checks."""
+    asyncio.run(_main())
 
 
 def run() -> None:
-    asyncio.run(main())
+    """Entry point registered in pyproject.toml. Delegates to CLI router."""
+    from leashd.cli import main as cli_main
+
+    cli_main()

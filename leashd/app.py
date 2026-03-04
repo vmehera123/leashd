@@ -6,7 +6,7 @@ import json
 import logging
 import logging.handlers
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -119,19 +119,31 @@ def _configure_logging(config: LeashdConfig, *, log_dir: Path | None = None) -> 
     )
 
 
+_DEFAULT_MCP_SERVERS: dict[str, Any] = {
+    "playwright": {
+        "command": "npx",
+        "args": ["@playwright/mcp@0.0.41"],
+    },
+}
+
+
 def _load_default_mcp_servers(config: LeashdConfig, project_root: Path) -> None:
-    """Merge leashd's own .mcp.json into config so the agent always has browser tools."""
+    """Merge default MCP servers into config so the agent always has browser tools."""
+    defaults = dict(_DEFAULT_MCP_SERVERS)
+
+    # Override defaults from file if present (local dev from repo root)
     mcp_path = project_root / ".mcp.json"
-    if not mcp_path.is_file():
-        return
-    try:
-        data = json.loads(mcp_path.read_text())
-        file_servers = data.get("mcpServers", {})
-        if file_servers:
-            # Existing config entries (env overrides) win over file defaults
-            config.mcp_servers = {**file_servers, **config.mcp_servers}
-    except Exception:
-        logger.warning("default_mcp_json_read_failed", path=str(mcp_path))
+    if mcp_path.is_file():
+        try:
+            data = json.loads(mcp_path.read_text())
+            file_servers = data.get("mcpServers", {})
+            if file_servers:
+                defaults = file_servers
+        except (OSError, json.JSONDecodeError, KeyError):
+            logger.warning("default_mcp_json_read_failed", path=str(mcp_path))
+
+    # Existing config entries (env overrides) win over defaults
+    config.mcp_servers = {**defaults, **config.mcp_servers}
 
 
 def build_engine(
@@ -161,11 +173,11 @@ def build_engine(
 
     _configure_logging(config, log_dir=resolved_log_dir)
 
-    leashd_root = Path(__file__).resolve().parent.parent
-    _load_default_mcp_servers(config, leashd_root)
+    leashd_pkg_root = Path(__file__).resolve().parent.parent
+    _load_default_mcp_servers(config, leashd_pkg_root)
 
     if config.workspace_config_root is None:
-        config.workspace_config_root = leashd_root
+        config.workspace_config_root = Path.home()
 
     logger.info(
         "engine_building",
@@ -176,9 +188,10 @@ def build_engine(
         approved_directories=[str(d) for d in config.approved_directories],
     )
 
-    # Session management store — fixed at leashd root, never switches with /dir
-    ensure_leashd_dir(leashd_root)
-    session_db_path = leashd_root / ".leashd" / "sessions.db"
+    # Session management store — global at ~/.leashd/, never switches with /dir
+    global_leashd_dir = Path.home() / ".leashd"
+    global_leashd_dir.mkdir(parents=True, exist_ok=True)
+    session_db_path = global_leashd_dir / "sessions.db"
 
     session_store: SessionStore
     if config.storage_backend == "sqlite":

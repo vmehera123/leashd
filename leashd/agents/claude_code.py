@@ -308,7 +308,7 @@ class ClaudeCodeAgent(BaseAgent):
         leashd_servers = self._config.mcp_servers
         if local_servers or leashd_servers:
             opts.mcp_servers = {**local_servers, **leashd_servers}
-            logger.debug(
+            logger.info(
                 "agent_mcp_servers",
                 session_id=session.session_id,
                 server_names=list(opts.mcp_servers.keys()),

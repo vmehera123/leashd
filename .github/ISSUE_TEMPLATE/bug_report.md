@@ -27,7 +27,7 @@ What actually happened. Include error messages or logs if available.
 ## Environment
 
 - **OS:** (e.g., macOS 15, Ubuntu 24.04)
-- **Python version:** (e.g., 3.13.1)
+- **Python version:** (e.g., 3.10+)
 - **leashd version:** (e.g., 0.4.0)
 - **Claude Code CLI version:** (output of `claude --version`)
 - **Connector:** (Telegram / CLI)

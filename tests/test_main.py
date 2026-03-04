@@ -6,7 +6,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from leashd.exceptions import ConnectorError
-from leashd.main import main, run
+from leashd.main import _main as main
+from leashd.main import run
 
 
 @pytest.fixture
@@ -29,7 +30,10 @@ def mock_config(tmp_path):
 class TestMain:
     @pytest.mark.asyncio
     async def test_config_error_exits(self):
-        with patch("leashd.main.LeashdConfig", side_effect=ValueError("bad config")):
+        with (
+            patch("leashd.main.inject_global_config_as_env"),
+            patch("leashd.main.LeashdConfig", side_effect=ValueError("bad config")),
+        ):
             with pytest.raises(SystemExit) as exc_info:
                 await main()
             assert exc_info.value.code == 1
@@ -37,6 +41,7 @@ class TestMain:
     @pytest.mark.asyncio
     async def test_successful_startup(self, mock_engine, mock_config):
         with (
+            patch("leashd.main.inject_global_config_as_env"),
             patch("leashd.main.LeashdConfig", return_value=mock_config),
             patch("leashd.main.build_engine", return_value=mock_engine),
             patch("builtins.input", side_effect=EOFError),
@@ -48,6 +53,7 @@ class TestMain:
     @pytest.mark.asyncio
     async def test_eof_triggers_shutdown(self, mock_engine, mock_config):
         with (
+            patch("leashd.main.inject_global_config_as_env"),
             patch("leashd.main.LeashdConfig", return_value=mock_config),
             patch("leashd.main.build_engine", return_value=mock_engine),
             patch("builtins.input", side_effect=EOFError),
@@ -59,6 +65,7 @@ class TestMain:
     @pytest.mark.asyncio
     async def test_keyboard_interrupt_shutdown(self, mock_engine, mock_config):
         with (
+            patch("leashd.main.inject_global_config_as_env"),
             patch("leashd.main.LeashdConfig", return_value=mock_config),
             patch("leashd.main.build_engine", return_value=mock_engine),
             patch("builtins.input", side_effect=KeyboardInterrupt),
@@ -70,6 +77,7 @@ class TestMain:
     @pytest.mark.asyncio
     async def test_empty_input_skipped(self, mock_engine, mock_config):
         with (
+            patch("leashd.main.inject_global_config_as_env"),
             patch("leashd.main.LeashdConfig", return_value=mock_config),
             patch("leashd.main.build_engine", return_value=mock_engine),
             patch("builtins.input", side_effect=["   ", EOFError]),
@@ -81,6 +89,7 @@ class TestMain:
     @pytest.mark.asyncio
     async def test_valid_input_dispatched(self, mock_engine, mock_config):
         with (
+            patch("leashd.main.inject_global_config_as_env"),
             patch("leashd.main.LeashdConfig", return_value=mock_config),
             patch("leashd.main.build_engine", return_value=mock_engine),
             patch("builtins.input", side_effect=["hello", EOFError]),
@@ -96,6 +105,7 @@ class TestMain:
     @pytest.mark.asyncio
     async def test_response_printed(self, mock_engine, mock_config, capsys):
         with (
+            patch("leashd.main.inject_global_config_as_env"),
             patch("leashd.main.LeashdConfig", return_value=mock_config),
             patch("leashd.main.build_engine", return_value=mock_engine),
             patch("builtins.input", side_effect=["hello", EOFError]),
@@ -108,6 +118,7 @@ class TestMain:
     @pytest.mark.asyncio
     async def test_multiple_messages_dispatched(self, mock_engine, mock_config):
         with (
+            patch("leashd.main.inject_global_config_as_env"),
             patch("leashd.main.LeashdConfig", return_value=mock_config),
             patch("leashd.main.build_engine", return_value=mock_engine),
             patch("builtins.input", side_effect=["first", "second", EOFError]),
@@ -119,10 +130,90 @@ class TestMain:
         assert calls[0].kwargs["text"] == "first"
         assert calls[1].kwargs["text"] == "second"
 
-    def test_run_calls_main(self):
-        with patch("leashd.main.asyncio.run") as mock_run:
+    @pytest.mark.asyncio
+    async def test_config_error_catches_leashd_error(self):
+        """LeashdError caught by narrowed except → exit code 1."""
+        from leashd.exceptions import LeashdError
+
+        with (
+            patch("leashd.main.inject_global_config_as_env"),
+            patch("leashd.main.LeashdConfig", side_effect=LeashdError("bad")),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            await main()
+        assert exc_info.value.code == 1
+
+    @pytest.mark.asyncio
+    async def test_config_error_catches_config_error(self, capsys):
+        """ConfigError caught → exit code 1, 'Configuration error' in stderr."""
+        from leashd.exceptions import ConfigError
+
+        with (
+            patch("leashd.main.inject_global_config_as_env"),
+            patch("leashd.main.LeashdConfig", side_effect=ConfigError("missing key")),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            await main()
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "Configuration error" in captured.err
+
+    @pytest.mark.asyncio
+    async def test_unexpected_exception_not_caught(self):
+        """TypeError from LeashdConfig() NOT caught — propagates."""
+        with (
+            patch("leashd.main.inject_global_config_as_env"),
+            patch("leashd.main.LeashdConfig", side_effect=TypeError("unexpected")),
+            pytest.raises(TypeError, match="unexpected"),
+        ):
+            await main()
+
+    def test_run_calls_cli_main(self):
+        with patch("leashd.cli.main") as mock_cli_main:
             run()
-            mock_run.assert_called_once()
+            mock_cli_main.assert_called_once()
+
+
+class TestDaemonCleanup:
+    @pytest.mark.asyncio
+    async def test_daemon_cleanup_called_on_success(self, mock_engine, mock_config):
+        """daemon_cleanup() called in finally block on normal CLI exit."""
+        with (
+            patch("leashd.main.inject_global_config_as_env"),
+            patch("leashd.main.LeashdConfig", return_value=mock_config),
+            patch("leashd.main.build_engine", return_value=mock_engine),
+            patch("builtins.input", side_effect=EOFError),
+            patch("leashd.daemon.cleanup") as mock_cleanup,
+        ):
+            await main()
+
+        mock_cleanup.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_daemon_cleanup_called_on_connector_error(
+        self, mock_engine, mock_config
+    ):
+        """daemon_cleanup() called even when ConnectorError triggers sys.exit(1)."""
+        mock_config.telegram_bot_token = "fake:token"
+
+        mock_connector = AsyncMock()
+        mock_connector.start.side_effect = ConnectorError("network down")
+
+        with (
+            patch("leashd.main.inject_global_config_as_env"),
+            patch("leashd.main.LeashdConfig", return_value=mock_config),
+            patch("leashd.main.build_engine", return_value=mock_engine),
+            patch(
+                "leashd.connectors.telegram.TelegramConnector",
+                return_value=mock_connector,
+            ),
+            patch("leashd.daemon.cleanup") as mock_cleanup,
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            await main()
+
+        assert exc_info.value.code == 1
+        mock_cleanup.assert_called_once()
 
 
 class TestTelegramMode:
@@ -139,6 +230,7 @@ class TestTelegramMode:
         stop_event.set()
 
         with (
+            patch("leashd.main.inject_global_config_as_env"),
             patch("leashd.main.LeashdConfig", return_value=cfg),
             patch("leashd.main.build_engine", return_value=mock_engine),
             patch(
@@ -166,6 +258,7 @@ class TestTelegramMode:
         mock_connector.start.side_effect = ConnectorError("network down")
 
         with (
+            patch("leashd.main.inject_global_config_as_env"),
             patch("leashd.main.LeashdConfig", return_value=cfg),
             patch("leashd.main.build_engine", return_value=mock_engine),
             patch(
@@ -192,6 +285,7 @@ class TestTelegramMode:
         )
 
         with (
+            patch("leashd.main.inject_global_config_as_env"),
             patch("leashd.main.LeashdConfig", return_value=cfg),
             patch("leashd.main.build_engine", return_value=mock_engine),
             patch(

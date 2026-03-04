@@ -27,6 +27,7 @@ flowchart LR
 
 | Document | Description |
 |---|---|
+| [CLI Reference](cli.md) | All `leashd` subcommands, daemon lifecycle, config management |
 | [Architecture](architecture.md) | Component map, dependency injection, startup/shutdown lifecycle |
 | [Safety Pipeline](safety-pipeline.md) | Gatekeeper, sandbox, policy engine, approval coordinator |
 | [Engine](engine.md) | Message lifecycle, plan mode, streaming, slash commands |
@@ -45,20 +46,21 @@ flowchart LR
 ## Quick Start
 
 ```bash
-# Clone and install
-git clone <repo-url>
-cd leashd
-uv sync
+# Install
+pip install leashd        # or: uv tool install leashd
+# or from source:
+git clone <repo-url> && cd leashd && uv sync
 
-# Minimal .env
-echo 'LEASHD_APPROVED_DIRECTORIES=/path/to/your/project' > .env
+# First-time setup wizard
+leashd init
 
-# Run the CLI (interactive REPL)
-uv run -m leashd
+# Start the daemon
+leashd start
 
-# Run with Telegram connector
-echo 'LEASHD_TELEGRAM_BOT_TOKEN=your-bot-token' >> .env
-uv run -m leashd
+# Check status
+leashd status
 ```
 
-See [Configuration](configuration.md) for the full environment variable reference.
+The setup wizard prompts for your approved directory and optional Telegram credentials. No manual config file editing needed.
+
+See [CLI Reference](cli.md) for all commands, and [Configuration](configuration.md) for the full environment variable reference.

@@ -10,8 +10,12 @@
 
 ## Component Inventory
 
-| Component | Class | Module |
+| Component | Class / Function | Module |
 |---|---|---|
+| CLI | `main()` | `cli.py` |
+| Setup wizard | `run_setup()` | `setup.py` |
+| Daemon manager | `start_daemon()`, `stop_daemon()` | `daemon.py` |
+| Config store | `load_global_config()`, `save_global_config()` | `config_store.py` |
 | Engine | `Engine` | `core/engine.py` |
 | Configuration | `LeashdConfig` | `core/config.py` |
 | Event bus | `EventBus` | `core/events.py` |
@@ -118,6 +122,8 @@ flowchart TB
 
 ```mermaid
 sequenceDiagram
+    participant cli as cli.py
+    participant daemon as daemon.py
     participant main as main.py
     participant app as build_engine()
     participant engine as Engine
@@ -125,6 +131,14 @@ sequenceDiagram
     participant plugins as PluginRegistry
     participant bus as EventBus
 
+    cli->>cli: parse args, inject_global_config_as_env()
+    alt leashd start (background)
+        cli->>daemon: start_daemon()
+        daemon->>daemon: spawn "leashd _run" subprocess
+        daemon->>main: start()
+    else leashd start -f (foreground)
+        cli->>main: start()
+    end
     main->>app: build_engine(config)
     app->>app: Create all components
     app->>engine: Engine(connector, agent, config, ...)
@@ -149,6 +163,8 @@ flowchart TD
     LeashdError --> StorageError
     LeashdError --> PluginError
     LeashdError --> InteractionTimeoutError
+    LeashdError --> ConnectorError
+    LeashdError --> DaemonError
 ```
 
 All exceptions inherit from `LeashdError` (defined in `exceptions.py`). Each maps to a specific subsystem failure, allowing callers to catch at the right granularity.

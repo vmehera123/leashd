@@ -55,18 +55,22 @@ _TRANSIENT_MESSAGE_DELAY = 5.0  # seconds before auto-deleting status messages (
 
 class _ToolCallbackState:
     __slots__ = (
+        "_bg_tasks",
         "clean_proceed",
         "plan_approved",
         "plan_file_content",
         "plan_file_path",
         "plan_review_shown",
+        "proceed_in_context",
         "target_mode",
     )
 
     def __init__(self) -> None:
+        self._bg_tasks: set[asyncio.Task[None]] = set()
         self.clean_proceed = False
         self.plan_approved = False
         self.plan_review_shown = False
+        self.proceed_in_context = False
         self.plan_file_content: str | None = None
         self.plan_file_path: str | None = None
         self.target_mode: str = "edit"
@@ -643,7 +647,7 @@ class Engine:
                 session_id=response.session_id,
             )
 
-            if not tool_state.clean_proceed:
+            if not tool_state.clean_proceed and not tool_state.proceed_in_context:
                 streamed = False
                 if responder:
                     try:
@@ -686,7 +690,7 @@ class Engine:
                     max_turns=self.config.max_turns,
                 )
 
-            if tool_state.clean_proceed:
+            if tool_state.clean_proceed or tool_state.proceed_in_context:
                 plan = self._resolve_plan_content(
                     tool_state, response.content, session.working_directory
                 )
@@ -695,8 +699,10 @@ class Engine:
                     chat_id,
                     user_id,
                     plan,
-                    trigger="clean_proceed",
-                    clear_context=True,
+                    trigger="clean_proceed"
+                    if tool_state.clean_proceed
+                    else "proceed_in_context",
+                    clear_context=tool_state.clean_proceed,
                     target_mode=tool_state.target_mode,
                 )
 
@@ -750,6 +756,21 @@ class Engine:
                 if responder:
                     await responder.deactivate()
                 return ""
+            if tool_state.clean_proceed or tool_state.proceed_in_context:
+                plan = self._resolve_plan_content(
+                    tool_state, "", session.working_directory
+                )
+                return await self._exit_plan_mode(
+                    session,
+                    chat_id,
+                    user_id,
+                    plan,
+                    trigger="clean_proceed"
+                    if tool_state.clean_proceed
+                    else "proceed_in_context",
+                    clear_context=tool_state.clean_proceed,
+                    target_mode=tool_state.target_mode,
+                )
             duration_ms = round((time.monotonic() - start) * 1000)
             logger.error(
                 "request_failed",
@@ -1098,15 +1119,37 @@ class Engine:
             ws = self._workspaces.get(session.workspace_name)
             if ws:
                 session.workspace_directories = [str(d) for d in ws.directories]
+                logger.info(
+                    "session_workspace_restored",
+                    workspace=session.workspace_name,
+                    directories=session.workspace_directories,
+                )
             else:
+                logger.warning(
+                    "session_workspace_not_found",
+                    workspace=session.workspace_name,
+                )
                 session.workspace_name = None
 
         if session.working_directory == self._default_directory:
+            logger.debug(
+                "session_realign_skipped",
+                reason="matches_default",
+                directory=self._default_directory,
+            )
             return
         target = Path(session.working_directory)
         if not target.is_dir():
+            logger.warning(
+                "session_directory_missing",
+                directory=session.working_directory,
+            )
             return
         await self._switch_paths(target)
+        logger.info(
+            "session_paths_realigned",
+            directory=str(target),
+        )
 
     async def _handle_dir_command(
         self, session: Session, args: str, chat_id: str
@@ -1461,28 +1504,24 @@ class Engine:
                     if result.clear_context:
                         session.claude_session_id = None
                         state.clean_proceed = True
-                        if responder:
-                            await responder.deactivate()
-                        # prevent GC of fire-and-forget task
-                        _bg: set[asyncio.Task[None]] = set()
-
-                        async def _cancel_agent() -> None:
-                            try:
-                                await asyncio.sleep(0.1)
-                                await self.agent.cancel(session.session_id)
-                            except Exception:
-                                logger.debug(
-                                    "cancel_agent_failed",
-                                    session_id=session.session_id,
-                                )
-
-                        t = asyncio.create_task(_cancel_agent())
-                        _bg.add(t)
-                        t.add_done_callback(_bg.discard)
                     else:
-                        session.mode = (
-                            "auto" if result.target_mode == "edit" else "default"
-                        )
+                        state.proceed_in_context = True
+                    if responder:
+                        await responder.deactivate()
+
+                    async def _cancel_agent() -> None:
+                        try:
+                            await asyncio.sleep(0.1)
+                            await self.agent.cancel(session.session_id)
+                        except Exception:
+                            logger.debug(
+                                "cancel_agent_failed",
+                                session_id=session.session_id,
+                            )
+
+                    t = asyncio.create_task(_cancel_agent())
+                    state._bg_tasks.add(t)
+                    t.add_done_callback(state._bg_tasks.discard)
                     return result.permission
                 return result
 

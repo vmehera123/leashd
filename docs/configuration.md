@@ -1,11 +1,12 @@
 # Configuration Reference
 
-`LeashdConfig` (`core/config.py`) uses pydantic-settings to load configuration from environment variables prefixed with `LEASHD_`. Values can also be set in a `.env` file in the project root.
+`LeashdConfig` (`core/config.py`) uses pydantic-settings to load configuration from environment variables prefixed with `LEASHD_`. Values can be set in `~/.leashd/config.yaml` (global), a `.env` file in the project root, or as environment variables.
 
 ## Loading Flow
 
 ```mermaid
 flowchart LR
+    yaml["~/.leashd/config.yaml"]
     env[".env file"]
     vars["Environment variables"]
     pydantic["pydantic-settings"]
@@ -13,12 +14,13 @@ flowchart LR
     config["LeashdConfig"]
     build["build_engine()"]
 
+    yaml -->|inject_global_config_as_env| pydantic
     env --> pydantic
     vars --> pydantic
     pydantic --> validators --> config --> build
 ```
 
-Environment variables override `.env` file values. Validators run after loading to resolve paths, parse user IDs, and validate policy files.
+Each layer overrides the one before it: `~/.leashd/config.yaml` → `.env` → environment variables (highest priority). `inject_global_config_as_env()` bridges the YAML config to `os.environ` so pydantic-settings picks it up. Validators run after loading to resolve paths, parse user IDs, and validate policy files.
 
 ## Required Variables
 
@@ -32,8 +34,8 @@ Environment variables override `.env` file values. Validators run after loading 
 
 | Variable | Type | Default | Description |
 |---|---|---|---|
-| `LEASHD_MAX_TURNS` | `int` | `25` | Maximum agent turns per message |
-| `LEASHD_AGENT_TIMEOUT_SECONDS` | `int` | `1800` | Agent execution timeout in seconds (30 minutes) |
+| `LEASHD_MAX_TURNS` | `int` | `150` | Maximum agent turns per message |
+| `LEASHD_AGENT_TIMEOUT_SECONDS` | `int` | `3600` | Agent execution timeout in seconds (60 minutes) |
 | `LEASHD_SYSTEM_PROMPT` | `str \| None` | `None` | Additional system prompt appended to the agent |
 | `LEASHD_ALLOWED_TOOLS` | `list[str]` | `[]` | Whitelist of tools the agent can use (empty = all) |
 | `LEASHD_DISALLOWED_TOOLS` | `list[str]` | `[]` | Blacklist of tools the agent cannot use |
@@ -158,8 +160,8 @@ LEASHD_APPROVED_DIRECTORIES=/path/to/your/project
 LEASHD_APPROVED_DIRECTORIES=/path/to/your/project
 
 # Agent
-LEASHD_MAX_TURNS=25
-LEASHD_AGENT_TIMEOUT_SECONDS=1800
+LEASHD_MAX_TURNS=150
+LEASHD_AGENT_TIMEOUT_SECONDS=3600
 LEASHD_SYSTEM_PROMPT="Focus on writing tests first."
 LEASHD_DEFAULT_MODE=default
 

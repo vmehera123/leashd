@@ -7,7 +7,7 @@ import re
 from collections.abc import Callable, Coroutine
 from datetime import timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, TypeVar, cast
 
 import structlog
 from telegram import (
@@ -109,14 +109,17 @@ def _truncate_callback_data(data: str) -> str:
     return data.encode()[:_CALLBACK_DATA_MAX_BYTES].decode(errors="ignore")
 
 
-async def _retry_on_network_error[T](
-    factory: Callable[[], Coroutine[object, object, T]],
+_T = TypeVar("_T")
+
+
+async def _retry_on_network_error(
+    factory: Callable[[], Coroutine[object, object, _T]],
     *,
     max_retries: int,
     base_delay: float,
     max_delay: float,
     operation: str,
-) -> T:
+) -> _T:
     """Retry a coroutine on transient Telegram network errors.
 
     Catches ``NetworkError`` (includes ``TimedOut``) and ``RetryAfter``.

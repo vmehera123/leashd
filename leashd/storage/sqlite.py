@@ -1,6 +1,6 @@
 """SQLite session store — sessions survive restarts."""
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -151,8 +151,12 @@ class SqliteSessionStore:
             chat_id=row["chat_id"],
             working_directory=row["working_directory"],
             claude_session_id=row["claude_session_id"],
-            created_at=datetime.fromisoformat(row["created_at"]).replace(tzinfo=UTC),
-            last_used=datetime.fromisoformat(row["last_used"]).replace(tzinfo=UTC),
+            created_at=datetime.fromisoformat(row["created_at"]).replace(
+                tzinfo=timezone.utc
+            ),
+            last_used=datetime.fromisoformat(row["last_used"]).replace(
+                tzinfo=timezone.utc
+            ),
             total_cost=row["total_cost"],
             message_count=row["message_count"],
             is_active=bool(row["is_active"]),
@@ -184,7 +188,7 @@ class SqliteSessionStore:
                 cost,
                 duration_ms,
                 session_id,
-                datetime.now(UTC).isoformat(),
+                datetime.now(timezone.utc).isoformat(),
             ),
         )
         await self._db.commit()

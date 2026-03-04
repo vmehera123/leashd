@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 from unittest.mock import patch
 
-from leashd.app import _load_default_mcp_servers, build_engine
+import pytest
+
+from leashd.app import _DEFAULT_MCP_SERVERS, _load_default_mcp_servers, build_engine
 from leashd.core.config import LeashdConfig
 from leashd.core.engine import Engine
 from leashd.middleware.auth import AuthMiddleware
@@ -174,7 +176,7 @@ class TestBuildEngine:
 
 
 class TestLoadDefaultMcpServers:
-    def test_loads_servers_from_file(self, tmp_path):
+    def test_file_overrides_hardcoded_defaults(self, tmp_path):
         mcp_file = tmp_path / ".mcp.json"
         mcp_file.write_text(
             json.dumps({"mcpServers": {"my-tool": {"command": "node"}}})
@@ -183,10 +185,10 @@ class TestLoadDefaultMcpServers:
         _load_default_mcp_servers(config, tmp_path)
         assert config.mcp_servers == {"my-tool": {"command": "node"}}
 
-    def test_missing_file_is_noop(self, tmp_path):
+    def test_missing_file_uses_hardcoded_defaults(self, tmp_path):
         config = LeashdConfig(approved_directories=[tmp_path])
         _load_default_mcp_servers(config, tmp_path)
-        assert config.mcp_servers == {}
+        assert config.mcp_servers == _DEFAULT_MCP_SERVERS
 
     def test_env_override_wins(self, tmp_path):
         mcp_file = tmp_path / ".mcp.json"
@@ -200,16 +202,44 @@ class TestLoadDefaultMcpServers:
         _load_default_mcp_servers(config, tmp_path)
         assert config.mcp_servers["shared"]["command"] == "from-env"
 
-    def test_empty_mcp_servers_in_file(self, tmp_path):
+    def test_env_override_wins_over_hardcoded_default(self, tmp_path):
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            mcp_servers={"playwright": {"command": "custom-pw"}},
+        )
+        _load_default_mcp_servers(config, tmp_path)
+        assert config.mcp_servers["playwright"]["command"] == "custom-pw"
+
+    def test_empty_mcp_servers_in_file_uses_hardcoded_defaults(self, tmp_path):
         mcp_file = tmp_path / ".mcp.json"
         mcp_file.write_text(json.dumps({"mcpServers": {}}))
         config = LeashdConfig(approved_directories=[tmp_path])
         _load_default_mcp_servers(config, tmp_path)
-        assert config.mcp_servers == {}
+        assert config.mcp_servers == _DEFAULT_MCP_SERVERS
 
-    def test_malformed_json_logs_warning(self, tmp_path):
+    def test_malformed_json_uses_hardcoded_defaults(self, tmp_path):
         mcp_file = tmp_path / ".mcp.json"
         mcp_file.write_text("not json{{{")
         config = LeashdConfig(approved_directories=[tmp_path])
         _load_default_mcp_servers(config, tmp_path)
-        assert config.mcp_servers == {}
+        assert config.mcp_servers == _DEFAULT_MCP_SERVERS
+
+    def test_permission_denied_mcp_json_uses_defaults(self, tmp_path):
+        """OSError on .mcp.json read → caught, falls back to hardcoded defaults."""
+        mcp_file = tmp_path / ".mcp.json"
+        mcp_file.write_text('{"mcpServers": {"custom": {"command": "node"}}}')
+        config = LeashdConfig(approved_directories=[tmp_path])
+        with patch("leashd.app.json.loads", side_effect=OSError("permission denied")):
+            _load_default_mcp_servers(config, tmp_path)
+        assert config.mcp_servers == _DEFAULT_MCP_SERVERS
+
+    def test_unexpected_exception_in_mcp_json_propagates(self, tmp_path):
+        """TypeError during .mcp.json processing → NOT caught (proves narrowing)."""
+        mcp_file = tmp_path / ".mcp.json"
+        mcp_file.write_text('{"mcpServers": {"custom": {"command": "node"}}}')
+        config = LeashdConfig(approved_directories=[tmp_path])
+        with (
+            patch("leashd.app.json.loads", side_effect=TypeError("unexpected")),
+            pytest.raises(TypeError, match="unexpected"),
+        ):
+            _load_default_mcp_servers(config, tmp_path)

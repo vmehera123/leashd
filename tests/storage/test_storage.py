@@ -165,9 +165,9 @@ class TestSessionManagerWithStore:
         mgr = SessionManager()
         session = await mgr.get_or_create("u1", "c1", "/tmp")
         # Artificially age the session
-        from datetime import UTC, datetime, timedelta
+        from datetime import datetime, timedelta, timezone
 
-        session.last_used = datetime.now(UTC) - timedelta(hours=25)
+        session.last_used = datetime.now(timezone.utc) - timedelta(hours=25)
         removed = mgr.cleanup_expired(max_age_hours=24)
         assert removed == 1
         assert mgr.get("u1", "c1") is None

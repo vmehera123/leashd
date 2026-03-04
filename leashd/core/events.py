@@ -1,7 +1,7 @@
 """Lightweight event bus for plugin hooks."""
 
 from collections.abc import Callable, Coroutine
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import structlog
@@ -34,7 +34,7 @@ class Event(BaseModel):
 
     name: str
     data: dict[str, Any] = Field(default_factory=dict)
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 EventHandler = Callable[[Event], Coroutine[Any, Any, None]]

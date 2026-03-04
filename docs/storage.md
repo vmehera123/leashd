@@ -55,6 +55,8 @@ The lookup follows a three-tier strategy:
 | `get_or_create(user_id, chat_id, working_directory)` | Three-tier lookup. Creates if not found. |
 | `get(user_id, chat_id)` | Memory-only lookup. Returns `None` if not cached. |
 | `update_from_result(session, claude_session_id, cost)` | Increments `message_count`, `total_cost`, updates `last_used`, and persists. |
+| `save(session)` | Persist current session state to the store (if configured). |
+| `reset(user_id, chat_id)` | Clear conversation state (new session ID, reset counters, clear workspace) but preserve `working_directory`. |
 | `deactivate(user_id, chat_id)` | Marks session inactive in memory and store. |
 | `cleanup_expired(max_age_hours)` | Removes expired sessions from memory cache. Returns count removed. |
 
@@ -67,13 +69,15 @@ class Session(BaseModel):
     chat_id: str
     working_directory: str
     claude_session_id: str | None = None
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    last_used: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    last_used: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     total_cost: float = 0.0
     message_count: int = 0
     mode: Literal["default", "plan", "auto", "test", "merge"] = "default"
     mode_instruction: str | None = None
     is_active: bool = True
+    workspace_name: str | None = None
+    workspace_directories: list[str] = Field(default_factory=list)
 ```
 
 `claude_session_id` stores the SDK session ID for multi-turn continuity. When cleared (via `/clear` or clean proceed), the next agent execution starts a fresh conversation.
@@ -110,6 +114,7 @@ erDiagram
         REAL total_cost
         INTEGER message_count
         INTEGER is_active
+        TEXT workspace_name
     }
 
     messages {

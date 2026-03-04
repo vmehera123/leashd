@@ -39,3 +39,7 @@ class InteractionTimeoutError(LeashdError):
 
 class ConnectorError(LeashdError):
     """Connector failed after exhausting retries."""
+
+
+class DaemonError(LeashdError):
+    """Daemon lifecycle error (start/stop)."""
