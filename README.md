@@ -89,33 +89,15 @@ Claude starts working. When it needs to do something gated by policy (e.g. write
 
 ---
 
-## What's New in 0.5.0
+## What's New in 0.6.0
 
-**Daemon mode** — `leashd` now runs in the background by default. Use `leashd stop` for graceful shutdown, `leashd status` to check on it, and `leashd start -f` to run in the foreground.
+**Autonomous task orchestrator** — send `/task Add a health check endpoint` from Telegram and the agent autonomously runs spec → explore → validate → plan → implement → test → PR. Comes back with a pull request or an escalation message. Crash recovery, per-phase cost tracking, and SQLite persistence built in. See the [Autonomous Setup Guide](docs/autonomous-setup-guide.md).
 
-**First-time setup wizard** — `leashd init` guides you through approved directories and optional Telegram credentials on first run. No manual `.env` editing required.
+**AI approval & plan review** — `AutoApprover` replaces human approval taps with a `claude -p` CLI evaluation. `AutoPlanReviewer` replaces manual plan review. Both have circuit breakers and full audit logging.
 
-**CLI subcommands** — manage your config from the terminal without touching files:
+**Autonomous loop** — post-task test-and-retry with exponential backoff. After `/edit` tasks, the agent runs tests, retries on failure, and optionally creates a PR.
 
-```bash
-leashd add-dir ~/projects/my-api   # add an approved directory
-leashd remove-dir ~/projects/old   # remove one
-leashd dirs                        # list all approved directories
-leashd config                      # view current resolved config
-```
-
-**Global config at `~/.leashd/config.yaml`** — a persistent base-layer config shared across all projects. Environment variables and `.env` files override it per-project.
-
-**Workspace management** — group related repos under a named workspace:
-
-```bash
-leashd ws add my-saas              # create a workspace
-leashd ws list                     # list all workspaces
-leashd ws show my-saas             # inspect a workspace
-leashd ws remove my-saas           # remove it
-```
-
-**Python 3.10+ support** — broadened from 3.13+. CI now runs a matrix across 3.10, 3.11, 3.12, and 3.13.
+**Autonomous policy** — `autonomous.yaml` is purpose-built for autonomous mode. Hard blocks remain (credentials, `rm -rf`, force push), but dev tools, file writes, and test runners are auto-allowed.
 
 See [CHANGELOG.md](CHANGELOG.md) for the full history.
 
@@ -193,6 +175,9 @@ All settings are environment variables prefixed with `LEASHD_`. Set them in `~/.
 | `LEASHD_AGENT_TIMEOUT_SECONDS` | `3600` | Agent execution timeout (60 minutes). |
 | `LEASHD_DEFAULT_MODE` | `default` | Default session mode: `"default"`, `"plan"`, or `"auto"`. |
 | `LEASHD_MCP_SERVERS` | `{}` | JSON dict of MCP server configurations. |
+| `LEASHD_TASK_ORCHESTRATOR` | `false` | Enable multi-phase task orchestrator (`/task` command). |
+| `LEASHD_TASK_MAX_RETRIES` | `3` | Max test-failure retries per task. |
+| `LEASHD_TASK_PHASE_TIMEOUT_SECONDS` | `1800` | Max seconds per phase (30 minutes). |
 
 ---
 
@@ -210,7 +195,7 @@ Everything is logged to `.leashd/audit.jsonl` — every tool attempt, every deci
 
 ### Built-in policies
 
-leashd ships four policies in `policies/`:
+leashd ships five policies in `policies/`:
 
 **`default.yaml`** *(recommended)* — balanced for everyday use.
 - Auto-allows: file reads, search, grep, git status/log/diff, read-only browser tools
@@ -229,6 +214,11 @@ leashd ships four policies in `policies/`:
 
 **`dev-tools.yaml`** *(overlay)* — auto-allows common dev commands. Loaded alongside `default.yaml` by default.
 - Auto-allows: linters (`ruff`, `eslint`, `prettier`), test runners (`pytest`, `jest`, `vitest`), package managers (`npm install`, `pip install`, `uv sync`, `cargo build`)
+
+**`autonomous.yaml`** — for fully autonomous operation with [task orchestrator](docs/autonomous-setup-guide.md).
+- Auto-allows: file writes, test runners, linters, package managers, safe git, GitHub CLI PR
+- AI-evaluated: git push (feature branches), network commands, browser mutations
+- Hard-blocks: credentials, force push, push to main/master, `rm -rf`, `sudo`, pipe-to-shell
 
 Switch policies:
 
@@ -256,6 +246,9 @@ Once the daemon is running and your bot is set up, these slash commands are avai
 | `/dir` | Switch working directory (inline buttons) |
 | `/git <subcommand>` | Full git suite: status, branch, checkout, diff, log, add, commit, push, pull |
 | `/test` | 9-phase agent-driven test workflow with browser automation |
+| `/task <description>` | Autonomous multi-phase task: spec → explore → plan → implement → test → PR |
+| `/tasks` | List active and recent tasks for the current chat |
+| `/cancel` | Cancel the active task in the current chat |
 | `/ws` | Manage workspaces inline |
 | `/status` | Show current session, mode, and directory |
 | `/clear` | Clear conversation history and start fresh |
@@ -267,10 +260,12 @@ Once the daemon is running and your bot is set up, these slash commands are avai
 Group related repositories under named workspaces for multi-repo context:
 
 ```bash
-leashd ws add my-saas        # create a workspace
-leashd ws list               # list all workspaces
-leashd ws show my-saas       # inspect repos in a workspace
-leashd ws remove my-saas     # remove it
+leashd ws add my-saas ~/src/api ~/src/web   # create a workspace
+leashd ws add my-saas ~/src/worker           # add a dir to existing workspace
+leashd ws list                               # list all workspaces
+leashd ws show my-saas                       # inspect repos in a workspace
+leashd ws remove my-saas ~/src/worker        # remove a dir from workspace
+leashd ws remove my-saas                     # remove entire workspace
 ```
 
 Workspaces are configured in `.leashd/workspaces.yaml` and inject context into the agent's system prompt automatically.

@@ -10,17 +10,21 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 from claude_agent_sdk.types import PermissionResultDeny
+from pydantic import BaseModel, ConfigDict
 
 from leashd.connectors.base import InlineButton
 from leashd.core.config import build_directory_names, ensure_leashd_dir
 from leashd.core.events import (
     COMMAND_TEST,
+    CONFIG_RELOADED,
     ENGINE_STARTED,
     ENGINE_STOPPED,
     EXECUTION_INTERRUPTED,
     MESSAGE_IN,
     MESSAGE_OUT,
     MESSAGE_QUEUED,
+    SESSION_COMPLETED,
+    TASK_SUBMITTED,
     Event,
     EventBus,
 )
@@ -43,6 +47,7 @@ if TYPE_CHECKING:
     from leashd.core.session import Session, SessionManager
     from leashd.git.handler import GitCommandHandler
     from leashd.middleware.base import MiddlewareChain
+    from leashd.plugins.builtin.auto_approver import AutoApprover
     from leashd.plugins.registry import PluginRegistry
     from leashd.storage.base import SessionStore
 
@@ -231,6 +236,19 @@ class _StreamingResponder:
         return True
 
 
+class PathConfig(BaseModel):
+    """Per-project path templates and pinning flags for Engine."""
+
+    model_config = ConfigDict(frozen=True)
+
+    audit_path: Path = Path(".leashd/audit.jsonl")
+    storage_path: Path = Path(".leashd/messages.db")
+    log_dir: Path = Path(".leashd/logs")
+    audit_pinned: bool = True
+    storage_pinned: bool = True
+    log_dir_pinned: bool = True
+
+
 class Engine:
     def __init__(
         self,
@@ -243,6 +261,7 @@ class Engine:
         sandbox: SandboxEnforcer | None = None,
         audit: AuditLogger | None = None,
         approval_coordinator: ApprovalCoordinator | None = None,
+        auto_approver: AutoApprover | None = None,
         interaction_coordinator: InteractionCoordinator | None = None,
         event_bus: EventBus | None = None,
         plugin_registry: PluginRegistry | None = None,
@@ -250,12 +269,7 @@ class Engine:
         store: SessionStore | None = None,
         message_store: MessageStore | None = None,
         git_handler: GitCommandHandler | None = None,
-        audit_path_pinned: bool = True,
-        storage_path_pinned: bool = True,
-        audit_path_template: Path | None = None,
-        storage_path_template: Path | None = None,
-        log_dir_pinned: bool = True,
-        log_dir_template: Path | None = None,
+        path_config: PathConfig | None = None,
     ) -> None:
         self.connector = connector
         self.agent = agent
@@ -268,7 +282,10 @@ class Engine:
         self._dir_names = build_directory_names(config.approved_directories)
         self._default_directory = str(config.approved_directories[0])
         ws_root = config.workspace_config_root or config.approved_directories[0]
-        self._workspaces = load_workspaces(ws_root, config.approved_directories)
+        self._workspaces = load_workspaces(ws_root)
+        for ws in self._workspaces.values():
+            for d in ws.directories:
+                self.sandbox.add_directory(d)
         self.audit = audit or AuditLogger(config.audit_log_path)
         self.approval_coordinator = approval_coordinator
         self.interaction_coordinator = interaction_coordinator
@@ -283,14 +300,7 @@ class Engine:
         )
         self._shared_store = message_store is None and isinstance(store, MessageStore)
 
-        self._audit_path_pinned = audit_path_pinned
-        self._storage_path_pinned = storage_path_pinned
-        self._audit_path_template = audit_path_template or Path(".leashd/audit.jsonl")
-        self._storage_path_template = storage_path_template or Path(
-            ".leashd/messages.db"
-        )
-        self._log_dir_pinned = log_dir_pinned
-        self._log_dir_template = log_dir_template or Path(".leashd/logs")
+        self._path_config = path_config or PathConfig()
 
         self._gatekeeper = ToolGatekeeper(
             sandbox=self.sandbox,
@@ -298,6 +308,7 @@ class Engine:
             event_bus=self.event_bus,
             policy_engine=self.policy_engine,
             approval_coordinator=self.approval_coordinator,
+            auto_approver=auto_approver,
             approval_timeout=config.approval_timeout_seconds,
         )
 
@@ -357,6 +368,20 @@ class Engine:
             if prompt:
                 await self.handle_message(user_id, prompt, chat_id)
 
+    # ── Public gatekeeper delegation ─────────────────────────────
+
+    def enable_tool_auto_approve(self, chat_id: str, tool_name: str) -> None:
+        """Enable auto-approve for a specific tool on a chat (plugin-facing API)."""
+        self._gatekeeper.enable_tool_auto_approve(chat_id, tool_name)
+
+    def disable_auto_approve(self, chat_id: str) -> None:
+        """Disable all auto-approve rules for a chat (plugin-facing API)."""
+        self._gatekeeper.disable_auto_approve(chat_id)
+
+    def get_executing_session_id(self, chat_id: str) -> str | None:
+        """Return the session_id currently executing for *chat_id*, or None."""
+        return self._executing_sessions.get(chat_id)
+
     async def _resolve_interrupt(self, interrupt_id: str, send_now: bool) -> bool:
         chat_id = self._interrupt_to_chat.pop(interrupt_id, None)
         if not chat_id:
@@ -398,6 +423,39 @@ class Engine:
         if self._store:
             await self._store.teardown()
         await self.agent.shutdown()
+
+    async def reload_config(self) -> None:
+        """Re-read config from disk and rebuild caches.
+
+        Called via SIGHUP — safe during active sessions because sessions
+        reference their own working_directory, not the engine caches.
+        """
+        from leashd.config_store import inject_global_config_as_env
+        from leashd.core.config import LeashdConfig as _LeashdConfig
+
+        try:
+            inject_global_config_as_env(force=True)
+            new_config = _LeashdConfig()  # type: ignore[call-arg]
+            self._dir_names = build_directory_names(new_config.approved_directories)
+            self._default_directory = str(new_config.approved_directories[0])
+            self.sandbox.update_directories(
+                [*new_config.approved_directories, Path.home() / ".claude" / "plans"]
+            )
+            if new_config.workspace_config_root is None:
+                new_config.workspace_config_root = Path.home()
+            self._workspaces = load_workspaces(new_config.workspace_config_root)
+            for ws in self._workspaces.values():
+                for d in ws.directories:
+                    self.sandbox.add_directory(d)
+            self.config = new_config
+            await self.event_bus.emit(Event(name=CONFIG_RELOADED))
+            logger.info(
+                "config_reloaded",
+                directories=len(new_config.approved_directories),
+                workspaces=len(self._workspaces),
+            )
+        except Exception:
+            logger.exception("config_reload_failed")
 
     async def handle_message(self, user_id: str, text: str, chat_id: str) -> str:
         if self.approval_coordinator and self.approval_coordinator.has_pending(chat_id):
@@ -524,7 +582,14 @@ class Engine:
             return messages[0][1]
         return "\n\n".join(text for _, text in messages)
 
-    async def _execute_turn(self, user_id: str, text: str, chat_id: str) -> str:
+    async def _execute_turn(
+        self,
+        user_id: str,
+        text: str,
+        chat_id: str,
+        *,
+        _skip_auto_plan: bool = False,
+    ) -> str:
         structlog.contextvars.clear_contextvars()
         structlog.contextvars.bind_contextvars(
             request_id=uuid.uuid4().hex[:8], chat_id=chat_id
@@ -560,6 +625,21 @@ class Engine:
         self._executing_sessions[chat_id] = session.session_id
         structlog.contextvars.bind_contextvars(session_id=session.session_id)
 
+        if (
+            self.config.auto_plan
+            and session.mode == "auto"
+            and session.claude_session_id is None
+            and not _skip_auto_plan
+        ):
+            session.mode = "plan"
+            session.plan_origin = "auto"
+            await self.session_manager.save(session)
+            logger.info(
+                "auto_plan_mode_activated",
+                session_id=session.session_id,
+                chat_id=chat_id,
+            )
+
         responder = None
         on_text_chunk = None
         on_tool_activity = None
@@ -572,7 +652,9 @@ class Engine:
             on_text_chunk = responder.on_chunk
             on_tool_activity = responder.on_activity
 
-        can_use_tool, tool_state = self._build_can_use_tool(session, chat_id, responder)
+        can_use_tool, tool_state = self._build_can_use_tool(
+            session, chat_id, responder, task_description=text
+        )
         pre_exec_claude_id = session.claude_session_id
 
         try:
@@ -674,6 +756,19 @@ class Engine:
                 num_turns=response.num_turns,
             )
 
+            await self.event_bus.emit(
+                Event(
+                    name=SESSION_COMPLETED,
+                    data={
+                        "session": session,
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                        "response_content": response.content,
+                        "cost": response.cost,
+                    },
+                )
+            )
+
             if response.num_turns >= self.config.max_turns and self.connector:
                 await self.connector.send_message(
                     chat_id,
@@ -708,6 +803,7 @@ class Engine:
 
             if (
                 session.mode == "plan"
+                and session.task_run_id is None
                 and session.message_count > 1
                 and not tool_state.plan_review_shown
                 and tool_state.plan_file_path is not None
@@ -746,7 +842,9 @@ class Engine:
                         target_mode=review.target_mode,
                     )
                 if review.behavior == "deny":
-                    return await self._execute_turn(user_id, review.message, chat_id)
+                    return await self._execute_turn(
+                        user_id, review.message, chat_id, _skip_auto_plan=True
+                    )
 
             return response.content
 
@@ -953,6 +1051,7 @@ class Engine:
         if command == "plan":
             old_mode = session.mode
             session.mode = "plan"
+            session.plan_origin = "user"
             self._gatekeeper.disable_auto_approve(chat_id)
             await self.session_manager.save(session)
             logger.info(
@@ -990,6 +1089,72 @@ class Engine:
                 )
                 await self.handle_message(user_id, prompt, chat_id)
             return ""
+
+        if command == "task":
+            task_text = args.strip()
+            if not task_text:
+                return "Usage: /task <description of the task>"
+            session.mode = "task"
+            session.task_run_id = None
+            await self.session_manager.save(session)
+            await self.event_bus.emit(
+                Event(
+                    name=TASK_SUBMITTED,
+                    data={
+                        "user_id": user_id,
+                        "chat_id": chat_id,
+                        "session_id": session.session_id,
+                        "task": task_text,
+                        "working_directory": session.working_directory,
+                    },
+                )
+            )
+            return ""
+
+        if command == "cancel":
+            # Emit MESSAGE_IN with /cancel text so TaskOrchestrator handles it
+            await self.event_bus.emit(
+                Event(
+                    name=MESSAGE_IN,
+                    data={
+                        "user_id": user_id,
+                        "chat_id": chat_id,
+                        "text": "/cancel",
+                    },
+                )
+            )
+            return "Cancellation requested."
+
+        if command == "stop":
+            await self.event_bus.emit(
+                Event(
+                    name=MESSAGE_IN,
+                    data={
+                        "user_id": user_id,
+                        "chat_id": chat_id,
+                        "text": "/stop",
+                    },
+                )
+            )
+            if self.approval_coordinator:
+                await self.approval_coordinator.cancel_pending(chat_id)
+            if self.interaction_coordinator:
+                self.interaction_coordinator.cancel_pending(chat_id)
+            session_id = self._executing_sessions.get(chat_id)
+            if session_id:
+                self._interrupted_chats.add(chat_id)
+                await self.agent.cancel(session_id)
+            old_iid = self._pending_interrupts.pop(chat_id, None)
+            if old_iid:
+                self._interrupt_to_chat.pop(old_iid, None)
+                mid = self._interrupt_message_ids.pop(chat_id, None)
+                if mid and self.connector:
+                    await self.connector.delete_message(chat_id, mid)
+            logger.info("all_work_stopped", user_id=user_id, chat_id=chat_id)
+            return "All work stopped."
+
+        if command == "tasks":
+            return await self._handle_tasks_command(user_id, chat_id)
 
         if command == "edit":
             old_mode = session.mode
@@ -1030,6 +1195,16 @@ class Engine:
             return "Default mode. All file writes require per-call approval."
 
         if command == "clear":
+            await self.event_bus.emit(
+                Event(
+                    name=MESSAGE_IN,
+                    data={
+                        "user_id": user_id,
+                        "chat_id": chat_id,
+                        "text": "/clear",
+                    },
+                )
+            )
             if self.approval_coordinator:
                 await self.approval_coordinator.cancel_pending(chat_id)
             if self.interaction_coordinator:
@@ -1074,6 +1249,8 @@ class Engine:
                     f"Messages: {session.message_count}",
                     f"Total cost: {cost}",
                     f"Auto-approve: {auto_str}",
+                    f"Auto-approver: {'enabled' if self.config.auto_approver else 'disabled'}",
+                    f"Autonomous loop: {'enabled' if self.config.autonomous_loop else 'disabled'}",
                 ]
             )
             return "\n".join(lines)
@@ -1098,14 +1275,15 @@ class Engine:
     async def _switch_paths(self, target: Path) -> None:
         """Switch audit, message-store, and log paths to a new directory."""
         ensure_leashd_dir(target)
-        if not self._audit_path_pinned:
-            self.audit.switch_path(target / self._audit_path_template)
-        if not self._storage_path_pinned and self._message_store is not None:
-            await self._message_store.switch_db(target / self._storage_path_template)
-        if not self._log_dir_pinned:
+        pc = self._path_config
+        if not pc.audit_pinned:
+            self.audit.switch_path(target / pc.audit_path)
+        if not pc.storage_pinned and self._message_store is not None:
+            await self._message_store.switch_db(target / pc.storage_path)
+        if not pc.log_dir_pinned:
             from leashd.app import switch_log_dir
 
-            switch_log_dir(target / self._log_dir_template, self.config)
+            switch_log_dir(target / pc.log_dir, self.config)
 
     async def _realign_paths_for_session(self, session: Session) -> None:
         """Switch audit/message paths to match the restored session's directory.
@@ -1277,6 +1455,54 @@ class Engine:
         )
         return f"Workspace '{ws.name}' active \u2014 {dir_list}\nPrimary: {primary}"
 
+    async def _handle_tasks_command(self, _user_id: str, chat_id: str) -> str:
+        """List active and recent tasks for this chat."""
+        task_orch = (
+            self.plugin_registry.get("task_orchestrator")
+            if self.plugin_registry
+            else None
+        )
+        if not task_orch:
+            return "Task orchestrator is not enabled."
+
+        from leashd.plugins.builtin.task_orchestrator import TaskOrchestrator
+
+        if not isinstance(task_orch, TaskOrchestrator):
+            return "Task orchestrator is not available."
+
+        store = task_orch._store
+        if not store:
+            return "Task store is not initialized."
+
+        tasks = await store.load_recent_for_chat(chat_id, limit=10)
+        if not tasks:
+            return "No tasks found for this chat."
+
+        phase_emoji = {
+            "pending": "⏳",
+            "spec": "📝",
+            "explore": "🔍",
+            "validate_spec": "✅",
+            "plan": "📋",
+            "validate_plan": "✅",
+            "implement": "🔨",
+            "test": "🧪",
+            "retry": "🔄",
+            "pr": "🚀",
+            "completed": "✅",
+            "failed": "❌",
+            "escalated": "⚠️",
+            "cancelled": "🛑",
+        }
+
+        lines = ["*Tasks:*\n"]
+        for t in tasks:
+            emoji = phase_emoji.get(t.phase, "❓")
+            cost_str = f" (${t.total_cost:.4f})" if t.total_cost else ""
+            preview = t.task[:60] + ("…" if len(t.task) > 60 else "")
+            lines.append(f"{emoji} `{t.run_id[:8]}` *{t.phase}*{cost_str}\n  {preview}")
+        return "\n".join(lines)
+
     async def _send_transient(self, chat_id: str, text: str) -> None:
         """Send a status message that auto-deletes after a short delay."""
         if not self.connector:
@@ -1393,6 +1619,7 @@ class Engine:
         if clear_context:
             session.claude_session_id = None
         session.mode = "auto" if target_mode == "edit" else "default"
+        session.plan_origin = None
         await self.session_manager.save(session)
         if target_mode == "edit":
             self._gatekeeper.enable_tool_auto_approve(chat_id, "Write")
@@ -1405,6 +1632,7 @@ class Engine:
             user_id,
             self._build_implementation_prompt(plan_content),
             chat_id,
+            _skip_auto_plan=True,
         )
 
     def _build_implementation_prompt(self, plan_content: str) -> str:
@@ -1418,6 +1646,7 @@ class Engine:
         session: Session,
         chat_id: str,
         responder: _StreamingResponder | None = None,
+        task_description: str = "",
     ) -> tuple[Any, _ToolCallbackState]:
         state = _ToolCallbackState()
 
@@ -1446,6 +1675,12 @@ class Engine:
                     )
 
             if self.interaction_coordinator and tool_name == "ExitPlanMode":
+                if session.task_run_id is not None:
+                    return PermissionResultDeny(
+                        message="Task orchestrator manages phase transitions. "
+                        "Do not call ExitPlanMode — finish your review and the "
+                        "orchestrator will advance to the next phase."
+                    )
                 if session.mode != "plan":
                     return PermissionResultDeny(
                         message="You are in implementation mode. Implement changes directly "
@@ -1489,15 +1724,25 @@ class Engine:
                     has_cached_content=state.plan_file_content is not None,
                     has_streaming_buffer=bool(responder and responder.buffer.strip()),
                 )
-                result = await self.interaction_coordinator.handle_plan_review(
-                    chat_id, tool_input, plan_content=plan_content
-                )
+                if (
+                    self.config.auto_plan
+                    and self.interaction_coordinator._auto_plan_reviewer
+                    and session.plan_origin != "user"
+                ):
+                    result = await self.interaction_coordinator.handle_plan_review_auto(
+                        chat_id,
+                        tool_input,
+                        plan_content=plan_content or "",
+                        task_description=task_description,
+                        session_id=session.session_id,
+                    )
+                else:
+                    result = await self.interaction_coordinator.handle_plan_review(
+                        chat_id, tool_input, plan_content=plan_content
+                    )
                 if isinstance(result, PlanReviewDecision):
                     state.plan_approved = True
                     state.target_mode = result.target_mode
-                    if result.target_mode == "edit":
-                        self._gatekeeper.enable_tool_auto_approve(chat_id, "Write")
-                        self._gatekeeper.enable_tool_auto_approve(chat_id, "Edit")
                     if responder:
                         await responder.delete_all_messages()
                         responder.reset()
@@ -1532,7 +1777,12 @@ class Engine:
                 )
 
             return await self._gatekeeper.check(
-                tool_name, tool_input, session.session_id, chat_id
+                tool_name,
+                tool_input,
+                session.session_id,
+                chat_id,
+                task_description=task_description,
+                session_mode=session.mode,
             )
 
         return can_use_tool, state

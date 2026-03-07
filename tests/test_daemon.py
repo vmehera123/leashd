@@ -148,6 +148,16 @@ class TestStartDaemon:
         ):
             start_daemon()
 
+    def test_orphan_process_raises(self, daemon_paths):
+        from leashd.daemon import start_daemon
+
+        with (
+            patch("leashd.daemon.is_running", return_value=(False, None)),
+            patch("leashd.daemon._find_daemon_pid", return_value=99999),
+            pytest.raises(DaemonError, match="orphan"),
+        ):
+            start_daemon()
+
     def test_spawns_subprocess(self, daemon_paths):
         from leashd.daemon import _read_pid, start_daemon
 
@@ -158,6 +168,7 @@ class TestStartDaemon:
 
         with (
             patch("leashd.daemon.is_running", return_value=(False, None)),
+            patch("leashd.daemon._find_daemon_pid", return_value=None),
             patch("subprocess.Popen", return_value=mock_proc) as mock_popen,
             patch("time.sleep"),
         ):
@@ -180,6 +191,7 @@ class TestStartDaemon:
 
         with (
             patch("leashd.daemon.is_running", return_value=(False, None)),
+            patch("leashd.daemon._find_daemon_pid", return_value=None),
             patch("subprocess.Popen", return_value=mock_proc),
             patch("time.sleep"),
         ):
@@ -199,6 +211,7 @@ class TestStartDaemon:
 
         with (
             patch("leashd.daemon.is_running", return_value=(False, None)),
+            patch("leashd.daemon._find_daemon_pid", return_value=None),
             patch("subprocess.Popen", return_value=mock_proc),
             patch("time.sleep"),
             pytest.raises(DaemonError, match="exited immediately"),
@@ -217,6 +230,7 @@ class TestStartDaemon:
 
         with (
             patch("leashd.daemon.is_running", return_value=(False, None)),
+            patch("leashd.daemon._find_daemon_pid", return_value=None),
             patch("subprocess.Popen", return_value=mock_proc),
             patch("time.sleep"),
             pytest.raises(DaemonError),
@@ -232,6 +246,7 @@ class TestStartDaemon:
         mock_log_file = MagicMock()
         with (
             patch("leashd.daemon.is_running", return_value=(False, None)),
+            patch("leashd.daemon._find_daemon_pid", return_value=None),
             patch("builtins.open", return_value=mock_log_file),
             patch("subprocess.Popen", side_effect=FileNotFoundError("no python")),
             pytest.raises(FileNotFoundError, match="no python"),
@@ -249,6 +264,7 @@ class TestStartDaemon:
 
         with (
             patch("leashd.daemon.is_running", return_value=(False, None)),
+            patch("leashd.daemon._find_daemon_pid", return_value=None),
             patch("subprocess.Popen", return_value=mock_proc),
             patch("leashd.daemon._write_pid", side_effect=OSError("disk full")),
             patch("os.kill") as mock_kill,
@@ -267,6 +283,7 @@ class TestStartDaemon:
 
         with (
             patch("leashd.daemon.is_running", return_value=(False, None)),
+            patch("leashd.daemon._find_daemon_pid", return_value=None),
             patch("subprocess.Popen", return_value=mock_proc),
             patch("leashd.daemon._write_pid", side_effect=OSError("disk full")),
             patch("os.kill", side_effect=ProcessLookupError),
@@ -308,19 +325,84 @@ class TestStopDaemon:
         assert result is True
         mock_kill.assert_called_once_with(12345, signal.SIGTERM)
 
-    def test_timeout_returns_false(self, daemon_paths):
+    def test_sigkill_after_sigterm_timeout(self, daemon_paths):
+        """After SIGTERM times out, SIGKILL is sent and process dies."""
+        from leashd.daemon import stop_daemon
+
+        alive_calls = 0
+
+        def mock_alive(pid):
+            nonlocal alive_calls
+            alive_calls += 1
+            # Alive during SIGTERM + first SIGKILL check, dead on third check
+            return alive_calls < 3
+
+        kill_calls = []
+
+        def mock_kill(pid, sig):
+            kill_calls.append(sig)
+
+        with (
+            patch("leashd.daemon.is_running", return_value=(True, 12345)),
+            patch("os.kill", side_effect=mock_kill),
+            patch("leashd.daemon._is_process_alive", side_effect=mock_alive),
+            patch(
+                "time.monotonic",
+                side_effect=[
+                    0.0,  # SIGTERM deadline = 10.0
+                    0.0,  # loop check: 0.0 < 10.0 → enter
+                    11.0,  # loop check: 11.0 < 10.0 → exit
+                    0.0,  # SIGKILL deadline = 2.0
+                    0.0,  # loop check: 0.0 < 2.0 → enter (alive=True)
+                    0.5,  # loop check: 0.5 < 2.0 → enter (alive=False → return)
+                ],
+            ),
+            patch("time.sleep"),
+        ):
+            result = stop_daemon()
+
+        assert result is True
+        assert signal.SIGTERM in kill_calls
+        assert signal.SIGKILL in kill_calls
+
+    def test_sigkill_timeout_returns_false(self, daemon_paths):
+        """When even SIGKILL doesn't kill the process, returns False."""
         from leashd.daemon import stop_daemon
 
         with (
             patch("leashd.daemon.is_running", return_value=(True, 12345)),
             patch("os.kill"),
             patch("leashd.daemon._is_process_alive", return_value=True),
-            patch("time.monotonic", side_effect=[0.0, 0.0, 11.0]),
+            # SIGTERM phase: 0.0 start, 0.0 check, 11.0 expired
+            # SIGKILL phase: 0.0 start, 0.0 check, 3.0 expired
+            patch("time.monotonic", side_effect=[0.0, 0.0, 11.0, 0.0, 0.0, 3.0]),
             patch("time.sleep"),
         ):
             result = stop_daemon()
 
         assert result is False
+
+    def test_sigkill_process_already_dead(self, daemon_paths):
+        """Process dies between SIGTERM timeout and SIGKILL — ProcessLookupError caught."""
+        from leashd.daemon import stop_daemon
+
+        kill_calls = []
+
+        def mock_kill(pid, sig):
+            kill_calls.append(sig)
+            if sig == signal.SIGKILL:
+                raise ProcessLookupError
+
+        with (
+            patch("leashd.daemon.is_running", return_value=(True, 12345)),
+            patch("os.kill", side_effect=mock_kill),
+            patch("leashd.daemon._is_process_alive", return_value=True),
+            patch("time.monotonic", side_effect=[0.0, 0.0, 11.0]),
+            patch("time.sleep"),
+        ):
+            result = stop_daemon()
+
+        assert result is True
 
     def test_stop_process_exits_between_check_and_kill(self, daemon_paths):
         """TOCTOU: process dies after is_running() — ProcessLookupError caught."""
@@ -337,6 +419,39 @@ class TestStopDaemon:
 
         assert result is True
         assert not pid_file.exists()
+
+
+class TestSignalReload:
+    def test_sends_sighup_to_running_daemon(self, daemon_paths):
+        from leashd.daemon import _write_pid, signal_reload
+
+        _write_pid(os.getpid())
+        with patch("leashd.daemon.os.kill") as mock_kill:
+            mock_kill.return_value = None
+            result = signal_reload()
+        assert result is True
+        # First call is _is_process_alive(pid) with signal 0, second is SIGHUP
+        assert mock_kill.call_count == 2
+        mock_kill.assert_any_call(os.getpid(), signal.SIGHUP)
+
+    def test_returns_false_when_not_running(self, daemon_paths):
+        from leashd.daemon import signal_reload
+
+        with patch("leashd.daemon._find_daemon_pid", return_value=None):
+            result = signal_reload()
+        assert result is False
+
+    def test_handles_process_lookup_error(self, daemon_paths):
+        from leashd.daemon import _read_pid, _write_pid, signal_reload
+
+        _write_pid(99999)
+        with (
+            patch("leashd.daemon._is_process_alive", return_value=True),
+            patch("os.kill", side_effect=ProcessLookupError),
+        ):
+            result = signal_reload()
+        assert result is False
+        assert _read_pid() is None  # PID file cleaned up
 
 
 class TestCleanup:

@@ -8,7 +8,13 @@ from typing import TYPE_CHECKING, Any
 import structlog
 from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny
 
-from leashd.core.events import TOOL_ALLOWED, TOOL_DENIED, TOOL_GATED, Event
+from leashd.core.events import (
+    APPROVAL_ESCALATED,
+    TOOL_ALLOWED,
+    TOOL_DENIED,
+    TOOL_GATED,
+    Event,
+)
 from leashd.core.safety.analyzer import strip_cd_prefix
 from leashd.core.safety.policy import PolicyDecision
 
@@ -18,6 +24,7 @@ if TYPE_CHECKING:
     from leashd.core.safety.audit import AuditLogger
     from leashd.core.safety.policy import PolicyEngine
     from leashd.core.safety.sandbox import SandboxEnforcer
+    from leashd.plugins.builtin.auto_approver import AutoApprover
 
 logger = structlog.get_logger()
 
@@ -86,6 +93,7 @@ class ToolGatekeeper:
         *,
         policy_engine: PolicyEngine | None = None,
         approval_coordinator: ApprovalCoordinator | None = None,
+        auto_approver: AutoApprover | None = None,
         approval_timeout: int = 300,
         path_tools: frozenset[str] | None = None,
     ) -> None:
@@ -94,6 +102,7 @@ class ToolGatekeeper:
         self._event_bus = event_bus
         self._policy_engine = policy_engine
         self._approval_coordinator = approval_coordinator
+        self._auto_approver = auto_approver
         self._approval_timeout = approval_timeout
         self._path_tools = path_tools or DEFAULT_PATH_TOOLS
         self._auto_approved_chats: set[str] = set()
@@ -125,6 +134,9 @@ class ToolGatekeeper:
         tool_input: dict[str, Any],
         session_id: str,
         chat_id: str,
+        *,
+        task_description: str = "",
+        session_mode: str | None = None,
     ) -> PermissionResultAllow | PermissionResultDeny:
         # Normalize MCP tool names (mcp__playwright__browser_navigate → browser_navigate)
         # for policy/sandbox/approval matching. Keep original for events/audit.
@@ -152,11 +164,16 @@ class ToolGatekeeper:
 
         if not self._policy_engine:
             self._audit.log_tool_attempt(
-                session_id, tool_name, tool_input, None, PolicyDecision.ALLOW
+                session_id,
+                tool_name,
+                tool_input,
+                None,
+                PolicyDecision.ALLOW,
+                session_mode=session_mode,
             )
             return await self._emit_and_allow(session_id, tool_name, tool_input)
 
-        classification = self._policy_engine.classify(normalized, tool_input)
+        classification = self._policy_engine.classify_compound(normalized, tool_input)
         decision = self._policy_engine.evaluate(classification)
 
         logger.info(
@@ -170,7 +187,12 @@ class ToolGatekeeper:
         )
 
         self._audit.log_tool_attempt(
-            session_id, tool_name, tool_input, classification, decision
+            session_id,
+            tool_name,
+            tool_input,
+            classification,
+            decision,
+            session_mode=session_mode,
         )
 
         if decision == PolicyDecision.ALLOW:
@@ -185,7 +207,13 @@ class ToolGatekeeper:
             )
 
         return await self._handle_approval(
-            session_id, chat_id, tool_name, tool_input, classification
+            session_id,
+            chat_id,
+            tool_name,
+            tool_input,
+            classification,
+            task_description=task_description,
+            session_mode=session_mode,
         )
 
     def _check_sandbox(
@@ -260,6 +288,9 @@ class ToolGatekeeper:
         tool_name: str,
         tool_input: dict[str, Any],
         classification: Any,
+        *,
+        task_description: str = "",
+        session_mode: str | None = None,
     ) -> PermissionResultAllow | PermissionResultDeny:
         blanket = chat_id in self._auto_approved_chats
         key = _approval_key(tool_name, tool_input)
@@ -271,9 +302,141 @@ class ToolGatekeeper:
                 tool_name=tool_name,
                 blanket=blanket,
             )
-            self._audit.log_approval(session_id, tool_name, True, chat_id)
+            self._audit.log_approval(
+                session_id, tool_name, True, chat_id, approver_type="auto_approve"
+            )
             return await self._emit_and_allow(session_id, tool_name, tool_input)
 
+        if self._auto_approver and session_mode in ("auto", "task"):
+            ai_result = await self._try_ai_approval(
+                session_id=session_id,
+                chat_id=chat_id,
+                tool_name=tool_name,
+                tool_input=tool_input,
+                key=key,
+                classification=classification,
+                task_description=task_description,
+            )
+            if ai_result is not None:
+                return ai_result
+
+        return await self._request_human_approval(
+            session_id=session_id,
+            chat_id=chat_id,
+            tool_name=tool_name,
+            tool_input=tool_input,
+            key=key,
+            classification=classification,
+        )
+
+    async def _try_ai_approval(
+        self,
+        session_id: str,
+        chat_id: str,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        key: str,
+        classification: Any,
+        task_description: str,
+    ) -> PermissionResultAllow | PermissionResultDeny | None:
+        """AI approval with human escalation on denial. Returns None to fall through."""
+        assert self._auto_approver is not None  # noqa: S101
+
+        audit_summary = ""
+        recent = self._audit.get_recent_entries(session_id)
+        if recent:
+            audit_summary = self._audit.summarize_entries(recent)
+
+        truncated_description = task_description[:2000] if task_description else ""
+
+        result = await self._auto_approver.evaluate(
+            tool_name=tool_name,
+            tool_input=tool_input,
+            session_id=session_id,
+            chat_id=chat_id,
+            task_description=truncated_description,
+            audit_summary=audit_summary,
+        )
+        if result.approved:
+            await self._event_bus.emit(
+                Event(
+                    name=TOOL_ALLOWED,
+                    data={
+                        "session_id": session_id,
+                        "tool_name": tool_name,
+                        "via": "ai_approver",
+                    },
+                )
+            )
+            return PermissionResultAllow(updated_input=tool_input)
+
+        ai_reason = result.reason or "AI approver denied the operation"
+        logger.info(
+            "ai_denial_escalating_to_human",
+            session_id=session_id,
+            tool_name=tool_name,
+            ai_reason=ai_reason,
+        )
+        await self._event_bus.emit(
+            Event(
+                name=APPROVAL_ESCALATED,
+                data={
+                    "session_id": session_id,
+                    "tool_name": tool_name,
+                    "ai_reason": ai_reason,
+                },
+            )
+        )
+
+        if not self._approval_coordinator:
+            return await self._emit_and_deny(
+                session_id, tool_name, "ai_denied", message=ai_reason
+            )
+
+        human_result = await self._approval_coordinator.request_approval(
+            chat_id=chat_id,
+            tool_name=key,
+            tool_input=tool_input,
+            classification=classification,
+            timeout=self._approval_timeout,
+            ai_denial_reason=ai_reason,
+        )
+        self._audit.log_approval(
+            session_id,
+            tool_name,
+            human_result.approved,
+            chat_id,
+            rejection_reason=human_result.reason,
+            approver_type="human_escalation",
+        )
+        if human_result.approved:
+            await self._event_bus.emit(
+                Event(
+                    name=TOOL_ALLOWED,
+                    data={
+                        "session_id": session_id,
+                        "tool_name": tool_name,
+                        "via": "human_escalation",
+                    },
+                )
+            )
+            return PermissionResultAllow(updated_input=tool_input)
+
+        deny_message = human_result.reason or "User denied the operation"
+        return await self._emit_and_deny(
+            session_id, tool_name, "user_denied", message=deny_message
+        )
+
+    async def _request_human_approval(
+        self,
+        session_id: str,
+        chat_id: str,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        key: str,
+        classification: Any,
+    ) -> PermissionResultAllow | PermissionResultDeny:
+        """Direct human approval (no AI involved)."""
         if not self._approval_coordinator:
             return await self._emit_and_deny(
                 session_id,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shlex
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import structlog
@@ -16,6 +17,7 @@ from leashd.plugins.builtin.browser_tools import (
 )
 from leashd.plugins.builtin.test_config_loader import (
     ProjectTestConfig,
+    discover_api_specs,
     load_project_test_config,
 )
 
@@ -62,6 +64,16 @@ TEST_BASH_AUTO_APPROVE: frozenset[str] = frozenset(
         "Bash::wc",
         "Bash::grep",
         "Bash::find",
+        "Bash::docker compose",
+        "Bash::docker-compose",
+        "Bash::docker build",
+        "Bash::docker run",
+        "Bash::docker ps",
+        "Bash::docker logs",
+        "Bash::docker exec",
+        "Bash::docker stop",
+        "Bash::docker start",
+        "Bash::docker restart",
     }
 )
 
@@ -165,7 +177,7 @@ def parse_test_args(args: str) -> TestConfig:
     return config
 
 
-def _merge_project_config(cli: TestConfig, project: ProjectTestConfig) -> TestConfig:
+def merge_project_config(cli: TestConfig, project: ProjectTestConfig) -> TestConfig:
     """Merge project defaults into CLI config. CLI values win."""
     updates: dict[str, object] = {}
     if not cli.app_url and project.url:
@@ -185,6 +197,7 @@ def build_test_instruction(
     config: TestConfig,
     *,
     project_config: ProjectTestConfig | None = None,
+    api_specs: list[tuple[str, str]] | None = None,
 ) -> str:
     """Generate a multi-phase system prompt based on test config."""
     sections: list[str] = []
@@ -245,6 +258,17 @@ def build_test_instruction(
     if hints:
         sections.append("USER HINTS:\n" + "\n".join(f"- {h}" for h in hints))
 
+    # API spec files
+    if api_specs:
+        spec_parts = [
+            "API SPECIFICATIONS:\n"
+            "These files document the project's API endpoints. Use them as the PRIMARY\n"
+            "reference for backend and E2E testing — do NOT guess endpoints."
+        ]
+        for path, content in api_specs:
+            spec_parts.append(f"\n--- {path} ---\n{content}\n---")
+        sections.append("\n".join(spec_parts))
+
     # Project config sections
     if project_config:
         pc_parts: list[str] = []
@@ -279,7 +303,10 @@ def build_test_instruction(
     if config.include_e2e:
         sections.append(
             "PHASE 2 — SERVER STARTUP:\n"
-            "- Start the dev server (use the detected or provided command)\n"
+            "- If the project uses Docker (docker-compose.yml / compose.yaml exists),\n"
+            "  use `docker compose up -d` and check readiness with health endpoint\n"
+            "- Check docker compose logs if startup fails\n"
+            "- Otherwise start the dev server (use the detected or provided command)\n"
             "- Wait for the server to be ready (check with curl or lsof)\n"
             "- If the server fails to start, read error output, fix the issue, retry\n"
             "- If already running, verify by hitting the URL"
@@ -314,7 +341,11 @@ def build_test_instruction(
     if config.include_backend:
         sections.append(
             "PHASE 5 — BACKEND VERIFICATION:\n"
-            "- Hit API endpoints with curl and verify responses\n"
+            "- Use discovered API spec files (.http, openapi.yaml, etc.) as the\n"
+            "  authoritative endpoint reference — do NOT guess endpoint paths or payloads\n"
+            "- If no spec files exist, read route definitions from the source code\n"
+            "- Test each endpoint with realistic payloads from the spec\n"
+            "- Verify response status codes, content types, and basic schema\n"
             "- Check server logs for errors or warnings\n"
             "- Test error handling (invalid input, missing auth, 404s)\n"
             "- Verify database operations if applicable"
@@ -420,12 +451,42 @@ def build_test_instruction(
     return "\n\n".join(sections)
 
 
-def _build_test_prompt(config: TestConfig) -> str:
+_TEST_SESSION_MAX_CHARS = 4000
+
+
+def read_test_session_context(working_dir: str) -> str | None:
+    """Read .leashd/test-session.md, return tail content or None if missing."""
+    path = Path(working_dir) / ".leashd" / "test-session.md"
+    if not path.is_file():
+        return None
+    try:
+        content = path.read_text(errors="replace")
+    except OSError:
+        return None
+    if not content.strip():
+        return None
+    return content[-_TEST_SESSION_MAX_CHARS:]
+
+
+def _build_test_prompt(
+    config: TestConfig,
+    *,
+    session_context: str | None = None,
+) -> str:
     """Build the user-facing prompt from test config."""
-    parts: list[str] = [
+    parts: list[str] = []
+
+    if session_context:
+        parts.append(
+            "PREVIOUS TEST SESSION CONTEXT (from .leashd/test-session.md):\n"
+            f"```\n{session_context}\n```\n"
+            "Resume from this state. Do NOT restart completed phases."
+        )
+
+    parts.append(
         "IMPORTANT: Start by reading .leashd/test-session.md — if it exists, resume; "
-        "if not, create it. Update it BEFORE each phase.",
-    ]
+        "if not, create it. Update it BEFORE each phase."
+    )
 
     if config.focus:
         parts.append(config.focus)
@@ -467,11 +528,18 @@ class TestRunnerPlugin(LeashdPlugin):
         # Load project test config and merge with CLI args
         project_config = load_project_test_config(session.working_directory)
         if project_config:
-            config = _merge_project_config(config, project_config)
+            config = merge_project_config(config, project_config)
+
+        # Discover API spec files
+        explicit_specs = project_config.api_specs if project_config else None
+        api_specs = discover_api_specs(
+            session.working_directory,
+            explicit_paths=explicit_specs or None,
+        )
 
         session.mode = "test"
         session.mode_instruction = build_test_instruction(
-            config, project_config=project_config
+            config, project_config=project_config, api_specs=api_specs or None
         )
 
         gatekeeper = event.data["gatekeeper"]
@@ -493,7 +561,12 @@ class TestRunnerPlugin(LeashdPlugin):
         gatekeeper.enable_tool_auto_approve(chat_id, "Write")
         gatekeeper.enable_tool_auto_approve(chat_id, "Edit")
 
-        event.data["prompt"] = _build_test_prompt(config)
+        # Read test session context for resume
+        session_context = read_test_session_context(session.working_directory)
+
+        event.data["prompt"] = _build_test_prompt(
+            config, session_context=session_context
+        )
 
         await self._event_bus.emit(
             Event(

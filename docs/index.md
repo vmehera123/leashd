@@ -42,6 +42,8 @@ flowchart LR
 | [Browser Testing](browser-testing.md) | Playwright MCP setup, browser tool policies, test agents |
 | [Interactions](interactions.md) | Question flow, plan review flow, asyncio bridge |
 | [Testing Setup](testing-setup.md) | Three-tier setup guide for e2e testing with /test and Playwright |
+| [Autonomous Mode](autonomous-mode.md) | AI approval, AI plan review, test-and-retry loop, task orchestrator, autonomous policy |
+| [Autonomous Setup Guide](autonomous-setup-guide.md) | Step-by-step guide to configure a fully autonomous coding agent |
 
 ## Quick Start
 

@@ -2747,3 +2747,247 @@ class TestPlanApprovalBehavior:
         # Bash goes through gatekeeper — should NOT be auto-approved
         assert len(bash_results) == 1
         assert not isinstance(bash_results[0], PermissionResultAllow)
+
+
+class TestPlanOriginRouting:
+    """Fix 1: /plan command must always route to human review, even with auto_plan=True."""
+
+    @pytest.mark.asyncio
+    async def test_user_plan_routes_to_human_review(
+        self, config, policy_engine, audit_logger
+    ):
+        """When user explicitly types /plan, ExitPlanMode routes to handle_plan_review
+        (human), not handle_plan_review_auto (AI), even when auto_plan is enabled."""
+        from unittest.mock import MagicMock
+
+        from tests.conftest import MockConnector
+
+        streaming_connector = MockConnector(support_streaming=True)
+        config.auto_plan = True
+        config.streaming_enabled = True
+
+        coordinator = InteractionCoordinator(streaming_connector, config)
+        coordinator._auto_plan_reviewer = MagicMock()
+
+        class PlanAgent(BaseAgent):
+            async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
+                if not prompt.startswith("Implement"):
+                    session.mode = "plan"
+                    await can_use_tool(
+                        "Write",
+                        {
+                            "file_path": "/tmp/proj/.claude/plans/test.md",
+                            "content": "# Plan\n\n1. Do stuff",
+                        },
+                        None,
+                    )
+
+                    async def click():
+                        await asyncio.sleep(0.05)
+                        req = streaming_connector.plan_review_requests[0]
+                        await coordinator.resolve_option(req["interaction_id"], "edit")
+
+                    task = asyncio.create_task(click())
+                    await can_use_tool("ExitPlanMode", {}, None)
+                    await task
+
+                return AgentResponse(content="ok", session_id="sid", cost=0.01)
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=streaming_connector,
+            agent=PlanAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            interaction_coordinator=coordinator,
+        )
+
+        # Use /plan command → sets plan_origin = "user"
+        await eng.handle_command("user1", "plan", "Do the thing", "chat1")
+
+        # Human review was shown (plan_review_requests populated)
+        assert len(streaming_connector.plan_review_requests) == 1
+        # AI reviewer was NOT called
+        coordinator._auto_plan_reviewer.review_plan.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_auto_plan_routes_to_ai_review(
+        self, config, policy_engine, audit_logger
+    ):
+        """When auto_plan activates plan mode automatically, ExitPlanMode routes to
+        AI review (handle_plan_review_auto)."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from leashd.plugins.builtin.auto_plan_reviewer import AutoPlanReviewer
+        from tests.conftest import MockConnector
+
+        streaming_connector = MockConnector(support_streaming=True)
+        config.auto_plan = True
+        config.streaming_enabled = True
+
+        coordinator = InteractionCoordinator(streaming_connector, config)
+        mock_reviewer = MagicMock(spec=AutoPlanReviewer)
+        mock_reviewer.review_plan = AsyncMock(
+            return_value=MagicMock(approved=True, feedback=None)
+        )
+        coordinator._auto_plan_reviewer = mock_reviewer
+
+        class AutoPlanAgent(BaseAgent):
+            async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
+                if not prompt.startswith("Implement"):
+                    session.mode = "plan"
+                    await can_use_tool(
+                        "Write",
+                        {
+                            "file_path": "/tmp/proj/.claude/plans/auto.md",
+                            "content": "# Auto Plan\n\n1. Steps",
+                        },
+                        None,
+                    )
+                    await can_use_tool("ExitPlanMode", {}, None)
+
+                return AgentResponse(content="ok", session_id="sid", cost=0.01)
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=streaming_connector,
+            agent=AutoPlanAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            interaction_coordinator=coordinator,
+        )
+
+        # Regular message (not /plan) → auto_plan activates → plan_origin = "auto"
+        await eng.handle_message("user1", "Do the thing", "chat1")
+
+        # AI reviewer WAS called (auto-initiated plan)
+        mock_reviewer.review_plan.assert_called_once()
+        # Human review was NOT shown
+        assert len(streaming_connector.plan_review_requests) == 0
+
+
+class TestNoAutoApproveBeforePlanExit:
+    """Fix 2: Write/Edit auto-approve must NOT be enabled before plan_mode_exit."""
+
+    @pytest.mark.asyncio
+    async def test_auto_approve_not_enabled_during_plan_review(
+        self, config, policy_engine, audit_logger
+    ):
+        """After ExitPlanMode is approved, Write/Edit should NOT be auto-approved
+        until _exit_plan_mode actually runs."""
+
+        from tests.conftest import MockConnector
+
+        streaming_connector = MockConnector(support_streaming=True)
+        config.streaming_enabled = True
+        coordinator = InteractionCoordinator(streaming_connector, config)
+
+        auto_approve_calls = []
+
+        class TrackingPlanAgent(BaseAgent):
+            async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
+                if not prompt.startswith("Implement"):
+                    session.mode = "plan"
+                    await can_use_tool(
+                        "Write",
+                        {
+                            "file_path": "/tmp/proj/.claude/plans/track.md",
+                            "content": "# Plan",
+                        },
+                        None,
+                    )
+
+                    async def click():
+                        await asyncio.sleep(0.05)
+                        req = streaming_connector.plan_review_requests[0]
+                        await coordinator.resolve_option(req["interaction_id"], "edit")
+
+                    task = asyncio.create_task(click())
+                    await can_use_tool("ExitPlanMode", {}, None)
+                    await task
+
+                return AgentResponse(content="ok", session_id="sid", cost=0.01)
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=streaming_connector,
+            agent=TrackingPlanAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            interaction_coordinator=coordinator,
+        )
+
+        original_enable = eng._gatekeeper.enable_tool_auto_approve
+
+        def tracking_enable(chat_id, tool_name):
+            session = eng.session_manager.get("user1", chat_id)
+            auto_approve_calls.append(
+                {"tool": tool_name, "mode": session.mode if session else "unknown"}
+            )
+            return original_enable(chat_id, tool_name)
+
+        eng._gatekeeper.enable_tool_auto_approve = tracking_enable
+
+        await eng.handle_command("user1", "plan", "Build something", "chat1")
+
+        # Auto-approve calls should only happen after mode is "auto" (in _exit_plan_mode)
+        for call in auto_approve_calls:
+            assert call["mode"] != "plan", (
+                f"enable_tool_auto_approve({call['tool']}) called while still in plan mode"
+            )
+
+        # Verify auto-approve WAS eventually called (Write + Edit)
+        assert len(auto_approve_calls) >= 2
+
+
+class TestExitPlanModeDeniedForTaskSessions:
+    """Fix 3: ExitPlanMode should be denied for task-orchestrated sessions."""
+
+    @pytest.mark.asyncio
+    async def test_exit_plan_mode_denied_for_task_session(
+        self, config, policy_engine, audit_logger, mock_connector
+    ):
+        coordinator = InteractionCoordinator(mock_connector, config)
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            interaction_coordinator=coordinator,
+        )
+
+        session = await eng.session_manager.get_or_create(
+            "user1", "chat1", str(config.approved_directories[0])
+        )
+        session.mode = "plan"
+        session.task_run_id = "task-run-123"
+
+        hook, _ = eng._build_can_use_tool(session, "chat1")
+        result = await hook("ExitPlanMode", {}, None)
+
+        assert isinstance(result, PermissionResultDeny)
+        assert "orchestrator" in result.message.lower()

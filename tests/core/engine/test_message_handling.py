@@ -553,3 +553,192 @@ class TestContextVarBinding:
         assert "session_id" in captured_vars
         assert isinstance(captured_vars["session_id"], str)
         assert len(captured_vars["session_id"]) > 0
+
+
+class TestAutoPlanActivation:
+    """Tests for auto-plan mode: switches new auto-mode sessions to plan mode."""
+
+    @pytest.mark.asyncio
+    async def test_auto_plan_activates_plan_mode_on_first_message(
+        self, audit_logger, policy_engine, tmp_path
+    ):
+        """auto_plan=True + auto mode + no claude_session_id → switches to plan."""
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            auto_plan=True,
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        agent = FakeAgent()
+        eng = Engine(
+            connector=None,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        # Set session to auto mode before sending message
+        session = await eng.session_manager.get_or_create("u1", "c1", str(tmp_path))
+        session.mode = "auto"
+        await eng.session_manager.save(session)
+
+        await eng.handle_message("u1", "hello", "c1")
+
+        session = eng.session_manager.get("u1", "c1")
+        assert session.mode == "plan"
+
+    @pytest.mark.asyncio
+    async def test_auto_plan_does_not_reactivate_on_resume(
+        self, audit_logger, policy_engine, tmp_path
+    ):
+        """Existing session with claude_session_id should not re-trigger plan mode."""
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            auto_plan=True,
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        agent = FakeAgent()
+        eng = Engine(
+            connector=None,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        # Create session with existing claude_session_id (resumed session)
+        session = await eng.session_manager.get_or_create("u1", "c1", str(tmp_path))
+        session.mode = "auto"
+        session.claude_session_id = "existing-session-abc"
+        await eng.session_manager.save(session)
+
+        await eng.handle_message("u1", "follow up", "c1")
+
+        session = eng.session_manager.get("u1", "c1")
+        # Mode should stay auto since this is a resumed session
+        assert session.mode == "auto"
+
+    @pytest.mark.asyncio
+    async def test_auto_plan_only_affects_auto_mode(
+        self, audit_logger, policy_engine, tmp_path
+    ):
+        """Session in default mode with auto_plan=True should NOT switch to plan."""
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            auto_plan=True,
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        agent = FakeAgent()
+        eng = Engine(
+            connector=None,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_message("u1", "hello", "c1")
+
+        session = eng.session_manager.get("u1", "c1")
+        assert session.mode == "default"
+
+    @pytest.mark.asyncio
+    async def test_exit_plan_mode_skips_auto_plan_reentry(
+        self, audit_logger, policy_engine, tmp_path
+    ):
+        """After plan approval, the implementation turn must not re-enter plan mode.
+
+        Regression test: _exit_plan_mode sets session.mode='auto' and clears
+        claude_session_id, which would re-trigger auto_plan in the recursive
+        _execute_turn call without the _skip_auto_plan guard.
+        """
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            auto_plan=True,
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        execute_modes: list[str] = []
+
+        class ModeTrackingAgent(BaseAgent):
+            async def execute(self, prompt, session, **kwargs):
+                execute_modes.append(session.mode)
+                return AgentResponse(
+                    content=f"Echo: {prompt}",
+                    session_id="impl-session",
+                    cost=0.01,
+                )
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        sm = SessionManager()
+        eng = Engine(
+            connector=None,
+            agent=ModeTrackingAgent(),
+            config=config,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        session = await sm.get_or_create("u1", "c1", str(tmp_path))
+        session.mode = "plan"
+        session.claude_session_id = "plan-session-xyz"
+        await sm.save(session)
+
+        plan_text = "A detailed implementation plan with enough content to pass the length check."
+        await eng._exit_plan_mode(
+            session, "c1", "u1", plan_text, trigger="test", clear_context=True
+        )
+
+        assert len(execute_modes) == 1
+        assert execute_modes[0] == "auto"
+
+        final_session = sm.get("u1", "c1")
+        assert final_session.mode == "auto"
+
+
+class TestRetryableResponsePatterns:
+    """Test all retryable error patterns in _is_retryable_response."""
+
+    def test_overloaded(self):
+        resp = AgentResponse(
+            content="The API is overloaded, please try again", is_error=True
+        )
+        assert Engine._is_retryable_response(resp) is True
+
+    def test_rate_limit(self):
+        resp = AgentResponse(content="rate_limit exceeded", is_error=True)
+        assert Engine._is_retryable_response(resp) is True
+
+    def test_500_error(self):
+        resp = AgentResponse(content="Server returned 500 error", is_error=True)
+        assert Engine._is_retryable_response(resp) is True
+
+    def test_529_error(self):
+        resp = AgentResponse(content="Server returned 529", is_error=True)
+        assert Engine._is_retryable_response(resp) is True
+
+    def test_maximum_buffer_size(self):
+        resp = AgentResponse(content="maximum buffer size exceeded", is_error=True)
+        assert Engine._is_retryable_response(resp) is True
+
+    def test_case_insensitive_match(self):
+        resp = AgentResponse(content="TEMPORARILY UNAVAILABLE", is_error=True)
+        assert Engine._is_retryable_response(resp) is True
+
+    def test_not_retryable_when_not_error(self):
+        resp = AgentResponse(content="overloaded is a word", is_error=False)
+        assert Engine._is_retryable_response(resp) is False
+
+    def test_authentication_error_not_retryable(self):
+        resp = AgentResponse(
+            content="authentication_error: invalid API key", is_error=True
+        )
+        assert Engine._is_retryable_response(resp) is False

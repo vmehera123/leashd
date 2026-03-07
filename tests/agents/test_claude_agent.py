@@ -446,6 +446,27 @@ class TestClaudeCodeAgent:
         opts = agent._build_options(session, can_use_tool=None)
         assert not opts.mcp_servers
 
+    def test_build_options_workspace_sets_add_dirs(self, tmp_path):
+        primary = str(tmp_path / "repo-a")
+        extra_b = str(tmp_path / "repo-b")
+        extra_c = str(tmp_path / "repo-c")
+        config = LeashdConfig(approved_directories=[tmp_path])
+        agent = ClaudeCodeAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=primary,
+            workspace_name="myws",
+            workspace_directories=[primary, extra_b, extra_c],
+        )
+        opts = agent._build_options(session, can_use_tool=None)
+        assert opts.add_dirs == [extra_b, extra_c]
+
+    def test_build_options_no_workspace_omits_add_dirs(self, agent, session):
+        opts = agent._build_options(session, can_use_tool=None)
+        assert not getattr(opts, "add_dirs", None)
+
     def test_build_options_logs_mcp_server_names(self, tmp_path, capsys):
         import json
 

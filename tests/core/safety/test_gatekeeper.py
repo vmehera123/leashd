@@ -72,6 +72,7 @@ class TestGatekeeperNoPolicy:
             {"file_path": str(tmp_dir / "foo.py")},
             None,
             PolicyDecision.ALLOW,
+            session_mode=None,
         )
 
 
@@ -418,8 +419,10 @@ class TestGatekeeperAutoApprove:
         assert result.behavior == "allow"
         # No approval request sent to connector
         assert len(mock_connector.approval_requests) == 0
-        # But audit was logged
-        mock_audit.log_approval.assert_called_once_with("s1", "Write", True, "c1")
+        # But audit was logged (with approver_type for auto-approve)
+        mock_audit.log_approval.assert_called_once_with(
+            "s1", "Write", True, "c1", approver_type="auto_approve"
+        )
 
     @pytest.mark.asyncio
     async def test_auto_approve_does_not_affect_other_chats(
@@ -481,7 +484,9 @@ class TestGatekeeperAutoApprove:
         )
         assert result.behavior == "allow"
         assert len(mock_connector.approval_requests) == 0
-        mock_audit.log_approval.assert_called_once_with("s1", "Write", True, "c1")
+        mock_audit.log_approval.assert_called_once_with(
+            "s1", "Write", True, "c1", approver_type="auto_approve"
+        )
 
     @pytest.mark.asyncio
     async def test_per_tool_auto_approve_does_not_bypass_other_tools(
@@ -599,7 +604,9 @@ class TestGatekeeperAutoApprove:
         )
         assert result.behavior == "allow"
         assert len(mock_connector.approval_requests) == 0
-        mock_audit.log_approval.assert_called_once_with("s1", "Write", True, "c1")
+        mock_audit.log_approval.assert_called_once_with(
+            "s1", "Write", True, "c1", approver_type="auto_approve"
+        )
 
 
 class TestApprovalKeyExtraction:
@@ -770,7 +777,7 @@ class TestGatekeeperSafetyInvariants:
         from unittest.mock import MagicMock
 
         mock_policy = MagicMock()
-        mock_policy.classify.side_effect = RuntimeError("policy crash")
+        mock_policy.classify_compound.side_effect = RuntimeError("policy crash")
         gk = ToolGatekeeper(
             sandbox=sandbox,
             audit=mock_audit,
@@ -1041,6 +1048,15 @@ class TestHierarchicalAutoApprove:
         assert gk._matches_auto_approved("c1", "Write") is True
         assert gk._matches_auto_approved("c1", "WriteExtra") is False
 
+    @pytest.mark.asyncio
+    async def test_docker_compose_auto_approved(self, gk, mock_connector, mock_audit):
+        gk.enable_tool_auto_approve("c1", "Bash::docker compose")
+        result = await gk.check(
+            "Bash", {"command": "docker compose up -d --build"}, "s1", "c1"
+        )
+        assert result.behavior == "allow"
+        assert len(mock_connector.approval_requests) == 0
+
 
 class TestMCPToolNameNormalization:
     """Tests for MCP tool name prefix stripping."""
@@ -1134,3 +1150,506 @@ class TestMCPToolNameNormalization:
         await gk.check("mcp__playwright__browser_snapshot", {}, "s1", "c1")
         assert len(events) == 1
         assert events[0].data["tool_name"] == "mcp__playwright__browser_snapshot"
+
+
+class TestGatekeeperAutoApproverIntegration:
+    @pytest.fixture
+    def ai_gatekeeper(self, sandbox, mock_audit, event_bus, policy_engine):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from leashd.core.safety.approvals import ApprovalResult
+
+        auto_approver = MagicMock()
+        auto_approver.evaluate = AsyncMock(
+            return_value=ApprovalResult(approved=True, reason="ok")
+        )
+        return ToolGatekeeper(
+            sandbox=sandbox,
+            audit=mock_audit,
+            event_bus=event_bus,
+            policy_engine=policy_engine,
+            auto_approver=auto_approver,
+        )
+
+    @pytest.mark.asyncio
+    async def test_task_description_forwarded(self, ai_gatekeeper, tmp_dir):
+        gk = ai_gatekeeper
+        await gk.check(
+            "Write",
+            {"file_path": str(tmp_dir / "main.py")},
+            "s1",
+            "c1",
+            task_description="Fix the login bug",
+            session_mode="auto",
+        )
+        call_kwargs = gk._auto_approver.evaluate.call_args[1]
+        assert call_kwargs["task_description"] == "Fix the login bug"
+
+    @pytest.mark.asyncio
+    async def test_audit_summary_forwarded(self, ai_gatekeeper, mock_audit, tmp_dir):
+        mock_audit.get_recent_entries = MagicMock(
+            return_value=[
+                {"event": "tool_attempt", "tool_name": "Read", "decision": "allow"},
+            ]
+        )
+        mock_audit.summarize_entries = MagicMock(return_value="Read → allow")
+        await ai_gatekeeper.check(
+            "Write",
+            {"file_path": str(tmp_dir / "main.py")},
+            "s1",
+            "c1",
+            session_mode="auto",
+        )
+        call_kwargs = ai_gatekeeper._auto_approver.evaluate.call_args[1]
+        assert "Read" in call_kwargs["audit_summary"]
+
+    @pytest.mark.asyncio
+    async def test_session_mode_forwarded_to_audit(
+        self, ai_gatekeeper, mock_audit, tmp_dir
+    ):
+        await ai_gatekeeper.check(
+            "Write",
+            {"file_path": str(tmp_dir / "main.py")},
+            "s1",
+            "c1",
+            session_mode="auto",
+        )
+        call_args = mock_audit.log_tool_attempt.call_args
+        assert call_args[1]["session_mode"] == "auto"
+
+    @pytest.mark.asyncio
+    async def test_ai_auto_approver_deny_emits_tool_denied(
+        self, sandbox, mock_audit, event_bus, policy_engine, tmp_dir
+    ):
+        """AutoApprover DENY with no coordinator → terminal deny + APPROVAL_ESCALATED."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from leashd.core.events import APPROVAL_ESCALATED, TOOL_DENIED
+        from leashd.core.safety.approvals import ApprovalResult
+
+        auto_approver = MagicMock()
+        auto_approver.evaluate = AsyncMock(
+            return_value=ApprovalResult(approved=False, reason="Too risky for AI")
+        )
+        gk = ToolGatekeeper(
+            sandbox=sandbox,
+            audit=mock_audit,
+            event_bus=event_bus,
+            policy_engine=policy_engine,
+            auto_approver=auto_approver,
+        )
+
+        denied_events: list = []
+        escalated_events: list = []
+
+        async def capture_denied(event):
+            denied_events.append(event)
+
+        async def capture_escalated(event):
+            escalated_events.append(event)
+
+        event_bus.subscribe(TOOL_DENIED, capture_denied)
+        event_bus.subscribe(APPROVAL_ESCALATED, capture_escalated)
+
+        result = await gk.check(
+            "Write",
+            {"file_path": str(tmp_dir / "main.py")},
+            "s1",
+            "c1",
+            session_mode="auto",
+        )
+
+        assert result.behavior == "deny"
+        assert "Too risky for AI" in result.message
+        assert (
+            len([e for e in denied_events if e.data.get("reason") == "ai_denied"]) == 1
+        )
+        assert len(escalated_events) == 1
+        assert escalated_events[0].data["ai_reason"] == "Too risky for AI"
+
+    @pytest.mark.asyncio
+    async def test_ai_denial_escalates_to_human_approve(
+        self, sandbox, mock_audit, event_bus, policy_engine, tmp_dir
+    ):
+        """AI deny + human approve → result is ALLOW."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from leashd.core.events import TOOL_ALLOWED
+        from leashd.core.safety.approvals import ApprovalResult
+
+        auto_approver = MagicMock()
+        auto_approver.evaluate = AsyncMock(
+            return_value=ApprovalResult(approved=False, reason="Looks risky")
+        )
+        coordinator = MagicMock()
+        coordinator.request_approval = AsyncMock(
+            return_value=ApprovalResult(approved=True)
+        )
+        gk = ToolGatekeeper(
+            sandbox=sandbox,
+            audit=mock_audit,
+            event_bus=event_bus,
+            policy_engine=policy_engine,
+            auto_approver=auto_approver,
+            approval_coordinator=coordinator,
+        )
+
+        allowed_events: list = []
+
+        async def capture(event):
+            allowed_events.append(event)
+
+        event_bus.subscribe(TOOL_ALLOWED, capture)
+
+        result = await gk.check(
+            "Write",
+            {"file_path": str(tmp_dir / "main.py")},
+            "s1",
+            "c1",
+            session_mode="auto",
+        )
+
+        assert result.behavior == "allow"
+        escalation_events = [
+            e for e in allowed_events if e.data.get("via") == "human_escalation"
+        ]
+        assert len(escalation_events) == 1
+        mock_audit.log_approval.assert_called_once()
+        assert (
+            mock_audit.log_approval.call_args[1]["approver_type"] == "human_escalation"
+        )
+
+    @pytest.mark.asyncio
+    async def test_ai_denial_escalates_to_human_deny(
+        self, sandbox, mock_audit, event_bus, policy_engine, tmp_dir
+    ):
+        """AI deny + human deny → result is DENY with human's reason."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from leashd.core.events import TOOL_DENIED
+        from leashd.core.safety.approvals import ApprovalResult
+
+        auto_approver = MagicMock()
+        auto_approver.evaluate = AsyncMock(
+            return_value=ApprovalResult(approved=False, reason="Looks risky")
+        )
+        coordinator = MagicMock()
+        coordinator.request_approval = AsyncMock(
+            return_value=ApprovalResult(approved=False, reason="No, block it")
+        )
+        gk = ToolGatekeeper(
+            sandbox=sandbox,
+            audit=mock_audit,
+            event_bus=event_bus,
+            policy_engine=policy_engine,
+            auto_approver=auto_approver,
+            approval_coordinator=coordinator,
+        )
+
+        denied_events: list = []
+
+        async def capture(event):
+            denied_events.append(event)
+
+        event_bus.subscribe(TOOL_DENIED, capture)
+
+        result = await gk.check(
+            "Write",
+            {"file_path": str(tmp_dir / "main.py")},
+            "s1",
+            "c1",
+            session_mode="auto",
+        )
+
+        assert result.behavior == "deny"
+        assert "No, block it" in result.message
+        user_denied = [
+            e for e in denied_events if e.data.get("reason") == "user_denied"
+        ]
+        assert len(user_denied) == 1
+
+    @pytest.mark.asyncio
+    async def test_ai_denial_terminal_when_no_coordinator(
+        self, sandbox, mock_audit, event_bus, policy_engine, tmp_dir
+    ):
+        """AI deny with no coordinator → terminal deny (backward compatible)."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from leashd.core.safety.approvals import ApprovalResult
+
+        auto_approver = MagicMock()
+        auto_approver.evaluate = AsyncMock(
+            return_value=ApprovalResult(approved=False, reason="Blocked by AI")
+        )
+        gk = ToolGatekeeper(
+            sandbox=sandbox,
+            audit=mock_audit,
+            event_bus=event_bus,
+            policy_engine=policy_engine,
+            auto_approver=auto_approver,
+        )
+
+        result = await gk.check(
+            "Write",
+            {"file_path": str(tmp_dir / "main.py")},
+            "s1",
+            "c1",
+            session_mode="auto",
+        )
+
+        assert result.behavior == "deny"
+        assert "Blocked by AI" in result.message
+
+    @pytest.mark.asyncio
+    async def test_escalation_passes_ai_reason_to_coordinator(
+        self, sandbox, mock_audit, event_bus, policy_engine, tmp_dir
+    ):
+        """Verify ai_denial_reason kwarg is passed to coordinator."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from leashd.core.safety.approvals import ApprovalResult
+
+        auto_approver = MagicMock()
+        auto_approver.evaluate = AsyncMock(
+            return_value=ApprovalResult(approved=False, reason="npm ci is dangerous")
+        )
+        coordinator = MagicMock()
+        coordinator.request_approval = AsyncMock(
+            return_value=ApprovalResult(approved=True)
+        )
+        gk = ToolGatekeeper(
+            sandbox=sandbox,
+            audit=mock_audit,
+            event_bus=event_bus,
+            policy_engine=policy_engine,
+            auto_approver=auto_approver,
+            approval_coordinator=coordinator,
+        )
+
+        await gk.check(
+            "Write",
+            {"file_path": str(tmp_dir / "main.py")},
+            "s1",
+            "c1",
+            session_mode="auto",
+        )
+
+        call_kwargs = coordinator.request_approval.call_args[1]
+        assert call_kwargs["ai_denial_reason"] == "npm ci is dangerous"
+
+    @pytest.mark.asyncio
+    async def test_ai_auto_approver_approve_emits_via_ai(
+        self, sandbox, mock_audit, event_bus, policy_engine, tmp_dir
+    ):
+        """AutoApprover returning approved=True must emit TOOL_ALLOWED with via=ai_approver."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from leashd.core.events import TOOL_ALLOWED
+        from leashd.core.safety.approvals import ApprovalResult
+
+        auto_approver = MagicMock()
+        auto_approver.evaluate = AsyncMock(
+            return_value=ApprovalResult(approved=True, reason="ok")
+        )
+        gk = ToolGatekeeper(
+            sandbox=sandbox,
+            audit=mock_audit,
+            event_bus=event_bus,
+            policy_engine=policy_engine,
+            auto_approver=auto_approver,
+        )
+
+        events = []
+
+        async def capture(event):
+            events.append(event)
+
+        event_bus.subscribe(TOOL_ALLOWED, capture)
+
+        result = await gk.check(
+            "Write",
+            {"file_path": str(tmp_dir / "main.py")},
+            "s1",
+            "c1",
+            session_mode="auto",
+        )
+
+        assert result.behavior == "allow"
+        ai_events = [e for e in events if e.data.get("via") == "ai_approver"]
+        assert len(ai_events) == 1
+
+    @pytest.mark.asyncio
+    async def test_blanket_auto_approve_skips_ai_approver(
+        self, sandbox, mock_audit, event_bus, policy_engine, tmp_dir
+    ):
+        """Blanket auto-approve must take precedence over AI auto-approver."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from leashd.core.safety.approvals import ApprovalResult
+
+        auto_approver = MagicMock()
+        auto_approver.evaluate = AsyncMock(
+            return_value=ApprovalResult(approved=True, reason="ok")
+        )
+        gk = ToolGatekeeper(
+            sandbox=sandbox,
+            audit=mock_audit,
+            event_bus=event_bus,
+            policy_engine=policy_engine,
+            auto_approver=auto_approver,
+        )
+        gk.enable_auto_approve("c1")
+
+        result = await gk.check(
+            "Write", {"file_path": str(tmp_dir / "main.py")}, "s1", "c1"
+        )
+
+        assert result.behavior == "allow"
+        auto_approver.evaluate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_ai_approver_skipped_for_default_mode(
+        self, sandbox, mock_audit, event_bus, policy_engine, tmp_dir
+    ):
+        """AI auto-approver is skipped for non-task sessions (default/None)."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from leashd.core.safety.approvals import ApprovalResult
+
+        auto_approver = MagicMock()
+        auto_approver.evaluate = AsyncMock(
+            return_value=ApprovalResult(approved=True, reason="ok")
+        )
+        coordinator = MagicMock()
+        coordinator.request_approval = AsyncMock(
+            return_value=ApprovalResult(approved=True)
+        )
+        gk = ToolGatekeeper(
+            sandbox=sandbox,
+            audit=mock_audit,
+            event_bus=event_bus,
+            policy_engine=policy_engine,
+            auto_approver=auto_approver,
+            approval_coordinator=coordinator,
+        )
+
+        result = await gk.check(
+            "Write",
+            {"file_path": str(tmp_dir / "main.py")},
+            "s1",
+            "c1",
+            session_mode="default",
+        )
+
+        assert result.behavior == "allow"
+        auto_approver.evaluate.assert_not_called()
+        coordinator.request_approval.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_ai_approver_skipped_for_plan_mode(
+        self, sandbox, mock_audit, event_bus, policy_engine, tmp_dir
+    ):
+        """AI auto-approver is skipped for plan mode — goes to human coordinator."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from leashd.core.safety.approvals import ApprovalResult
+
+        auto_approver = MagicMock()
+        auto_approver.evaluate = AsyncMock(
+            return_value=ApprovalResult(approved=True, reason="ok")
+        )
+        coordinator = MagicMock()
+        coordinator.request_approval = AsyncMock(
+            return_value=ApprovalResult(approved=True)
+        )
+        gk = ToolGatekeeper(
+            sandbox=sandbox,
+            audit=mock_audit,
+            event_bus=event_bus,
+            policy_engine=policy_engine,
+            auto_approver=auto_approver,
+            approval_coordinator=coordinator,
+        )
+
+        result = await gk.check(
+            "Write",
+            {"file_path": str(tmp_dir / "main.py")},
+            "s1",
+            "c1",
+            session_mode="plan",
+        )
+
+        assert result.behavior == "allow"
+        auto_approver.evaluate.assert_not_called()
+        coordinator.request_approval.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_ai_approver_active_for_task_mode(
+        self, sandbox, mock_audit, event_bus, policy_engine, tmp_dir
+    ):
+        """AI auto-approver IS called for task mode sessions."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from leashd.core.events import TOOL_ALLOWED
+        from leashd.core.safety.approvals import ApprovalResult
+
+        auto_approver = MagicMock()
+        auto_approver.evaluate = AsyncMock(
+            return_value=ApprovalResult(approved=True, reason="ok")
+        )
+        gk = ToolGatekeeper(
+            sandbox=sandbox,
+            audit=mock_audit,
+            event_bus=event_bus,
+            policy_engine=policy_engine,
+            auto_approver=auto_approver,
+        )
+
+        events = []
+
+        async def capture(event):
+            events.append(event)
+
+        event_bus.subscribe(TOOL_ALLOWED, capture)
+
+        result = await gk.check(
+            "Write",
+            {"file_path": str(tmp_dir / "main.py")},
+            "s1",
+            "c1",
+            session_mode="task",
+        )
+
+        assert result.behavior == "allow"
+        auto_approver.evaluate.assert_called_once()
+        ai_events = [e for e in events if e.data.get("via") == "ai_approver"]
+        assert len(ai_events) == 1
+
+    @pytest.mark.asyncio
+    async def test_per_tool_auto_approve_skips_ai_approver(
+        self, sandbox, mock_audit, event_bus, policy_engine, tmp_dir
+    ):
+        """Per-tool auto-approve must take precedence over AI auto-approver."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from leashd.core.safety.approvals import ApprovalResult
+
+        auto_approver = MagicMock()
+        auto_approver.evaluate = AsyncMock(
+            return_value=ApprovalResult(approved=True, reason="ok")
+        )
+        gk = ToolGatekeeper(
+            sandbox=sandbox,
+            audit=mock_audit,
+            event_bus=event_bus,
+            policy_engine=policy_engine,
+            auto_approver=auto_approver,
+        )
+        gk.enable_tool_auto_approve("c1", "Write")
+
+        result = await gk.check(
+            "Write", {"file_path": str(tmp_dir / "main.py")}, "s1", "c1"
+        )
+
+        assert result.behavior == "allow"
+        auto_approver.evaluate.assert_not_called()

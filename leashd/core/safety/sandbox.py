@@ -31,6 +31,10 @@ class SandboxEnforcer:
         logger.debug("sandbox_path_denied", path=str(resolved))
         return False, (f"Path {resolved} is outside allowed directories: {allowed_str}")
 
+    def update_directories(self, directories: list[Path]) -> None:
+        self._allowed = [d.expanduser().resolve() for d in directories]
+        logger.info("sandbox_directories_updated", count=len(self._allowed))
+
     def add_directory(self, directory: Path) -> None:
         resolved = directory.expanduser().resolve()
         if resolved not in self._allowed:

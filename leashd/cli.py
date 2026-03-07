@@ -13,15 +13,25 @@ if TYPE_CHECKING:
 
 from leashd.config_store import (
     add_approved_directory,
-    add_workspace,
     config_path,
     get_approved_directories,
+    get_autonomous_config,
     get_workspaces,
     inject_global_config_as_env,
     load_global_config,
+    merge_workspace_dirs,
     remove_approved_directory,
     remove_workspace,
+    remove_workspace_dirs,
+    save_global_config,
 )
+
+
+def _notify_daemon_reload() -> None:
+    from leashd.daemon import signal_reload
+
+    if signal_reload():
+        print("  (daemon notified)")
 
 
 def _handle_init() -> None:
@@ -40,6 +50,7 @@ def _handle_add_dir(path: str | None) -> None:
         sys.exit(1)
     add_approved_directory(resolved)
     print(f"\u2713 Added {resolved}")
+    _notify_daemon_reload()
 
 
 def _handle_remove_dir(path: str | None) -> None:
@@ -52,6 +63,7 @@ def _handle_remove_dir(path: str | None) -> None:
         sys.exit(1)
     remove_approved_directory(resolved)
     print(f"\u2713 Removed {resolved}")
+    _notify_daemon_reload()
 
 
 def _handle_dirs() -> None:
@@ -140,6 +152,12 @@ def _print_resolved_config(config: LeashdConfig, yaml_data: dict[str, Any]) -> N
     else:
         print("\nTelegram: not configured")
 
+    autonomous = get_autonomous_config(yaml_data)
+    if autonomous.get("enabled"):
+        print("\nAutonomous mode: ENABLED")
+    else:
+        print("\nAutonomous mode: disabled")
+
 
 def _print_yaml_only_config(yaml_data: dict[str, Any]) -> None:
     """Fallback display from raw YAML when LeashdConfig can't be built."""
@@ -158,6 +176,116 @@ def _print_yaml_only_config(yaml_data: dict[str, Any]) -> None:
             print(f"Allowed user IDs: {', '.join(str(uid) for uid in user_ids)}")
     else:
         print("\nTelegram: not configured")
+
+    autonomous = get_autonomous_config(yaml_data)
+    if autonomous.get("enabled"):
+        print("\nAutonomous mode: ENABLED")
+    else:
+        print("\nAutonomous mode: disabled")
+
+
+def _handle_autonomous(args: argparse.Namespace) -> None:
+    """Route autonomous subcommands."""
+    sub = getattr(args, "auto_command", None)
+    if sub is None or sub == "show":
+        _handle_autonomous_show()
+    elif sub == "setup":
+        _handle_autonomous_setup()
+    elif sub == "enable":
+        _handle_autonomous_enable()
+    elif sub == "disable":
+        _handle_autonomous_disable()
+
+
+def _handle_autonomous_show() -> None:
+    """Display all autonomous settings."""
+    data = load_global_config()
+    autonomous = get_autonomous_config(data)
+
+    if not autonomous.get("enabled"):
+        print("Autonomous mode: disabled")
+        print(
+            "Run 'leashd autonomous enable' or 'leashd autonomous setup' to configure."
+        )
+        return
+
+    print("Autonomous mode: ENABLED\n")
+    _yn = {True: "yes", False: "no"}
+    print(f"  Policy: {autonomous.get('policy', 'autonomous')}")
+    print(
+        f"  AI tool approver: {_yn.get(autonomous.get('auto_approver', True), 'yes')}"
+    )
+    print(f"  AI plan reviewer: {_yn.get(autonomous.get('auto_plan', True), 'yes')}")
+    print(f"  Auto PR: {_yn.get(autonomous.get('auto_pr', False), 'no')}")
+    print(f"  PR base branch: {autonomous.get('auto_pr_base_branch', 'main')}")
+    print(
+        f"  Test-and-retry loop: "
+        f"{_yn.get(autonomous.get('autonomous_loop', False), 'no')}"
+    )
+    print(f"  Max retries (task): {autonomous.get('task_max_retries', 3)}")
+
+
+def _handle_autonomous_setup() -> None:
+    """Run the autonomous config wizard."""
+    from leashd.setup import _configure_autonomous
+
+    data = load_global_config()
+    existing = get_autonomous_config(data)
+
+    if existing.get("enabled"):
+        try:
+            answer = input("Autonomous mode already configured. Reconfigure? [y/N] ")
+        except (EOFError, KeyboardInterrupt):
+            answer = "n"
+        if answer.strip().lower() not in ("y", "yes"):
+            print("Kept existing configuration.")
+            return
+
+    autonomous = _configure_autonomous(existing, input_fn=input)
+    data["autonomous"] = autonomous
+    save_global_config(data)
+    inject_global_config_as_env(force=True)
+    print("\u2713 Autonomous mode configured")
+
+
+def _handle_autonomous_enable() -> None:
+    """Quick-enable autonomous mode with defaults."""
+    data = load_global_config()
+    autonomous = get_autonomous_config(data)
+
+    if autonomous.get("enabled"):
+        print("\u2713 Autonomous mode already enabled")
+        return
+
+    autonomous.setdefault("policy", "autonomous")
+    autonomous.setdefault("auto_approver", True)
+    autonomous.setdefault("auto_plan", True)
+    autonomous.setdefault("auto_pr", True)
+    autonomous.setdefault("auto_pr_base_branch", "main")
+    autonomous.setdefault("autonomous_loop", True)
+    autonomous.setdefault("task_max_retries", 3)
+    autonomous["enabled"] = True
+
+    data["autonomous"] = autonomous
+    save_global_config(data)
+    inject_global_config_as_env(force=True)
+    print("\u2713 Autonomous mode enabled")
+
+
+def _handle_autonomous_disable() -> None:
+    """Disable autonomous mode, preserving config for re-enable."""
+    data = load_global_config()
+    autonomous = get_autonomous_config(data)
+
+    if not autonomous.get("enabled"):
+        print("\u2713 Autonomous mode already disabled")
+        return
+
+    autonomous["enabled"] = False
+    data["autonomous"] = autonomous
+    save_global_config(data)
+    inject_global_config_as_env(force=True)
+    print("\u2713 Autonomous mode disabled")
 
 
 def _handle_clean() -> None:
@@ -209,9 +337,11 @@ def _handle_ws(args: argparse.Namespace) -> None:
     elif sub == "add":
         _handle_ws_add(args.name, args.directories, args.desc)
     elif sub == "remove":
-        _handle_ws_remove(args.name)
+        _handle_ws_remove(args.name, args.directories)
     elif sub == "show":
         _handle_ws_show(args.name)
+    elif sub == "list":
+        _handle_ws_list()
 
 
 def _handle_ws_list() -> None:
@@ -232,11 +362,11 @@ def _handle_ws_list() -> None:
 
 
 def _handle_ws_add(name: str, directories: list[str], description: str) -> None:
-    """Create or update a workspace."""
+    """Create or merge directories into a workspace."""
     approved = get_approved_directories()
     approved_set = {d.resolve() for d in approved}
 
-    resolved_dirs: list[Path] = []
+    resolved_strs: list[str] = []
     for d in directories:
         p = Path(d).expanduser().resolve()
         if not p.is_dir():
@@ -246,18 +376,59 @@ def _handle_ws_add(name: str, directories: list[str], description: str) -> None:
             add_approved_directory(p)
             approved_set.add(p)
             print(f"  approved {p}")
-        resolved_dirs.append(p)
+        resolved_strs.append(str(p))
 
-    add_workspace(name, resolved_dirs, description)
-    print(f"\u2713 Workspace '{name}' saved ({len(resolved_dirs)} directories)")
+    desc = description if description else None
+    existed = name in get_workspaces()
+    added, present = merge_workspace_dirs(name, resolved_strs, desc)
+
+    for d in added:
+        print(f"  + {d}")
+    for d in present:
+        print(f"  = {d} (already in workspace)")
+
+    total = len(added) + len(present)
+    if existed:
+        existing_count = len(get_workspaces()[name]["directories"])
+        print(
+            f"\u2713 Workspace '{name}' saved ({len(added)} added, {existing_count} total)"
+        )
+    else:
+        print(f"\u2713 Workspace '{name}' created ({total} directories)")
+    _notify_daemon_reload()
 
 
-def _handle_ws_remove(name: str) -> None:
-    """Remove a workspace."""
-    if not remove_workspace(name):
+def _handle_ws_remove(name: str, directories: list[str]) -> None:
+    """Remove a workspace or specific directories from it."""
+    if not directories:
+        if not remove_workspace(name):
+            print(f"Error: workspace '{name}' not found", file=sys.stderr)
+            sys.exit(1)
+        print(f"\u2713 Removed workspace '{name}'")
+        _notify_daemon_reload()
+        return
+
+    resolved = [str(Path(d).expanduser().resolve()) for d in directories]
+    try:
+        remaining = remove_workspace_dirs(name, resolved)
+    except KeyError:
         print(f"Error: workspace '{name}' not found", file=sys.stderr)
         sys.exit(1)
-    print(f"\u2713 Removed workspace '{name}'")
+    except ValueError as e:
+        missing = e.args[0]
+        print(f"Error: directories not in workspace '{name}':", file=sys.stderr)
+        for d in missing:
+            print(f"  {d}", file=sys.stderr)
+        sys.exit(1)
+
+    if not remaining:
+        print(f"\u2713 Removed workspace '{name}' (no directories remaining)")
+    else:
+        print(
+            f"\u2713 Removed {len(resolved)} dir(s) from '{name}' "
+            f"({len(remaining)} remaining)"
+        )
+    _notify_daemon_reload()
 
 
 def _handle_ws_show(name: str) -> None:
@@ -323,6 +494,16 @@ def _start_engine() -> None:
 def _handle_start(*, foreground: bool) -> None:
     """Start leashd — foreground or daemon mode."""
     if foreground:
+        from leashd.daemon import is_running
+
+        running, pid = is_running()
+        if running:
+            print(
+                f"Warning: leashd daemon is already running (PID {pid}). "
+                "Stop it first with 'leashd stop' to avoid Telegram conflicts.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         _start_engine()
         return
 
@@ -359,7 +540,46 @@ def _handle_stop() -> None:
     if clean:
         print("leashd stopped.")
     else:
-        print("Warning: leashd did not exit within 10s — PID file removed.")
+        print(
+            "Warning: leashd did not exit after SIGTERM + SIGKILL — PID file removed."
+        )
+
+
+def _handle_restart() -> None:
+    """Restart leashd daemon (stop then start)."""
+    from leashd.daemon import daemon_log_path, is_running, start_daemon, stop_daemon
+    from leashd.exceptions import DaemonError
+
+    running, pid = is_running()
+    if running and pid:
+        print(f"Stopping leashd (PID {pid})...")
+        try:
+            clean = stop_daemon()
+        except DaemonError as e:
+            print(f"Error stopping: {e}", file=sys.stderr)
+            sys.exit(1)
+        if clean:
+            print("leashd stopped.")
+        else:
+            print(
+                "Warning: leashd did not exit after SIGTERM + SIGKILL — PID file removed."
+            )
+    else:
+        print("leashd is not running, starting fresh.")
+
+    data = load_global_config()
+    if not data or not data.get("approved_directories"):
+        print("No config found. Run 'leashd init' first.", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        new_pid = start_daemon()
+    except DaemonError as e:
+        print(f"Error starting: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"leashd restarted (PID {new_pid})")
+    print(f"Logs: {daemon_log_path()}")
 
 
 def _handle_status() -> None:
@@ -373,6 +593,17 @@ def _handle_status() -> None:
         print(f"Daemon log: {daemon_log_path()}")
     else:
         print("leashd is not running.")
+
+
+def _handle_reload() -> None:
+    """Send SIGHUP to the daemon to reload config."""
+    from leashd.daemon import signal_reload
+
+    if signal_reload():
+        print("Config reload signal sent to daemon.")
+    else:
+        print("leashd is not running.", file=sys.stderr)
+        sys.exit(1)
 
 
 def _handle_internal_run() -> None:
@@ -401,6 +632,7 @@ def main() -> None:
     )
 
     subparsers.add_parser("stop", help="Stop the leashd daemon")
+    subparsers.add_parser("restart", help="Restart the leashd daemon")
     subparsers.add_parser("status", help="Show daemon status")
     subparsers.add_parser("_run", help=argparse.SUPPRESS)
 
@@ -424,10 +656,23 @@ def main() -> None:
     subparsers.add_parser("dirs", help="List approved directories")
     subparsers.add_parser("config", help="Show current config summary")
     subparsers.add_parser("clean", help="Remove all logs, databases, and audit files")
+    subparsers.add_parser("reload", help="Reload config in running daemon")
+
+    # Autonomous mode
+    auto_parser = subparsers.add_parser(
+        "autonomous", help="Manage autonomous mode settings"
+    )
+    auto_sub = auto_parser.add_subparsers(dest="auto_command")
+    auto_sub.add_parser("show", help="Show autonomous mode settings (default)")
+    auto_sub.add_parser("setup", help="Run autonomous mode setup wizard")
+    auto_sub.add_parser("enable", help="Quick-enable autonomous mode with defaults")
+    auto_sub.add_parser("disable", help="Disable autonomous mode")
 
     # Workspace management
     ws_parser = subparsers.add_parser("ws", help="Manage workspaces")
     ws_sub = ws_parser.add_subparsers(dest="ws_command")
+
+    ws_sub.add_parser("list", help="List all workspaces")
 
     ws_add = ws_sub.add_parser("add", help="Create or update a workspace")
     ws_add.add_argument("name", help="Workspace name")
@@ -436,8 +681,16 @@ def main() -> None:
     )
     ws_add.add_argument("--desc", default="", help="Workspace description")
 
-    ws_remove = ws_sub.add_parser("remove", help="Remove a workspace")
-    ws_remove.add_argument("name", help="Workspace name to remove")
+    ws_remove = ws_sub.add_parser(
+        "remove", help="Remove a workspace or directories from it"
+    )
+    ws_remove.add_argument("name", help="Workspace name")
+    ws_remove.add_argument(
+        "directories",
+        nargs="*",
+        default=[],
+        help="Directories to remove (omit to remove entire workspace)",
+    )
 
     ws_show = ws_sub.add_parser("show", help="Show workspace details")
     ws_show.add_argument("name", help="Workspace name to show")
@@ -453,6 +706,8 @@ def main() -> None:
         _handle_start(foreground=args.foreground)
     elif args.command == "stop":
         _handle_stop()
+    elif args.command == "restart":
+        _handle_restart()
     elif args.command == "status":
         _handle_status()
     elif args.command == "_run":
@@ -469,9 +724,13 @@ def main() -> None:
         _handle_config()
     elif args.command == "clean":
         _handle_clean()
+    elif args.command == "reload":
+        _handle_reload()
     elif args.command == "version":
         from leashd import __version__
 
         print(f"leashd {__version__}")
+    elif args.command == "autonomous":
+        _handle_autonomous(args)
     elif args.command == "ws":
         _handle_ws(args)

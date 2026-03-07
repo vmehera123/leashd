@@ -63,7 +63,7 @@ sequenceDiagram
 
 ## Agent Modes
 
-leashd supports three agent modes per session: **default**, **plan**, and **auto** (plus special **test** and **merge** modes activated by plugins).
+leashd supports three agent modes per session: **default**, **plan**, and **auto** (plus special **test**, **merge**, and **task** modes activated by plugins).
 
 - **default** — balanced mode; the agent decides whether to plan or implement directly
 - **plan** — the agent receives a system prompt instruction (`_PLAN_MODE_INSTRUCTION`) that tells it to explore and plan before implementing. When the agent calls `ExitPlanMode`, the user reviews the plan and decides how to proceed.
@@ -74,6 +74,7 @@ stateDiagram-v2
     [*] --> default: Session created
     default --> plan: /plan command
     default --> auto: /edit command
+    default --> task: /task command
     plan --> plan_review: Agent calls ExitPlanMode
     plan_review --> auto: User approves (proceed/clean_proceed)
     plan_review --> plan: User selects "adjust"
@@ -84,9 +85,12 @@ stateDiagram-v2
     plan --> default: /default command
     auto --> default: /default command
     default --> default: /default command
+    task --> task: TaskOrchestrator drives phases
+    task --> default: task completes/fails/cancelled
     plan --> [*]: /clear command
     auto --> [*]: /clear command
     default --> [*]: /clear command
+    task --> [*]: /clear command
 ```
 
 ### Plan Review Flow
@@ -113,7 +117,7 @@ class _ToolCallbackState:
 
 ## Slash Commands
 
-The engine handles eight commands via `handle_command()`:
+The engine handles eleven commands via `handle_command()`:
 
 | Command | Effect |
 |---|---|
@@ -123,6 +127,9 @@ The engine handles eight commands via `handle_command()`:
 | `/default` | Sets `session.mode = "default"`, disables auto-approve |
 | `/git <subcommand>` | Routes to `GitCommandHandler` for git operations with inline action buttons |
 | `/test [flags]` | Emits `COMMAND_TEST` event, activating `TestRunnerPlugin`'s 9-phase test workflow |
+| `/task <description>` | Sets `session.mode = "task"`, emits `TASK_SUBMITTED` event. TaskOrchestrator drives multi-phase workflow. |
+| `/cancel` | Cancels the active task in the current chat. Emits `MESSAGE_IN` with text="/cancel". |
+| `/tasks` | Lists tasks for the current chat — active first, then recent completed/failed. |
 | `/clear` | Deactivates session (forces new session next message), disables auto-approve |
 | `/status` | Returns current mode, message count, total cost, auto-approve status |
 

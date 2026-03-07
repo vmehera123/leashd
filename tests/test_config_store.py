@@ -15,8 +15,10 @@ from leashd.config_store import (
     inject_global_config_as_env,
     load_global_config,
     load_workspaces_config,
+    merge_workspace_dirs,
     remove_approved_directory,
     remove_workspace,
+    remove_workspace_dirs,
     save_global_config,
     save_workspaces_config,
     workspaces_path,
@@ -335,3 +337,79 @@ class TestWorkspaceConfig:
 
     def test_get_workspaces_empty(self, fake_config_dir):
         assert get_workspaces() == {}
+
+
+class TestMergeWorkspaceDirs:
+    def test_creates_new_workspace(self, fake_config_dir):
+        added, present = merge_workspace_dirs("app", ["/a", "/b"])
+        assert added == ["/a", "/b"]
+        assert present == []
+        ws = get_workspaces()
+        assert ws["app"]["directories"] == ["/a", "/b"]
+
+    def test_appends_to_existing(self, fake_config_dir):
+        add_workspace("app", [], description="orig")
+        merge_workspace_dirs("app", ["/a"])
+        merge_workspace_dirs("app", ["/b"])
+        ws = get_workspaces()
+        assert ws["app"]["directories"] == ["/a", "/b"]
+
+    def test_deduplicates(self, fake_config_dir):
+        add_workspace("app", [], description="")
+        merge_workspace_dirs("app", ["/a", "/b"])
+        added, present = merge_workspace_dirs("app", ["/b", "/c"])
+        assert added == ["/c"]
+        assert present == ["/b"]
+        ws = get_workspaces()
+        assert ws["app"]["directories"] == ["/a", "/b", "/c"]
+
+    def test_preserves_description_when_none(self, fake_config_dir):
+        add_workspace("app", [], description="keep me")
+        merge_workspace_dirs("app", ["/a"], description=None)
+        assert get_workspaces()["app"]["description"] == "keep me"
+
+    def test_updates_description_when_provided(self, fake_config_dir):
+        add_workspace("app", [], description="old")
+        merge_workspace_dirs("app", ["/a"], description="new")
+        assert get_workspaces()["app"]["description"] == "new"
+
+    def test_new_workspace_default_description(self, fake_config_dir):
+        merge_workspace_dirs("app", ["/a"])
+        assert get_workspaces()["app"]["description"] == ""
+
+    def test_new_workspace_with_description(self, fake_config_dir):
+        merge_workspace_dirs("app", ["/a"], description="hello")
+        assert get_workspaces()["app"]["description"] == "hello"
+
+    def test_returns_correct_tuple(self, fake_config_dir):
+        merge_workspace_dirs("app", ["/a", "/b"])
+        added, present = merge_workspace_dirs("app", ["/a", "/c"])
+        assert added == ["/c"]
+        assert present == ["/a"]
+
+
+class TestRemoveWorkspaceDirs:
+    def test_partial_removal(self, fake_config_dir):
+        add_workspace("app", [], description="test")
+        merge_workspace_dirs("app", ["/a", "/b", "/c"])
+        remaining = remove_workspace_dirs("app", ["/b"])
+        assert remaining == ["/a", "/c"]
+        assert get_workspaces()["app"]["directories"] == ["/a", "/c"]
+
+    def test_full_removal_deletes_workspace(self, fake_config_dir):
+        merge_workspace_dirs("app", ["/a"])
+        remaining = remove_workspace_dirs("app", ["/a"])
+        assert remaining == []
+        assert "app" not in get_workspaces()
+
+    def test_missing_workspace_raises_key_error(self, fake_config_dir):
+        with pytest.raises(KeyError):
+            remove_workspace_dirs("nope", ["/a"])
+
+    def test_missing_dir_raises_value_error(self, fake_config_dir):
+        merge_workspace_dirs("app", ["/a", "/b"])
+        with pytest.raises(ValueError, match="/c") as exc_info:
+            remove_workspace_dirs("app", ["/c", "/d"])
+        missing = exc_info.value.args[0]
+        assert "/c" in missing
+        assert "/d" in missing

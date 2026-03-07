@@ -142,6 +142,7 @@ _PermissionMode = Literal["default", "acceptEdits", "plan", "bypassPermissions"]
 _SESSION_TO_PERMISSION_MODE: dict[str, _PermissionMode] = {
     "auto": "acceptEdits",
     "test": "acceptEdits",
+    "task": "acceptEdits",
     "plan": "plan",
     "default": "default",
 }
@@ -295,6 +296,11 @@ class ClaudeCodeAgent(BaseAgent):
                 session.working_directory,
             )
             system_prompt = _prepend_instruction(ws_ctx, system_prompt)
+            opts.add_dirs = [
+                d
+                for d in session.workspace_directories
+                if d != session.working_directory
+            ]
         if system_prompt:
             opts.system_prompt = system_prompt
         if self._config.allowed_tools:

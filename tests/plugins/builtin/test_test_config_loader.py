@@ -4,11 +4,12 @@ import pytest
 
 from leashd.plugins.builtin.test_config_loader import (
     ProjectTestConfig,
+    discover_api_specs,
     load_project_test_config,
 )
 from leashd.plugins.builtin.test_runner import (
     TestConfig,
-    _merge_project_config,
+    merge_project_config,
 )
 
 
@@ -93,6 +94,7 @@ class TestProjectTestConfigModel:
         assert c.preconditions == []
         assert c.focus_areas == []
         assert c.environment == {}
+        assert c.api_specs == []
 
     def test_frozen(self):
         from pydantic import ValidationError
@@ -106,7 +108,7 @@ class TestMergeProjectConfig:
     def test_cli_overrides_project(self):
         cli = TestConfig(app_url="http://cli")
         project = ProjectTestConfig(url="http://project")
-        merged = _merge_project_config(cli, project)
+        merged = merge_project_config(cli, project)
         assert merged.app_url == "http://cli"
 
     def test_project_fills_gaps(self):
@@ -117,7 +119,7 @@ class TestMergeProjectConfig:
             framework="next.js",
             directory="tests/e2e",
         )
-        merged = _merge_project_config(cli, project)
+        merged = merge_project_config(cli, project)
         assert merged.app_url == "http://project"
         assert merged.dev_server_command == "npm run dev"
         assert merged.framework == "next.js"
@@ -126,7 +128,7 @@ class TestMergeProjectConfig:
     def test_partial_merge(self):
         cli = TestConfig(framework="react")
         project = ProjectTestConfig(url="http://project", framework="next.js")
-        merged = _merge_project_config(cli, project)
+        merged = merge_project_config(cli, project)
         assert merged.app_url == "http://project"
         assert merged.framework == "react"  # CLI wins
 
@@ -138,5 +140,66 @@ class TestMergeProjectConfig:
             test_directory="tests/",
         )
         project = ProjectTestConfig()
-        merged = _merge_project_config(cli, project)
+        merged = merge_project_config(cli, project)
         assert merged is cli  # No copy needed
+
+
+class TestDiscoverApiSpecs:
+    def test_finds_http_files(self, tmp_path):
+        requests_dir = tmp_path / "requests"
+        requests_dir.mkdir()
+        http_file = requests_dir / "localhost.http"
+        http_file.write_text("GET http://localhost:8080/api/health\n")
+        result = discover_api_specs(str(tmp_path))
+        assert len(result) == 1
+        assert result[0][0] == "requests/localhost.http"
+        assert "GET http://localhost:8080" in result[0][1]
+
+    def test_skips_excluded_dirs(self, tmp_path):
+        nm = tmp_path / "node_modules" / "some_pkg"
+        nm.mkdir(parents=True)
+        (nm / "api.http").write_text("GET /ignored\n")
+        result = discover_api_specs(str(tmp_path))
+        assert len(result) == 0
+
+    def test_truncates_large_files(self, tmp_path):
+        big = tmp_path / "api.http"
+        big.write_text("x" * 5000)
+        result = discover_api_specs(str(tmp_path))
+        assert len(result) == 1
+        assert len(result[0][1]) == 2000
+
+    def test_empty_project(self, tmp_path):
+        result = discover_api_specs(str(tmp_path))
+        assert result == []
+
+    def test_explicit_paths_override_discovery(self, tmp_path):
+        # Auto-discoverable file that should be ignored
+        (tmp_path / "auto.http").write_text("auto content")
+        # Explicit file
+        subdir = tmp_path / "docs"
+        subdir.mkdir()
+        (subdir / "spec.yaml").write_text("openapi: 3.0.0")
+        result = discover_api_specs(str(tmp_path), explicit_paths=["docs/spec.yaml"])
+        assert len(result) == 1
+        assert result[0][0] == "docs/spec.yaml"
+        assert "openapi" in result[0][1]
+
+    def test_finds_openapi_files(self, tmp_path):
+        (tmp_path / "openapi.yaml").write_text("openapi: 3.0.0")
+        (tmp_path / "swagger.json").write_text('{"swagger": "2.0"}')
+        result = discover_api_specs(str(tmp_path))
+        paths = {r[0] for r in result}
+        assert "openapi.yaml" in paths
+        assert "swagger.json" in paths
+
+    def test_respects_max_depth(self, tmp_path):
+        deep = tmp_path / "a" / "b" / "c" / "d"
+        deep.mkdir(parents=True)
+        (deep / "api.http").write_text("too deep")
+        result = discover_api_specs(str(tmp_path))
+        assert len(result) == 0
+
+    def test_explicit_missing_file_skipped(self, tmp_path):
+        result = discover_api_specs(str(tmp_path), explicit_paths=["nonexistent.http"])
+        assert result == []

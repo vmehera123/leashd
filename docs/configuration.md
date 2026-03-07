@@ -83,6 +83,16 @@ Each layer overrides the one before it: `~/.leashd/config.yaml` → `.env` → e
 | `LEASHD_STREAMING_ENABLED` | `bool` | `True` | Enable real-time message streaming to connector |
 | `LEASHD_STREAMING_THROTTLE_SECONDS` | `float` | `1.5` | Minimum interval between streaming updates |
 
+### Task Orchestration
+
+| Variable | Type | Default | Description |
+|---|---|---|---|
+| `LEASHD_TASK_ORCHESTRATOR` | `bool` | `false` | Enable the multi-phase task orchestrator. When enabled, `/task` commands drive spec→explore→validate→plan→implement→test→PR workflows. |
+| `LEASHD_TASK_MAX_RETRIES` | `int` | `3` | Maximum test-failure retries per task before escalating to the user |
+| `LEASHD_TASK_PHASE_TIMEOUT_SECONDS` | `int` | `1800` | Maximum seconds per phase (default 30 minutes). Phases that exceed this timeout are marked as failed. |
+
+See [Autonomous Mode](autonomous-mode.md#task-orchestrator) for the full task orchestrator reference.
+
 ### Logging
 
 | Variable | Type | Default | Description |
@@ -143,7 +153,7 @@ workspaces:
 | `/workspace <name>` | Activate workspace — sets cwd to primary dir, injects multi-repo context into agent system prompt |
 | `/workspace exit` | Deactivate workspace — return to single-directory mode |
 
-When a workspace is active, the agent's system prompt is prepended with workspace context listing all directories, and MCP servers from all workspace directories are merged (primary wins conflicts).
+When a workspace is active, the agent's system prompt is prepended with workspace context listing all directories. MCP servers are only loaded from the primary (working) directory and leashd config; non-primary directories are available as additional context but do not contribute MCP servers.
 
 ## Example `.env` Files
 
@@ -184,6 +194,11 @@ LEASHD_STORAGE_PATH=.leashd/messages.db
 # Streaming
 LEASHD_STREAMING_ENABLED=true
 LEASHD_STREAMING_THROTTLE_SECONDS=1.5
+
+# Task Orchestration
+LEASHD_TASK_ORCHESTRATOR=false
+LEASHD_TASK_MAX_RETRIES=3
+LEASHD_TASK_PHASE_TIMEOUT_SECONDS=1800
 
 # Logging
 LEASHD_LOG_LEVEL=INFO

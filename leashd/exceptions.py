@@ -43,3 +43,7 @@ class ConnectorError(LeashdError):
 
 class DaemonError(LeashdError):
     """Daemon lifecycle error (start/stop)."""
+
+
+class TaskError(LeashdError):
+    """Task orchestration error."""

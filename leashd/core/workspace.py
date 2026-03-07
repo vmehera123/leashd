@@ -24,11 +24,11 @@ class Workspace(BaseModel):
         return self.directories[0]
 
 
-def load_workspaces(leashd_root: Path, approved: list[Path]) -> dict[str, Workspace]:
+def load_workspaces(leashd_root: Path) -> dict[str, Workspace]:
     """Load workspace definitions from `.leashd/workspaces.yaml`.
 
     Returns empty dict if the file is missing (expected for users without workspaces).
-    Skips individual workspaces that reference non-existent or unapproved directories.
+    Skips individual workspaces that reference non-existent directories.
     """
     leashd_dir = leashd_root / ".leashd"
     yaml_path = _find_yaml(leashd_dir)
@@ -46,7 +46,7 @@ def load_workspaces(leashd_root: Path, approved: list[Path]) -> dict[str, Worksp
     if not isinstance(raw, dict):
         return {}
 
-    return _parse_workspaces(raw.get("workspaces", {}), approved)
+    return _parse_workspaces(raw.get("workspaces", {}))
 
 
 def _find_yaml(leashd_dir: Path) -> Path | None:
@@ -58,12 +58,11 @@ def _find_yaml(leashd_dir: Path) -> Path | None:
 
 
 def _parse_workspaces(
-    raw: dict[str, Any] | None, approved: list[Path]
+    raw: dict[str, Any] | None,
 ) -> dict[str, Workspace]:
     if not isinstance(raw, dict):
         return {}
 
-    approved_set = {p.resolve() for p in approved}
     workspaces: dict[str, Workspace] = {}
 
     for name, entry in raw.items():
@@ -82,13 +81,6 @@ def _parse_workspaces(
             if not resolved.is_dir():
                 logger.warning(
                     "workspace_dir_not_found", workspace=name, directory=str(resolved)
-                )
-                continue
-            if resolved not in approved_set:
-                logger.warning(
-                    "workspace_dir_not_approved",
-                    workspace=name,
-                    directory=str(resolved),
                 )
                 continue
             dirs.append(resolved)

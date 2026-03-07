@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.6.0] - 2026-03-07
+- **added**: Task orchestrator — multi-phase autonomous workflow (plan→implement→test→PR) with crash recovery, SQLite persistence, and per-chat concurrency; dynamic phase insertion (explore, validate) based on task keywords
+- **added**: AI-driven phase transition evaluator replaces brittle substring heuristics — uses Claude CLI to decide advance/retry/escalate/complete between phases
+- **added**: AI auto-approver — Claude Haiku replaces human approval taps for `require_approval` policy actions
+- **added**: Autonomous loop — post-task test-and-retry with `/test` integration and automatic PR creation
+- **added**: Autonomous policy (`autonomous.yaml`) for minimal-interruption operation
+- **added**: `leashd autonomous` CLI subcommand (`setup`, `enable`, `disable`, `show`) and setup wizard integration
+- **added**: Agentic testing in task orchestrator — test phase uses TestRunnerPlugin (browser tools, multi-phase workflow, self-healing) instead of plain `uv run pytest`
+- **added**: API spec discovery — auto-scans for `.http`, `.rest`, `openapi.yaml/json`, `swagger.yaml/json` and injects them into test prompts; configurable via `api_specs` in `.leashd/test.yaml`
+- **added**: Test session context — reads `.leashd/test-session.md` on resume so the agent continues from prior progress
+- **added**: `/stop` command — cancels all ongoing work (agent, autonomous task, loop) without resetting session
+- **added**: `leashd restart` command (stop + start)
+- **added**: Live config reload via SIGHUP — `add-dir`, `remove-dir`, and workspace changes propagate to running daemon without restart; new `leashd reload` command
+- **added**: `leashd ws remove <name> <dir...>` removes specific directories from a workspace
+- **added**: Compound command classification prevents policy evasion via `&&`/`||`/`;`
+- **added**: Auto-plan review — AI plan review via Claude Haiku when `auto_plan=True`
+- **added**: Load CLAUDE.md from all workspace directories via SDK `add_dirs`
+- **changed**: Task pipeline simplified from 11 phases to 3 core phases (plan→implement→test) with dynamic insertion based on task keywords
+- **changed**: `leashd ws add` now merges directories into existing workspaces instead of replacing
+- **changed**: `/clear` now also cancels autonomous tasks and autonomous loop before resetting
+- **fixed**: False-positive test failure detection on "No failures to fix" — success indicators now take priority
+- **fixed**: `/plan` command now always routes to human review even when `auto_plan=True`
+
+
 ## [0.5.0] - 2026-03-02
 - **added**: Daemon mode — `leashd` now runs in the background by default; `leashd stop` for graceful shutdown, `leashd status` to check, `leashd start -f` for foreground
 - **added**: CLI subcommands — `leashd init`, `add-dir`, `remove-dir`, `dirs`, `config` for managing configuration without manual `.env` editing

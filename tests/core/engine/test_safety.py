@@ -153,7 +153,8 @@ class TestAutoApproveWritesAfterProceed:
     async def test_auto_approve_writes_after_plan_proceed(
         self, config, fake_agent, policy_engine, audit_logger, mock_connector
     ):
-        """After ExitPlanMode proceed, Write/Edit are auto-approved but Bash is not."""
+        """After ExitPlanMode in can_use_tool, Write/Edit auto-approve is deferred
+        to _exit_plan_mode — NOT set prematurely while still in plan mode."""
         coordinator = InteractionCoordinator(mock_connector, config)
         eng = Engine(
             connector=mock_connector,
@@ -178,12 +179,10 @@ class TestAutoApproveWritesAfterProceed:
         await hook("ExitPlanMode", {}, None)
         await task
 
+        # Auto-approve is deferred to _exit_plan_mode (not set in can_use_tool)
         auto = eng._gatekeeper._auto_approved_tools.get("chat1", set())
-        assert "Write" in auto
-        assert "Edit" in auto
-        # Bash should NOT be auto-approved
-        assert "Bash" not in auto
-        # Blanket auto-approve should NOT be set
+        assert "Write" not in auto
+        assert "Edit" not in auto
         assert "chat1" not in eng._gatekeeper._auto_approved_chats
 
     @pytest.mark.asyncio

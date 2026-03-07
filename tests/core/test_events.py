@@ -173,6 +173,33 @@ class TestEventBusRobustness:
         await bus.emit(Event(name="mass"))
         assert len(count) == 100
 
+    @pytest.mark.asyncio
+    async def test_subscribe_during_emit_is_safe(self, bus):
+        """Subscribing a new handler during emit must not crash.
+
+        Because EventBus iterates the handler list directly, a new handler
+        appended during iteration may or may not fire for the current event.
+        The key contract is: no crash, and the new handler is available for
+        future events.
+        """
+        calls = []
+
+        async def late_handler(event):
+            calls.append("late")
+
+        async def subscribing_handler(event):
+            calls.append("subscribing")
+            bus.subscribe("test", late_handler)
+
+        bus.subscribe("test", subscribing_handler)
+        await bus.emit(Event(name="test"))
+
+        assert "subscribing" in calls
+
+        calls.clear()
+        await bus.emit(Event(name="test"))
+        assert "late" in calls
+
     def test_event_timestamp_populated(self):
         from datetime import datetime
 

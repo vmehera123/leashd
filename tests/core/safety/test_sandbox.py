@@ -67,6 +67,25 @@ class TestSandboxEnforcer:
         ok, _ = sandbox.validate_path(tmp_path / "test.py")
         assert ok is True
 
+    def test_update_directories_replaces_list(self, tmp_path):
+        dir_a = tmp_path / "a"
+        dir_b = tmp_path / "b"
+        dir_a.mkdir()
+        dir_b.mkdir()
+        sandbox = SandboxEnforcer([dir_a])
+        sandbox.update_directories([dir_b])
+        ok_b, _ = sandbox.validate_path(str(dir_b / "file.py"))
+        assert ok_b is True
+        ok_a, _ = sandbox.validate_path(str(dir_a / "file.py"))
+        assert ok_a is False
+
+    def test_update_directories_empty(self, tmp_path):
+        sandbox = SandboxEnforcer([tmp_path])
+        sandbox.update_directories([])
+        ok, reason = sandbox.validate_path(str(tmp_path / "file.py"))
+        assert ok is False
+        assert "outside allowed" in reason
+
     def test_add_directory_deduplicates(self, tmp_path):
         sandbox = SandboxEnforcer([tmp_path])
         sandbox.add_directory(tmp_path)

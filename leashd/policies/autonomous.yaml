@@ -1,0 +1,206 @@
+# Autonomous mode policy — minimal interruption for AI-driven approval.
+#
+# Routine dev actions are auto-allowed so the AutoApprover plugin is only
+# consulted for genuinely risky operations.  Hard blocks are absolute and
+# cannot be overridden by any approver.
+#
+# Usage:
+#   LEASHD_POLICY_FILES=leashd/policies/autonomous.yaml
+
+version: "1.0"
+name: autonomous
+
+rules:
+  # ── Hard blocks (never, regardless of approver) ────────────────────────────
+
+  - name: credential-files
+    tools: [Read, Write, Edit]
+    path_patterns:
+      - "\\.env$|\\.env\\."
+      - "\\.ssh/|\\.aws/"
+      - "\\.key$|\\.pem$"
+      - "id_rsa|credentials|secrets?"
+    action: deny
+    reason: "Credential/sensitive file access blocked"
+    risk_level: critical
+
+  - name: no-force-push
+    tool: Bash
+    command_patterns: ["git\\s+push.*(-f|--force)"]
+    action: deny
+    reason: "Force push blocked"
+    risk_level: critical
+
+  - name: push-protected-branch
+    tool: Bash
+    # Note: regex cannot detect the current branch, so some vectors
+    # (e.g. `git push origin HEAD` when HEAD=main) cannot be caught here.
+    command_patterns:
+      - "git\\s+push.*(main|master)"
+      - "git\\s+.*push\\s*$"
+    action: deny
+    reason: "Push to protected branch requires human review"
+    risk_level: critical
+
+  - name: destructive-bash
+    tool: Bash
+    command_patterns:
+      - "rm\\s.*-.*r.*f|rm\\s+-rf"
+      - "\\bsudo\\b"
+      - "\\b(curl|wget)\\b.*\\|.*\\b(bash|sh|zsh)\\b"
+      - "\\bchmod\\s+777\\b"
+      - "\\b(DROP|TRUNCATE)\\s+(TABLE|DATABASE)\\b"
+    action: deny
+    reason: "Destructive or dangerous command"
+    risk_level: critical
+
+  - name: pipe-to-shell
+    tool: Bash
+    command_patterns:
+      - "\\|\\s*(sh|bash|zsh)\\b"
+    action: deny
+    reason: "Pipe-to-shell blocked"
+    risk_level: critical
+
+  # ── Auto-allow: agent internals ────────────────────────────────────────────
+
+  - name: agent-internal-tools
+    tools: [AskUserQuestion, ExitPlanMode, Task, TaskCreate, TaskUpdate, TaskList, TaskGet, TodoWrite, EnterPlanMode]
+    action: allow
+
+  # ── Auto-allow: reads ──────────────────────────────────────────────────────
+
+  - name: read-only-tools
+    tools: [Read, Glob, Grep, WebSearch, WebFetch, LS]
+    action: allow
+
+  - name: browser-readonly-tools
+    tools:
+      - browser_snapshot
+      - browser_take_screenshot
+      - browser_console_messages
+      - browser_network_requests
+      - browser_tab_list
+      - browser_wait_for
+      - browser_generate_playwright_test
+    action: allow
+
+  - name: read-only-bash
+    tool: Bash
+    command_patterns:
+      - "^(ls|cat|head|tail|find|grep|wc|du|df|pwd|echo|date|whoami|which|type|file|stat)\\b"
+      - "^git\\s+(-[a-zA-Z]\\s+\\S+\\s+|--[a-z-]+(=\\S+)?\\s+)*?(status|log|diff|show|branch|remote|tag)\\b"
+    action: allow
+
+  # ── Auto-allow: dev tools ──────────────────────────────────────────────────
+
+  - name: dev-test-runners
+    tool: Bash
+    command_patterns:
+      - "^(pytest|python\\s+-m\\s+pytest|uv\\s+run\\s+pytest)\\b"
+      - "^(jest|vitest|mocha|npx\\s+playwright)\\b"
+    action: allow
+    description: "Test runner"
+
+  - name: dev-linters
+    tool: Bash
+    command_patterns:
+      - "^(ruff|mypy|eslint|prettier|black|flake8)\\b"
+      - "^(uv\\s+run\\s+ruff|uv\\s+run\\s+mypy)\\b"
+    action: allow
+    description: "Linter / formatter"
+
+  - name: dev-package-managers
+    tool: Bash
+    command_patterns:
+      - "^(npm\\s+(install|ci|test|run|ls|audit)|pip\\s+(install|list|freeze))\\b"
+      - "^(uv\\s+(sync|lock|add|pip))\\b"
+      - "^(yarn\\s+(install|add)|pnpm\\s+(install|add)|bun\\s+install)\\b"
+      - "^(cargo\\s+(build|test|clippy|fmt)|go\\s+(build|test|vet|mod))\\b"
+      - "^make\\s+(test|check|lint|build|clean|install)\\b"
+    action: allow
+    description: "Package manager / build tool"
+
+  - name: dev-git-safe
+    tool: Bash
+    command_patterns:
+      - "^git\\s+(add|commit|stash|checkout\\s+-b|branch)\\b"
+    action: allow
+    description: "Safe git operation"
+
+  - name: gh-cli-pr
+    tool: Bash
+    command_patterns:
+      - "^gh\\s+pr\\s+(create|list|view|status)"
+    action: allow
+    description: "GitHub CLI PR operations"
+
+  # ── Auto-allow: file writes (sandbox still enforced) ───────────────────────
+
+  - name: file-writes
+    tools: [Write, Edit, NotebookEdit]
+    action: allow
+    description: "File modification (sandbox-validated)"
+
+  - name: plan-file-writes
+    tools: [Write, Edit]
+    path_patterns:
+      - "\\.plan$"
+      - "\\.claude/plans/"
+    action: allow
+
+  # ── Require AI approval: git push to feature branches ──────────────────────
+
+  - name: git-push
+    tool: Bash
+    command_patterns:
+      - "^git\\s+(-[a-zA-Z]\\s+\\S+\\s+|--[a-z-]+(=\\S+)?\\s+)*?push\\b"
+    action: require_approval
+    description: "Git push requires approval"
+
+  - name: git-mutations
+    tool: Bash
+    command_patterns:
+      - "^git\\s+(-[a-zA-Z]\\s+\\S+\\s+|--[a-z-]+(=\\S+)?\\s+)*?(reset|rebase|merge|cherry-pick|rm)\\b"
+    action: require_approval
+    description: "Git mutation"
+
+  # ── Require AI approval: network ───────────────────────────────────────────
+
+  - name: network-bash
+    tool: Bash
+    command_patterns: ["^(curl|wget|ssh|scp|rsync)\\b"]
+    action: require_approval
+    description: "Network access"
+
+  # ── Require AI approval: browser mutations ─────────────────────────────────
+
+  - name: browser-mutation-tools
+    tools:
+      - browser_navigate
+      - browser_navigate_back
+      - browser_navigate_forward
+      - browser_click
+      - browser_type
+      - browser_hover
+      - browser_drag
+      - browser_press_key
+      - browser_select_option
+      - browser_file_upload
+      - browser_handle_dialog
+      - browser_fill_form
+      - browser_evaluate
+      - browser_tabs
+      - browser_tab_new
+      - browser_tab_select
+      - browser_tab_close
+      - browser_resize
+      - browser_pdf_save
+      - browser_close
+      - browser_install
+    action: require_approval
+    description: "Browser interaction/mutation"
+
+settings:
+  default_action: require_approval
+  approval_timeout_seconds: 30

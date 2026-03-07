@@ -192,6 +192,10 @@ class TelegramConnector(BaseConnector):
                     "test",
                     "workspace",
                     "ws",
+                    "task",
+                    "cancel",
+                    "tasks",
+                    "stop",
                 ],
                 self._on_command,
             )
@@ -218,9 +222,13 @@ class TelegramConnector(BaseConnector):
     async def stop(self) -> None:
         if self._app is None:
             return
-        await self._app.updater.stop()  # type: ignore[union-attr]
-        await self._app.stop()
-        await self._app.shutdown()
+        try:
+            async with asyncio.timeout(8):  # type: ignore[attr-defined]
+                await self._app.updater.stop()  # type: ignore[union-attr]
+                await self._app.stop()
+                await self._app.shutdown()
+        except TimeoutError:
+            logger.warning("telegram_connector_stop_timeout")
         logger.info("telegram_connector_stopped")
 
     async def send_message(

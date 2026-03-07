@@ -66,6 +66,13 @@ class TestAddDir:
         captured = capsys.readouterr()
         assert str(Path.home()) in captured.out
 
+    def test_notifies_daemon_on_add(self, fake_config_dir, tmp_path, capsys):
+        from leashd.cli import _handle_add_dir
+
+        with patch("leashd.cli._notify_daemon_reload") as mock_notify:
+            _handle_add_dir(str(tmp_path))
+        mock_notify.assert_called_once()
+
 
 class TestRemoveDir:
     def test_removes_existing(self, fake_config_dir, tmp_path, capsys):
@@ -76,6 +83,14 @@ class TestRemoveDir:
         captured = capsys.readouterr()
         assert "\u2713" in captured.out
         assert "Removed" in captured.out
+
+    def test_notifies_daemon_on_remove(self, fake_config_dir, tmp_path, capsys):
+        from leashd.cli import _handle_remove_dir
+
+        add_approved_directory(tmp_path)
+        with patch("leashd.cli._notify_daemon_reload") as mock_notify:
+            _handle_remove_dir(str(tmp_path))
+        mock_notify.assert_called_once()
 
     def test_not_in_list_exits(self, fake_config_dir, tmp_path):
         from leashd.cli import _handle_remove_dir
@@ -830,20 +845,36 @@ class TestWorkspace:
         ws = get_workspaces()
         assert len(ws["myapp"]["directories"]) == 2
 
+    def test_ws_add_notifies_daemon(self, fake_config_dir, tmp_path, capsys):
+        from leashd.cli import _handle_ws_add
+
+        add_approved_directory(tmp_path)
+        with patch("leashd.cli._notify_daemon_reload") as mock_notify:
+            _handle_ws_add("myapp", [str(tmp_path)], "")
+        mock_notify.assert_called_once()
+
     def test_ws_remove_existing(self, fake_config_dir, tmp_path, capsys):
         from leashd.cli import _handle_ws_remove
 
         add_workspace("myapp", [tmp_path])
-        _handle_ws_remove("myapp")
+        _handle_ws_remove("myapp", [])
         captured = capsys.readouterr()
         assert "\u2713" in captured.out
         assert "Removed" in captured.out
+
+    def test_ws_remove_notifies_daemon(self, fake_config_dir, tmp_path, capsys):
+        from leashd.cli import _handle_ws_remove
+
+        add_workspace("myapp", [tmp_path])
+        with patch("leashd.cli._notify_daemon_reload") as mock_notify:
+            _handle_ws_remove("myapp", [])
+        mock_notify.assert_called_once()
 
     def test_ws_remove_missing(self, fake_config_dir):
         from leashd.cli import _handle_ws_remove
 
         with pytest.raises(SystemExit) as exc_info:
-            _handle_ws_remove("nonexistent")
+            _handle_ws_remove("nonexistent", [])
         assert exc_info.value.code == 1
 
     def test_ws_show_existing(self, fake_config_dir, tmp_path, capsys):
@@ -887,14 +918,167 @@ class TestWorkspace:
         ws = get_workspaces()
         assert len(ws["myapp"]["directories"]) == 2
 
+    def test_ws_add_merges_into_existing(self, fake_config_dir, tmp_path, capsys):
+        from leashd.cli import _handle_ws_add
+        from leashd.config_store import get_workspaces
+
+        d1 = tmp_path / "a"
+        d2 = tmp_path / "b"
+        d1.mkdir()
+        d2.mkdir()
+        add_approved_directory(d1)
+        add_approved_directory(d2)
+
+        _handle_ws_add("myapp", [str(d1)], "desc")
+        capsys.readouterr()
+        _handle_ws_add("myapp", [str(d2)], "")
+        captured = capsys.readouterr()
+        assert f"+ {d2.resolve()}" in captured.out
+        assert "1 added" in captured.out
+        ws = get_workspaces()
+        assert len(ws["myapp"]["directories"]) == 2
+
+    def test_ws_add_dedup_output(self, fake_config_dir, tmp_path, capsys):
+        from leashd.cli import _handle_ws_add
+
+        d1 = tmp_path / "a"
+        d1.mkdir()
+        add_approved_directory(d1)
+        _handle_ws_add("myapp", [str(d1)], "")
+        capsys.readouterr()
+        _handle_ws_add("myapp", [str(d1)], "")
+        captured = capsys.readouterr()
+        assert "(already in workspace)" in captured.out
+        assert "0 added" in captured.out
+
+    def test_ws_add_preserves_desc(self, fake_config_dir, tmp_path, capsys):
+        from leashd.cli import _handle_ws_add
+        from leashd.config_store import get_workspaces
+
+        d1 = tmp_path / "a"
+        d2 = tmp_path / "b"
+        d1.mkdir()
+        d2.mkdir()
+        add_approved_directory(d1)
+        add_approved_directory(d2)
+
+        _handle_ws_add("myapp", [str(d1)], "original")
+        capsys.readouterr()
+        _handle_ws_add("myapp", [str(d2)], "")
+        ws = get_workspaces()
+        assert ws["myapp"]["description"] == "original"
+
+    def test_ws_add_updates_desc(self, fake_config_dir, tmp_path, capsys):
+        from leashd.cli import _handle_ws_add
+        from leashd.config_store import get_workspaces
+
+        d1 = tmp_path / "a"
+        d1.mkdir()
+        add_approved_directory(d1)
+        _handle_ws_add("myapp", [str(d1)], "old")
+        capsys.readouterr()
+        _handle_ws_add("myapp", [str(d1)], "new")
+        ws = get_workspaces()
+        assert ws["myapp"]["description"] == "new"
+
+    def test_ws_add_created_message(self, fake_config_dir, tmp_path, capsys):
+        from leashd.cli import _handle_ws_add
+
+        d1 = tmp_path / "a"
+        d1.mkdir()
+        add_approved_directory(d1)
+        _handle_ws_add("myapp", [str(d1)], "")
+        captured = capsys.readouterr()
+        assert "created" in captured.out
+        assert "1 directories" in captured.out
+
+    def test_ws_remove_specific_dir(self, fake_config_dir, tmp_path, capsys):
+        from leashd.cli import _handle_ws_remove
+        from leashd.config_store import get_workspaces, merge_workspace_dirs
+
+        d1 = tmp_path / "a"
+        d2 = tmp_path / "b"
+        d1.mkdir()
+        d2.mkdir()
+        merge_workspace_dirs("myapp", [str(d1.resolve()), str(d2.resolve())])
+        _handle_ws_remove("myapp", [str(d1)])
+        captured = capsys.readouterr()
+        assert "1 dir(s)" in captured.out
+        assert "1 remaining" in captured.out
+        ws = get_workspaces()
+        assert len(ws["myapp"]["directories"]) == 1
+
+    def test_ws_remove_last_dir_deletes_workspace(
+        self, fake_config_dir, tmp_path, capsys
+    ):
+        from leashd.cli import _handle_ws_remove
+        from leashd.config_store import get_workspaces, merge_workspace_dirs
+
+        d1 = tmp_path / "a"
+        d1.mkdir()
+        merge_workspace_dirs("myapp", [str(d1.resolve())])
+        _handle_ws_remove("myapp", [str(d1)])
+        captured = capsys.readouterr()
+        assert "no directories remaining" in captured.out
+        assert "myapp" not in get_workspaces()
+
+    def test_ws_remove_dir_not_in_workspace(self, fake_config_dir, tmp_path, capsys):
+        from leashd.cli import _handle_ws_remove
+        from leashd.config_store import merge_workspace_dirs
+
+        d1 = tmp_path / "a"
+        d1.mkdir()
+        merge_workspace_dirs("myapp", [str(d1.resolve())])
+        with pytest.raises(SystemExit) as exc_info:
+            _handle_ws_remove("myapp", ["/nonexistent/path"])
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "not in workspace" in captured.err
+
+    def test_ws_remove_dir_nonexistent_workspace(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_ws_remove
+
+        with pytest.raises(SystemExit) as exc_info:
+            _handle_ws_remove("nope", ["/some/dir"])
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "not found" in captured.err
+
+    def test_ws_remove_dirs_notifies_daemon(self, fake_config_dir, tmp_path, capsys):
+        from leashd.cli import _handle_ws_remove
+        from leashd.config_store import merge_workspace_dirs
+
+        d1 = tmp_path / "a"
+        d1.mkdir()
+        merge_workspace_dirs("myapp", [str(d1.resolve())])
+        with patch("leashd.cli._notify_daemon_reload") as mock_notify:
+            _handle_ws_remove("myapp", [str(d1)])
+        mock_notify.assert_called_once()
+
 
 class TestStart:
     def test_foreground_delegates_to_start_engine(self):
         from leashd.cli import _handle_start
 
-        with patch("leashd.cli._start_engine") as mock_engine:
+        with (
+            patch("leashd.daemon.is_running", return_value=(False, None)),
+            patch("leashd.cli._start_engine") as mock_engine,
+        ):
             _handle_start(foreground=True)
             mock_engine.assert_called_once()
+
+    def test_foreground_with_daemon_running_exits(self, capsys):
+        from leashd.cli import _handle_start
+
+        with (
+            patch("leashd.daemon.is_running", return_value=(True, 12345)),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            _handle_start(foreground=True)
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "already running" in captured.err
+        assert "12345" in captured.err
 
     def test_no_config_exits(self, fake_config_dir, capsys):
         from leashd.cli import _handle_start
@@ -969,7 +1153,7 @@ class TestStop:
         with patch("leashd.daemon.stop_daemon", return_value=False):
             _handle_stop()
         captured = capsys.readouterr()
-        assert "did not exit" in captured.out
+        assert "SIGKILL" in captured.out
 
 
 class TestStatus:
@@ -989,6 +1173,94 @@ class TestStatus:
             _handle_status()
         captured = capsys.readouterr()
         assert "not running" in captured.out
+
+
+class TestRestart:
+    def test_restart_when_running(self, capsys):
+        from leashd.cli import _handle_restart
+
+        with (
+            patch("leashd.daemon.is_running", return_value=(True, 111)),
+            patch("leashd.daemon.stop_daemon", return_value=True) as mock_stop,
+            patch(
+                "leashd.cli.load_global_config",
+                return_value={"approved_directories": ["/tmp/proj"]},
+            ),
+            patch("leashd.daemon.start_daemon", return_value=222) as mock_start,
+        ):
+            _handle_restart()
+        mock_stop.assert_called_once()
+        mock_start.assert_called_once()
+        captured = capsys.readouterr()
+        assert "Stopping" in captured.out
+        assert "111" in captured.out
+        assert "restarted" in captured.out
+        assert "222" in captured.out
+
+    def test_restart_when_not_running(self, capsys):
+        from leashd.cli import _handle_restart
+
+        with (
+            patch("leashd.daemon.is_running", return_value=(False, None)),
+            patch("leashd.daemon.stop_daemon") as mock_stop,
+            patch(
+                "leashd.cli.load_global_config",
+                return_value={"approved_directories": ["/tmp/proj"]},
+            ),
+            patch("leashd.daemon.start_daemon", return_value=333),
+        ):
+            _handle_restart()
+        mock_stop.assert_not_called()
+        captured = capsys.readouterr()
+        assert "not running" in captured.out
+        assert "restarted" in captured.out
+        assert "333" in captured.out
+
+    def test_restart_stop_error_exits(self, capsys):
+        from leashd.cli import _handle_restart
+        from leashd.exceptions import DaemonError
+
+        with (
+            patch("leashd.daemon.is_running", return_value=(True, 444)),
+            patch(
+                "leashd.daemon.stop_daemon",
+                side_effect=DaemonError("stop failed"),
+            ),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            _handle_restart()
+        assert exc_info.value.code == 1
+
+    def test_restart_start_error_exits(self, capsys):
+        from leashd.cli import _handle_restart
+        from leashd.exceptions import DaemonError
+
+        with (
+            patch("leashd.daemon.is_running", return_value=(False, None)),
+            patch(
+                "leashd.cli.load_global_config",
+                return_value={"approved_directories": ["/tmp/proj"]},
+            ),
+            patch(
+                "leashd.daemon.start_daemon",
+                side_effect=DaemonError("start failed"),
+            ),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            _handle_restart()
+        assert exc_info.value.code == 1
+
+    def test_restart_no_config_exits(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_restart
+
+        with (
+            patch("leashd.daemon.is_running", return_value=(False, None)),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            _handle_restart()
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "No config found" in captured.err
 
 
 class TestStartStopStatusDispatch:
@@ -1025,6 +1297,17 @@ class TestStartStopStatusDispatch:
             main()
             mock_stop.assert_called_once()
 
+    def test_restart_dispatch(self):
+        from leashd.cli import main
+
+        with (
+            patch("leashd.cli.inject_global_config_as_env"),
+            patch("leashd.cli._handle_restart") as mock_restart,
+            patch("sys.argv", ["leashd", "restart"]),
+        ):
+            main()
+            mock_restart.assert_called_once()
+
     def test_status_dispatch(self):
         from leashd.cli import main
 
@@ -1046,3 +1329,54 @@ class TestStartStopStatusDispatch:
         ):
             main()
             mock_run.assert_called_once()
+
+    def test_reload_dispatch(self):
+        from leashd.cli import main
+
+        with (
+            patch("leashd.cli.inject_global_config_as_env"),
+            patch("leashd.cli._handle_reload") as mock_reload,
+            patch("sys.argv", ["leashd", "reload"]),
+        ):
+            main()
+            mock_reload.assert_called_once()
+
+
+class TestReload:
+    def test_reload_success(self, capsys):
+        from leashd.cli import _handle_reload
+
+        with patch("leashd.daemon.signal_reload", return_value=True):
+            _handle_reload()
+        captured = capsys.readouterr()
+        assert "reload signal sent" in captured.out
+
+    def test_reload_not_running(self, capsys):
+        from leashd.cli import _handle_reload
+
+        with (
+            patch("leashd.daemon.signal_reload", return_value=False),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            _handle_reload()
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "not running" in captured.err
+
+
+class TestNotifyDaemonReload:
+    def test_notify_prints_when_daemon_running(self, capsys):
+        from leashd.cli import _notify_daemon_reload
+
+        with patch("leashd.daemon.signal_reload", return_value=True):
+            _notify_daemon_reload()
+        captured = capsys.readouterr()
+        assert "daemon notified" in captured.out
+
+    def test_notify_silent_when_daemon_not_running(self, capsys):
+        from leashd.cli import _notify_daemon_reload
+
+        with patch("leashd.daemon.signal_reload", return_value=False):
+            _notify_daemon_reload()
+        captured = capsys.readouterr()
+        assert captured.out == ""

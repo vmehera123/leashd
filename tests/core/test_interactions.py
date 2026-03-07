@@ -602,8 +602,131 @@ class TestInteractionTimeoutBehavior:
         # Late resolve attempts should return False and not crash
         assert await coord.resolve_option(iid, "A") is False
         assert await coord.resolve_text("chat1", "late answer") is False
+
+
+class TestHandlePlanReviewAuto:
+    """Tests for handle_plan_review_auto — AI-powered plan review pathway."""
+
+    @pytest.mark.asyncio
+    async def test_approved_returns_plan_review_decision(self, mock_connector, config):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from leashd.core.interactions import InteractionCoordinator, PlanReviewDecision
+
+        coord = InteractionCoordinator(mock_connector, config)
+
+        mock_reviewer = MagicMock()
+        mock_result = MagicMock()
+        mock_result.approved = True
+        mock_result.feedback = None
+        mock_reviewer.review_plan = AsyncMock(return_value=mock_result)
+        coord._auto_plan_reviewer = mock_reviewer
+
+        result = await coord.handle_plan_review_auto(
+            "chat1",
+            {"allowedPrompts": []},
+            plan_content="1. Read file\n2. Fix bug",
+            task_description="Fix login",
+            session_id="sess-1",
+        )
+
+        assert isinstance(result, PlanReviewDecision)
+        assert result.permission.behavior == "allow"
+        assert result.clear_context is True
+        assert result.target_mode == "edit"
+
+    @pytest.mark.asyncio
+    async def test_revision_requested_returns_deny_with_feedback(
+        self, mock_connector, config
+    ):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from leashd.core.interactions import InteractionCoordinator
+
+        coord = InteractionCoordinator(mock_connector, config)
+
+        mock_reviewer = MagicMock()
+        mock_result = MagicMock()
+        mock_result.approved = False
+        mock_result.feedback = "Add error handling step"
+        mock_reviewer.review_plan = AsyncMock(return_value=mock_result)
+        coord._auto_plan_reviewer = mock_reviewer
+
+        result = await coord.handle_plan_review_auto(
+            "chat1",
+            {},
+            plan_content="1. Read file\n2. Change code",
+            task_description="Fix login",
+            session_id="sess-1",
+        )
+
+        assert result.behavior == "deny"
+        assert "Add error handling step" in result.message
+
+    @pytest.mark.asyncio
+    async def test_no_reviewer_returns_deny(self, mock_connector, config):
+        from leashd.core.interactions import InteractionCoordinator
+
+        coord = InteractionCoordinator(mock_connector, config)
+        result = await coord.handle_plan_review_auto(
+            "chat1",
+            {},
+            plan_content="some plan",
+            task_description="task",
+            session_id="sess-1",
+        )
+
+        assert result.behavior == "deny"
+        assert "not configured" in result.message.lower()
+
+    @pytest.mark.asyncio
+    async def test_empty_feedback_uses_default_message(self, mock_connector, config):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from leashd.core.interactions import InteractionCoordinator
+
+        coord = InteractionCoordinator(mock_connector, config)
+
+        mock_reviewer = MagicMock()
+        mock_result = MagicMock()
+        mock_result.approved = False
+        mock_result.feedback = None
+        mock_reviewer.review_plan = AsyncMock(return_value=mock_result)
+        coord._auto_plan_reviewer = mock_reviewer
+
+        result = await coord.handle_plan_review_auto(
+            "chat1",
+            {},
+            plan_content="plan text",
+            task_description="task desc",
+            session_id="sess-1",
+        )
+
+        assert result.behavior == "deny"
+        assert "revise the plan" in result.message.lower()
         assert coord.pending == {}
         assert coord._chat_index == {}
+
+
+class TestInteractionTimeoutExtended:
+    """Additional timeout/state tests (continuation of TestInteractionTimeoutBehavior)."""
+
+    def _make_coord(self, connector, config, event_bus=None):
+        from leashd.core.interactions import InteractionCoordinator
+
+        return InteractionCoordinator(connector, config, event_bus)
+
+    def _question_input(self, text="Pick one?"):
+        return {
+            "questions": [
+                {
+                    "question": text,
+                    "header": "Choice",
+                    "options": [{"label": "A", "description": "A"}],
+                    "multiSelect": False,
+                }
+            ]
+        }
 
     @pytest.mark.asyncio
     async def test_invalid_plan_decision_blocks_then_times_out(

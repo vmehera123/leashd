@@ -28,6 +28,25 @@ MERGE_STARTED = "merge.started"
 MERGE_COMPLETED = "merge.completed"
 EXECUTION_INTERRUPTED = "execution.interrupted"
 
+APPROVAL_REQUESTED = "approval.requested"
+APPROVAL_RESOLVED = "approval.resolved"
+APPROVAL_ESCALATED = "approval.escalated"
+SESSION_COMPLETED = "session.completed"
+SESSION_RETRY = "session.retry"
+SESSION_ESCALATED = "session.escalated"
+PLAN_REVIEW_COMPLETED = "plan.review.completed"
+AUTO_PR_CREATED = "auto_pr.created"
+CONFIG_RELOADED = "config.reloaded"
+
+# Task orchestration events
+TASK_SUBMITTED = "task.submitted"
+TASK_PHASE_CHANGED = "task.phase_changed"
+TASK_COMPLETED = "task.completed"
+TASK_FAILED = "task.failed"
+TASK_ESCALATED = "task.escalated"
+TASK_CANCELLED = "task.cancelled"
+TASK_RESUMED = "task.resumed"
+
 
 class Event(BaseModel):
     model_config = ConfigDict(frozen=True)

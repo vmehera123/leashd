@@ -29,7 +29,7 @@ class TestWorkspaceModel:
 
 class TestLoadWorkspaces:
     def test_no_file_returns_empty(self, tmp_path):
-        result = load_workspaces(tmp_path, [tmp_path])
+        result = load_workspaces(tmp_path)
         assert result == {}
 
     def test_valid_yaml(self, tmp_path):
@@ -54,7 +54,7 @@ class TestLoadWorkspaces:
             )
         )
 
-        result = load_workspaces(tmp_path, [dir_a, dir_b])
+        result = load_workspaces(tmp_path)
         assert "myws" in result
         ws = result["myws"]
         assert ws.name == "myws"
@@ -72,10 +72,10 @@ class TestLoadWorkspaces:
             yaml.dump({"workspaces": {"ws1": {"directories": [str(dir_a)]}}})
         )
 
-        result = load_workspaces(tmp_path, [dir_a])
+        result = load_workspaces(tmp_path)
         assert "ws1" in result
 
-    def test_dir_not_in_approved_is_skipped(self, tmp_path):
+    def test_unapproved_dir_still_included(self, tmp_path):
         dir_a = tmp_path / "repo-a"
         dir_b = tmp_path / "repo-b"
         dir_a.mkdir()
@@ -95,11 +95,11 @@ class TestLoadWorkspaces:
             )
         )
 
-        # Only dir_a is approved
-        result = load_workspaces(tmp_path, [dir_a])
+        result = load_workspaces(tmp_path)
         ws = result["myws"]
-        assert len(ws.directories) == 1
+        assert len(ws.directories) == 2
         assert ws.directories[0] == dir_a.resolve()
+        assert ws.directories[1] == dir_b.resolve()
 
     def test_dir_not_exists_is_skipped(self, tmp_path):
         dir_a = tmp_path / "repo-a"
@@ -120,7 +120,7 @@ class TestLoadWorkspaces:
             )
         )
 
-        result = load_workspaces(tmp_path, [dir_a])
+        result = load_workspaces(tmp_path)
         ws = result["myws"]
         assert len(ws.directories) == 1
 
@@ -131,7 +131,7 @@ class TestLoadWorkspaces:
             yaml.dump({"workspaces": {"empty": {"directories": []}}})
         )
 
-        result = load_workspaces(tmp_path, [tmp_path])
+        result = load_workspaces(tmp_path)
         assert result == {}
 
     def test_all_dirs_invalid_skips_workspace(self, tmp_path):
@@ -142,7 +142,7 @@ class TestLoadWorkspaces:
             yaml.dump({"workspaces": {"bad": {"directories": [str(nonexistent)]}}})
         )
 
-        result = load_workspaces(tmp_path, [tmp_path])
+        result = load_workspaces(tmp_path)
         assert result == {}
 
     def test_multiple_workspaces(self, tmp_path):
@@ -164,7 +164,7 @@ class TestLoadWorkspaces:
             )
         )
 
-        result = load_workspaces(tmp_path, [dir_a, dir_b])
+        result = load_workspaces(tmp_path)
         assert len(result) == 2
         assert "fe" in result
         assert "be" in result
@@ -174,7 +174,7 @@ class TestLoadWorkspaces:
         leashd_dir.mkdir()
         (leashd_dir / "workspaces.yaml").write_text(":::bad yaml{{{")
 
-        result = load_workspaces(tmp_path, [tmp_path])
+        result = load_workspaces(tmp_path)
         assert result == {}
 
     def test_tilde_expansion(self, tmp_path):
@@ -187,5 +187,5 @@ class TestLoadWorkspaces:
             yaml.dump({"workspaces": {"ws": {"directories": [str(dir_a)]}}})
         )
 
-        result = load_workspaces(tmp_path, [dir_a])
+        result = load_workspaces(tmp_path)
         assert "ws" in result

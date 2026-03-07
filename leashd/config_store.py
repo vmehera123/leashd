@@ -9,6 +9,10 @@ import yaml
 
 from leashd.exceptions import ConfigError
 
+_POLICIES_DIR = Path(__file__).parent / "policies"
+
+_KNOWN_POLICIES = {"autonomous", "default", "strict", "permissive", "dev-tools"}
+
 _CONFIG_DIR = Path.home() / ".leashd"
 _CONFIG_FILE = _CONFIG_DIR / "config.yaml"
 _WORKSPACES_FILE = _CONFIG_DIR / "workspaces.yaml"
@@ -131,6 +135,77 @@ def inject_global_config_as_env(*, force: bool = False) -> None:
                 [str(uid) for uid in user_ids]
             )
 
+    _inject_autonomous_config(data, force=force)
+
+
+# --- Autonomous config bridging ---
+
+_AUTONOMOUS_FIELD_MAP: dict[str, str] = {
+    "auto_approver": "LEASHD_AUTO_APPROVER",
+    "auto_plan": "LEASHD_AUTO_PLAN",
+    "auto_pr": "LEASHD_AUTO_PR",
+    "auto_pr_base_branch": "LEASHD_AUTO_PR_BASE_BRANCH",
+    "autonomous_loop": "LEASHD_AUTONOMOUS_LOOP",
+    "task_max_retries": "LEASHD_TASK_MAX_RETRIES",
+}
+
+
+def resolve_policy_name(name: str) -> Path:
+    """Resolve a short policy name to a full path.
+
+    Short names like ``"autonomous"`` resolve to ``leashd/policies/autonomous.yaml``.
+    Absolute paths pass through unchanged. A ``.yaml`` suffix is added if missing
+    for short names.
+    """
+    path = Path(name)
+    if path.is_absolute():
+        return path
+    stem = name.removesuffix(".yaml")
+    if stem in _KNOWN_POLICIES:
+        return _POLICIES_DIR / f"{stem}.yaml"
+    return path
+
+
+def get_autonomous_config(data: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Read the ``autonomous`` section from global config.
+
+    Returns an empty dict when the section is missing or not a dict.
+    """
+    if data is None:
+        data = load_global_config()
+    autonomous = data.get("autonomous", {})
+    if not isinstance(autonomous, dict):
+        return {}
+    return autonomous
+
+
+def _inject_autonomous_config(data: dict[str, Any], *, force: bool = False) -> None:
+    """Bridge autonomous YAML config → LEASHD_* env vars."""
+    autonomous = get_autonomous_config(data)
+    if not autonomous.get("enabled"):
+        return
+
+    key = "LEASHD_TASK_ORCHESTRATOR"
+    if force or key not in os.environ:
+        os.environ[key] = "true"
+
+    policy = autonomous.get("policy")
+    if policy:
+        key = "LEASHD_POLICY_FILES"
+        if force or key not in os.environ:
+            resolved = resolve_policy_name(str(policy))
+            os.environ[key] = json.dumps([str(resolved)])
+
+    for yaml_key, env_key in _AUTONOMOUS_FIELD_MAP.items():
+        value = autonomous.get(yaml_key)
+        if value is None:
+            continue
+        if force or env_key not in os.environ:
+            if isinstance(value, bool):
+                os.environ[env_key] = str(value).lower()
+            else:
+                os.environ[env_key] = str(value)
+
 
 # --- Workspace config at ~/.leashd/workspaces.yaml ---
 
@@ -183,3 +258,73 @@ def get_workspaces() -> dict[str, dict[str, Any]]:
     if not isinstance(workspaces, dict):
         return {}
     return workspaces
+
+
+def merge_workspace_dirs(
+    name: str, directories: list[str], description: str | None = None
+) -> tuple[list[str], list[str]]:
+    """Merge directories into a workspace, creating it if needed.
+
+    Returns (newly_added, already_present) path strings.
+    """
+    data = load_workspaces_config()
+    workspaces = data.get("workspaces", {})
+    if not isinstance(workspaces, dict):
+        workspaces = {}
+
+    existing = workspaces.get(name)
+    if existing is None:
+        workspaces[name] = {
+            "directories": list(directories),
+            "description": description or "",
+        }
+        data["workspaces"] = workspaces
+        save_workspaces_config(data)
+        return (list(directories), [])
+
+    existing_dirs: list[str] = existing.get("directories", [])
+    existing_set = set(existing_dirs)
+    newly_added: list[str] = []
+    already_present: list[str] = []
+    for d in directories:
+        if d in existing_set:
+            already_present.append(d)
+        else:
+            newly_added.append(d)
+            existing_dirs.append(d)
+
+    existing["directories"] = existing_dirs
+    if description is not None:
+        existing["description"] = description
+    workspaces[name] = existing
+    data["workspaces"] = workspaces
+    save_workspaces_config(data)
+    return (newly_added, already_present)
+
+
+def remove_workspace_dirs(name: str, directories: list[str]) -> list[str]:
+    """Remove specific directories from a workspace.
+
+    Returns remaining dirs (empty list means workspace was deleted).
+    Raises KeyError if workspace not found, ValueError if any dir not in workspace.
+    """
+    data = load_workspaces_config()
+    workspaces = data.get("workspaces", {})
+    if not isinstance(workspaces, dict) or name not in workspaces:
+        raise KeyError(name)
+
+    existing_dirs: list[str] = workspaces[name].get("directories", [])
+    existing_set = set(existing_dirs)
+    to_remove = set(directories)
+    missing = to_remove - existing_set
+    if missing:
+        raise ValueError(sorted(missing))
+
+    remaining = [d for d in existing_dirs if d not in to_remove]
+    if remaining:
+        workspaces[name]["directories"] = remaining
+    else:
+        del workspaces[name]
+    data["workspaces"] = workspaces
+    save_workspaces_config(data)
+    return remaining

@@ -1,5 +1,6 @@
 """Tests for the Telegram connector."""
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -147,6 +148,23 @@ class TestStop:
     @pytest.mark.asyncio
     async def test_stop_without_start_is_noop(self, connector):
         await connector.stop()  # should not raise
+
+    @pytest.mark.asyncio
+    async def test_stop_timeout_does_not_hang(self, connector):
+        """When shutdown hangs, the timeout fires and stop() completes."""
+        mock_app = _make_mock_app()
+
+        async def hang_forever():
+            await asyncio.sleep(999)
+
+        mock_app.updater.stop = hang_forever
+        connector._app = mock_app
+
+        with patch(
+            "leashd.connectors.telegram.asyncio.timeout",
+            return_value=asyncio.timeout(0.1),
+        ):
+            await asyncio.wait_for(connector.stop(), timeout=2.0)
 
 
 class TestSendMessage:

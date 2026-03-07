@@ -12,7 +12,7 @@ import structlog
 
 from leashd.agents.claude_code import ClaudeCodeAgent
 from leashd.core.config import LeashdConfig, ensure_leashd_dir
-from leashd.core.engine import Engine
+from leashd.core.engine import Engine, PathConfig
 from leashd.core.events import EventBus
 from leashd.core.interactions import InteractionCoordinator
 from leashd.core.safety.approvals import ApprovalCoordinator
@@ -26,8 +26,11 @@ from leashd.middleware.auth import AuthMiddleware
 from leashd.middleware.base import MiddlewareChain
 from leashd.middleware.rate_limit import RateLimitMiddleware
 from leashd.plugins.builtin.audit_plugin import AuditPlugin
+from leashd.plugins.builtin.auto_approver import AutoApprover
+from leashd.plugins.builtin.autonomous_loop import AutonomousLoop
 from leashd.plugins.builtin.browser_tools import BrowserToolsPlugin
 from leashd.plugins.builtin.merge_resolver import MergeResolverPlugin
+from leashd.plugins.builtin.task_orchestrator import TaskOrchestrator
 from leashd.plugins.builtin.test_runner import TestRunnerPlugin
 from leashd.plugins.registry import PluginRegistry
 from leashd.storage.memory import MemorySessionStore
@@ -225,11 +228,65 @@ def build_engine(
     )
     audit = AuditLogger(resolved_audit)
 
+    auto_approver = None
+    if config.auto_approver:
+        auto_approver = AutoApprover(
+            audit,
+            model=config.auto_approver_model,
+            max_calls_per_session=config.auto_approver_max_calls,
+        )
+        logger.info(
+            "auto_approver_enabled",
+            model=config.auto_approver_model or "(default)",
+            max_calls=config.auto_approver_max_calls,
+        )
+
+    auto_plan_reviewer = None
+    if config.auto_plan:
+        from leashd.plugins.builtin.auto_plan_reviewer import AutoPlanReviewer
+
+        auto_plan_reviewer = AutoPlanReviewer(audit, model=config.auto_plan_model)
+        logger.info(
+            "auto_plan_reviewer_enabled",
+            model=config.auto_plan_model or "(default)",
+        )
+
     approval_coordinator = None
     interaction_coordinator = None
     if connector:
         approval_coordinator = ApprovalCoordinator(connector, config)
-        interaction_coordinator = InteractionCoordinator(connector, config, event_bus)
+        interaction_coordinator = InteractionCoordinator(
+            connector, config, event_bus, auto_plan_reviewer=auto_plan_reviewer
+        )
+
+    autonomous_loop = None
+    if config.autonomous_loop:
+        autonomous_loop = AutonomousLoop(
+            connector,
+            max_retries=config.autonomous_max_retries,
+            auto_pr=config.auto_pr,
+            auto_pr_base_branch=config.auto_pr_base_branch,
+        )
+        logger.info(
+            "autonomous_loop_enabled",
+            max_retries=config.autonomous_max_retries,
+            auto_pr=config.auto_pr,
+        )
+
+    task_orchestrator = None
+    if config.task_orchestrator:
+        task_orchestrator = TaskOrchestrator(
+            connector=connector,
+            db_path=str(session_db_path),
+            max_retries=config.task_max_retries,
+            auto_pr=config.auto_pr,
+            auto_pr_base_branch=config.auto_pr_base_branch,
+        )
+        logger.info(
+            "task_orchestrator_enabled",
+            max_retries=config.task_max_retries,
+            auto_pr=config.auto_pr,
+        )
 
     # Plugins
     registry = PluginRegistry()
@@ -237,6 +294,14 @@ def build_engine(
     registry.register(BrowserToolsPlugin())
     registry.register(TestRunnerPlugin())
     registry.register(MergeResolverPlugin())
+    if auto_approver:
+        registry.register(auto_approver)
+    if auto_plan_reviewer:
+        registry.register(auto_plan_reviewer)
+    if autonomous_loop:
+        registry.register(autonomous_loop)
+    if task_orchestrator:
+        registry.register(task_orchestrator)
     for plugin in plugins or []:
         registry.register(plugin)
 
@@ -268,7 +333,7 @@ def build_engine(
         streaming=config.streaming_enabled,
     )
 
-    return Engine(
+    engine = Engine(
         connector=connector,
         agent=agent,
         config=config,
@@ -277,6 +342,7 @@ def build_engine(
         sandbox=sandbox,
         audit=audit,
         approval_coordinator=approval_coordinator,
+        auto_approver=auto_approver,
         interaction_coordinator=interaction_coordinator,
         event_bus=event_bus,
         plugin_registry=registry,
@@ -284,10 +350,20 @@ def build_engine(
         store=session_store,
         message_store=message_store,
         git_handler=git_handler,
-        audit_path_pinned=audit_is_pinned,
-        storage_path_pinned=storage_is_pinned,
-        audit_path_template=config.audit_log_path,
-        storage_path_template=config.storage_path,
-        log_dir_pinned=log_dir_is_pinned,
-        log_dir_template=config.log_dir,
+        path_config=PathConfig(
+            audit_path=config.audit_log_path,
+            storage_path=config.storage_path,
+            log_dir=config.log_dir or Path(".leashd/logs"),
+            audit_pinned=audit_is_pinned,
+            storage_pinned=storage_is_pinned,
+            log_dir_pinned=log_dir_is_pinned,
+        ),
     )
+
+    if autonomous_loop:
+        autonomous_loop.set_engine(engine)
+
+    if task_orchestrator:
+        task_orchestrator.set_engine(engine)
+
+    return engine

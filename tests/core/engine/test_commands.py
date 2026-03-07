@@ -1,15 +1,16 @@
-"""Engine tests — /test, /dir, /commit, /plan, /edit, /clear commands."""
+"""Engine tests — /test, /dir, /commit, /plan, /edit, /clear, /task, /cancel, /tasks commands."""
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, create_autospec
 
 import pytest
 
 from leashd.core.config import LeashdConfig
-from leashd.core.engine import Engine
+from leashd.core.engine import Engine, PathConfig
 from leashd.core.events import EventBus
 from leashd.core.interactions import InteractionCoordinator, PendingInteraction
 from leashd.core.safety.approvals import ApprovalCoordinator, PendingApproval
 from leashd.core.session import SessionManager
+from leashd.plugins.registry import PluginRegistry
 from tests.core.engine.conftest import FakeAgent, _make_git_handler_mock
 
 
@@ -773,8 +774,7 @@ class TestDirSwitchDataPaths:
             session_manager=SessionManager(),
             policy_engine=policy_engine,
             audit=audit,
-            audit_path_pinned=False,
-            storage_path_pinned=True,
+            path_config=PathConfig(audit_pinned=False, storage_pinned=True),
         )
 
         await eng.handle_message("user1", "hello", "chat1")
@@ -805,8 +805,7 @@ class TestDirSwitchDataPaths:
             session_manager=SessionManager(),
             policy_engine=policy_engine,
             store=store,
-            storage_path_pinned=False,
-            audit_path_pinned=True,
+            path_config=PathConfig(storage_pinned=False, audit_pinned=True),
         )
 
         await eng.handle_message("user1", "hello", "chat1")
@@ -839,8 +838,7 @@ class TestDirSwitchDataPaths:
             session_manager=SessionManager(),
             policy_engine=policy_engine,
             audit=audit,
-            audit_path_pinned=True,
-            storage_path_pinned=True,
+            path_config=PathConfig(audit_pinned=True, storage_pinned=True),
         )
 
         await eng.handle_message("user1", "hello", "chat1")
@@ -1660,3 +1658,349 @@ class TestEditWithArgs:
         result = await eng.handle_command("user1", "clear", "", "chat1")
 
         assert "cleared" in result.lower()
+
+
+class TestTasksCommand:
+    @pytest.mark.asyncio
+    async def test_tasks_no_plugin_registry(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = FakeAgent()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+        assert eng.plugin_registry is None
+
+        result = await eng.handle_command("user1", "tasks", "", "chat1")
+
+        assert result == "Task orchestrator is not enabled."
+
+    @pytest.mark.asyncio
+    async def test_tasks_empty_plugin_registry(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = FakeAgent()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            plugin_registry=PluginRegistry(),
+        )
+
+        result = await eng.handle_command("user1", "tasks", "", "chat1")
+
+        assert result == "Task orchestrator is not enabled."
+
+    @pytest.mark.asyncio
+    async def test_tasks_no_tasks_found(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        from leashd.plugins.builtin.task_orchestrator import TaskOrchestrator
+
+        orch = create_autospec(TaskOrchestrator, instance=True)
+        orch.meta.name = "task_orchestrator"
+        orch._store = AsyncMock()
+        orch._store.load_recent_for_chat = AsyncMock(return_value=[])
+
+        registry = PluginRegistry()
+        registry._plugins["task_orchestrator"] = orch
+
+        agent = FakeAgent()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            plugin_registry=registry,
+        )
+
+        result = await eng.handle_command("user1", "tasks", "", "chat1")
+
+        assert result == "No tasks found for this chat."
+
+    @pytest.mark.asyncio
+    async def test_tasks_returns_formatted_list(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        from leashd.core.task import TaskRun
+        from leashd.plugins.builtin.task_orchestrator import TaskOrchestrator
+
+        task = TaskRun(
+            run_id="abcdef1234567890",
+            user_id="user1",
+            chat_id="chat1",
+            session_id="sess1",
+            task="Implement the frobulator",
+            phase="implement",
+            total_cost=0.0512,
+            working_directory="/tmp",
+        )
+
+        orch = create_autospec(TaskOrchestrator, instance=True)
+        orch.meta.name = "task_orchestrator"
+        orch._store = AsyncMock()
+        orch._store.load_recent_for_chat = AsyncMock(return_value=[task])
+
+        registry = PluginRegistry()
+        registry._plugins["task_orchestrator"] = orch
+
+        agent = FakeAgent()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            plugin_registry=registry,
+        )
+
+        result = await eng.handle_command("user1", "tasks", "", "chat1")
+
+        assert "Implement the frobulator" in result
+        assert "abcdef12" in result
+        assert "🔨" in result
+        assert "implement" in result
+        assert "$0.0512" in result
+
+
+class TestTaskCommand:
+    @pytest.mark.asyncio
+    async def test_task_no_args_returns_usage(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = FakeAgent()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        result = await eng.handle_command("user1", "task", "", "chat1")
+
+        assert result == "Usage: /task <description of the task>"
+
+    @pytest.mark.asyncio
+    async def test_task_emits_event_and_sets_mode(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        from leashd.core.events import TASK_SUBMITTED, Event
+
+        captured_events: list[Event] = []
+
+        async def capture(event: Event) -> None:
+            captured_events.append(event)
+
+        bus = EventBus()
+        bus.subscribe(TASK_SUBMITTED, capture)
+
+        agent = FakeAgent()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            event_bus=bus,
+        )
+
+        result = await eng.handle_command("user1", "task", "Build a widget", "chat1")
+
+        assert result == ""
+        session = eng.session_manager.get("user1", "chat1")
+        assert session.mode == "task"
+        assert len(captured_events) == 1
+        assert captured_events[0].data["task"] == "Build a widget"
+        assert captured_events[0].data["chat_id"] == "chat1"
+
+
+class TestCancelCommand:
+    @pytest.mark.asyncio
+    async def test_cancel_emits_event_and_returns_confirmation(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        from leashd.core.events import MESSAGE_IN, Event
+
+        captured_events: list[Event] = []
+
+        async def capture(event: Event) -> None:
+            captured_events.append(event)
+
+        bus = EventBus()
+        bus.subscribe(MESSAGE_IN, capture)
+
+        agent = FakeAgent()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            event_bus=bus,
+        )
+
+        result = await eng.handle_command("user1", "cancel", "", "chat1")
+
+        assert result == "Cancellation requested."
+        assert len(captured_events) == 1
+        assert captured_events[0].data["text"] == "/cancel"
+        assert captured_events[0].data["chat_id"] == "chat1"
+
+
+class TestStopCommand:
+    @pytest.mark.asyncio
+    async def test_stop_returns_confirmation_and_emits_event(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        from leashd.core.events import MESSAGE_IN, Event
+
+        captured_events: list[Event] = []
+
+        async def capture(event: Event) -> None:
+            captured_events.append(event)
+
+        bus = EventBus()
+        bus.subscribe(MESSAGE_IN, capture)
+
+        agent = FakeAgent()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            event_bus=bus,
+        )
+
+        result = await eng.handle_command("user1", "stop", "", "chat1")
+
+        assert result == "All work stopped."
+        assert len(captured_events) == 1
+        assert captured_events[0].data["text"] == "/stop"
+        assert captured_events[0].data["chat_id"] == "chat1"
+
+    @pytest.mark.asyncio
+    async def test_stop_cancels_running_agent(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = AsyncMock()
+        agent.cancel = AsyncMock()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        eng._executing_sessions["chat1"] = "sess-42"
+
+        await eng.handle_command("user1", "stop", "", "chat1")
+
+        agent.cancel.assert_awaited_once_with("sess-42")
+
+    @pytest.mark.asyncio
+    async def test_stop_cancels_pending_approvals(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = FakeAgent()
+        ac = ApprovalCoordinator(mock_connector, config)
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            approval_coordinator=ac,
+        )
+
+        pending = PendingApproval(
+            approval_id="ap-1",
+            chat_id="chat1",
+            tool_name="Bash",
+            tool_input={"command": "rm -rf /"},
+        )
+        ac.pending["ap-1"] = pending
+
+        result = await eng.handle_command("user1", "stop", "", "chat1")
+
+        assert result == "All work stopped."
+        assert pending.decision is False
+        assert pending.event.is_set()
+
+    @pytest.mark.asyncio
+    async def test_stop_does_not_reset_session(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = FakeAgent()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_message("user1", "hello", "chat1")
+        session = eng.session_manager.get("user1", "chat1")
+        original_id = session.session_id
+        original_claude_id = session.claude_session_id
+        original_count = session.message_count
+
+        await eng.handle_command("user1", "stop", "", "chat1")
+
+        session_after = eng.session_manager.get("user1", "chat1")
+        assert session_after.session_id == original_id
+        assert session_after.claude_session_id == original_claude_id
+        assert session_after.message_count == original_count
+
+
+class TestClearEmitsEvent:
+    @pytest.mark.asyncio
+    async def test_clear_emits_message_in_event(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        from leashd.core.events import MESSAGE_IN, Event
+
+        captured_events: list[Event] = []
+
+        async def capture(event: Event) -> None:
+            captured_events.append(event)
+
+        bus = EventBus()
+        bus.subscribe(MESSAGE_IN, capture)
+
+        agent = FakeAgent()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            event_bus=bus,
+        )
+
+        await eng.handle_command("user1", "clear", "", "chat1")
+
+        assert any(e.data["text"] == "/clear" for e in captured_events)
+        assert any(e.data["chat_id"] == "chat1" for e in captured_events)

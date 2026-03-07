@@ -19,6 +19,7 @@ from leashd.plugins.builtin.test_runner import (
     _build_test_prompt,
     build_test_instruction,
     parse_test_args,
+    read_test_session_context,
 )
 
 
@@ -1021,3 +1022,96 @@ class TestProjectConfigMergeInPlugin:
         # CLI URL should win
         assert "http://cli-url" in session.mode_instruction
         assert "http://cli-url" in event.data["prompt"]
+
+
+class TestBuildTestInstructionWithApiSpecs:
+    def test_api_specs_section_present(self):
+        specs = [("requests/localhost.http", "GET /api/health")]
+        instruction = build_test_instruction(TestConfig(), api_specs=specs)
+        assert "API SPECIFICATIONS" in instruction
+        assert "requests/localhost.http" in instruction
+        assert "GET /api/health" in instruction
+        assert "do NOT guess endpoints" in instruction
+
+    def test_no_api_specs_no_section(self):
+        instruction = build_test_instruction(TestConfig())
+        assert "API SPECIFICATIONS" not in instruction
+
+    def test_multiple_spec_files(self):
+        specs = [
+            ("requests/localhost.http", "GET /api/health"),
+            ("openapi.yaml", "openapi: 3.0.0"),
+        ]
+        instruction = build_test_instruction(TestConfig(), api_specs=specs)
+        assert "requests/localhost.http" in instruction
+        assert "openapi.yaml" in instruction
+
+    def test_api_specs_after_hints(self):
+        specs = [("api.http", "content")]
+        instruction = build_test_instruction(
+            TestConfig(app_url="http://localhost"), api_specs=specs
+        )
+        hints_idx = instruction.index("USER HINTS")
+        specs_idx = instruction.index("API SPECIFICATIONS")
+        assert specs_idx > hints_idx
+
+
+class TestPhaseInstructionImprovements:
+    def test_phase2_mentions_docker(self):
+        instruction = build_test_instruction(TestConfig())
+        phase2_start = instruction.index("PHASE 2")
+        phase3_start = instruction.index("PHASE 3")
+        phase2 = instruction[phase2_start:phase3_start]
+        assert "docker compose" in phase2.lower()
+        assert "docker-compose.yml" in phase2 or "compose.yaml" in phase2
+
+    def test_phase5_references_specs(self):
+        instruction = build_test_instruction(TestConfig(include_backend=True))
+        phase5_start = instruction.index("PHASE 5")
+        phase5_end = instruction.index("PHASE 7")
+        phase5 = instruction[phase5_start:phase5_end]
+        assert "spec files" in phase5.lower()
+        assert "do NOT guess" in phase5
+
+
+class TestReadTestSessionContext:
+    def test_exists(self, tmp_path):
+        leashd = tmp_path / ".leashd"
+        leashd.mkdir()
+        (leashd / "test-session.md").write_text("# Phase 1 complete\n## Progress\n...")
+        result = read_test_session_context(str(tmp_path))
+        assert result is not None
+        assert "Phase 1 complete" in result
+
+    def test_missing(self, tmp_path):
+        result = read_test_session_context(str(tmp_path))
+        assert result is None
+
+    def test_truncates_large(self, tmp_path):
+        leashd = tmp_path / ".leashd"
+        leashd.mkdir()
+        (leashd / "test-session.md").write_text("x" * 10000)
+        result = read_test_session_context(str(tmp_path))
+        assert result is not None
+        assert len(result) == 4000
+
+    def test_empty_file(self, tmp_path):
+        leashd = tmp_path / ".leashd"
+        leashd.mkdir()
+        (leashd / "test-session.md").write_text("")
+        result = read_test_session_context(str(tmp_path))
+        assert result is None
+
+
+class TestBuildTestPromptWithContext:
+    def test_includes_previous_context(self):
+        prompt = _build_test_prompt(
+            TestConfig(), session_context="Phase 1 done, Phase 2 in progress"
+        )
+        assert "PREVIOUS TEST SESSION CONTEXT" in prompt
+        assert "Phase 1 done" in prompt
+        assert "Do NOT restart completed phases" in prompt
+
+    def test_no_context_no_section(self):
+        prompt = _build_test_prompt(TestConfig())
+        assert "PREVIOUS TEST SESSION CONTEXT" not in prompt

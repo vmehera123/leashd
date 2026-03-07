@@ -7,7 +7,7 @@ import pytest
 
 from leashd.agents.base import AgentResponse, BaseAgent
 from leashd.core.config import LeashdConfig
-from leashd.core.engine import Engine
+from leashd.core.engine import Engine, PathConfig
 from leashd.core.interactions import InteractionCoordinator
 from leashd.core.session import Session, SessionManager
 from leashd.exceptions import AgentError, StorageError
@@ -985,8 +985,9 @@ class TestDirectoryPersistenceAcrossRestart:
             audit=audit_logger,
             store=session_store,
             message_store=message_store,
-            storage_path_pinned=False,
-            storage_path_template=config.storage_path,
+            path_config=PathConfig(
+                storage_pinned=False, storage_path=config.storage_path
+            ),
         )
         await eng.handle_message("user1", "hello", "chat1")
 
@@ -1546,3 +1547,98 @@ class TestWorkspacePersistence:
             assert session2.workspace_directories == []
         finally:
             await store2.teardown()
+
+
+class TestSessionManagerDeactivateAndCleanup:
+    """Tests for SessionManager.deactivate() and cleanup_expired()."""
+
+    @pytest.mark.asyncio
+    async def test_deactivate_marks_inactive_and_deletes_from_store(self):
+        from unittest.mock import AsyncMock
+
+        store = AsyncMock()
+        store.load = AsyncMock(return_value=None)
+        sm = SessionManager(store=store)
+        session = await sm.get_or_create("u1", "c1", "/tmp")
+        assert session.is_active is True
+
+        await sm.deactivate("u1", "c1")
+
+        assert session.is_active is False
+        store.delete.assert_called_once_with("u1", "c1")
+
+    @pytest.mark.asyncio
+    async def test_deactivate_nonexistent_no_error(self):
+        sm = SessionManager()
+        await sm.deactivate("nobody", "nochat")
+
+    def test_cleanup_expired_removes_old_sessions(self):
+        from datetime import datetime, timedelta, timezone
+
+        sm = SessionManager()
+        key = sm._key("u1", "c1")
+        session = Session(
+            session_id="sess-old",
+            user_id="u1",
+            chat_id="c1",
+            working_directory="/tmp",
+        )
+        session.last_used = datetime.now(timezone.utc) - timedelta(hours=48)
+        sm._sessions[key] = session
+
+        removed = sm.cleanup_expired(max_age_hours=24)
+
+        assert removed == 1
+        assert sm.get("u1", "c1") is None
+
+    def test_cleanup_expired_preserves_recent_sessions(self):
+        from datetime import datetime, timezone
+
+        sm = SessionManager()
+        key = sm._key("u1", "c1")
+        session = Session(
+            session_id="sess-recent",
+            user_id="u1",
+            chat_id="c1",
+            working_directory="/tmp",
+        )
+        session.last_used = datetime.now(timezone.utc)
+        sm._sessions[key] = session
+
+        removed = sm.cleanup_expired(max_age_hours=24)
+
+        assert removed == 0
+        assert sm.get("u1", "c1") is not None
+
+    def test_cleanup_expired_returns_count(self):
+        from datetime import datetime, timedelta, timezone
+
+        sm = SessionManager()
+        now = datetime.now(timezone.utc)
+
+        for i in range(3):
+            key = sm._key(f"old-u{i}", f"old-c{i}")
+            session = Session(
+                session_id=f"sess-old-{i}",
+                user_id=f"old-u{i}",
+                chat_id=f"old-c{i}",
+                working_directory="/tmp",
+            )
+            session.last_used = now - timedelta(hours=48)
+            sm._sessions[key] = session
+
+        for i in range(2):
+            key = sm._key(f"new-u{i}", f"new-c{i}")
+            session = Session(
+                session_id=f"sess-new-{i}",
+                user_id=f"new-u{i}",
+                chat_id=f"new-c{i}",
+                working_directory="/tmp",
+            )
+            session.last_used = now
+            sm._sessions[key] = session
+
+        removed = sm.cleanup_expired(max_age_hours=24)
+
+        assert removed == 3
+        assert len(sm._sessions) == 2

@@ -50,6 +50,7 @@ class ApprovalCoordinator:
         tool_input: dict[str, Any],
         classification: Classification,
         timeout: int | None = None,
+        ai_denial_reason: str | None = None,
     ) -> ApprovalResult:
         timeout = timeout or self.config.approval_timeout_seconds
         approval_id = str(uuid.uuid4())
@@ -62,7 +63,9 @@ class ApprovalCoordinator:
         )
         self.pending[approval_id] = pending
 
-        description = self._format_description(tool_name, tool_input, classification)
+        description = self._format_description(
+            tool_name, tool_input, classification, ai_denial_reason=ai_denial_reason
+        )
 
         msg_id = await self.connector.request_approval(
             chat_id, approval_id, description, tool_name
@@ -134,8 +137,13 @@ class ApprovalCoordinator:
         tool_name: str,
         tool_input: dict[str, Any],
         classification: Classification,
+        *,
+        ai_denial_reason: str | None = None,
     ) -> str:
-        parts = [f"Tool: {tool_name}"]
+        parts = []
+        if ai_denial_reason:
+            parts.append(f"\u26a0\ufe0f AI reviewer denied: {ai_denial_reason}")
+        parts.append(f"Tool: {tool_name}")
 
         if classification.description:
             parts.append(f"Action: {classification.description}")

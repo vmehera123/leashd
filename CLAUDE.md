@@ -57,6 +57,10 @@ leashd clean           # remove all runtime artifacts
 uv run mypy leashd/
 ```
 
+## Mandatory Post-Implementation Check
+
+**ALWAYS run `make check` after finishing any implementation work (features, bug fixes, refactors, etc.) and fix ALL issues it reports before considering the task complete.** This is non-negotiable. `make check` runs lint+format (ruff), type checking (mypy), and the full test suite (pytest). Do not skip this step. Do not leave failing checks for the user to fix.
+
 ## Architecture
 
 The system follows a three-layer safety pipeline: **Sandbox → Policy → Approval**.
@@ -71,7 +75,7 @@ The system follows a three-layer safety pipeline: **Sandbox → Policy → Appro
 
 **Setup** (`setup.py`) — interactive first-time wizard (`leashd init`). Prompts for cwd approval, Telegram bot token, and user ID. Writes to global config store.
 
-**Engine** (`core/engine.py`) is the central orchestrator. It receives user messages from connectors, passes them through the middleware chain, routes messages to the Claude Code agent, and sends responses back through connectors. Supports `/dir`, `/plan <text>`, `/edit <text>`, `/git`, and `/workspace` (alias `/ws`) commands.
+**Engine** (`core/engine.py`) is the central orchestrator. It receives user messages from connectors, passes them through the middleware chain, routes messages to the Claude Code agent, and sends responses back through connectors. Supports `/dir`, `/plan <text>`, `/edit <text>`, `/git`, `/workspace` (alias `/ws`), `/task <description>`, `/stop`, `/cancel`, and `/tasks` commands.
 
 **Safety pipeline** (all in `core/safety/`):
 0. **Gatekeeper** (`gatekeeper.py`) — `ToolGatekeeper` orchestrates the full sandbox → policy → approval chain per tool call, emitting events at each stage. Extracted from Engine to keep it focused on message routing.
@@ -85,7 +89,7 @@ The system follows a three-layer safety pipeline: **Sandbox → Policy → Appro
 - `AuthMiddleware` — user whitelist via `LEASHD_ALLOWED_USER_IDS`
 - `RateLimitMiddleware` — token-bucket rate limiting per user via `LEASHD_RATE_LIMIT_RPM`
 
-**EventBus** (`core/events.py`): Pub/sub system for decoupling subsystems. Plugins and internal components subscribe to named events. Key events: `tool.gated`, `tool.allowed`, `tool.denied`, `message.in`, `message.out`, `engine.started`, `engine.stopped`, `command.test`, `test.started`, `test.completed`, `command.merge`, `merge.started`, `merge.completed`, `interaction.requested`, `interaction.resolved`, `message.queued`, `execution.interrupted`.
+**EventBus** (`core/events.py`): Pub/sub system for decoupling subsystems. Plugins and internal components subscribe to named events. Key events: `tool.gated`, `tool.allowed`, `tool.denied`, `message.in`, `message.out`, `engine.started`, `engine.stopped`, `command.test`, `test.started`, `test.completed`, `command.merge`, `merge.started`, `merge.completed`, `interaction.requested`, `interaction.resolved`, `message.queued`, `execution.interrupted`, `session.completed`, `approval.escalated`, `task.submitted`, `task.phase_changed`, `task.completed`, `task.failed`, `task.escalated`, `task.cancelled`, `task.resumed`.
 
 **Plugin system** (`plugins/`):
 - `LeashdPlugin` ABC with lifecycle hooks: `initialize → start → stop`
@@ -96,6 +100,7 @@ The system follows a three-layer safety pipeline: **Sandbox → Policy → Appro
 - Built-in: `TestRunnerPlugin` activates 9-phase test workflow via `/test` command, auto-approves browser tools and test commands
 - Built-in: `MergeResolverPlugin` handles `/git merge` conflict resolution, auto-approves Edit/Write/Read and git read commands
 - Built-in: `TestConfigLoaderPlugin` loads per-project test configuration from `.leashd/test.yaml` to customize the `/test` workflow
+- Built-in: `TaskOrchestrator` drives autonomous tasks through spec→explore→validate→plan→implement→test→PR with crash recovery, SQLite persistence (`core/task.py`), and per-chat serialization (`core/queue.py`)
 
 **Interactions** (`core/interactions.py`): `InteractionCoordinator` bridges Claude's `AskUserQuestion` and `ExitPlanMode` SDK events to connectors — forwards questions/plan reviews to Telegram, collects user responses, and returns them to the agent.
 
@@ -113,7 +118,7 @@ The system follows a three-layer safety pipeline: **Sandbox → Policy → Appro
 
 **Connector protocol** (`connectors/base.py`): Abstract interface for I/O transports (Telegram, Slack, etc.). Handles message delivery, typing indicators, approval requests, and file sending.
 
-**Policies** (`policies/`): Four built-in YAML policies — `default.yaml` (balanced), `strict.yaml` (maximum restrictions, shorter timeout), `permissive.yaml` (maximum freedom for trusted environments), `dev-tools.yaml` (overlay that auto-allows common dev commands like package managers, linters, test runners — meant to be combined with other policies). All deny credential file access and destructive patterns.
+**Policies** (`policies/`): Five built-in YAML policies — `default.yaml` (balanced), `strict.yaml` (maximum restrictions, shorter timeout), `permissive.yaml` (maximum freedom for trusted environments), `dev-tools.yaml` (overlay that auto-allows common dev commands like package managers, linters, test runners — meant to be combined with other policies), `autonomous.yaml` (purpose-built for autonomous mode — hard blocks on dangerous operations, auto-allows dev tools and file writes, AI approval for git push and network operations). All deny credential file access and destructive patterns.
 
 **Configuration** (`core/config.py` + `config_store.py`): `LeashdConfig` uses pydantic-settings, loaded from environment variables prefixed with `LEASHD_`. `config_store.py` manages the persistent `~/.leashd/config.yaml` and bridges it to env vars via `inject_global_config_as_env()`. Layer order: `~/.leashd/config.yaml` → `.env` → environment variables (highest priority). Required: `LEASHD_APPROVED_DIRECTORIES`. `build_directory_names()` derives short names from basenames for the `/dir` command.
 
@@ -143,7 +148,7 @@ leashd integrates with Playwright MCP for browser automation. The `.mcp.json` at
 - Custom exception hierarchy in `exceptions.py`: `ConfigError`, `AgentError`, `SafetyError`, `ApprovalTimeoutError`, `SessionError`, `StorageError`, `PluginError`, `InteractionTimeoutError`, `ConnectorError`, `DaemonError`
 - Tests use `pytest-asyncio` with `asyncio_mode = "auto"`; coverage minimum: 89% (`fail_under = 89`)
 - No `__init__.py` or other boilerplate junk files — use implicit namespace packages
-- No redundant or obvious comments — only comment non-obvious logic
+- **Never write obvious or self-explanatory comments.** Only add comments when they explain *why* a non-obvious decision was made or describe complex logic that isn't clear from the code itself. If the code speaks for itself, leave it uncommented.
 - Only use `from __future__ import annotations` when necessary (e.g., forward references needed at runtime by Pydantic models)
 - `TYPE_CHECKING` blocks to break circular imports — runtime imports only what's needed
 - Modern union syntax: `X | None` not `Optional[X]`, `X | Y` not `Union[X, Y]`

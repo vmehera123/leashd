@@ -193,6 +193,42 @@ When a merge results in conflicts, the plugin sets the session to merge mode and
 
 The plugin provides project-specific defaults for the `/test` workflow, so teams can commit shared test configuration without passing flags every time.
 
+## Built-In: `TaskOrchestrator`
+
+`TaskOrchestrator` (`plugins/builtin/task_orchestrator.py`) drives autonomous tasks through a multi-phase workflow: spec → explore → validate → plan → implement → test → PR. It provides crash recovery, SQLite persistence, per-chat concurrency control, and cost tracking.
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending: /task submitted
+    pending --> spec: orchestrator picks up
+    spec --> explore: spec written
+    explore --> validate_spec: codebase explored
+    validate_spec --> plan: spec validated
+    plan --> validate_plan: plan written
+    validate_plan --> implement: plan validated
+    implement --> test: code written
+    test --> pr: tests pass
+    test --> retry: tests fail, retries left
+    retry --> test: fix attempted
+    test --> escalated: retries exhausted
+    pr --> completed: PR created
+    completed --> [*]
+    escalated --> [*]
+    failed --> [*]
+    cancelled --> [*]
+```
+
+| Aspect | Detail |
+|---|---|
+| Subscribes to | `TASK_SUBMITTED`, `SESSION_COMPLETED`, `MESSAGE_IN` |
+| Emits | `TASK_PHASE_CHANGED`, `TASK_COMPLETED`, `TASK_FAILED`, `TASK_ESCALATED`, `TASK_CANCELLED`, `TASK_RESUMED` |
+| Auto-approves | Write, Edit, NotebookEdit during `auto` mode phases |
+| Config | `LEASHD_TASK_ORCHESTRATOR` (enable), `LEASHD_TASK_MAX_RETRIES`, `LEASHD_TASK_PHASE_TIMEOUT_SECONDS` |
+
+The orchestrator uses `KeyedAsyncQueue` (`core/queue.py`) for per-chat serialization — tasks for the same chat execute sequentially, while different chats run concurrently. Task state is persisted to SQLite via `TaskStore` (`core/task.py`), enabling crash recovery on daemon restart. On startup, `start()` loads all non-terminal tasks and resumes them from their current phase.
+
+See [Autonomous Mode](autonomous-mode.md#task-orchestrator) for the full state machine, phase walkthrough, and configuration details.
+
 ## Writing a Custom Plugin
 
 ### Step 1: Define the Plugin

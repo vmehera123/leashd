@@ -273,3 +273,40 @@ class TestStripCdPrefix:
 
     def test_cd_no_path_with_chain(self):
         assert strip_cd_prefix("cd && ls") == "ls"
+
+
+class TestRedirectDetection:
+    """Redirect operator detection in bash commands."""
+
+    def test_append_redirect_detected(self):
+        """>> (append redirect) must be flagged."""
+        a = analyze_bash("echo data >> logfile.txt")
+        assert a.has_redirect
+
+    def test_input_redirect_detected(self):
+        """< (input redirect) must be flagged."""
+        a = analyze_bash("sort < input.txt")
+        assert a.has_redirect
+
+    def test_heredoc_redirect_detected(self):
+        """<< (heredoc) must be flagged."""
+        a = analyze_bash("cat << EOF\nhello\nEOF")
+        assert a.has_redirect
+
+
+class TestPathTraversalSensitivity:
+    """Traversal sensitivity vs credential sensitivity."""
+
+    def test_traversal_without_credential_is_high(self):
+        """Path with traversal but no credential pattern → high, not critical."""
+        a = analyze_path("../../etc/hostname")
+        assert a.has_traversal
+        assert not a.is_credential
+        assert a.sensitivity == "high"
+
+    def test_traversal_with_credential_is_critical(self):
+        """Path with both traversal and credential → critical overrides."""
+        a = analyze_path("../../.ssh/id_rsa")
+        assert a.has_traversal
+        assert a.is_credential
+        assert a.sensitivity == "critical"

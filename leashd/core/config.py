@@ -89,6 +89,22 @@ class LeashdConfig(BaseSettings):
     # Agent mode
     default_mode: Literal["default", "plan", "auto"] = "default"
 
+    # Autonomous mode
+    auto_approver: bool = False
+    auto_approver_model: str | None = None
+    auto_approver_max_calls: int = 50
+    autonomous_loop: bool = False
+    autonomous_max_retries: int = 3
+    auto_plan: bool = False
+    auto_plan_model: str | None = None
+    auto_pr: bool = False
+    auto_pr_base_branch: str = "main"
+
+    # Task orchestration
+    task_orchestrator: bool = False
+    task_max_retries: int = 3
+    task_phase_timeout_seconds: int = 1800  # 30 minutes per phase
+
     # Streaming
     streaming_enabled: bool = True
     streaming_throttle_seconds: float = 1.5

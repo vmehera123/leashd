@@ -74,6 +74,16 @@ async def _run_telegram(config: LeashdConfig) -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop_event.set)
 
+    if hasattr(signal, "SIGHUP"):
+        _reload_tasks: set[asyncio.Task[None]] = set()
+
+        def _schedule_reload() -> None:
+            task = asyncio.ensure_future(engine.reload_config())
+            _reload_tasks.add(task)
+            task.add_done_callback(_reload_tasks.discard)
+
+        loop.add_signal_handler(signal.SIGHUP, _schedule_reload)
+
     try:
         await stop_event.wait()
     finally:

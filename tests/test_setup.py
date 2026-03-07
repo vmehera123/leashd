@@ -67,21 +67,21 @@ class TestPromptOptional:
 
 class TestRunSetup:
     def test_adds_cwd(self, fake_config_dir, tmp_path):
-        inputs = iter(["y", "", ""])
+        inputs = iter(["y", "", "n"])
         result = run_setup(tmp_path, input_fn=lambda _prompt: next(inputs))
 
         dirs = result.get("approved_directories", [])
         assert str(tmp_path.resolve()) in dirs
 
     def test_skips_telegram(self, fake_config_dir, tmp_path):
-        inputs = iter(["y", "", ""])
+        inputs = iter(["y", "", "n"])
         result = run_setup(tmp_path, input_fn=lambda _prompt: next(inputs))
 
         telegram = result.get("telegram", {})
         assert not telegram.get("bot_token")
 
     def test_saves_telegram(self, fake_config_dir, tmp_path):
-        inputs = iter(["y", "123:abc-token", "987654321"])
+        inputs = iter(["y", "123:abc-token", "987654321", "n"])
         result = run_setup(tmp_path, input_fn=lambda _prompt: next(inputs))
 
         assert result["telegram"]["bot_token"] == "123:abc-token"
@@ -103,12 +103,12 @@ class TestRunSetup:
             call_count += 1
             if call_count == 1:
                 return "y"  # add dir
-            return ""  # skip telegram token
+            return ""  # skip telegram token / decline autonomous
 
         result = run_setup(tmp_path, input_fn=counting_input)
         assert "allowed_user_ids" not in result.get("telegram", {})
-        # Should have been called exactly 2 times: dir + token
-        assert call_count == 2
+        # dir + token + autonomous
+        assert call_count == 3
 
     def test_rerun_skips_existing_dir(self, fake_config_dir, tmp_path):
         """When cwd already in approved dirs, dir prompt is skipped."""
@@ -121,10 +121,10 @@ class TestRunSetup:
             return ""
 
         run_setup(tmp_path, input_fn=counting_input)
-        assert call_count == 1  # only token prompt
+        assert call_count == 2  # token + autonomous
 
     def test_rerun_skips_existing_token(self, fake_config_dir, tmp_path):
-        """When dir and token already set, only user-id prompt shown."""
+        """When dir and token already set, only user-id and autonomous prompts shown."""
         save_global_config(
             {
                 "approved_directories": [str(tmp_path.resolve())],
@@ -139,7 +139,7 @@ class TestRunSetup:
             return ""
 
         run_setup(tmp_path, input_fn=counting_input)
-        assert call_count == 1  # only user-id prompt
+        assert call_count == 2  # user-id + autonomous
 
     def test_eof_during_prompt_no_corruption(self, fake_config_dir, tmp_path):
         """EOFError during input doesn't corrupt config."""
@@ -162,28 +162,28 @@ class TestRunSetup:
 
     def test_invalid_user_id_non_numeric_skipped(self, fake_config_dir, tmp_path):
         """Non-numeric user ID 'abc123' is skipped via ValueError from int()."""
-        inputs = iter(["y", "123:abc-token", "abc123"])
+        inputs = iter(["y", "123:abc-token", "abc123", "n"])
         result = run_setup(tmp_path, input_fn=lambda _prompt: next(inputs))
         telegram = result.get("telegram", {})
         assert "allowed_user_ids" not in telegram
 
     def test_invalid_user_id_float_skipped(self, fake_config_dir, tmp_path):
         """Float-like '12.34' user ID raises ValueError from int() — skipped."""
-        inputs = iter(["y", "123:abc-token", "12.34"])
+        inputs = iter(["y", "123:abc-token", "12.34", "n"])
         result = run_setup(tmp_path, input_fn=lambda _prompt: next(inputs))
         telegram = result.get("telegram", {})
         assert "allowed_user_ids" not in telegram
 
     def test_valid_negative_user_id_saved(self, fake_config_dir, tmp_path):
         """Negative Telegram group ID like '-1001234567890' passes int() and is saved."""
-        inputs = iter(["y", "123:abc-token", "-1001234567890"])
+        inputs = iter(["y", "123:abc-token", "-1001234567890", "n"])
         result = run_setup(tmp_path, input_fn=lambda _prompt: next(inputs))
         telegram = result.get("telegram", {})
         assert "-1001234567890" in telegram.get("allowed_user_ids", [])
 
     def test_invalid_user_id_message_printed(self, fake_config_dir, tmp_path, capsys):
         """Non-numeric user ID prints 'Invalid user ID' message."""
-        inputs = iter(["y", "123:abc-token", "not-a-number"])
+        inputs = iter(["y", "123:abc-token", "not-a-number", "n"])
         run_setup(tmp_path, input_fn=lambda _prompt: next(inputs))
         captured = capsys.readouterr()
         assert "Invalid user ID" in captured.out

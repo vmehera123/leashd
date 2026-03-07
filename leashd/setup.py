@@ -107,6 +107,58 @@ def run_setup(
                 data["telegram"] = telegram
                 print("  \u2713 User ID saved\n")
 
+    autonomous = data.get("autonomous", {})
+    if not isinstance(autonomous, dict):
+        autonomous = {}
+
+    if not autonomous.get("enabled"):
+        print("  Autonomous mode (optional \u2014 press Enter to skip)")
+        print("  (Enables AI-powered approvals, task orchestrator, and auto-PR)")
+        if _prompt_yes_no(
+            "  Enable autonomous mode?", default=False, input_fn=input_fn
+        ):
+            autonomous = _configure_autonomous(autonomous, input_fn=input_fn)
+            data["autonomous"] = autonomous
+            print("  \u2713 Autonomous mode configured\n")
+        else:
+            print("  - Skipped\n")
+
     save_global_config(data)
     print(f"  \u2713 Config saved to {config_path()}")
     return data
+
+
+def _configure_autonomous(
+    existing: dict[str, Any],
+    *,
+    input_fn: Callable[[str], str] = input,
+) -> dict[str, Any]:
+    """Interactive autonomous mode config builder.
+
+    Sets sensible defaults and prompts only for optional features.
+    Preserves any extra keys already in *existing*.
+    """
+    config = dict(existing)
+    config["enabled"] = True
+    config.setdefault("policy", "autonomous")
+    config.setdefault("auto_approver", True)
+    config.setdefault("auto_plan", True)
+
+    if _prompt_yes_no(
+        "  Auto-create PRs when tasks complete?", default=True, input_fn=input_fn
+    ):
+        config["auto_pr"] = True
+        branch = input_fn("    PR base branch: ").strip()
+        config["auto_pr_base_branch"] = branch if branch else "main"
+    else:
+        config["auto_pr"] = False
+
+    if _prompt_yes_no(
+        "  Enable test-and-retry loop after tasks?", default=True, input_fn=input_fn
+    ):
+        config["autonomous_loop"] = True
+    else:
+        config["autonomous_loop"] = False
+
+    config.setdefault("task_max_retries", 3)
+    return config

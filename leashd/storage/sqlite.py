@@ -47,6 +47,42 @@ CREATE INDEX IF NOT EXISTS idx_messages_chat
 ON messages (user_id, chat_id, created_at)
 """
 
+_CREATE_TASK_RUNS_TABLE = """
+CREATE TABLE IF NOT EXISTS task_runs (
+    run_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    chat_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    parent_run_id TEXT,
+    task TEXT NOT NULL,
+    phase TEXT NOT NULL DEFAULT 'pending',
+    previous_phase TEXT,
+    outcome TEXT,
+    error_message TEXT,
+    retry_count INTEGER DEFAULT 0,
+    max_retries INTEGER DEFAULT 3,
+    phase_context TEXT DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    phase_started_at TEXT,
+    completed_at TEXT,
+    last_updated TEXT NOT NULL,
+    total_cost REAL DEFAULT 0.0,
+    phase_costs TEXT DEFAULT '{}',
+    working_directory TEXT NOT NULL
+)
+"""
+
+_CREATE_TASK_RUNS_CHAT_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_task_runs_chat
+ON task_runs (chat_id, phase)
+"""
+
+_CREATE_TASK_RUNS_USER_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_task_runs_user
+ON task_runs (user_id, created_at DESC)
+"""
+
 
 class SqliteSessionStore:
     def __init__(self, db_path: Path | str) -> None:
@@ -60,6 +96,9 @@ class SqliteSessionStore:
             await self._db.execute(_CREATE_TABLE)
             await self._db.execute(_CREATE_MESSAGES_TABLE)
             await self._db.execute(_CREATE_MESSAGES_INDEX)
+            await self._db.execute(_CREATE_TASK_RUNS_TABLE)
+            await self._db.execute(_CREATE_TASK_RUNS_CHAT_INDEX)
+            await self._db.execute(_CREATE_TASK_RUNS_USER_INDEX)
 
             # Idempotent migrations for columns added after initial schema
             cursor = await self._db.execute("PRAGMA table_info(sessions)")
@@ -68,7 +107,18 @@ class SqliteSessionStore:
                 await self._db.execute(
                     "ALTER TABLE sessions ADD COLUMN workspace_name TEXT"
                 )
-
+            if "mode" not in existing:
+                await self._db.execute(
+                    "ALTER TABLE sessions ADD COLUMN mode TEXT DEFAULT 'default'"
+                )
+            if "mode_instruction" not in existing:
+                await self._db.execute(
+                    "ALTER TABLE sessions ADD COLUMN mode_instruction TEXT"
+                )
+            if "task_run_id" not in existing:
+                await self._db.execute(
+                    "ALTER TABLE sessions ADD COLUMN task_run_id TEXT"
+                )
             await self._db.commit()
             logger.info("sqlite_store_initialized", db_path=self._db_path)
         except Exception as e:
@@ -103,8 +153,8 @@ class SqliteSessionStore:
                (user_id, chat_id, session_id, working_directory,
                 claude_session_id, created_at, last_used,
                 total_cost, message_count, is_active,
-                workspace_name)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                workspace_name, mode, mode_instruction, task_run_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 session.user_id,
                 session.chat_id,
@@ -117,6 +167,9 @@ class SqliteSessionStore:
                 session.message_count,
                 int(session.is_active),
                 session.workspace_name,
+                session.mode,
+                session.mode_instruction,
+                session.task_run_id,
             ),
         )
         await self._db.commit()
@@ -145,6 +198,7 @@ class SqliteSessionStore:
 
     @staticmethod
     def _row_to_session(row: aiosqlite.Row) -> Session:
+        keys = row.keys()
         return Session(
             session_id=row["session_id"],
             user_id=row["user_id"],
@@ -161,6 +215,11 @@ class SqliteSessionStore:
             message_count=row["message_count"],
             is_active=bool(row["is_active"]),
             workspace_name=row["workspace_name"],
+            mode=row["mode"] if "mode" in keys else "default",
+            mode_instruction=row["mode_instruction"]
+            if "mode_instruction" in keys
+            else None,
+            task_run_id=row["task_run_id"] if "task_run_id" in keys else None,
         )
 
     async def save_message(

@@ -94,6 +94,22 @@ def _read_log_tail(max_bytes: int = 2000) -> str:
         return "(no daemon log found)"
 
 
+def signal_reload() -> bool:
+    """Send SIGHUP to the running daemon to trigger config reload.
+
+    Returns True if the signal was sent successfully.
+    """
+    running, pid = is_running()
+    if not running or pid is None:
+        return False
+    try:
+        os.kill(pid, signal.SIGHUP)
+    except ProcessLookupError:
+        _remove_pid()
+        return False
+    return True
+
+
 def is_running() -> tuple[bool, int | None]:
     """Check if daemon is running. Auto-cleans stale PID files."""
     pid = _read_pid()
@@ -119,6 +135,13 @@ def start_daemon() -> int:
     running, pid = is_running()
     if running:
         raise DaemonError(f"leashd is already running (PID {pid})")
+
+    orphan = _find_daemon_pid()
+    if orphan is not None:
+        raise DaemonError(
+            f"Found orphan leashd process (PID {orphan}). "
+            "Run 'leashd stop' or kill it manually."
+        )
 
     _LEASHD_DIR.mkdir(parents=True, exist_ok=True)
     log_file = open(_DAEMON_LOG, "a")  # noqa: SIM115
@@ -171,6 +194,19 @@ def stop_daemon() -> bool:
             return True
         time.sleep(0.1)
 
-    # Timed out — process still alive
+    # SIGTERM timed out — escalate to SIGKILL
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        _remove_pid()
+        return True
+
+    kill_deadline = time.monotonic() + 2.0
+    while time.monotonic() < kill_deadline:
+        if not _is_process_alive(pid):
+            _remove_pid()
+            return True
+        time.sleep(0.1)
+
     _remove_pid()
     return False

@@ -82,9 +82,8 @@ class TestEngineInteractionRouting:
         await task
 
         assert result.behavior == "allow"
-        auto = eng._gatekeeper._auto_approved_tools.get("chat1", set())
-        assert "Write" in auto
-        assert "Edit" in auto
+        # Auto-approve for Write/Edit is deferred to _exit_plan_mode (not set here);
+        # this prevents premature auto-approve while session is still in plan mode
 
     @pytest.mark.asyncio
     async def test_regular_tool_still_hits_gatekeeper(
@@ -204,9 +203,7 @@ class TestEngineInteractionRouting:
 
         assert result.behavior == "allow"
         assert session.claude_session_id is None
-        auto = eng._gatekeeper._auto_approved_tools.get("chat1", set())
-        assert "Write" in auto
-        assert "Edit" in auto
+        # Auto-approve for Write/Edit is deferred to _exit_plan_mode
 
 
 class TestCleanProceedAutoImplementation:

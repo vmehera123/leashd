@@ -1,6 +1,6 @@
 [project]
 name = "leashd"
-version = "0.5.0"
+version = "0.6.0"
 description = "End-to-end agentic coding workflow with safety guardrails. Plan, execute, test - with human-in-the-loop approval"
 readme = "README.md"
 requires-python = ">=3.10"

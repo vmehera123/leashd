@@ -262,6 +262,58 @@ class TestSqliteEdgeCases:
             await store.teardown()
 
 
+class TestSqliteSessionFieldsPersistence:
+    @pytest.mark.asyncio
+    async def test_mode_round_trip(self, tmp_path):
+        store = SqliteSessionStore(tmp_path / "test.db")
+        await store.setup()
+        try:
+            session = _make_session(mode="task")
+            await store.save(session)
+            loaded = await store.load("u1", "c1")
+            assert loaded.mode == "task"
+        finally:
+            await store.teardown()
+
+    @pytest.mark.asyncio
+    async def test_mode_instruction_round_trip(self, tmp_path):
+        store = SqliteSessionStore(tmp_path / "test.db")
+        await store.setup()
+        try:
+            session = _make_session(mode_instruction="build a widget")
+            await store.save(session)
+            loaded = await store.load("u1", "c1")
+            assert loaded.mode_instruction == "build a widget"
+        finally:
+            await store.teardown()
+
+    @pytest.mark.asyncio
+    async def test_task_run_id_round_trip(self, tmp_path):
+        store = SqliteSessionStore(tmp_path / "test.db")
+        await store.setup()
+        try:
+            session = _make_session(task_run_id="run-abc-123")
+            await store.save(session)
+            loaded = await store.load("u1", "c1")
+            assert loaded.task_run_id == "run-abc-123"
+        finally:
+            await store.teardown()
+
+    @pytest.mark.asyncio
+    async def test_mode_defaults_to_default(self, tmp_path):
+        store = SqliteSessionStore(tmp_path / "test.db")
+        await store.setup()
+        try:
+            session = _make_session()
+            await store.save(session)
+            loaded = await store.load("u1", "c1")
+            assert loaded.mode == "default"
+            assert loaded.mode_instruction is None
+            assert loaded.task_run_id is None
+        finally:
+            await store.teardown()
+
+
 class TestSqliteWorkspacePersistence:
     @pytest.mark.asyncio
     async def test_workspace_name_round_trip(self, tmp_path):

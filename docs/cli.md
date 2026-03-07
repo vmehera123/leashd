@@ -16,8 +16,8 @@ leashd is controlled entirely from the command line. The `leashd` command manage
 | `leashd add-dir [path]` | Add directory to approved list (default: cwd) |
 | `leashd remove-dir [path]` | Remove directory from approved list (default: cwd) |
 | `leashd dirs` | List approved directories |
-| `leashd ws add <name> <dir1> [dir2...]` | Create or update a workspace |
-| `leashd ws remove <name>` | Remove a workspace |
+| `leashd ws add <name> <dir1> [dir2...]` | Add directories to a workspace (creates if new) |
+| `leashd ws remove <name> [dir...]` | Remove a workspace, or specific directories from it |
 | `leashd ws show <name>` | Show workspace details |
 | `leashd ws list` | List all workspaces |
 | `leashd clean` | Remove all runtime artifacts |
@@ -132,13 +132,15 @@ leashd dirs
 
 Workspaces group related repositories so the agent gets multi-repo context. All workspace directories must be approved (or will be auto-approved on `ws add`).
 
-### Creating a Workspace
+### Adding Directories
 
 ```bash
-leashd ws add my-app ~/projects/frontend ~/projects/api ~/projects/worker --desc "My full-stack app"
+leashd ws add my-app ~/projects/frontend ~/projects/api --desc "My full-stack app"
 ```
 
-Directories that aren't already approved are automatically added. Workspace definition is saved to `~/.leashd/workspaces.yaml`.
+Creates the workspace if it doesn't exist. If the workspace already exists, new directories are merged in — existing directories are preserved, duplicates are skipped. Pass `--desc` to set or update the description; omit it to keep the existing description unchanged.
+
+Directories that aren't already approved are automatically added.
 
 ### Listing Workspaces
 
@@ -152,13 +154,16 @@ leashd ws list
 leashd ws show my-app
 ```
 
-### Removing a Workspace
+### Removing a Workspace or Directories
 
 ```bash
-leashd ws remove my-app
+leashd ws remove my-app              # remove the entire workspace
+leashd ws remove my-app ~/projects/worker  # remove specific directory from workspace
 ```
 
-Removes the workspace definition only — approved directories are not affected.
+When directories are specified, only those are removed. If the last directory is removed, the workspace is deleted automatically. Without directory arguments, the entire workspace is removed.
+
+Approved directories are not affected — only the workspace definition changes.
 
 ## Cleanup
 

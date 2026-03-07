@@ -42,6 +42,7 @@ flowchart LR
         testrunner["TestRunnerPlugin"]
         mergeresolver["MergeResolverPlugin"]
         githandler["GitCommandHandler"]
+        orchestrator["TaskOrchestrator"]
     end
 
     bus["EventBus"]
@@ -52,12 +53,13 @@ flowchart LR
         custom["Custom handlers"]
     end
 
-    engine -->|message.in/out, engine.*, message.queued, command.test, execution.interrupted| bus
+    engine -->|message.in/out, engine.*, session.completed, task.submitted, message.queued, command.test, execution.interrupted| bus
     gatekeeper -->|tool.gated, tool.allowed, tool.denied| bus
     interactions -->|interaction.*| bus
     testrunner -->|test.started| bus
     mergeresolver -->|merge.started| bus
     githandler -->|command.merge| bus
+    orchestrator -->|task.phase_changed, task.completed, task.failed, task.escalated, task.cancelled, task.resumed| bus
     bus --> plugins
     bus --> audit
     bus --> custom
@@ -84,6 +86,14 @@ flowchart LR
 | `merge.started` | `MERGE_STARTED` | `MergeResolverPlugin` | `chat_id` | Merge conflict resolution started |
 | `test.completed` | `TEST_COMPLETED` | `TestRunnerPlugin` | `chat_id`, `results` | Test workflow finished |
 | `merge.completed` | `MERGE_COMPLETED` | `MergeResolverPlugin` | `chat_id` | Merge resolution finished |
+| `session.completed` | `SESSION_COMPLETED` | `Engine` | `session`, `chat_id`, `user_id`, `response_content` | Agent session completed |
+| `task.submitted` | `TASK_SUBMITTED` | `Engine` | `user_id`, `chat_id`, `session_id`, `task`, `working_directory` | `/task` command submitted |
+| `task.phase_changed` | `TASK_PHASE_CHANGED` | `TaskOrchestrator` | `run_id`, `chat_id`, `phase`, `previous_phase` | Task transitioned to new phase |
+| `task.completed` | `TASK_COMPLETED` | `TaskOrchestrator` | `run_id`, `chat_id`, `total_cost` | Task finished successfully |
+| `task.failed` | `TASK_FAILED` | `TaskOrchestrator` | `run_id`, `chat_id`, `error` | Task failed with error |
+| `task.escalated` | `TASK_ESCALATED` | `TaskOrchestrator` | `run_id`, `chat_id`, `retry_count` | Task escalated — retries exhausted |
+| `task.cancelled` | `TASK_CANCELLED` | `TaskOrchestrator` | `run_id`, `chat_id` | Task cancelled by user |
+| `task.resumed` | `TASK_RESUMED` | `TaskOrchestrator` | `run_id`, `chat_id`, `phase` | Task resumed after daemon restart |
 
 ## Plugin Subscription Pattern
 

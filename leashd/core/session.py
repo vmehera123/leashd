@@ -26,11 +26,13 @@ class Session(BaseModel):
     last_used: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     total_cost: float = 0.0
     message_count: int = 0
-    mode: Literal["default", "plan", "auto", "test", "merge"] = "default"
+    mode: Literal["default", "plan", "auto", "test", "merge", "task"] = "default"
     mode_instruction: str | None = None
+    plan_origin: Literal["user", "auto", "task"] | None = None
     is_active: bool = True
     workspace_name: str | None = None
     workspace_directories: list[str] = Field(default_factory=list)
+    task_run_id: str | None = None
 
 
 class SessionManager:
@@ -131,6 +133,9 @@ class SessionManager:
         session.message_count = 0
         session.total_cost = 0.0
         session.mode = "default"
+        session.mode_instruction = None
+        session.plan_origin = None
+        session.task_run_id = None
         session.created_at = datetime.now(timezone.utc)
         session.last_used = datetime.now(timezone.utc)
         session.is_active = True
