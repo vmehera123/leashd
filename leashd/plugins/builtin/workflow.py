@@ -177,7 +177,7 @@ def resolve_step(step: PlaybookStep, browser_backend: str) -> PlaybookStep:
     if not step.backends or browser_backend not in step.backends:
         return step
     override = step.backends[browser_backend]
-    merged: dict[str, object] = {}
+    merged: dict[str, Any] = {}
     for field in _OVERRIDE_FIELDS:
         if field in override.model_fields_set:
             merged[field] = getattr(override, field)
@@ -237,9 +237,6 @@ def format_playbook_instruction(
             lines.append(f"  {phase.description}")
         for i, base_step in enumerate(phase.steps, 1):
             step = resolve_step(base_step, browser_backend)
-            has_override = (
-                base_step.backends is not None and browser_backend in base_step.backends
-            )
             desc = step.description
             if not step.verify:
                 desc += " (no verification needed)"
@@ -248,7 +245,8 @@ def format_playbook_instruction(
                 parts.append(f"     Target: {step.target}")
             if step.tool_hint:
                 if (
-                    has_override
+                    base_step.backends is not None
+                    and browser_backend in base_step.backends
                     and "tool_hint"
                     in base_step.backends[browser_backend].model_fields_set
                 ):

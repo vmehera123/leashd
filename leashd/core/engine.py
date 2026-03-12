@@ -1237,7 +1237,7 @@ class Engine:
                 },
             )
             await self.event_bus.emit(event)
-            error = event.data.get("error", "")
+            error: str = event.data.get("error", "")
             if error:
                 return error
             prompt = event.data.get("prompt", "")
