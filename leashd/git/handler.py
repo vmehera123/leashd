@@ -94,7 +94,9 @@ class GitCommandHandler:
             case "checkout":
                 if not sub_args:
                     return "Usage: /git checkout <branch-name>"
-                return await self._checkout(cwd, sub_args, chat_id, session, user_id)
+                return await self._checkout(
+                    cwd, sub_args.strip(), chat_id, session, user_id
+                )
             case "diff":
                 return await self._diff(cwd, sub_args)
             case "log":
@@ -114,7 +116,9 @@ class GitCommandHandler:
                     return await self._merge_abort(cwd, session, user_id)
                 if not sub_args:
                     return "Usage: /git merge <branch>"
-                return await self._merge(cwd, sub_args, chat_id, session, user_id)
+                return await self._merge(
+                    cwd, sub_args.strip(), chat_id, session, user_id
+                )
             case "push":
                 return await self._push_confirm(cwd, chat_id)
             case "pull":
@@ -150,6 +154,11 @@ class GitCommandHandler:
                     chat_id, formatter.format_result(result)
                 )
             case "add":
+                resolved = (cwd / payload).resolve()
+                path_valid, path_err = self._sandbox.validate_path(resolved)
+                if not path_valid:
+                    await self._connector.send_message(chat_id, f"\u274c {path_err}")
+                    return
                 result = await self._service.add(cwd, [payload])
                 self._log_audit(session, "add", payload, user_id)
                 await self._connector.send_message(
@@ -171,7 +180,8 @@ class GitCommandHandler:
                 await self._connector.send_message(chat_id, "Push cancelled.")
             case "status":
                 text = await self._status(cwd, chat_id)
-                await self._connector.send_message(chat_id, text)
+                if text:
+                    await self._connector.send_message(chat_id, text)
             case "diff":
                 text = await self._diff(cwd, "")
                 await self._connector.send_message(chat_id, text)
@@ -326,8 +336,10 @@ class GitCommandHandler:
         return _ALREADY_SENT
 
     async def _diff(self, cwd: Path, args: str) -> str:
-        staged = args.strip() == "--staged"
-        path = args.strip() if args and not staged else None
+        parts = args.strip().split()
+        staged = "--staged" in parts
+        remaining = [p for p in parts if p != "--staged"]
+        path = remaining[0] if remaining else None
         diff_text = await self._service.diff(cwd, staged=staged, path=path)
         return formatter.format_diff(diff_text)
 

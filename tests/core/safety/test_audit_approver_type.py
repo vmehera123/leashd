@@ -228,3 +228,40 @@ class TestAuditResilience:
         entries = audit_logger._path.read_text().strip().split("\n")
         entry = json.loads(entries[-1])
         assert "user_id" not in entry
+
+    def test_non_serializable_tool_input_handled(self, audit_logger):
+        """Non-serializable values (object, set) don't crash due to default=str."""
+        audit_logger.log_tool_attempt(
+            "sess-1",
+            "Write",
+            {"obj": object(), "set": {1, 2, 3}},
+            None,
+            PolicyDecision.ALLOW,
+        )
+        entries = audit_logger._path.read_text().strip().split("\n")
+        entry = json.loads(entries[-1])
+        assert entry["tool_name"] == "Write"
+        assert "obj" in entry["tool_input"]
+
+    def test_nested_dict_tool_input_preserved(self, audit_logger):
+        """Deeply nested dict structure preserved in JSONL."""
+        nested = {"level1": {"level2": {"level3": "deep_value"}}}
+        audit_logger.log_tool_attempt(
+            "sess-1", "Bash", nested, None, PolicyDecision.ALLOW
+        )
+        entries = audit_logger._path.read_text().strip().split("\n")
+        entry = json.loads(entries[-1])
+        assert entry["tool_input"]["level1"]["level2"]["level3"] == "deep_value"
+
+    def test_none_values_in_tool_input_handled(self, audit_logger):
+        """None values in tool_input don't crash."""
+        audit_logger.log_tool_attempt(
+            "sess-1",
+            "Bash",
+            {"command": None},
+            None,
+            PolicyDecision.ALLOW,
+        )
+        entries = audit_logger._path.read_text().strip().split("\n")
+        entry = json.loads(entries[-1])
+        assert entry["tool_input"]["command"] is None

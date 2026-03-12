@@ -310,3 +310,35 @@ class TestPathTraversalSensitivity:
         assert a.has_traversal
         assert a.is_credential
         assert a.sensitivity == "critical"
+
+
+class TestNestedCredentialPaths:
+    """Credential detection for paths nested inside subdirectories."""
+
+    def test_configs_dot_env(self):
+        a = analyze_path("configs/.env")
+        assert a.is_credential is True
+
+    def test_deploy_ssh_id_rsa(self):
+        a = analyze_path("deploy/.ssh/id_rsa")
+        assert a.is_credential is True
+
+    def test_subdir_aws_credentials(self):
+        a = analyze_path("subdir/.aws/credentials")
+        assert a.is_credential is True
+
+
+class TestEnvVariantFiles:
+    """Variant .env file names must all be detected as credentials."""
+
+    def test_env_test(self):
+        a = analyze_path(".env.test")
+        assert a.is_credential is True
+
+    def test_env_staging(self):
+        a = analyze_path(".env.staging")
+        assert a.is_credential is True
+
+    def test_env_development_local(self):
+        a = analyze_path(".env.development.local")
+        assert a.is_credential is True

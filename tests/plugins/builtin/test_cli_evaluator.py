@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from leashd.plugins.builtin._cli_evaluator import (
     PhaseDecision,
     evaluate_phase_outcome,
+    sanitize_for_prompt,
 )
 
 
@@ -111,3 +112,29 @@ class TestPhaseDecision:
         d = PhaseDecision(action="advance")
         assert d.reason == ""
         assert d.method == "evaluator"
+
+
+class TestSanitizeEdgeCases:
+    """Validates CONTROL_CHAR_RE regex against security-relevant character classes."""
+
+    def test_rtl_override_sequences_stripped(self):
+        assert sanitize_for_prompt("safe\u202dtext\u202c") == "safetext"
+
+    def test_zero_width_joiner_stripped(self):
+        result = sanitize_for_prompt("a\u200cb\u200dc")
+        assert result == "abc"
+
+    def test_null_byte_in_middle_stripped(self):
+        assert sanitize_for_prompt("app\x00rove") == "approve"
+
+    def test_line_paragraph_separators_stripped(self):
+        assert sanitize_for_prompt("line\u2028break\u2029end") == "linebreakend"
+
+    def test_c1_control_chars_stripped(self):
+        text = "".join(chr(c) for c in range(0x80, 0xA0))
+        assert sanitize_for_prompt(text) == ""
+
+    def test_mixed_dangerous_chars_comprehensive(self):
+        dangerous = "ok\x00\u200b\u202a\u2028\x80\ufefftext"
+        result = sanitize_for_prompt(dangerous)
+        assert result == "oktext"

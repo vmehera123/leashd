@@ -833,7 +833,7 @@ class TestSessionPersistenceOnDirSwitch:
         # One of the saves should be from _exit_plan_mode with cleared session
         exit_saves = [s for s in save_snapshots if s["claude_session_id"] is None]
         assert len(exit_saves) >= 1
-        assert exit_saves[0]["mode"] == "auto"
+        assert exit_saves[0]["mode"] == "edit"
 
     @pytest.mark.asyncio
     async def test_dir_switch_persists_to_sqlite(

@@ -20,6 +20,11 @@ leashd is controlled entirely from the command line. The `leashd` command manage
 | `leashd ws remove <name> [dir...]` | Remove a workspace, or specific directories from it |
 | `leashd ws show <name>` | Show workspace details |
 | `leashd ws list` | List all workspaces |
+| `leashd browser show` | Show browser settings (backend, headless, profile) |
+| `leashd browser set-backend <backend>` | Switch backend: `playwright` or `agent-browser` |
+| `leashd browser headless [on\|off]` | Show or toggle headless mode |
+| `leashd browser set-profile <path>` | Set browser profile directory for `/web` |
+| `leashd browser clear-profile` | Clear browser profile (use temporary) |
 | `leashd clean` | Remove all runtime artifacts |
 | `leashd version` | Show version |
 
@@ -44,10 +49,58 @@ Interactive first-time setup that prompts for:
 1. **Approved directory** — defaults to current working directory
 2. **Telegram bot token** — optional; without it, leashd runs in CLI REPL mode
 3. **Telegram user ID** — restricts the bot to your account only
+4. **Autonomous mode** — optional setup for AI approval, task orchestrator, and autonomous loop
+5. **Browser profile** — optional path for persistent browser sessions in `/web`
 
 Writes configuration to `~/.leashd/config.yaml`. Run again to reconfigure.
 
 **Source:** `setup.py`
+
+## Browser Configuration
+
+Manage browser backend, headless mode, and profile for `/web` and `/test` sessions.
+
+### Viewing Settings
+
+```bash
+leashd browser show
+```
+
+Displays backend, headless mode, and profile path.
+
+### Switching Backend
+
+```bash
+leashd browser set-backend playwright       # Playwright MCP (default)
+leashd browser set-backend agent-browser    # agent-browser CLI
+```
+
+- **`playwright`** — uses Playwright MCP server via `.mcp.json`. Provides 28 browser tools through the Claude Agent SDK. This is the default.
+- **`agent-browser`** — uses the agent-browser CLI skill instead. Installs the skill automatically on switch; Playwright MCP is disabled.
+
+### Headless Mode
+
+```bash
+leashd browser headless          # show current setting
+leashd browser headless on       # headless (no visible window)
+leashd browser headless off      # headed (visible window, default)
+```
+
+Toggles the `--headless` flag injected into Playwright MCP args at runtime. Useful for CI environments or remote sessions where no display is available. Some UI interactions (file picker dialogs, OS-level notifications) don't work in headless mode.
+
+Only applies to the `playwright` backend.
+
+### Browser Profile
+
+```bash
+leashd browser set-profile ~/.leashd/browser-profile   # dedicated profile
+leashd browser set-profile ~/Library/Application\ Support/Google/Chrome/  # reuse Chrome profile
+leashd browser clear-profile    # revert to temporary profiles
+```
+
+Sets `LEASHD_BROWSER_USER_DATA_DIR` in `~/.leashd/config.yaml`. The directory is created automatically on first use. When set, `/web` sessions retain cookies, logins, and local storage across invocations. `/test` always uses a temporary profile for isolation.
+
+**Source:** `cli.py`
 
 ## Daemon Lifecycle
 

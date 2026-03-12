@@ -53,6 +53,7 @@ _MAX_RETRIES = 3
 _MAX_BACKOFF_SECONDS: float = 16
 _MAX_BUFFER_SIZE = 10 * 1024 * 1024  # 10 MB
 _ERROR_TRUNCATION_LENGTH = 200
+_STDERR_MAX_LINES = 50
 
 _RETRYABLE_PATTERNS = (
     "api_error",
@@ -141,8 +142,10 @@ _PermissionMode = Literal["default", "acceptEdits", "plan", "bypassPermissions"]
 
 _SESSION_TO_PERMISSION_MODE: dict[str, _PermissionMode] = {
     "auto": "acceptEdits",
+    "edit": "acceptEdits",
     "test": "acceptEdits",
     "task": "acceptEdits",
+    "web": "acceptEdits",
     "plan": "plan",
     "default": "default",
 }
@@ -188,11 +191,29 @@ def _describe_tool(name: str, tool_input: dict[str, Any]) -> str:
         return "Entering plan mode"
     if name == "AskUserQuestion":
         return "Asking a question"
+    if name == "Skill":
+        return str(tool_input.get("skill", ""))
     # Unknown tool — show first string value
     for v in tool_input.values():
         if isinstance(v, str) and v:
             return _truncate(v)
     return ""
+
+
+class _StderrBuffer:
+    def __init__(self, max_lines: int = _STDERR_MAX_LINES) -> None:
+        self._lines: list[str] = []
+        self._max_lines = max_lines
+
+    def __call__(self, line: str) -> None:
+        if len(self._lines) < self._max_lines:
+            self._lines.append(line)
+
+    def get(self) -> str:
+        return "\n".join(self._lines)
+
+    def clear(self) -> None:
+        self._lines.clear()
 
 
 class _SafeSDKClient(ClaudeSDKClient):
@@ -219,6 +240,10 @@ class ClaudeCodeAgent(BaseAgent):
     def __init__(self, config: LeashdConfig) -> None:
         self._config = config
         self._active_clients: dict[str, ClaudeSDKClient] = {}
+        self._stderr_buffers: dict[str, _StderrBuffer] = {}
+
+    def update_config(self, config: LeashdConfig) -> None:
+        self._config = config
 
     async def execute(
         self,
@@ -262,10 +287,19 @@ class ClaudeCodeAgent(BaseAgent):
                 )
             return response
         except Exception as e:
+            stderr_buf = self._stderr_buffers.get(session.session_id)
+            stderr_content = (
+                stderr_buf.get()[:_ERROR_TRUNCATION_LENGTH] if stderr_buf else None
+            )
             logger.error(
-                "agent_execute_failed", error=str(e), session=session.session_id
+                "agent_execute_failed",
+                error=str(e),
+                session=session.session_id,
+                stderr=stderr_content or None,
             )
             raise AgentError(_friendly_error(str(e))) from e
+        finally:
+            self._stderr_buffers.pop(session.session_id, None)
 
     def _build_options(
         self,
@@ -274,16 +308,17 @@ class ClaudeCodeAgent(BaseAgent):
     ) -> ClaudeAgentOptions:
         opts = ClaudeAgentOptions(
             cwd=session.working_directory,
-            max_turns=self._config.max_turns,
+            max_turns=self._config.effective_max_turns(session.mode),
             can_use_tool=can_use_tool,
             permission_mode=_SESSION_TO_PERMISSION_MODE.get(session.mode, "default"),
-            setting_sources=["project"],
+            setting_sources=["project", "user"],
             max_buffer_size=_MAX_BUFFER_SIZE,
         )
+        opts.effort = self._config.effort
         system_prompt = self._config.system_prompt or ""
         if session.mode == "plan":
             system_prompt = _prepend_instruction(_PLAN_MODE_INSTRUCTION, system_prompt)
-        elif session.mode == "auto":
+        elif session.mode in ("auto", "edit"):
             system_prompt = _prepend_instruction(_AUTO_MODE_INSTRUCTION, system_prompt)
         elif session.mode_instruction:
             system_prompt = _prepend_instruction(
@@ -304,22 +339,79 @@ class ClaudeCodeAgent(BaseAgent):
         if system_prompt:
             opts.system_prompt = system_prompt
         if self._config.allowed_tools:
-            opts.allowed_tools = self._config.allowed_tools
+            opts.allowed_tools = list(self._config.allowed_tools)
+            from leashd.skills import has_installed_skills
+
+            if has_installed_skills() and "Skill" not in opts.allowed_tools:
+                opts.allowed_tools.append("Skill")
         if self._config.disallowed_tools:
             opts.disallowed_tools = self._config.disallowed_tools
+        # Block playwright MCP tools when using agent-browser backend — the SDK's
+        # setting_sources=["project"] auto-discovers .mcp.json and mounts playwright
+        # regardless of opts.mcp_servers stripping.
+        if self._config.browser_backend == "agent-browser":
+            from leashd.plugins.builtin.browser_tools import ALL_BROWSER_TOOLS
+
+            pw_tools = [f"mcp__playwright__{t}" for t in ALL_BROWSER_TOOLS]
+            opts.disallowed_tools = list(
+                set(opts.disallowed_tools or []) | set(pw_tools)
+            )
+            if not self._config.browser_headless:
+                opts.env["AGENT_BROWSER_HEADED"] = "1"
+            if (
+                session.mode == "web"
+                and not session.browser_fresh
+                and self._config.browser_user_data_dir
+            ):
+                resolved = str(Path(self._config.browser_user_data_dir).expanduser())
+                opts.env["AGENT_BROWSER_PROFILE"] = resolved
+                logger.info(
+                    "agent_browser_profile_injected",
+                    session_id=session.session_id,
+                    profile=resolved,
+                )
         if session.claude_session_id:
             opts.resume = session.claude_session_id
 
         local_servers = self._read_local_mcp_servers(session.working_directory)
         leashd_servers = self._config.mcp_servers
         if local_servers or leashd_servers:
-            opts.mcp_servers = {**local_servers, **leashd_servers}
+            merged = {**local_servers, **leashd_servers}
+            if self._config.browser_backend == "agent-browser":
+                merged.pop("playwright", None)
+            opts.mcp_servers = merged
             logger.info(
                 "agent_mcp_servers",
                 session_id=session.session_id,
                 server_names=list(opts.mcp_servers.keys()),
                 cwd=session.working_directory,
             )
+
+        servers: Any = opts.mcp_servers
+        if isinstance(servers, dict) and "playwright" in servers:
+            pw = dict(servers["playwright"])
+            args_list = list(pw.get("args", []))
+
+            output_dir = str(
+                Path(session.working_directory) / ".leashd" / ".playwright"
+            )
+            args_list.extend(["--output-dir", output_dir])
+
+            if (
+                session.mode == "web"
+                and not session.browser_fresh
+                and self._config.browser_user_data_dir
+            ):
+                resolved = str(Path(self._config.browser_user_data_dir).expanduser())
+                args_list.extend(["--user-data-dir", resolved])
+                logger.info(
+                    "browser_profile_injected",
+                    session_id=session.session_id,
+                    user_data_dir=resolved,
+                )
+
+            pw["args"] = args_list
+            opts.mcp_servers = {**servers, "playwright": pw}  # type: ignore[dict-item]
 
         return opts
 
@@ -377,9 +469,14 @@ class ClaudeCodeAgent(BaseAgent):
         on_tool_activity: Callable[[ToolActivity | None], Coroutine[Any, Any, None]]
         | None = None,
     ) -> AgentResponse:
+        stderr_buf = _StderrBuffer()
+        self._stderr_buffers[session.session_id] = stderr_buf
+        options.stderr = stderr_buf
+
         last_error: AgentResponse | None = None
         for _attempt in range(_MAX_RETRIES):
             start = time.monotonic()
+            stderr_buf.clear()
             tools_used: list[str] = []
             text_parts: list[str] = []
 
@@ -470,6 +567,7 @@ class ClaudeCodeAgent(BaseAgent):
                         "resume_failed_retry_fresh",
                         session_id=session.session_id,
                         error_preview=str(exc)[:_ERROR_TRUNCATION_LENGTH],
+                        stderr=stderr_buf.get()[:_ERROR_TRUNCATION_LENGTH] or None,
                     )
                     options.resume = None
                     session.claude_session_id = None
@@ -480,6 +578,7 @@ class ClaudeCodeAgent(BaseAgent):
                         "retryable_stream_error",
                         session_id=session.session_id,
                         error_preview=str(exc)[:_ERROR_TRUNCATION_LENGTH],
+                        stderr=stderr_buf.get()[:_ERROR_TRUNCATION_LENGTH] or None,
                         attempt=_attempt + 1,
                     )
                     last_error = AgentResponse(
@@ -510,3 +609,4 @@ class ClaudeCodeAgent(BaseAgent):
             with contextlib.suppress(Exception):
                 await client.disconnect()
         self._active_clients.clear()
+        self._stderr_buffers.clear()

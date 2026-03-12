@@ -34,6 +34,9 @@ _LEASHD_GITIGNORE = """\
 !.gitignore
 !test.yaml
 !test.yml
+!workflows/
+!workflows/*.yaml
+!workflows/*.yml
 """
 
 
@@ -60,11 +63,14 @@ class LeashdConfig(BaseSettings):
 
     # Agent settings
     max_turns: int = 150
+    web_max_turns: int = 300
+    test_max_turns: int = 200
     agent_timeout_seconds: int = 3600  # 60 minutes
     system_prompt: str | None = None
     allowed_tools: list[str] = []
     disallowed_tools: list[str] = []
     mcp_servers: dict[str, Any] = {}
+    effort: Literal["low", "medium", "high", "max"] | None = "medium"
 
     # Safety settings
     policy_files: list[Path] = []
@@ -88,6 +94,11 @@ class LeashdConfig(BaseSettings):
 
     # Agent mode
     default_mode: Literal["default", "plan", "auto"] = "default"
+
+    # Browser
+    browser_backend: Literal["playwright", "agent-browser"] = "playwright"
+    browser_user_data_dir: str | None = None
+    browser_headless: bool = False
 
     # Autonomous mode
     auto_approver: bool = False
@@ -161,3 +172,8 @@ class LeashdConfig(BaseSettings):
         if isinstance(v, str):
             return [Path(p.strip()) for p in v.split(",") if p.strip()]
         return v
+
+    def effective_max_turns(self, mode: str) -> int:
+        """Return the turn limit for the given session mode."""
+        limits = {"web": self.web_max_turns, "test": self.test_max_turns}
+        return limits.get(mode, self.max_turns)

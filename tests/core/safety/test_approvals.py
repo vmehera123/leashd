@@ -653,3 +653,92 @@ class TestRejectWithReason:
         )
         assert "Bash::uv run" in desc
         assert "Command: uv run pytest" in desc
+
+    @pytest.mark.asyncio
+    async def test_format_description_with_ai_denial_reason(
+        self, approval_coordinator, classification
+    ):
+        desc = approval_coordinator._format_description(
+            "Bash",
+            {"command": "npm ci"},
+            classification,
+            ai_denial_reason="npm ci modifies node_modules without lockfile check",
+        )
+        assert "\u26a0\ufe0f AI reviewer denied:" in desc
+        assert "npm ci modifies node_modules" in desc
+
+    @pytest.mark.asyncio
+    async def test_format_description_without_ai_denial_reason(
+        self, approval_coordinator, classification
+    ):
+        desc = approval_coordinator._format_description(
+            "Bash",
+            {"command": "npm ci"},
+            classification,
+            ai_denial_reason=None,
+        )
+        assert "AI reviewer denied" not in desc
+
+
+class TestApprovalCancellationExtended:
+    @pytest.mark.asyncio
+    async def test_concurrent_cancel_and_resolve_no_crash(
+        self, approval_coordinator, mock_connector, classification
+    ):
+        import asyncio
+
+        async def cancel_and_resolve():
+            await asyncio.sleep(0.05)
+            cancel_task = approval_coordinator.cancel_pending("chat1")
+            req = mock_connector.approval_requests[0]
+            resolve_task = approval_coordinator.resolve_approval(
+                req["approval_id"], True
+            )
+            await asyncio.gather(cancel_task, resolve_task)
+
+        task = asyncio.create_task(cancel_and_resolve())
+        result = await approval_coordinator.request_approval(
+            chat_id="chat1",
+            tool_name="Write",
+            tool_input={"file_path": "/a.py"},
+            classification=classification,
+            timeout=5,
+        )
+        await task
+        assert isinstance(result.approved, bool)
+
+    @pytest.mark.asyncio
+    async def test_cancel_during_multiple_chats_only_affects_target(
+        self, approval_coordinator, mock_connector, classification
+    ):
+        import asyncio
+
+        async def cancel_chat1_resolve_chat2():
+            await asyncio.sleep(0.05)
+            await approval_coordinator.cancel_pending("chat1")
+            for req in mock_connector.approval_requests:
+                if req["chat_id"] == "chat2":
+                    await approval_coordinator.resolve_approval(
+                        req["approval_id"], True
+                    )
+
+        task = asyncio.create_task(cancel_chat1_resolve_chat2())
+        r1, r2 = await asyncio.gather(
+            approval_coordinator.request_approval(
+                chat_id="chat1",
+                tool_name="Write",
+                tool_input={"file_path": "/a.py"},
+                classification=classification,
+                timeout=5,
+            ),
+            approval_coordinator.request_approval(
+                chat_id="chat2",
+                tool_name="Edit",
+                tool_input={"file_path": "/b.py"},
+                classification=classification,
+                timeout=5,
+            ),
+        )
+        await task
+        assert r1.approved is False
+        assert r2.approved is True

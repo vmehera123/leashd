@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import os
+import signal
 import time
 import uuid
 from pathlib import Path
@@ -16,6 +19,7 @@ from leashd.connectors.base import InlineButton
 from leashd.core.config import build_directory_names, ensure_leashd_dir
 from leashd.core.events import (
     COMMAND_TEST,
+    COMMAND_WEB,
     CONFIG_RELOADED,
     ENGINE_STARTED,
     ENGINE_STOPPED,
@@ -58,10 +62,45 @@ _MAX_STREAMING_DISPLAY = 4000
 _TRANSIENT_MESSAGE_DELAY = 5.0  # seconds before auto-deleting status messages (longer than connector's 4.0s approval cleanup)
 
 
+class AgentDeadline:
+    """Mutable deadline that pauses during user interactions and can be reset."""
+
+    __slots__ = ("_deadline", "_paused_remaining", "_timeout")
+
+    def __init__(self, timeout: float) -> None:
+        self._timeout = timeout
+        self._deadline = time.monotonic() + timeout
+        self._paused_remaining: float | None = None
+
+    def pause(self) -> None:
+        if self._paused_remaining is None:
+            self._paused_remaining = max(0.0, self._deadline - time.monotonic())
+
+    def resume(self) -> None:
+        if self._paused_remaining is not None:
+            self._deadline = time.monotonic() + self._paused_remaining
+            self._paused_remaining = None
+
+    def reset(self) -> None:
+        self._deadline = time.monotonic() + self._timeout
+        self._paused_remaining = None
+
+    @property
+    def remaining(self) -> float:
+        if self._paused_remaining is not None:
+            return self._paused_remaining
+        return max(0.0, self._deadline - time.monotonic())
+
+    @property
+    def expired(self) -> bool:
+        return self.remaining <= 0
+
+
 class _ToolCallbackState:
     __slots__ = (
         "_bg_tasks",
         "clean_proceed",
+        "plan_adjustment_feedback",
         "plan_approved",
         "plan_file_content",
         "plan_file_path",
@@ -73,6 +112,7 @@ class _ToolCallbackState:
     def __init__(self) -> None:
         self._bg_tasks: set[asyncio.Task[None]] = set()
         self.clean_proceed = False
+        self.plan_adjustment_feedback: str | None = None
         self.plan_approved = False
         self.plan_review_shown = False
         self.proceed_in_context = False
@@ -424,6 +464,40 @@ class Engine:
             await self._store.teardown()
         await self.agent.shutdown()
 
+    async def _shutdown_browser(self, session: Session) -> None:
+        if session.mode != "web":
+            return
+        backend = session.browser_backend or self.config.browser_backend
+        try:
+            if backend == "agent-browser":
+                proc = await asyncio.create_subprocess_exec(
+                    "agent-browser",
+                    "close",
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            else:
+                await self._kill_playwright_mcp()
+        except Exception:
+            logger.debug("browser_shutdown_failed", exc_info=True)
+
+    async def _kill_playwright_mcp(self) -> None:
+        proc = await asyncio.create_subprocess_exec(
+            "pgrep",
+            "-f",
+            "@playwright/mcp",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await proc.communicate()
+        if not stdout:
+            return
+        for line in stdout.decode().strip().splitlines():
+            pid = int(line.strip())
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGTERM)
+
     async def reload_config(self) -> None:
         """Re-read config from disk and rebuild caches.
 
@@ -448,7 +522,13 @@ class Engine:
                 for d in ws.directories:
                     self.sandbox.add_directory(d)
             self.config = new_config
-            await self.event_bus.emit(Event(name=CONFIG_RELOADED))
+            self.agent.update_config(new_config)
+            await self.event_bus.emit(
+                Event(
+                    name=CONFIG_RELOADED,
+                    data={"browser_backend": new_config.browser_backend},
+                )
+            )
             logger.info(
                 "config_reloaded",
                 directories=len(new_config.approved_directories),
@@ -457,7 +537,12 @@ class Engine:
         except Exception:
             logger.exception("config_reload_failed")
 
-    async def handle_message(self, user_id: str, text: str, chat_id: str) -> str:
+    async def handle_message(
+        self,
+        user_id: str,
+        text: str,
+        chat_id: str,
+    ) -> str:
         if self.approval_coordinator and self.approval_coordinator.has_pending(chat_id):
             resolved = await self.approval_coordinator.reject_with_reason(chat_id, text)
             if resolved:
@@ -629,6 +714,7 @@ class Engine:
             self.config.auto_plan
             and session.mode == "auto"
             and session.claude_session_id is None
+            and session.plan_origin is None
             and not _skip_auto_plan
         ):
             session.mode = "plan"
@@ -652,14 +738,21 @@ class Engine:
             on_text_chunk = responder.on_chunk
             on_tool_activity = responder.on_activity
 
+        deadline = AgentDeadline(self.config.agent_timeout_seconds)
         can_use_tool, tool_state = self._build_can_use_tool(
-            session, chat_id, responder, task_description=text
+            session, chat_id, responder, task_description=text, deadline=deadline
         )
         pre_exec_claude_id = session.claude_session_id
 
         try:
             response = await self._execute_agent_with_timeout(
-                text, session, can_use_tool, on_text_chunk, on_tool_activity, chat_id
+                text,
+                session,
+                can_use_tool,
+                on_text_chunk,
+                on_tool_activity,
+                chat_id,
+                deadline=deadline,
             )
 
             if response.is_error and self._is_retryable_response(response):
@@ -675,6 +768,7 @@ class Engine:
                 await asyncio.sleep(delay)
                 if responder:
                     responder.reset()
+                deadline.reset()
                 response = await self._execute_agent_with_timeout(
                     text,
                     session,
@@ -682,6 +776,7 @@ class Engine:
                     on_text_chunk,
                     on_tool_activity,
                     chat_id,
+                    deadline=deadline,
                 )
 
             # Check interrupt BEFORE persisting session — /clear may have
@@ -711,6 +806,15 @@ class Engine:
                     )
                 )
                 return ""
+
+            if tool_state.plan_adjustment_feedback:
+                logger.info("plan_adjustment_restart", chat_id=chat_id)
+                return await self._execute_turn(
+                    user_id,
+                    tool_state.plan_adjustment_feedback,
+                    chat_id,
+                    _skip_auto_plan=True,
+                )
 
             await self.session_manager.update_from_result(
                 session,
@@ -769,20 +873,25 @@ class Engine:
                 )
             )
 
-            if response.num_turns >= self.config.max_turns and self.connector:
+            effective_limit = self.config.effective_max_turns(session.mode)
+            if response.num_turns >= effective_limit and self.connector:
+                env_hint = {
+                    "web": "LEASHD_WEB_MAX_TURNS",
+                    "test": "LEASHD_TEST_MAX_TURNS",
+                }.get(session.mode, "LEASHD_MAX_TURNS")
                 await self.connector.send_message(
                     chat_id,
-                    f"\u26a0\ufe0f Agent reached the turn limit ({self.config.max_turns} turns). "
+                    f"\u26a0\ufe0f Agent reached the turn limit ({effective_limit} turns). "
                     "The task may be incomplete.\n\n"
                     "\u2022 Send a message to continue where it left off\n"
                     "\u2022 /clear to start fresh\n"
-                    "\u2022 Set LEASHD_MAX_TURNS to increase the limit",
+                    f"\u2022 Set {env_hint} to increase the limit",
                 )
                 logger.warning(
                     "turn_limit_reached",
                     chat_id=chat_id,
                     num_turns=response.num_turns,
-                    max_turns=self.config.max_turns,
+                    max_turns=effective_limit,
                 )
 
             if tool_state.clean_proceed or tool_state.proceed_in_context:
@@ -854,6 +963,14 @@ class Engine:
                 if responder:
                     await responder.deactivate()
                 return ""
+            if tool_state.plan_adjustment_feedback:
+                logger.info("plan_adjustment_restart", chat_id=chat_id)
+                return await self._execute_turn(
+                    user_id,
+                    tool_state.plan_adjustment_feedback,
+                    chat_id,
+                    _skip_auto_plan=True,
+                )
             if tool_state.clean_proceed or tool_state.proceed_in_context:
                 plan = self._resolve_plan_content(
                     tool_state, "", session.working_directory
@@ -905,20 +1022,33 @@ class Engine:
         on_text_chunk: Any,
         on_tool_activity: Any,
         chat_id: str,
+        deadline: AgentDeadline | None = None,
     ) -> AgentResponse:
         pre_exec_claude_id = session.claude_session_id
-        try:
-            return await asyncio.wait_for(
-                self.agent.execute(
-                    prompt=text,
-                    session=session,
-                    can_use_tool=can_use_tool,
-                    on_text_chunk=on_text_chunk,
-                    on_tool_activity=on_tool_activity,
-                ),
-                timeout=self.config.agent_timeout_seconds,
+        if deadline is None:
+            deadline = AgentDeadline(self.config.agent_timeout_seconds)
+        agent_task = asyncio.create_task(
+            self.agent.execute(
+                prompt=text,
+                session=session,
+                can_use_tool=can_use_tool,
+                on_text_chunk=on_text_chunk,
+                on_tool_activity=on_tool_activity,
             )
+        )
+        try:
+            while not agent_task.done():
+                remaining = deadline.remaining
+                if remaining <= 0:
+                    raise TimeoutError
+                done, _ = await asyncio.wait({agent_task}, timeout=remaining)
+                if done:
+                    break
+            return agent_task.result()
         except TimeoutError:
+            agent_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await agent_task
             logger.error(
                 "agent_execution_timeout",
                 chat_id=chat_id,
@@ -1090,6 +1220,34 @@ class Engine:
                 await self.handle_message(user_id, prompt, chat_id)
             return ""
 
+        if command == "web":
+            if not args.strip():
+                return (
+                    "Usage: /web <recipe> --topic <topic> [--resume] or /web <description>\n"
+                    "Recipes: linkedin_comment"
+                )
+            event = Event(
+                name=COMMAND_WEB,
+                data={
+                    "session": session,
+                    "chat_id": chat_id,
+                    "args": args,
+                    "gatekeeper": self._gatekeeper,
+                    "prompt": "",
+                },
+            )
+            await self.event_bus.emit(event)
+            error = event.data.get("error", "")
+            if error:
+                return error
+            prompt = event.data.get("prompt", "")
+            if prompt:
+                await self._send_transient(
+                    chat_id, "🌐 Web mode activated. Starting browser automation..."
+                )
+                await self.handle_message(user_id, prompt, chat_id)
+            return ""
+
         if command == "task":
             task_text = args.strip()
             if not task_text:
@@ -1150,6 +1308,7 @@ class Engine:
                 mid = self._interrupt_message_ids.pop(chat_id, None)
                 if mid and self.connector:
                     await self.connector.delete_message(chat_id, mid)
+            await self._shutdown_browser(session)
             logger.info("all_work_stopped", user_id=user_id, chat_id=chat_id)
             return "All work stopped."
 
@@ -1158,7 +1317,8 @@ class Engine:
 
         if command == "edit":
             old_mode = session.mode
-            session.mode = "auto"
+            session.mode = "edit"
+            session.plan_origin = "edit"
             self._gatekeeper.enable_tool_auto_approve(chat_id, "Write")
             self._gatekeeper.enable_tool_auto_approve(chat_id, "Edit")
             self._gatekeeper.enable_tool_auto_approve(chat_id, "NotebookEdit")
@@ -1167,7 +1327,7 @@ class Engine:
                 user_id=user_id,
                 chat_id=chat_id,
                 from_mode=old_mode,
-                to_mode="auto",
+                to_mode="edit",
             )
             if args.strip():
                 await self._send_transient(
@@ -1182,8 +1342,11 @@ class Engine:
 
         if command == "default":
             old_mode = session.mode
+            if old_mode == "web":
+                await self._shutdown_browser(session)
             session.mode = "default"
             session.mode_instruction = None
+            session.plan_origin = None
             self._gatekeeper.disable_auto_approve(chat_id)
             logger.info(
                 "mode_switched",
@@ -1221,6 +1384,7 @@ class Engine:
                 mid = self._interrupt_message_ids.pop(chat_id, None)
                 if mid and self.connector:
                     await self.connector.delete_message(chat_id, mid)
+            await self._shutdown_browser(session)
             await self.session_manager.reset(user_id, chat_id)
             self._gatekeeper.disable_auto_approve(chat_id)
             self._pending_messages.pop(chat_id, None)
@@ -1228,7 +1392,7 @@ class Engine:
             return "Session cleared. Next message starts a fresh conversation."
 
         if command == "status":
-            mode = "accept edits" if session.mode == "auto" else session.mode
+            mode = "accept edits" if session.mode in ("auto", "edit") else session.mode
             cost = f"${session.total_cost:.4f}"
             blanket, per_tool = self._gatekeeper.get_auto_approve_status(chat_id)
             if blanket:
@@ -1618,7 +1782,7 @@ class Engine:
         logger.info("plan_mode_exit", chat_id=chat_id, trigger=trigger)
         if clear_context:
             session.claude_session_id = None
-        session.mode = "auto" if target_mode == "edit" else "default"
+        session.mode = "edit" if target_mode == "edit" else "default"
         session.plan_origin = None
         await self.session_manager.save(session)
         if target_mode == "edit":
@@ -1647,6 +1811,7 @@ class Engine:
         chat_id: str,
         responder: _StreamingResponder | None = None,
         task_description: str = "",
+        deadline: AgentDeadline | None = None,
     ) -> tuple[Any, _ToolCallbackState]:
         state = _ToolCallbackState()
 
@@ -1656,9 +1821,15 @@ class Engine:
             _context: Any,
         ) -> Any:
             if self.interaction_coordinator and tool_name == "AskUserQuestion":
-                return await self.interaction_coordinator.handle_question(
-                    chat_id, tool_input
-                )
+                if deadline:
+                    deadline.pause()
+                try:
+                    return await self.interaction_coordinator.handle_question(
+                        chat_id, tool_input
+                    )
+                finally:
+                    if deadline:
+                        deadline.resume()
 
             if tool_name in ("Write", "Edit"):
                 file_path = tool_input.get("file_path", "")
@@ -1724,22 +1895,30 @@ class Engine:
                     has_cached_content=state.plan_file_content is not None,
                     has_streaming_buffer=bool(responder and responder.buffer.strip()),
                 )
-                if (
-                    self.config.auto_plan
-                    and self.interaction_coordinator._auto_plan_reviewer
-                    and session.plan_origin != "user"
-                ):
-                    result = await self.interaction_coordinator.handle_plan_review_auto(
-                        chat_id,
-                        tool_input,
-                        plan_content=plan_content or "",
-                        task_description=task_description,
-                        session_id=session.session_id,
-                    )
-                else:
-                    result = await self.interaction_coordinator.handle_plan_review(
-                        chat_id, tool_input, plan_content=plan_content
-                    )
+                if deadline:
+                    deadline.pause()
+                try:
+                    if (
+                        self.config.auto_plan
+                        and self.interaction_coordinator._auto_plan_reviewer
+                        and session.plan_origin != "user"
+                    ):
+                        result = (
+                            await self.interaction_coordinator.handle_plan_review_auto(
+                                chat_id,
+                                tool_input,
+                                plan_content=plan_content or "",
+                                task_description=task_description,
+                                session_id=session.session_id,
+                            )
+                        )
+                    else:
+                        result = await self.interaction_coordinator.handle_plan_review(
+                            chat_id, tool_input, plan_content=plan_content
+                        )
+                finally:
+                    if deadline:
+                        deadline.reset()
                 if isinstance(result, PlanReviewDecision):
                     state.plan_approved = True
                     state.target_mode = result.target_mode
@@ -1768,21 +1947,45 @@ class Engine:
                     state._bg_tasks.add(t)
                     t.add_done_callback(state._bg_tasks.discard)
                     return result.permission
+
+                state.plan_adjustment_feedback = result.message
+                if responder:
+                    await responder.deactivate()
+
+                async def _cancel_agent_adjust() -> None:
+                    try:
+                        await asyncio.sleep(0.1)
+                        await self.agent.cancel(session.session_id)
+                    except Exception:
+                        logger.debug(
+                            "cancel_agent_failed",
+                            session_id=session.session_id,
+                        )
+
+                t = asyncio.create_task(_cancel_agent_adjust())
+                state._bg_tasks.add(t)
+                t.add_done_callback(state._bg_tasks.discard)
                 return result
 
-            if tool_name == "EnterPlanMode" and session.mode == "auto":
+            if tool_name == "EnterPlanMode" and session.mode in ("auto", "edit"):
                 return PermissionResultDeny(
                     message="You are in accept-edits mode. Implement changes directly "
                     "— do not enter plan mode."
                 )
 
-            return await self._gatekeeper.check(
-                tool_name,
-                tool_input,
-                session.session_id,
-                chat_id,
-                task_description=task_description,
-                session_mode=session.mode,
-            )
+            if deadline:
+                deadline.pause()
+            try:
+                return await self._gatekeeper.check(
+                    tool_name,
+                    tool_input,
+                    session.session_id,
+                    chat_id,
+                    task_description=task_description,
+                    session_mode=session.mode,
+                )
+            finally:
+                if deadline:
+                    deadline.resume()
 
         return can_use_tool, state

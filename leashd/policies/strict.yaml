@@ -26,7 +26,7 @@ rules:
 
   # Allow rules
   - name: agent-internal-tools
-    tools: [AskUserQuestion, ExitPlanMode, Task, TaskCreate, TaskUpdate, TaskList, TaskGet, TodoWrite, EnterPlanMode]
+    tools: [AskUserQuestion, ExitPlanMode, Task, TaskCreate, TaskUpdate, TaskList, TaskGet, TodoWrite, EnterPlanMode, Skill]
     action: allow
 
   - name: read-only-tools
@@ -67,6 +67,12 @@ rules:
     tools: [browser_navigate, browser_navigate_back, browser_navigate_forward, browser_snapshot, browser_take_screenshot, browser_console_messages, browser_network_requests, browser_click, browser_type, browser_hover, browser_drag, browser_press_key, browser_select_option, browser_file_upload, browser_handle_dialog, browser_fill_form, browser_evaluate, browser_tabs, browser_tab_list, browser_tab_new, browser_tab_select, browser_tab_close, browser_resize, browser_wait_for, browser_pdf_save, browser_close, browser_install, browser_generate_playwright_test]
     action: require_approval
     description: "Browser access (strict mode)"
+
+  - name: agent-browser-all
+    tool: Bash
+    command_patterns: ["^agent-browser\\b"]
+    action: require_approval
+    description: "Agent-browser access (strict mode)"
 
 settings:
   default_action: require_approval

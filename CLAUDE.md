@@ -61,6 +61,15 @@ leashd autonomous enable   # enable autonomous mode
 leashd autonomous disable  # disable autonomous mode
 leashd autonomous show     # show current autonomous config
 
+leashd effort show          # show current effort level
+leashd effort set <level>   # set effort (low, medium, high, max)
+
+# Skill management
+leashd skill list            # list installed skills (default)
+leashd skill add <zip> [--tag web --tag content]  # install from zip
+leashd skill remove <name>   # uninstall a skill
+leashd skill show <name>     # show skill details
+
 # Type checking
 uv run mypy leashd/
 ```
@@ -75,7 +84,7 @@ The system follows a three-layer safety pipeline: **Sandbox → Policy → Appro
 
 **Bootstrap** (`app.py`) wires all subsystems together: builds config, storage, connectors, middleware, plugins, safety pipeline, git handler, and engine. Entry point is `main.py:run()` → `cli.py` → `main.py:start()` → `app.py:build_engine()`.
 
-**CLI** (`cli.py`) — argparse subcommand router. Entry point is `main.py:run()` → `cli.py:main()`. Dispatches `start`, `stop`, `status`, `init`, `add-dir`, `remove-dir`, `dirs`, `config`, `clean`, `ws`. Bare `leashd` (no subcommand) triggers smart-start: checks cwd, prompts to approve if needed, then daemonizes.
+**CLI** (`cli.py`) — argparse subcommand router. Entry point is `main.py:run()` → `cli.py:main()`. Dispatches `start`, `stop`, `status`, `init`, `add-dir`, `remove-dir`, `dirs`, `config`, `clean`, `ws`, `skill`. Bare `leashd` (no subcommand) triggers smart-start: checks cwd, prompts to approve if needed, then daemonizes.
 
 **Daemon** (`daemon.py`) — background process lifecycle via PID file at `~/.leashd/leashd.pid`. `start_daemon()` spawns `leashd _run` as a detached subprocess; `stop_daemon()` sends SIGTERM with 10s grace period. `is_running()` auto-cleans stale PID files and falls back to `pgrep`. SIGHUP triggers live config reload (`leashd reload`) — `add-dir`, `remove-dir`, and workspace changes propagate without restart.
 
@@ -124,6 +133,8 @@ The system follows a three-layer safety pipeline: **Sandbox → Policy → Appro
 - `GitCommandHandler` (`handler.py`) — routes `/git` subcommands (status, branch, checkout, diff, log, add, commit, push, pull, merge) and callback buttons
 - `GitFormatter` (`formatter.py`) — Telegram-friendly display with emoji indicators and 4096-char truncation
 - `GitModels` (`models.py`) — frozen Pydantic models for status, branches, log entries, and results
+
+**Skills** (`skills.py`): Filesystem-based capability packages for the Claude Agent SDK. Each skill is a directory with a `SKILL.md` file (YAML frontmatter with `name` + `description`, markdown instructions). Installed to `~/.claude/skills/{name}/` from zip files via `leashd skill add`. SDK discovers skills via `setting_sources=["project", "user"]`; `"Skill"` is auto-injected into `allowed_tools` when skills exist. Skills tagged `"web"` or `"content"` appear in the `/web` system prompt's `AVAILABLE SKILLS` section. Config metadata stored in `~/.leashd/config.yaml` under `skills:`.
 
 **Agent abstraction** (`agents/`): `BaseAgent` protocol with `ClaudeCodeAgent` implementation wrapping `claude-agent-sdk`. Supports session resume for multi-turn continuity.
 

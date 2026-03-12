@@ -260,7 +260,7 @@ class TestCleanProceedAutoImplementation:
         await eng.handle_message("user1", "Make a plan", "chat1")
 
         session = eng.session_manager.get("user1", "chat1")
-        assert session.mode == "auto"
+        assert session.mode == "edit"
         # Agent was called twice: first with original prompt, then with plan content
         assert len(prompts_seen) == 2
         assert prompts_seen[0] == "Make a plan"

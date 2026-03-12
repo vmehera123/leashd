@@ -92,7 +92,7 @@ sequenceDiagram
 | Option | Source |
 |---|---|
 | `cwd` | `session.working_directory` |
-| `max_turns` | `config.max_turns` |
+| `max_turns` | `config.effective_max_turns(session.mode)` — mode-specific limit (web: 300, test: 200, default: 150) |
 | `system_prompt` | `config.system_prompt` + plan mode instruction (if `session.mode == "plan"`) |
 | `allowed_tools` | `config.allowed_tools` |
 | `disallowed_tools` | `config.disallowed_tools` |

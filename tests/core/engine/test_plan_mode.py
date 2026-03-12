@@ -442,7 +442,7 @@ class TestFallbackPlanReview:
                 # On the second call (feedback), switch out of plan mode
                 # so the fallback doesn't trigger a third round
                 if len(self.prompts) > 1:
-                    session.mode = "auto"
+                    session.mode = "edit"
                 return AgentResponse(
                     content="Plan summary", session_id="sid", cost=0.01
                 )
@@ -2253,7 +2253,7 @@ class TestExitPlanModeDeniedAfterApproval:
         assert len(prompts_seen) == 2
         assert prompts_seen[1].startswith("Implement")
         session = sm.get("user1", "chat1")
-        assert session.mode == "auto"
+        assert session.mode == "edit"
 
 
 class TestPlanApprovalBehavior:
@@ -2991,3 +2991,118 @@ class TestExitPlanModeDeniedForTaskSessions:
 
         assert isinstance(result, PermissionResultDeny)
         assert "orchestrator" in result.message.lower()
+
+
+class TestPlanReviewDeadlinePause:
+    @pytest.mark.asyncio
+    async def test_plan_review_does_not_timeout(
+        self, config, policy_engine, audit_logger
+    ):
+        """Plan review wait pauses the agent deadline — user think time doesn't count."""
+        from tests.conftest import MockConnector
+
+        streaming_connector = MockConnector(support_streaming=True)
+        config_short = LeashdConfig(
+            approved_directories=config.approved_directories,
+            max_turns=5,
+            agent_timeout_seconds=1,
+            streaming_enabled=True,
+            audit_log_path=config.audit_log_path,
+        )
+        coordinator = InteractionCoordinator(streaming_connector, config_short)
+
+        class SlowReviewAgent(BaseAgent):
+            async def execute(
+                self,
+                prompt,
+                session,
+                *,
+                can_use_tool=None,
+                on_text_chunk=None,
+                **kwargs,
+            ):
+                if not prompt.startswith("Implement"):
+                    session.mode = "plan"
+
+                    async def accept_after_delay():
+                        await asyncio.sleep(1.5)
+                        req = streaming_connector.plan_review_requests[0]
+                        await coordinator.resolve_option(req["interaction_id"], "edit")
+
+                    task = asyncio.create_task(accept_after_delay())
+                    await can_use_tool("ExitPlanMode", {}, None)
+                    await task
+
+                return AgentResponse(content="Done", session_id="sid", cost=0.01)
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=streaming_connector,
+            agent=SlowReviewAgent(),
+            config=config_short,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            interaction_coordinator=coordinator,
+        )
+
+        result = await eng.handle_message("user1", "Plan something", "chat1")
+        assert "timed out" not in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_plan_adjustment_restarts_with_fresh_timeout(
+        self, config, policy_engine, audit_logger, mock_connector
+    ):
+        """Plan adjustment cancels agent and restarts _execute_turn with feedback."""
+        coordinator = InteractionCoordinator(mock_connector, config)
+        prompts_seen: list[str] = []
+
+        class AdjustablePlanAgent(BaseAgent):
+            async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
+                prompts_seen.append(prompt)
+                if not prompt.startswith("Add more"):
+                    session.mode = "plan"
+
+                    async def click_adjust():
+                        await asyncio.sleep(0.05)
+                        req = mock_connector.plan_review_requests[0]
+                        await coordinator.resolve_option(
+                            req["interaction_id"], "adjust"
+                        )
+                        await asyncio.sleep(0.05)
+                        await coordinator.resolve_text(
+                            "chat1", "Add more error handling"
+                        )
+
+                    task = asyncio.create_task(click_adjust())
+                    await can_use_tool("ExitPlanMode", {}, None)
+                    await task
+                else:
+                    session.mode = "edit"
+
+                return AgentResponse(content="Done", session_id="sid", cost=0.01)
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=AdjustablePlanAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            interaction_coordinator=coordinator,
+        )
+
+        await eng.handle_message("user1", "Plan it", "chat1")
+
+        assert "Add more error handling" in prompts_seen

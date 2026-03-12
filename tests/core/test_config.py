@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from leashd.core.config import LeashdConfig, build_directory_names, ensure_leashd_dir
 
@@ -13,6 +14,8 @@ class TestLeashdConfig:
     def test_default_values(self, tmp_path):
         config = LeashdConfig(approved_directories=[tmp_path])
         assert config.max_turns == 150
+        assert config.web_max_turns == 300
+        assert config.test_max_turns == 200
         assert config.agent_timeout_seconds == 3600
         assert config.storage_backend == "sqlite"
         assert config.approval_timeout_seconds == 300
@@ -257,6 +260,44 @@ class TestleashdDirDefaults:
         assert config.log_dir == Path(".leashd/logs")
 
 
+class TestEffectiveMaxTurns:
+    def test_default_mode_returns_max_turns(self, tmp_path):
+        config = LeashdConfig(approved_directories=[tmp_path], max_turns=100)
+        assert config.effective_max_turns("default") == 100
+
+    def test_web_mode_returns_web_max_turns(self, tmp_path):
+        config = LeashdConfig(approved_directories=[tmp_path], web_max_turns=400)
+        assert config.effective_max_turns("web") == 400
+
+    def test_test_mode_returns_test_max_turns(self, tmp_path):
+        config = LeashdConfig(approved_directories=[tmp_path], test_max_turns=250)
+        assert config.effective_max_turns("test") == 250
+
+    def test_unknown_mode_falls_back_to_max_turns(self, tmp_path):
+        config = LeashdConfig(approved_directories=[tmp_path], max_turns=75)
+        assert config.effective_max_turns("merge") == 75
+        assert config.effective_max_turns("task") == 75
+        assert config.effective_max_turns("auto") == 75
+
+    def test_plan_mode_uses_global_max_turns(self, tmp_path):
+        config = LeashdConfig(approved_directories=[tmp_path], max_turns=50)
+        assert config.effective_max_turns("plan") == 50
+
+    def test_web_max_turns_custom_value(self, tmp_path):
+        config = LeashdConfig(
+            approved_directories=[tmp_path], web_max_turns=500, max_turns=100
+        )
+        assert config.effective_max_turns("web") == 500
+        assert config.effective_max_turns("default") == 100
+
+    def test_test_max_turns_custom_value(self, tmp_path):
+        config = LeashdConfig(
+            approved_directories=[tmp_path], test_max_turns=350, max_turns=100
+        )
+        assert config.effective_max_turns("test") == 350
+        assert config.effective_max_turns("default") == 100
+
+
 class TestEnsureleashdDir:
     def test_creates_directory(self, tmp_path):
         result = ensure_leashd_dir(tmp_path)
@@ -271,6 +312,13 @@ class TestEnsureleashdDir:
         assert "!test.yaml" in content
         assert "!.gitignore" in content
 
+    def test_gitignore_includes_workflow_patterns(self, tmp_path):
+        ensure_leashd_dir(tmp_path)
+        content = (tmp_path / ".leashd" / ".gitignore").read_text()
+        assert "!workflows/" in content
+        assert "!workflows/*.yaml" in content
+        assert "!workflows/*.yml" in content
+
     def test_does_not_overwrite_existing_gitignore(self, tmp_path):
         leashd_dir = tmp_path / ".leashd"
         leashd_dir.mkdir()
@@ -284,3 +332,38 @@ class TestEnsureleashdDir:
         ensure_leashd_dir(tmp_path)
         ensure_leashd_dir(tmp_path)
         assert (tmp_path / ".leashd").is_dir()
+
+
+class TestEffortConfig:
+    def test_effort_default_medium(self, tmp_path):
+        config = LeashdConfig(approved_directories=[tmp_path])
+        assert config.effort == "medium"
+
+    def test_effort_custom_values(self, tmp_path):
+        for level in ("low", "high", "max"):
+            config = LeashdConfig(approved_directories=[tmp_path], effort=level)
+            assert config.effort == level
+
+    def test_effort_none_accepted(self, tmp_path):
+        config = LeashdConfig(approved_directories=[tmp_path], effort=None)
+        assert config.effort is None
+
+    def test_effort_invalid_rejected(self, tmp_path):
+        with pytest.raises(ValidationError, match="effort"):
+            LeashdConfig(approved_directories=[tmp_path], effort="turbo")
+
+
+class TestBrowserBackendConfig:
+    def test_default_playwright(self, tmp_path):
+        config = LeashdConfig(approved_directories=[tmp_path])
+        assert config.browser_backend == "playwright"
+
+    def test_agent_browser(self, tmp_path):
+        config = LeashdConfig(
+            approved_directories=[tmp_path], browser_backend="agent-browser"
+        )
+        assert config.browser_backend == "agent-browser"
+
+    def test_invalid_backend_rejected(self, tmp_path):
+        with pytest.raises(ValidationError):
+            LeashdConfig(approved_directories=[tmp_path], browser_backend="selenium")

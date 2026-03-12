@@ -94,6 +94,8 @@ def _activity_label(tool_name: str, description: str = "") -> tuple[str, str]:
         return ("🧠", "Thinking")
     if tool_name.startswith(("mcp__playwright__", "browser_")):
         return ("🌐", "Browsing")
+    if tool_name == "Skill":
+        return ("🧩", "Using skill")
     if tool_name == "Agent":
         lowered = description.lower()
         if any(w in lowered for w in ("plan", "design", "architect")):
@@ -196,6 +198,7 @@ class TelegramConnector(BaseConnector):
                     "cancel",
                     "tasks",
                     "stop",
+                    "web",
                 ],
                 self._on_command,
             )

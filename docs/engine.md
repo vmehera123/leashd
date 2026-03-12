@@ -123,7 +123,7 @@ The engine handles eleven commands via `handle_command()`:
 |---|---|
 | `/dir` | Switch working directory with inline keyboard buttons |
 | `/plan [text]` | Sets `session.mode = "plan"`, disables auto-approve. With text, starts agent immediately. |
-| `/edit [text]` | Sets `session.mode = "auto"`, enables auto-approve for Write and Edit. With text, starts agent immediately. |
+| `/edit [text]` | Sets `session.mode = "edit"`, enables auto-approve for Write and Edit. With text, starts agent immediately. |
 | `/default` | Sets `session.mode = "default"`, disables auto-approve |
 | `/git <subcommand>` | Routes to `GitCommandHandler` for git operations with inline action buttons |
 | `/test [flags]` | Emits `COMMAND_TEST` event, activating `TestRunnerPlugin`'s 9-phase test workflow |

@@ -1653,3 +1653,260 @@ class TestGatekeeperAutoApproverIntegration:
 
         assert result.behavior == "allow"
         auto_approver.evaluate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_ai_approver_skipped_for_edit_mode(
+        self, sandbox, mock_audit, event_bus, policy_engine, tmp_dir
+    ):
+        """AI auto-approver must NOT activate for 'edit' mode (user-initiated /edit).
+
+        Regression: 'edit' mode was previously 'auto', which let the AutoApprover
+        fire during interactive /edit sessions.
+        """
+        from unittest.mock import AsyncMock, MagicMock
+
+        from leashd.core.safety.approvals import ApprovalResult
+
+        auto_approver = MagicMock()
+        auto_approver.evaluate = AsyncMock(
+            return_value=ApprovalResult(approved=True, reason="ok")
+        )
+        coordinator = MagicMock()
+        coordinator.request_approval = AsyncMock(
+            return_value=ApprovalResult(approved=True)
+        )
+        gk = ToolGatekeeper(
+            sandbox=sandbox,
+            audit=mock_audit,
+            event_bus=event_bus,
+            policy_engine=policy_engine,
+            auto_approver=auto_approver,
+            approval_coordinator=coordinator,
+        )
+
+        result = await gk.check(
+            "Write",
+            {"file_path": str(tmp_dir / "main.py")},
+            "s1",
+            "c1",
+            session_mode="edit",
+        )
+
+        assert result.behavior == "allow"
+        auto_approver.evaluate.assert_not_called()
+        coordinator.request_approval.assert_called_once()
+
+
+class TestGatekeeperSafetyInvariantsExtended:
+    """Additional safety invariant tests for auto-approve bypass prevention."""
+
+    @pytest.fixture
+    def policy_gk(
+        self, sandbox, mock_audit, event_bus, policy_engine, approval_coordinator
+    ):
+        return ToolGatekeeper(
+            sandbox=sandbox,
+            audit=mock_audit,
+            event_bus=event_bus,
+            policy_engine=policy_engine,
+            approval_coordinator=approval_coordinator,
+        )
+
+    @pytest.mark.asyncio
+    async def test_per_tool_auto_approve_cannot_bypass_policy_deny(self, policy_gk):
+        gk = policy_gk
+        gk.enable_tool_auto_approve("c1", "Bash")
+        result = await gk.check("Bash", {"command": "rm -rf /"}, "s1", "c1")
+        assert result.behavior == "deny"
+
+    @pytest.mark.asyncio
+    async def test_per_tool_auto_approve_cannot_bypass_sandbox(self, policy_gk):
+        gk = policy_gk
+        gk.enable_tool_auto_approve("c1", "Read")
+        result = await gk.check("Read", {"file_path": "/etc/passwd"}, "s1", "c1")
+        assert result.behavior == "deny"
+
+    @pytest.mark.asyncio
+    async def test_mcp_path_tool_checked_by_sandbox(
+        self, sandbox, mock_audit, event_bus, policy_engine
+    ):
+        gk = ToolGatekeeper(
+            sandbox=sandbox,
+            audit=mock_audit,
+            event_bus=event_bus,
+            policy_engine=policy_engine,
+        )
+        result = await gk.check(
+            "mcp__custom__Read", {"file_path": "/etc/shadow"}, "s1", "c1"
+        )
+        assert result.behavior == "deny"
+
+    @pytest.mark.asyncio
+    async def test_auto_approve_does_not_override_deny_for_credential_files(
+        self, sandbox, mock_audit, event_bus, tmp_path
+    ):
+        from pathlib import Path
+
+        from leashd.core.safety.policy import PolicyEngine
+
+        pe = PolicyEngine(
+            [
+                Path(__file__).parent.parent.parent.parent
+                / "leashd"
+                / "policies"
+                / "default.yaml"
+            ]
+        )
+        gk = ToolGatekeeper(
+            sandbox=sandbox,
+            audit=mock_audit,
+            event_bus=event_bus,
+            policy_engine=pe,
+        )
+        gk.enable_auto_approve("c1")
+        result = await gk.check(
+            "Read", {"file_path": str(tmp_path / ".env")}, "s1", "c1"
+        )
+        assert result.behavior == "deny"
+
+
+class TestHierarchicalAutoApproveExtended:
+    """Additional hierarchical auto-approve edge cases."""
+
+    @pytest.fixture
+    def gk(self, sandbox, mock_audit, event_bus, policy_engine, approval_coordinator):
+        return ToolGatekeeper(
+            sandbox=sandbox,
+            audit=mock_audit,
+            event_bus=event_bus,
+            policy_engine=policy_engine,
+            approval_coordinator=approval_coordinator,
+        )
+
+    def test_prefix_with_hyphen_not_matched(self, gk):
+        gk.enable_tool_auto_approve("c1", "Bash::git")
+        assert gk._matches_auto_approved("c1", "Bash::git-lfs status") is False
+
+    def test_prefix_with_digit_suffix_not_matched(self, gk):
+        gk.enable_tool_auto_approve("c1", "Bash::python")
+        assert gk._matches_auto_approved("c1", "Bash::python3 script.py") is False
+
+    def test_empty_stored_set_returns_false(self, gk):
+        assert gk._matches_auto_approved("c1", "Bash::git push") is False
+
+    def test_non_bash_stored_entry_ignored_for_bash_key(self, gk):
+        gk.enable_tool_auto_approve("c1", "Write")
+        assert gk._matches_auto_approved("c1", "Bash::git push") is False
+
+
+class TestGatekeeperStateManagement:
+    """Auto-approve state isolation and management tests."""
+
+    @pytest.fixture
+    def gk(self, sandbox, mock_audit, event_bus, policy_engine, approval_coordinator):
+        return ToolGatekeeper(
+            sandbox=sandbox,
+            audit=mock_audit,
+            event_bus=event_bus,
+            policy_engine=policy_engine,
+            approval_coordinator=approval_coordinator,
+        )
+
+    @pytest.mark.asyncio
+    async def test_auto_approve_chat_isolation(
+        self, gk, mock_connector, mock_audit, tmp_dir
+    ):
+        import asyncio
+
+        gk.enable_auto_approve("c1")
+        r1 = await gk.check(
+            "Write", {"file_path": str(tmp_dir / "main.py")}, "s1", "c1"
+        )
+        assert r1.behavior == "allow"
+        assert len(mock_connector.approval_requests) == 0
+
+        async def approve_c2():
+            await asyncio.sleep(0.05)
+            req = mock_connector.approval_requests[0]
+            await gk._approval_coordinator.resolve_approval(req["approval_id"], True)
+
+        task = asyncio.create_task(approve_c2())
+        r2 = await gk.check(
+            "Write", {"file_path": str(tmp_dir / "other.py")}, "s1", "c2"
+        )
+        await task
+        assert r2.behavior == "allow"
+        assert len(mock_connector.approval_requests) == 1
+
+        gk.enable_auto_approve("c2")
+        gk.disable_auto_approve("c1")
+
+        blanket_c1, _ = gk.get_auto_approve_status("c1")
+        blanket_c2, _ = gk.get_auto_approve_status("c2")
+        assert blanket_c1 is False
+        assert blanket_c2 is True
+
+    def test_disable_clears_blanket_and_per_tool(self, gk):
+        gk.enable_auto_approve("c1")
+        gk.enable_tool_auto_approve("c1", "Write")
+        gk.enable_tool_auto_approve("c1", "Bash::git push")
+        gk.disable_auto_approve("c1")
+
+        blanket, per_tool = gk.get_auto_approve_status("c1")
+        assert blanket is False
+        assert per_tool == set()
+
+    def test_get_auto_approve_status_reports_correctly(self, gk):
+        gk.enable_auto_approve("c1")
+        gk.enable_tool_auto_approve("c1", "Write")
+        gk.enable_tool_auto_approve("c1", "Edit")
+
+        blanket, per_tool = gk.get_auto_approve_status("c1")
+        assert blanket is True
+        assert per_tool == {"Write", "Edit"}
+
+        blanket_c2, per_tool_c2 = gk.get_auto_approve_status("c2")
+        assert blanket_c2 is False
+        assert per_tool_c2 == set()
+
+    @pytest.mark.asyncio
+    async def test_empty_session_id_no_crash(self, gk):
+        result = await gk.check("Bash", {"command": "ls"}, "", "c1")
+        assert result.behavior == "allow"
+
+    @pytest.mark.asyncio
+    async def test_empty_chat_id_no_crash(self, gk):
+        result = await gk.check("Bash", {"command": "ls"}, "s1", "")
+        assert result.behavior == "allow"
+
+
+class TestGatekeeperEventsExtended:
+    """Additional event handler resilience tests."""
+
+    @pytest.mark.asyncio
+    async def test_event_handler_exception_does_not_block_allow(
+        self, sandbox, mock_audit, event_bus
+    ):
+        from leashd.core.events import TOOL_GATED
+
+        async def crashing_handler(_event):
+            raise RuntimeError("handler crash")
+
+        event_bus.subscribe(TOOL_GATED, crashing_handler)
+        gk = ToolGatekeeper(sandbox=sandbox, audit=mock_audit, event_bus=event_bus)
+        result = await gk.check("Bash", {"command": "ls"}, "s1", "c1")
+        assert result.behavior == "allow"
+
+    @pytest.mark.asyncio
+    async def test_event_handler_exception_does_not_block_deny(
+        self, sandbox, mock_audit, event_bus
+    ):
+        from leashd.core.events import TOOL_GATED
+
+        async def crashing_handler(_event):
+            raise RuntimeError("handler crash")
+
+        event_bus.subscribe(TOOL_GATED, crashing_handler)
+        gk = ToolGatekeeper(sandbox=sandbox, audit=mock_audit, event_bus=event_bus)
+        result = await gk.check("Read", {"file_path": "/etc/passwd"}, "s1", "c1")
+        assert result.behavior == "deny"

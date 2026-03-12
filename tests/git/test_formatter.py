@@ -7,6 +7,7 @@ from leashd.git.models import (
     GitLogEntry,
     GitResult,
     GitStatus,
+    MergeResult,
 )
 
 
@@ -354,3 +355,109 @@ class TestBuildAutoMessage:
 
     def test_empty(self):
         assert formatter.build_auto_message([]) == "update files"
+
+
+class TestFormatStatusEdgeCases:
+    def test_unicode_paths(self):
+        status = GitStatus(
+            branch="main",
+            staged=[FileChange(path="src/\u4e2d\u6587.py", status="modified")],
+            untracked=["\U0001f600_emoji.txt"],
+        )
+        result = formatter.format_status(status)
+        assert "\u4e2d\u6587.py" in result
+        assert "\U0001f600_emoji.txt" in result
+
+    def test_very_long_path(self):
+        long_path = "a/" * 250 + "file.py"
+        status = GitStatus(
+            branch="main",
+            staged=[FileChange(path=long_path, status="modified")],
+        )
+        result = formatter.format_status(status)
+        assert long_path in result
+
+    def test_many_files(self):
+        status = GitStatus(
+            branch="main",
+            staged=[
+                FileChange(path=f"file{i}.py", status="modified") for i in range(100)
+            ],
+        )
+        result = formatter.format_status(status)
+        assert "file0.py" in result
+        assert "file99.py" in result
+
+    def test_copied_file_indicator(self):
+        status = GitStatus(
+            branch="main",
+            staged=[FileChange(path="copy.py", status="copied")],
+        )
+        result = formatter.format_status(status)
+        assert "C copy.py" in result
+
+
+class TestBuildAutoMessageEdgeCases:
+    def test_conflicted_status_falls_back(self):
+        staged = [FileChange(path="conflict.py", status="conflicted")]
+        result = formatter.build_auto_message(staged)
+        assert result == "update conflict.py"
+
+    def test_mixed_three_statuses_counter(self):
+        staged = [
+            FileChange(path="a.py", status="added"),
+            FileChange(path="b.py", status="added"),
+            FileChange(path="c.py", status="added"),
+            FileChange(path="d.py", status="modified"),
+            FileChange(path="e.py", status="modified"),
+            FileChange(path="f.py", status="deleted"),
+        ]
+        result = formatter.build_auto_message(staged)
+        assert "6 files" in result
+        assert "3 added" in result
+        assert "2 modified" in result
+        assert "1 deleted" in result
+
+    def test_very_long_path_in_single_file(self):
+        long_path = "a/" * 100 + "file.py"
+        staged = [FileChange(path=long_path, status="modified")]
+        result = formatter.build_auto_message(staged)
+        assert result == f"update {long_path}"
+
+
+class TestFormatDiffBoundary:
+    def test_exactly_at_max_length_no_truncation(self):
+        diff = "x" * 100
+        result = formatter.format_diff(diff, max_length=100)
+        assert "truncated" not in result
+        assert result == diff
+
+    def test_max_length_plus_one_truncated(self):
+        diff = "x" * 50 + "\n" + "y" * 50 + "\n"
+        result = formatter.format_diff(diff, max_length=51)
+        assert "truncated" in result
+
+
+class TestFormatMergeResultEdgeCases:
+    def test_conflicts_but_empty_file_list(self):
+        result = MergeResult(
+            success=False,
+            had_conflicts=True,
+            conflicted_files=[],
+            message="Merge conflicts detected",
+        )
+        text = formatter.format_merge_result(result)
+        assert "\u26a0\ufe0f" in text
+        assert "conflicts" in text.lower()
+
+    def test_many_conflicted_files(self):
+        files = [f"file{i}.py" for i in range(50)]
+        result = MergeResult(
+            success=False,
+            had_conflicts=True,
+            conflicted_files=files,
+            message="Merge conflicts detected",
+        )
+        text = formatter.format_merge_result(result)
+        assert "file0.py" in text
+        assert "file49.py" in text

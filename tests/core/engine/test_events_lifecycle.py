@@ -666,3 +666,182 @@ class TestTurnLimitWarningContent:
             m for m in mock_connector.sent_messages if "turn limit" in m["text"].lower()
         ]
         assert len(turn_msgs) == 1
+
+
+class TestModeSpecificTurnLimits:
+    """Verify per-mode turn limits (web, test) use mode-specific thresholds."""
+
+    @pytest.mark.asyncio
+    async def test_web_mode_uses_web_max_turns(
+        self, tmp_path, audit_logger, policy_engine, mock_connector
+    ):
+        from leashd.core.config import LeashdConfig
+
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            max_turns=5,
+            web_max_turns=10,
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+
+        class WebAgent(BaseAgent):
+            async def execute(self, prompt, session, **kwargs):
+                session.mode = "web"
+                return AgentResponse(
+                    content="partial",
+                    session_id="sid",
+                    cost=0.01,
+                    num_turns=10,
+                )
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=WebAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_message("user1", "browse", "chat1")
+
+        turn_msgs = [
+            m for m in mock_connector.sent_messages if "turn limit" in m["text"].lower()
+        ]
+        assert len(turn_msgs) == 1
+        assert "10 turns" in turn_msgs[0]["text"]
+        assert "LEASHD_WEB_MAX_TURNS" in turn_msgs[0]["text"]
+
+    @pytest.mark.asyncio
+    async def test_web_mode_no_warning_under_web_limit(
+        self, tmp_path, audit_logger, policy_engine, mock_connector
+    ):
+        from leashd.core.config import LeashdConfig
+
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            max_turns=5,
+            web_max_turns=10,
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+
+        class WebUnderLimitAgent(BaseAgent):
+            async def execute(self, prompt, session, **kwargs):
+                session.mode = "web"
+                return AgentResponse(
+                    content="done",
+                    session_id="sid",
+                    cost=0.01,
+                    num_turns=7,
+                )
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=WebUnderLimitAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_message("user1", "browse", "chat1")
+
+        turn_msgs = [
+            m for m in mock_connector.sent_messages if "turn limit" in m["text"].lower()
+        ]
+        assert len(turn_msgs) == 0
+
+    @pytest.mark.asyncio
+    async def test_test_mode_uses_test_max_turns(
+        self, tmp_path, audit_logger, policy_engine, mock_connector
+    ):
+        from leashd.core.config import LeashdConfig
+
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            max_turns=5,
+            test_max_turns=8,
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+
+        class TestModeAgent(BaseAgent):
+            async def execute(self, prompt, session, **kwargs):
+                session.mode = "test"
+                return AgentResponse(
+                    content="partial",
+                    session_id="sid",
+                    cost=0.01,
+                    num_turns=8,
+                )
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=TestModeAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_message("user1", "test", "chat1")
+
+        turn_msgs = [
+            m for m in mock_connector.sent_messages if "turn limit" in m["text"].lower()
+        ]
+        assert len(turn_msgs) == 1
+        assert "8 turns" in turn_msgs[0]["text"]
+        assert "LEASHD_TEST_MAX_TURNS" in turn_msgs[0]["text"]
+
+    @pytest.mark.asyncio
+    async def test_default_mode_shows_generic_env_hint(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        class LimitAgent(BaseAgent):
+            async def execute(self, prompt, session, **kwargs):
+                return AgentResponse(
+                    content="partial",
+                    session_id="sid",
+                    cost=0.01,
+                    num_turns=config.max_turns,
+                )
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=LimitAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_message("user1", "do stuff", "chat1")
+
+        turn_msgs = [
+            m for m in mock_connector.sent_messages if "turn limit" in m["text"].lower()
+        ]
+        assert len(turn_msgs) == 1
+        assert "LEASHD_MAX_TURNS" in turn_msgs[0]["text"]

@@ -26,6 +26,7 @@ TEST_COMPLETED = "test.completed"
 COMMAND_MERGE = "command.merge"
 MERGE_STARTED = "merge.started"
 MERGE_COMPLETED = "merge.completed"
+COMMAND_WEB = "command.web"
 EXECUTION_INTERRUPTED = "execution.interrupted"
 
 APPROVAL_REQUESTED = "approval.requested"

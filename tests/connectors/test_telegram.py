@@ -9,11 +9,13 @@ from telegram.error import BadRequest, InvalidToken, NetworkError, RetryAfter, T
 
 from leashd.connectors.base import InlineButton
 from leashd.connectors.telegram import (
+    _CALLBACK_DATA_MAX_BYTES,
     _MAX_MESSAGE_LENGTH,
     TelegramConnector,
     _retry_on_network_error,
     _split_text,
     _to_telegram_markup,
+    _truncate_callback_data,
 )
 from leashd.exceptions import ConnectorError
 
@@ -1800,6 +1802,7 @@ class TestSendActivity:
             ("mcp__playwright__browser_click", "Click button", "🌐 Browsing:"),
             ("Agent", "Explore project structure", "🔍 Searching:"),
             ("Agent", "Design implementation plan", "🧠 Thinking:"),
+            ("Skill", "linkedin-writer", "🧩 Using skill:"),
             ("UnknownTool", "something", "⏳ Running:"),
         ],
     )
@@ -2677,3 +2680,887 @@ class TestWsCallback:
 
         await connector._on_callback_query(update, MagicMock())
         handler.assert_awaited_once()
+
+
+class TestSendMessageWithIdAndButtons:
+    @pytest.mark.asyncio
+    async def test_returns_message_id_on_success(self, connector):
+        mock_app = _make_mock_app()
+        mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=42))
+        connector._app = mock_app
+
+        buttons = [[InlineButton(text="OK", callback_data="ok")]]
+        msg_id = await connector._send_message_with_id_and_buttons(
+            "100", "text", buttons
+        )
+        assert msg_id == "42"
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_no_app(self, connector):
+        buttons = [[InlineButton(text="OK", callback_data="ok")]]
+        result = await connector._send_message_with_id_and_buttons(
+            "100", "text", buttons
+        )
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_on_exception(self, connector):
+        mock_app = _make_mock_app()
+        mock_app.bot.send_message = AsyncMock(side_effect=RuntimeError("fail"))
+        connector._app = mock_app
+
+        buttons = [[InlineButton(text="OK", callback_data="ok")]]
+        result = await connector._send_message_with_id_and_buttons(
+            "100", "text", buttons
+        )
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_truncates_long_text(self, connector):
+        mock_app = _make_mock_app()
+        mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=1))
+        connector._app = mock_app
+
+        long_text = "x" * 5000
+        buttons = [[InlineButton(text="OK", callback_data="ok")]]
+        await connector._send_message_with_id_and_buttons("100", long_text, buttons)
+        call_args = mock_app.bot.send_message.call_args
+        assert len(call_args.kwargs["text"]) == _MAX_MESSAGE_LENGTH
+
+
+class TestTryDeleteMessage:
+    @pytest.mark.asyncio
+    async def test_returns_false_when_no_app(self, connector):
+        result = await connector._try_delete_message("100", "1")
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_returns_true_on_success(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        result = await connector._try_delete_message("100", "1")
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_returns_false_on_exception(self, connector):
+        mock_app = _make_mock_app()
+        mock_app.bot.delete_message = AsyncMock(
+            side_effect=BadRequest("Message not found")
+        )
+        connector._app = mock_app
+        result = await connector._try_delete_message("100", "1")
+        assert result is False
+
+
+class TestTryEditMessage:
+    @pytest.mark.asyncio
+    async def test_returns_false_when_no_app(self, connector):
+        result = await connector._try_edit_message("100", "1", "text")
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_returns_true_on_success(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        result = await connector._try_edit_message("100", "1", "updated")
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_truncates_long_text(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        long_text = "x" * 5000
+        await connector._try_edit_message("100", "1", long_text)
+        call_args = mock_app.bot.edit_message_text.call_args
+        assert len(call_args.kwargs["text"]) == _MAX_MESSAGE_LENGTH
+
+
+class TestSendPlanMessagesMethod:
+    @pytest.mark.asyncio
+    async def test_returns_empty_when_no_app(self, connector):
+        result = await connector.send_plan_messages("100", "plan text")
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_chunks_long_plan_text(self, connector):
+        mock_app = _make_mock_app()
+        mock_app.bot.send_message = AsyncMock(
+            side_effect=[
+                MagicMock(message_id=1),
+                MagicMock(message_id=2),
+            ]
+        )
+        connector._app = mock_app
+
+        long_plan = "a" * 5000
+        ids = await connector.send_plan_messages("100", long_plan)
+        assert len(ids) == 2
+        assert ids == ["1", "2"]
+
+    @pytest.mark.asyncio
+    async def test_tracks_message_ids_in_dict(self, connector):
+        mock_app = _make_mock_app()
+        mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=7))
+        connector._app = mock_app
+
+        await connector.send_plan_messages("100", "short plan")
+        assert connector._plan_message_ids["100"] == ["7"]
+
+
+class TestDeleteMessagesMethod:
+    @pytest.mark.asyncio
+    async def test_deletes_each_message(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+
+        await connector.delete_messages("100", ["1", "2", "3"])
+        assert mock_app.bot.delete_message.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_clears_plan_message_ids(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        connector._plan_message_ids["100"] = ["1", "2"]
+
+        await connector.delete_messages("100", ["1", "2"])
+        assert "100" not in connector._plan_message_ids
+
+    @pytest.mark.asyncio
+    async def test_handles_empty_list(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        await connector.delete_messages("100", [])
+        mock_app.bot.delete_message.assert_not_awaited()
+
+
+class TestClearQuestionMessage:
+    @pytest.mark.asyncio
+    async def test_deletes_tracked_question_message(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        connector._question_message_ids["100"] = "55"
+
+        await connector.clear_question_message("100")
+        mock_app.bot.delete_message.assert_awaited_once_with(chat_id=100, message_id=55)
+
+    @pytest.mark.asyncio
+    async def test_no_tracked_message_is_noop(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        await connector.clear_question_message("100")
+        mock_app.bot.delete_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_pops_from_tracking_dict(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        connector._question_message_ids["100"] = "55"
+
+        await connector.clear_question_message("100")
+        assert "100" not in connector._question_message_ids
+
+
+class TestOnError:
+    @pytest.mark.asyncio
+    async def test_does_not_raise(self, connector):
+        ctx = MagicMock()
+        ctx.error = RuntimeError("something broke")
+        await connector._on_error(MagicMock(), ctx)
+
+    @pytest.mark.asyncio
+    async def test_logs_error_details(self, connector):
+        ctx = MagicMock()
+        ctx.error = ValueError("bad value")
+        update = MagicMock()
+        with patch("leashd.connectors.telegram.logger") as mock_logger:
+            await connector._on_error(update, ctx)
+            mock_logger.error.assert_called_once()
+            call_kwargs = mock_logger.error.call_args
+            assert call_kwargs.args[0] == "telegram_error"
+
+
+class TestSendQuestionSendFails:
+    @pytest.mark.asyncio
+    async def test_send_fails_message_id_not_tracked(self, connector):
+        mock_app = _make_mock_app()
+        mock_app.bot.send_message = AsyncMock(side_effect=RuntimeError("network fail"))
+        connector._app = mock_app
+
+        await connector.send_question(
+            "100", "int-1", "Question?", "Header", [{"label": "A"}]
+        )
+        assert "100" not in connector._question_message_ids
+
+
+class TestCrossChatStateIsolation:
+    @pytest.mark.asyncio
+    async def test_approval_tool_names_isolated_per_approval_id(self, connector):
+        mock_app = _make_mock_app()
+        mock_app.bot.send_message = AsyncMock(
+            side_effect=[MagicMock(message_id=1), MagicMock(message_id=2)]
+        )
+        connector._app = mock_app
+
+        await connector.request_approval("100", "ap-1", "desc", "Write")
+        await connector.request_approval("200", "ap-2", "desc", "Bash")
+
+        assert connector._approval_tool_names["ap-1"] == "Write"
+        assert connector._approval_tool_names["ap-2"] == "Bash"
+
+    @pytest.mark.asyncio
+    async def test_activity_message_id_isolated_per_chat(self, connector):
+        mock_app = _make_mock_app()
+        mock_app.bot.send_message = AsyncMock(
+            side_effect=[MagicMock(message_id=10), MagicMock(message_id=20)]
+        )
+        connector._app = mock_app
+
+        await connector.send_activity("100", "Bash", "ls")
+        await connector.send_activity("200", "Write", "main.py")
+
+        assert connector._activity_message_id["100"] == "10"
+        assert connector._activity_message_id["200"] == "20"
+
+    @pytest.mark.asyncio
+    async def test_plan_message_ids_isolated_per_chat(self, connector):
+        mock_app = _make_mock_app()
+        msg_counter = iter(range(1, 100))
+        mock_app.bot.send_message = AsyncMock(
+            side_effect=lambda **kw: MagicMock(message_id=next(msg_counter))
+        )
+        connector._app = mock_app
+
+        await connector.send_plan_messages("100", "plan A")
+        await connector.send_plan_messages("200", "plan B")
+
+        assert "100" in connector._plan_message_ids
+        assert "200" in connector._plan_message_ids
+        assert connector._plan_message_ids["100"] != connector._plan_message_ids["200"]
+
+    @pytest.mark.asyncio
+    async def test_question_message_ids_isolated_per_chat(self, connector):
+        mock_app = _make_mock_app()
+        mock_app.bot.send_message = AsyncMock(
+            side_effect=[MagicMock(message_id=10), MagicMock(message_id=20)]
+        )
+        connector._app = mock_app
+
+        await connector.send_question("100", "int-1", "Q1?", "H1", [{"label": "A"}])
+        await connector.send_question("200", "int-2", "Q2?", "H2", [{"label": "B"}])
+
+        assert connector._question_message_ids["100"] == "10"
+        assert connector._question_message_ids["200"] == "20"
+
+    @pytest.mark.asyncio
+    async def test_concurrent_approvals_different_chats(self, connector):
+        mock_app = _make_mock_app()
+        mock_app.bot.send_message = AsyncMock(
+            side_effect=[MagicMock(message_id=1), MagicMock(message_id=2)]
+        )
+        connector._app = mock_app
+
+        resolver = AsyncMock(return_value=True)
+        connector.set_approval_resolver(resolver)
+
+        await connector.request_approval("100", "ap-1", "desc", "Write")
+        await connector.request_approval("200", "ap-2", "desc", "Bash")
+
+        update1 = _make_callback_update("approval:yes:ap-1")
+        update1.callback_query.message = MagicMock(
+            spec=Message, chat_id=100, message_id=1, text="desc"
+        )
+        update2 = _make_callback_update("approval:yes:ap-2")
+        update2.callback_query.message = MagicMock(
+            spec=Message, chat_id=200, message_id=2, text="desc"
+        )
+
+        await connector._on_callback_query(update1, MagicMock())
+        await connector._on_callback_query(update2, MagicMock())
+
+        assert resolver.await_count == 2
+        calls = [c.args for c in resolver.await_args_list]
+        assert ("ap-1", True) in calls
+        assert ("ap-2", True) in calls
+
+    @pytest.mark.asyncio
+    async def test_clearing_one_chat_does_not_affect_other(self, connector):
+        mock_app = _make_mock_app()
+        msg_counter = iter(range(1, 100))
+        mock_app.bot.send_message = AsyncMock(
+            side_effect=lambda **kw: MagicMock(message_id=next(msg_counter))
+        )
+        connector._app = mock_app
+
+        await connector.send_plan_messages("100", "plan A")
+        await connector.send_plan_messages("200", "plan B")
+
+        await connector.clear_plan_messages("100")
+        assert "100" not in connector._plan_message_ids
+        assert "200" in connector._plan_message_ids
+
+
+class TestCallbackDataSecurity:
+    @pytest.mark.asyncio
+    async def test_unknown_approval_id_shows_expired(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        resolver = AsyncMock(return_value=False)
+        connector.set_approval_resolver(resolver)
+
+        update = _make_callback_update("approval:yes:unknown-id")
+        await connector._on_callback_query(update, MagicMock())
+
+        edit_text = update.callback_query.edit_message_text.call_args.args[0]
+        assert "Expired" in edit_text
+
+    @pytest.mark.asyncio
+    async def test_unknown_interaction_id_shows_expired(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        resolver = AsyncMock(return_value=False)
+        connector.set_interaction_resolver(resolver)
+
+        update = _make_callback_update("interact:unknown-id:option_a")
+        await connector._on_callback_query(update, MagicMock())
+
+        edit_text = update.callback_query.edit_message_text.call_args.args[0]
+        assert "Expired" in edit_text
+
+    def test_truncated_callback_data_preserves_prefix(self):
+        long_id = "a" * 100
+        data = f"approval:yes:{long_id}"
+        truncated = _truncate_callback_data(data)
+        assert truncated.startswith("approval:yes:")
+        assert len(truncated.encode()) <= _CALLBACK_DATA_MAX_BYTES
+
+    @pytest.mark.asyncio
+    async def test_approval_edit_exception_swallowed(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        resolver = AsyncMock(return_value=True)
+        connector.set_approval_resolver(resolver)
+
+        update = _make_callback_update("approval:yes:ap-1")
+        update.callback_query.edit_message_text = AsyncMock(
+            side_effect=RuntimeError("edit failed")
+        )
+
+        await connector._on_callback_query(update, MagicMock())
+        resolver.assert_awaited_once()
+
+
+class TestInputEdgeCases:
+    @pytest.mark.asyncio
+    async def test_send_message_unicode_emoji(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+
+        text = "Hello \U0001f600 World \u2764\ufe0f \U0001f1fa\U0001f1f8"
+        await connector.send_message("100", text)
+        call_args = mock_app.bot.send_message.call_args
+        assert call_args.kwargs["text"] == text
+
+    @pytest.mark.asyncio
+    async def test_request_approval_empty_tool_name(self, connector):
+        mock_app = _make_mock_app()
+        mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=1))
+        connector._app = mock_app
+
+        await connector.request_approval("100", "ap-1", "desc", "")
+
+        call_args = mock_app.bot.send_message.call_args
+        markup = call_args.kwargs["reply_markup"]
+        approve_all_btn = markup.inline_keyboard[1][0]
+        assert approve_all_btn.text == "Approve all in session"
+
+    @pytest.mark.asyncio
+    async def test_request_approval_very_long_tool_name(self, connector):
+        mock_app = _make_mock_app()
+        mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=1))
+        connector._app = mock_app
+
+        long_tool = "CustomTool" * 20
+        await connector.request_approval("100", "ap-1", "desc", long_tool)
+
+        call_args = mock_app.bot.send_message.call_args
+        markup = call_args.kwargs["reply_markup"]
+        for row in markup.inline_keyboard:
+            for btn in row:
+                assert len(btn.callback_data.encode()) <= _CALLBACK_DATA_MAX_BYTES
+
+    @pytest.mark.asyncio
+    async def test_send_question_empty_options(self, connector):
+        mock_app = _make_mock_app()
+        mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=1))
+        connector._app = mock_app
+
+        await connector.send_question("100", "int-1", "Question?", "Header", [])
+        mock_app.bot.send_message.assert_awaited_once()
+
+
+class TestCallbackRoutingEdgeCases:
+    @pytest.mark.asyncio
+    async def test_interaction_no_colon_in_suffix(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        resolver = AsyncMock()
+        connector.set_interaction_resolver(resolver)
+
+        update = _make_callback_update("interact:no-colon-here")
+        await connector._on_callback_query(update, MagicMock())
+        resolver.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_interaction_empty_interaction_id(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        resolver = AsyncMock()
+        connector.set_interaction_resolver(resolver)
+
+        update = _make_callback_update("interact::answer")
+        await connector._on_callback_query(update, MagicMock())
+        resolver.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_interaction_empty_answer(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        resolver = AsyncMock()
+        connector.set_interaction_resolver(resolver)
+
+        update = _make_callback_update("interact:int-1:")
+        await connector._on_callback_query(update, MagicMock())
+        resolver.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_interaction_resolver_exception_shows_expired(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        resolver = AsyncMock(side_effect=RuntimeError("resolver failed"))
+        connector.set_interaction_resolver(resolver)
+
+        update = _make_callback_update("interact:int-1:option_a")
+        await connector._on_callback_query(update, MagicMock())
+
+        edit_text = update.callback_query.edit_message_text.call_args.args[0]
+        assert "Expired" in edit_text
+
+    @pytest.mark.asyncio
+    async def test_interaction_non_message_query_early_return(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        resolver = AsyncMock(return_value=True)
+        connector.set_interaction_resolver(resolver)
+
+        update = _make_callback_update("interact:int-1:option_a")
+        update.callback_query.message = MagicMock()  # no spec=Message
+
+        await connector._on_callback_query(update, MagicMock())
+        resolver.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_interaction_expired_edit_failure_swallowed(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        resolver = AsyncMock(return_value=False)
+        connector.set_interaction_resolver(resolver)
+
+        update = _make_callback_update("interact:int-1:option_a")
+        update.callback_query.edit_message_text = AsyncMock(
+            side_effect=RuntimeError("edit failed")
+        )
+        await connector._on_callback_query(update, MagicMock())
+
+    @pytest.mark.asyncio
+    async def test_interrupt_no_colon_in_suffix(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        resolver = AsyncMock()
+        connector.set_interrupt_resolver(resolver)
+
+        update = _make_callback_update("interrupt:no-colon")
+        await connector._on_callback_query(update, MagicMock())
+        resolver.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_interrupt_empty_interrupt_id(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        resolver = AsyncMock()
+        connector.set_interrupt_resolver(resolver)
+
+        update = _make_callback_update("interrupt:send:")
+        await connector._on_callback_query(update, MagicMock())
+        resolver.assert_not_awaited()
+
+
+class TestInterruptCallbackEdgeCases:
+    @pytest.mark.asyncio
+    async def test_resolver_exception_does_not_crash(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        resolver = AsyncMock(side_effect=RuntimeError("resolver failed"))
+        connector.set_interrupt_resolver(resolver)
+
+        update = _make_callback_update("interrupt:send:irpt-1")
+        update.callback_query.message = MagicMock(
+            spec=Message, chat_id=100, message_id=1, text="preview"
+        )
+
+        await connector._on_callback_query(update, MagicMock())
+        edit_text = update.callback_query.edit_message_text.call_args.args[0]
+        assert "Expired" in edit_text
+
+    @pytest.mark.asyncio
+    async def test_non_message_query_does_not_crash(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        resolver = AsyncMock(return_value=True)
+        connector.set_interrupt_resolver(resolver)
+
+        update = _make_callback_update("interrupt:send:irpt-1")
+        update.callback_query.message = MagicMock()  # no spec=Message
+
+        await connector._on_callback_query(update, MagicMock())
+        update.callback_query.edit_message_text.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_interrupt_prompt_truncates_long_preview(self, connector):
+        mock_app = _make_mock_app()
+        mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=1))
+        connector._app = mock_app
+
+        long_preview = "x" * 500
+        await connector.send_interrupt_prompt("100", "irpt-1", long_preview)
+
+        call_args = mock_app.bot.send_message.call_args
+        text = call_args.kwargs["text"]
+        assert "x" * 200 in text
+        assert "x" * 201 not in text
+
+
+class TestGitCallbackEdgeCases:
+    @pytest.mark.asyncio
+    async def test_action_only_no_colon(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        git_handler = AsyncMock()
+        connector.set_git_handler(git_handler)
+
+        update = _make_callback_update("git:status")
+        update.callback_query.from_user = MagicMock(id=42)
+        update.callback_query.message = MagicMock(
+            spec=Message, chat_id=100, message_id=1
+        )
+
+        await connector._on_callback_query(update, MagicMock())
+        git_handler.assert_awaited_once_with("42", "100", "status", "")
+
+
+class TestApprovalLifecycle:
+    @pytest.mark.asyncio
+    async def test_full_approve_flow(self, connector):
+        mock_app = _make_mock_app()
+        mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=50))
+        connector._app = mock_app
+
+        resolver = AsyncMock(return_value=True)
+        connector.set_approval_resolver(resolver)
+
+        msg_id = await connector.request_approval(
+            "100", "ap-1", "Run npm install?", "Bash"
+        )
+        assert msg_id == "50"
+
+        update = _make_callback_update("approval:yes:ap-1")
+        update.callback_query.message = MagicMock(
+            spec=Message, chat_id=100, message_id=50, text="Run npm install?"
+        )
+
+        await connector._on_callback_query(update, MagicMock())
+
+        resolver.assert_awaited_once_with("ap-1", True)
+        edit_text = update.callback_query.edit_message_text.call_args.args[0]
+        assert "Approved" in edit_text
+        assert len(connector._cleanup_tasks) >= 0
+
+    @pytest.mark.asyncio
+    async def test_full_rejection_flow(self, connector):
+        mock_app = _make_mock_app()
+        mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=50))
+        connector._app = mock_app
+
+        resolver = AsyncMock(return_value=True)
+        connector.set_approval_resolver(resolver)
+
+        await connector.request_approval("100", "ap-1", "rm -rf /", "Bash")
+
+        update = _make_callback_update("approval:no:ap-1")
+        update.callback_query.message = MagicMock(
+            spec=Message, chat_id=100, message_id=50, text="rm -rf /"
+        )
+
+        await connector._on_callback_query(update, MagicMock())
+
+        resolver.assert_awaited_once_with("ap-1", False)
+        edit_text = update.callback_query.edit_message_text.call_args.args[0]
+        assert "Rejected" in edit_text
+
+    @pytest.mark.asyncio
+    async def test_full_approve_all_flow(self, connector):
+        mock_app = _make_mock_app()
+        mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=50))
+        connector._app = mock_app
+
+        resolver = AsyncMock(return_value=True)
+        connector.set_approval_resolver(resolver)
+
+        auto_approve_handler = MagicMock()
+        connector.set_auto_approve_handler(auto_approve_handler)
+
+        await connector.request_approval("100", "ap-1", "Write main.py", "Write")
+
+        update = _make_callback_update("approval:all:ap-1")
+        update.callback_query.message = MagicMock(
+            spec=Message, chat_id=100, message_id=50, text="Write main.py"
+        )
+
+        await connector._on_callback_query(update, MagicMock())
+
+        resolver.assert_awaited_once_with("ap-1", True)
+        auto_approve_handler.assert_called_once_with("100", "Write")
+        edit_text = update.callback_query.edit_message_text.call_args.args[0]
+        assert "auto-approved" in edit_text
+        assert "Write" in edit_text
+
+
+class TestPlanReviewLifecycle:
+    @pytest.mark.asyncio
+    async def test_proceed_flow(self, connector):
+        mock_app = _make_mock_app()
+        msg_counter = iter(range(1, 100))
+        mock_app.bot.send_message = AsyncMock(
+            side_effect=lambda **kw: MagicMock(message_id=next(msg_counter))
+        )
+        connector._app = mock_app
+
+        resolver = AsyncMock(return_value=True)
+        connector.set_interaction_resolver(resolver)
+
+        await connector.send_plan_review("100", "int-1", "Plan content here")
+
+        plan_ids_before = list(connector._plan_message_ids.get("100", []))
+        assert len(plan_ids_before) > 0
+
+        button_msg_id = plan_ids_before[-1]
+        update = _make_callback_update("interact:int-1:edit")
+        update.callback_query.message = MagicMock(
+            spec=Message,
+            chat_id=100,
+            message_id=int(button_msg_id),
+            text="Proceed?",
+        )
+
+        await connector._on_callback_query(update, MagicMock())
+        resolver.assert_awaited_once_with("int-1", "edit")
+        assert "100" not in connector._plan_message_ids
+
+    @pytest.mark.asyncio
+    async def test_adjust_flow_no_ack(self, connector):
+        mock_app = _make_mock_app()
+        msg_counter = iter(range(1, 100))
+        mock_app.bot.send_message = AsyncMock(
+            side_effect=lambda **kw: MagicMock(message_id=next(msg_counter))
+        )
+        connector._app = mock_app
+
+        resolver = AsyncMock(return_value=True)
+        connector.set_interaction_resolver(resolver)
+
+        await connector.send_plan_review("100", "int-1", "Plan content")
+
+        plan_ids_before = list(connector._plan_message_ids.get("100", []))
+        button_msg_id = plan_ids_before[-1]
+
+        send_count_before = mock_app.bot.send_message.await_count
+
+        update = _make_callback_update("interact:int-1:adjust")
+        update.callback_query.message = MagicMock(
+            spec=Message,
+            chat_id=100,
+            message_id=int(button_msg_id),
+            text="Proceed?",
+        )
+
+        await connector._on_callback_query(update, MagicMock())
+        resolver.assert_awaited_once_with("int-1", "adjust")
+        ack_sends = mock_app.bot.send_message.await_count - send_count_before
+        assert ack_sends == 0
+
+    @pytest.mark.asyncio
+    async def test_clean_edit_flow(self, connector):
+        mock_app = _make_mock_app()
+        msg_counter = iter(range(1, 100))
+        mock_app.bot.send_message = AsyncMock(
+            side_effect=lambda **kw: MagicMock(message_id=next(msg_counter))
+        )
+        connector._app = mock_app
+
+        resolver = AsyncMock(return_value=True)
+        connector.set_interaction_resolver(resolver)
+
+        await connector.send_plan_review("100", "int-1", "Plan content")
+
+        plan_ids_before = list(connector._plan_message_ids.get("100", []))
+        button_msg_id = plan_ids_before[-1]
+
+        update = _make_callback_update("interact:int-1:clean_edit")
+        update.callback_query.message = MagicMock(
+            spec=Message,
+            chat_id=100,
+            message_id=int(button_msg_id),
+            text="Proceed?",
+        )
+
+        await connector._on_callback_query(update, MagicMock())
+        resolver.assert_awaited_once_with("int-1", "clean_edit")
+        assert "100" not in connector._plan_message_ids
+
+
+class TestQuestionLifecycle:
+    @pytest.mark.asyncio
+    async def test_full_question_flow(self, connector):
+        mock_app = _make_mock_app()
+        mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=10))
+        connector._app = mock_app
+
+        resolver = AsyncMock(return_value=True)
+        connector.set_interaction_resolver(resolver)
+
+        await connector.send_question(
+            "100", "int-1", "Pick one", "Header", [{"label": "A"}, {"label": "B"}]
+        )
+        assert connector._question_message_ids.get("100") == "10"
+
+        update = _make_callback_update("interact:int-1:A")
+        update.callback_query.message = MagicMock(
+            spec=Message, chat_id=100, message_id=10, text="Pick one"
+        )
+
+        await connector._on_callback_query(update, MagicMock())
+        resolver.assert_awaited_once_with("int-1", "A")
+        assert "100" not in connector._question_message_ids
+
+    @pytest.mark.asyncio
+    async def test_question_expired_flow(self, connector):
+        mock_app = _make_mock_app()
+        mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=10))
+        connector._app = mock_app
+
+        resolver = AsyncMock(return_value=False)
+        connector.set_interaction_resolver(resolver)
+
+        await connector.send_question(
+            "100", "int-1", "Pick one", "Header", [{"label": "A"}]
+        )
+
+        update = _make_callback_update("interact:int-1:A")
+        await connector._on_callback_query(update, MagicMock())
+
+        edit_text = update.callback_query.edit_message_text.call_args.args[0]
+        assert "Expired" in edit_text
+
+
+class TestSplitTextEdgeCases:
+    def test_content_preserved_with_mixed_whitespace(self):
+        text = "line1\nword1 word2 " + "a" * 3990
+        chunks = _split_text(text)
+        joined = chunks[0]
+        for c in chunks[1:]:
+            joined += c
+        assert text.replace("\n", "").replace(" ", "") in joined.replace(
+            "\n", ""
+        ).replace(" ", "")
+
+    def test_multibyte_unicode_preserved(self):
+        cjk = "\u4e16\u754c" * 2500
+        chunks = _split_text(cjk)
+        joined = "".join(chunks)
+        assert joined == cjk
+
+    def test_single_char_text(self):
+        assert _split_text("x") == ["x"]
+
+
+class TestTruncateCallbackData:
+    def test_short_data_unchanged(self):
+        data = "approval:yes:abc"
+        assert _truncate_callback_data(data) == data
+
+    def test_exact_64_bytes_unchanged(self):
+        data = "a" * 64
+        assert _truncate_callback_data(data) == data
+
+    def test_over_64_bytes_truncated(self):
+        data = "a" * 100
+        result = _truncate_callback_data(data)
+        assert len(result.encode()) <= _CALLBACK_DATA_MAX_BYTES
+        assert result == "a" * 64
+
+    def test_multibyte_truncation_produces_valid_utf8(self):
+        data = "interact:" + "\U0001f600" * 20
+        result = _truncate_callback_data(data)
+        assert len(result.encode()) <= _CALLBACK_DATA_MAX_BYTES
+        result.encode("utf-8")
+
+
+class TestScheduleMessageCleanupState:
+    @pytest.mark.asyncio
+    async def test_creates_asyncio_task(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+
+        connector.schedule_message_cleanup("100", "1", delay=0.01)
+        assert len(connector._cleanup_tasks) == 1
+
+        await asyncio.sleep(0.05)
+        assert len(connector._cleanup_tasks) == 0
+
+    @pytest.mark.asyncio
+    async def test_multiple_cleanups_tracked(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+
+        connector.schedule_message_cleanup("100", "1", delay=0.1)
+        connector.schedule_message_cleanup("100", "2", delay=0.1)
+        connector.schedule_message_cleanup("100", "3", delay=0.1)
+        assert len(connector._cleanup_tasks) == 3
+
+
+class TestSendActivityStateTracking:
+    @pytest.mark.asyncio
+    async def test_send_message_returns_none_no_state_tracked(self, connector):
+        mock_app = _make_mock_app()
+        mock_app.bot.send_message = AsyncMock(side_effect=RuntimeError("network fail"))
+        connector._app = mock_app
+
+        result = await connector.send_activity("100", "Bash", "ls")
+        assert result is None
+        assert "100" not in connector._activity_message_id
+
+    @pytest.mark.asyncio
+    async def test_edit_fails_creates_new_message(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+
+        connector._activity_message_id["100"] = "old-id"
+        connector._activity_last_text["100"] = "old text"
+
+        mock_app.bot.edit_message_text = AsyncMock(
+            side_effect=BadRequest("Message not found")
+        )
+        mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=99))
+
+        result = await connector.send_activity("100", "Bash", "npm test")
+        assert result == "99"
+        assert connector._activity_message_id["100"] == "99"

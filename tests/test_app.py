@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from unittest.mock import patch
 
 import pytest
@@ -173,6 +174,90 @@ class TestBuildEngine:
         config = LeashdConfig(approved_directories=[tmp_path])
         _patched_build_engine(config=config)
         assert "playwright" in config.mcp_servers
+
+    def test_headless_baked_into_mcp_at_startup(self, tmp_path):
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            browser_headless=True,
+        )
+        _patched_build_engine(config=config)
+        assert "--headless" in config.mcp_servers["playwright"]["args"]
+
+    def test_headless_false_strips_from_mcp(self, tmp_path):
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            browser_headless=False,
+            mcp_servers={
+                "playwright": {
+                    "command": "npx",
+                    "args": ["@playwright/mcp", "--headless"],
+                }
+            },
+        )
+        _patched_build_engine(config=config)
+        assert "--headless" not in config.mcp_servers["playwright"]["args"]
+
+    def test_headless_no_duplicates(self, tmp_path):
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            browser_headless=True,
+            mcp_servers={
+                "playwright": {
+                    "command": "npx",
+                    "args": ["@playwright/mcp", "--headless"],
+                }
+            },
+        )
+        _patched_build_engine(config=config)
+        assert config.mcp_servers["playwright"]["args"].count("--headless") == 1
+
+    def test_agent_browser_sets_headed_env(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("AGENT_BROWSER_HEADED", raising=False)
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            browser_backend="agent-browser",
+            browser_headless=False,
+        )
+        with patch("leashd.skills.ensure_agent_browser_skill"):
+            _patched_build_engine(config=config)
+        assert os.environ.get("AGENT_BROWSER_HEADED") == "1"
+        monkeypatch.delenv("AGENT_BROWSER_HEADED", raising=False)
+
+    def test_agent_browser_headless_unsets_headed_env(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AGENT_BROWSER_HEADED", "1")
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            browser_backend="agent-browser",
+            browser_headless=True,
+        )
+        with patch("leashd.skills.ensure_agent_browser_skill"):
+            _patched_build_engine(config=config)
+        assert "AGENT_BROWSER_HEADED" not in os.environ
+
+    def test_agent_browser_sets_profile_env(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("AGENT_BROWSER_PROFILE", raising=False)
+        profile = str(tmp_path / "browser-profile")
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            browser_backend="agent-browser",
+            browser_user_data_dir=profile,
+        )
+        with patch("leashd.skills.ensure_agent_browser_skill"):
+            _patched_build_engine(config=config)
+        assert os.environ.get("AGENT_BROWSER_PROFILE") == profile
+        monkeypatch.delenv("AGENT_BROWSER_PROFILE", raising=False)
+
+    def test_agent_browser_no_profile_env_when_unconfigured(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("AGENT_BROWSER_PROFILE", raising=False)
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            browser_backend="agent-browser",
+        )
+        with patch("leashd.skills.ensure_agent_browser_skill"):
+            _patched_build_engine(config=config)
+        assert "AGENT_BROWSER_PROFILE" not in os.environ
 
 
 class TestLoadDefaultMcpServers:

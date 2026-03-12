@@ -114,29 +114,21 @@ Claude starts working. When it needs to do something gated by policy (e.g. write
 
 ---
 
-## What's New in 0.6.0
+## What's New in 0.7.0
 
-**Autonomous task orchestrator** — send `/task Add a health check endpoint` from Telegram and the agent autonomously runs spec → explore → validate → plan → implement → test → PR. Comes back with a pull request or an escalation message. Crash recovery, per-phase cost tracking, and SQLite persistence built in. See the [Autonomous Setup Guide](docs/autonomous-setup-guide.md).
+**`/web` command** — autonomous web automation with content-level human approval. Send `/web check my GitHub notifications` or `/web linkedin_comment --topic "AI"` from Telegram. The agent navigates, reads, and acts — proposing content via `AskUserQuestion` for your approval before executing.
 
-**AI-driven phase transitions** — an AI evaluator replaces brittle substring heuristics to decide whether to advance, retry, escalate, or complete between task phases.
+**Two browser backends** — choose between [Playwright MCP](https://github.com/playwright-community/mcp) (default) and [agent-browser](https://github.com/vercel-labs/agent-browser) (Vercel's Rust-powered browser CLI). Switch with `leashd browser set-backend agent-browser`. Both integrate with the same safety pipeline and persistent browser profiles.
 
-**AI approval & plan review** — `AutoApprover` replaces human approval taps with a `claude -p` CLI evaluation. `AutoPlanReviewer` replaces manual plan review. Both have circuit breakers and full audit logging.
+**Browser profile persistence** — persistent login sessions across `/web` invocations via Chrome user data directories. Configure with `leashd browser set-profile`, view with `leashd browser show`, clear with `leashd browser clear-profile`. Use `/web --fresh` to skip the profile for a one-off clean session.
 
-**Autonomous loop** — post-task test-and-retry with exponential backoff. After `/edit` tasks, the agent runs tests, retries on failure, and optionally creates a PR.
+**Configurable thinking effort** — control Claude's reasoning depth. Manage it at runtime with `leashd effort show` and `leashd effort set <level>`.
 
-**Autonomous policy** — `autonomous.yaml` is purpose-built for autonomous mode. Hard blocks remain (credentials, `rm -rf`, force push), but dev tools, file writes, and test runners are auto-allowed.
+**Per-mode turn limits** — `/web` and `/test` commands get higher default turn limits (`LEASHD_WEB_MAX_TURNS=300`, `LEASHD_TEST_MAX_TURNS=200`) to accommodate browser-heavy research and multi-phase test workflows, independent of the global `LEASHD_MAX_TURNS=150`.
 
-**Agentic testing in task orchestrator** — the test phase uses `TestRunnerPlugin` for structured 9-phase testing instead of plain `pytest`, with API spec discovery (`.http`, `.rest`, `openapi.yaml/json`, `swagger.yaml/json`) for smarter test prompts.
+**Agent timeout pauses during interactions** — user think time (plan review, questions, tool approvals) no longer counts against the 60-minute agent timeout. Plan adjustments restart with a fresh timer.
 
-**`/stop` command** — stop all ongoing work (agent, task, autonomous loop) without resetting the session.
-
-**`leashd restart` & `leashd reload`** — restart the daemon or live-reload config via SIGHUP without downtime.
-
-**`leashd autonomous` CLI** — guided setup, quick enable/disable for autonomous features. See [Autonomous Setup Guide](docs/autonomous-setup-guide.md).
-
-**Compound command classification** — the policy engine now splits `&&`, `||`, and `;` chains and evaluates each segment independently, preventing policy evasion via compound commands.
-
-**Workspace improvements** — `leashd ws add` merges directories into existing workspaces; `leashd ws remove <name> <dir>` removes specific directories; `CLAUDE.md` is loaded from all workspace directories via SDK `add_dirs`.
+**Git security hardening** — sandbox validation on git add callbacks, `..` rejection in branch names, and whitespace stripping to prevent path traversal.
 
 See [CHANGELOG.md](CHANGELOG.md) for the full history.
 
@@ -193,76 +185,113 @@ See the [Autonomous Setup Guide](docs/autonomous-setup-guide.md) for a full walk
 
 ## Configuration
 
-leashd uses a **layered config system** — each layer overrides the one before it:
+leashd is configured primarily through CLI commands — no manual file editing needed. Run `leashd init` once, then use subcommands for everything else.
+
+### Setup and inspection
+
+```bash
+leashd init       # first-time setup wizard — writes ~/.leashd/config.yaml
+leashd config     # show resolved config (all layers merged)
+```
+
+### Approved directories
+
+```bash
+leashd add-dir /path/to/project    # approve a directory
+leashd remove-dir /path/to/project # revoke approval
+leashd dirs                         # list approved directories
+```
+
+### Autonomous mode
+
+```bash
+leashd autonomous setup    # guided setup for autonomous features
+leashd autonomous enable   # quick-enable with defaults
+leashd autonomous disable  # disable autonomous mode
+leashd autonomous show     # show current autonomous config
+```
+
+### Browser
+
+```bash
+leashd browser show                                  # show backend and profile
+leashd browser set-backend agent-browser              # switch browser backend
+leashd browser set-profile ~/.leashd/browser-profile  # set persistent profile
+leashd browser clear-profile                           # remove profile
+leashd browser headless                                # toggle headless mode
+```
+
+### Thinking effort
+
+```bash
+leashd effort show       # display current effort level
+leashd effort set high   # set effort level (low, medium, high, max)
+```
+
+### Skills
+
+```bash
+leashd skill list              # list installed skills (default)
+leashd skill add skill.zip     # install from zip archive
+leashd skill remove my-skill   # uninstall a skill
+leashd skill show my-skill     # show skill details
+```
+
+### Workspaces
+
+```bash
+leashd ws add my-saas ~/src/api ~/src/web   # create a workspace
+leashd ws add my-saas ~/src/worker           # add a dir to existing workspace
+leashd ws list                               # list all workspaces
+leashd ws show my-saas                       # inspect repos in a workspace
+leashd ws remove my-saas ~/src/worker        # remove a dir from workspace
+leashd ws remove my-saas                     # remove entire workspace
+```
+
+Workspaces group related repos so the agent gets multi-repo context. `CLAUDE.md` files from all workspace directories are loaded via SDK `add_dirs`.
+
+### Workflows
+
+```bash
+leashd workflow list         # list available playbooks
+leashd workflow show <name>  # show playbook details
+```
+
+Place YAML playbooks in `.leashd/workflows/` (project) or `~/.leashd/workflows/` (global).
+
+### Maintenance
+
+```bash
+leashd clean    # remove all runtime artifacts
+leashd reload   # reload config without restart (SIGHUP)
+```
+
+### Config layering
+
+leashd uses a layered config system — each layer overrides the one before it:
 
 ```
-~/.leashd/config.yaml   ← global base (managed by leashd init / leashd config)
+~/.leashd/config.yaml   ← global base (managed by leashd init / CLI commands)
 .env in your project    ← per-project overrides
 environment variables   ← highest priority
 ```
 
-### First-time setup
+### Advanced: environment variables
 
-```bash
-leashd init
-```
-
-### Inspecting resolved config
-
-```bash
-leashd config
-```
-
-### Managing approved directories
-
-```bash
-leashd add-dir /path/to/project
-leashd remove-dir /path/to/project
-leashd dirs
-```
-
-### Full configuration reference
-
-All settings are environment variables prefixed with `LEASHD_`. Set them in `~/.leashd/config.yaml`, a local `.env`, or export them directly.
+All settings are environment variables prefixed with `LEASHD_`. Most are managed by the CLI commands above, but these are commonly set directly in `.env` or as env vars:
 
 | Variable | Default | Description |
 |---|---|---|
-| `LEASHD_APPROVED_DIRECTORIES` | **required** | Directories the agent can work in (comma-separated). Must exist. |
 | `LEASHD_TELEGRAM_BOT_TOKEN` | — | Bot token from @BotFather. Without this, leashd runs in local CLI mode. |
-| `LEASHD_ALLOWED_USER_IDS` | *(no restriction)* | Comma-separated Telegram user IDs that can use the bot. Empty = anyone. |
-| `LEASHD_MAX_TURNS` | `150` | Max conversation turns per request. |
-| `LEASHD_SYSTEM_PROMPT` | — | Custom system prompt for the agent. |
+| `LEASHD_ALLOWED_USER_IDS` | *(no restriction)* | Comma-separated Telegram user IDs that can use the bot. |
+| `LEASHD_SYSTEM_PROMPT` | — | Custom system prompt appended to the agent. |
 | `LEASHD_POLICY_FILES` | built-in `default.yaml` | Comma-separated paths to YAML policy files. |
-| `LEASHD_APPROVAL_TIMEOUT_SECONDS` | `300` | Seconds to wait for approval tap before auto-denying. |
-| `LEASHD_RATE_LIMIT_RPM` | `0` *(off)* | Max requests per minute per user. |
-| `LEASHD_RATE_LIMIT_BURST` | `5` | Burst capacity for the rate limiter. |
-| `LEASHD_STORAGE_BACKEND` | `sqlite` | `sqlite` (persistent) or `memory` (sessions lost on restart). |
-| `LEASHD_STORAGE_PATH` | `.leashd/messages.db` | SQLite database path. |
-| `LEASHD_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, or `ERROR`. |
-| `LEASHD_LOG_DIR` | `~/.leashd/logs` | Directory for rotating JSON logs. |
-| `LEASHD_AUDIT_LOG_PATH` | `.leashd/audit.jsonl` | Append-only audit log of all tool decisions. |
-| `LEASHD_ALLOWED_TOOLS` | *(all)* | Allowlist of Claude tool names. Empty = all allowed. |
-| `LEASHD_DISALLOWED_TOOLS` | *(none)* | Denylist of Claude tool names. |
-| `LEASHD_STREAMING_ENABLED` | `true` | Progressive streaming updates in Telegram. |
-| `LEASHD_STREAMING_THROTTLE_SECONDS` | `1.5` | Min seconds between message edits during streaming. |
-| `LEASHD_AGENT_TIMEOUT_SECONDS` | `3600` | Agent execution timeout (60 minutes). |
-| `LEASHD_DEFAULT_MODE` | `default` | Default session mode: `"default"`, `"plan"`, or `"auto"`. |
+| `LEASHD_MAX_TURNS` | `150` | Max conversation turns per request. |
+| `LEASHD_APPROVAL_TIMEOUT_SECONDS` | `300` | Seconds to wait for approval before auto-denying. |
 | `LEASHD_MCP_SERVERS` | `{}` | JSON dict of MCP server configurations. |
-| `LEASHD_TASK_ORCHESTRATOR` | `false` | Enable multi-phase task orchestrator (`/task` command). |
-| `LEASHD_TASK_MAX_RETRIES` | `3` | Max test-failure retries per task. |
-| `LEASHD_TASK_PHASE_TIMEOUT_SECONDS` | `1800` | Max seconds per phase (30 minutes). |
-| `LEASHD_INTERACTION_TIMEOUT_SECONDS` | `300` | Timeout for agent-user interactions (plan review, questions). |
-| `LEASHD_AUTO_APPROVER` | `false` | Enable AI auto-approver (replaces human approval taps). |
-| `LEASHD_AUTO_APPROVER_MODEL` | — | Model for auto-approver evaluations. |
-| `LEASHD_AUTO_APPROVER_MAX_CALLS` | `50` | Max tool call evaluations per request. |
-| `LEASHD_AUTONOMOUS_LOOP` | `false` | Enable post-task test-and-retry loop. |
-| `LEASHD_AUTONOMOUS_MAX_RETRIES` | `3` | Max retries in autonomous loop. |
-| `LEASHD_AUTO_PLAN` | `false` | Enable AI plan reviewer (replaces manual plan review). |
-| `LEASHD_AUTO_PLAN_MODEL` | — | Model for auto plan reviewer. |
-| `LEASHD_AUTO_PR` | `false` | Auto-create PRs after `/task` completion. |
-| `LEASHD_AUTO_PR_BASE_BRANCH` | `main` | Base branch for auto PRs. |
-| `LEASHD_LOG_MAX_BYTES` | `10485760` | Max log file size before rotation (10 MB). |
-| `LEASHD_LOG_BACKUP_COUNT` | `5` | Number of rotated log backups. |
+| `LEASHD_DEFAULT_MODE` | `default` | Default session mode: `"default"`, `"plan"`, or `"auto"`. |
+
+See [docs/configuration.md](docs/configuration.md) for the full environment variable reference (40+ settings).
 
 ---
 
@@ -305,15 +334,15 @@ leashd ships five policies in `policies/`:
 - AI-evaluated: git push (feature branches), network commands, browser mutations
 - Hard-blocks: credentials, force push, push to main/master, `rm -rf`, `sudo`, pipe-to-shell
 
-Switch policies:
+Switch policies (in your `.env` or as an env var):
 
-```bash
+```env
 LEASHD_POLICY_FILES=policies/strict.yaml
 ```
 
 Combine multiple policy files (rules merged, evaluated in order):
 
-```bash
+```env
 LEASHD_POLICY_FILES=policies/default.yaml,policies/my-overrides.yaml
 ```
 
@@ -330,6 +359,7 @@ Once the daemon is running and your bot is set up, these slash commands are avai
 | `/default` | Switch back to balanced default mode |
 | `/dir` | Switch working directory (inline buttons) |
 | `/git <subcommand>` | Full git suite: status, branch, checkout, diff, log, add, commit, push, pull |
+| `/web <instruction>` | Autonomous web automation with content-level human approval |
 | `/test` | 9-phase agent-driven test workflow with browser automation |
 | `/task <description>` | Autonomous multi-phase task: spec → explore → plan → implement → test → PR |
 | `/tasks` | List active and recent tasks for the current chat |
@@ -343,18 +373,7 @@ Once the daemon is running and your bot is set up, these slash commands are avai
 
 ## Workspaces
 
-Group related repositories under named workspaces for multi-repo context:
-
-```bash
-leashd ws add my-saas ~/src/api ~/src/web   # create a workspace
-leashd ws add my-saas ~/src/worker           # add a dir to existing workspace
-leashd ws list                               # list all workspaces
-leashd ws show my-saas                       # inspect repos in a workspace
-leashd ws remove my-saas ~/src/worker        # remove a dir from workspace
-leashd ws remove my-saas                     # remove entire workspace
-```
-
-Workspaces are configured in `.leashd/workspaces.yaml` and inject context into the agent's system prompt automatically. `CLAUDE.md` files from all workspace directories are loaded via SDK `add_dirs`.
+Workspaces group related repositories so the agent gets multi-repo context across all of them simultaneously. Configure workspaces via `leashd ws` — see [Configuration > Workspaces](#workspaces) for the full command reference. When active, `CLAUDE.md` files from all workspace directories are loaded and the agent's system prompt includes multi-repo context.
 
 ---
 
@@ -362,33 +381,42 @@ Workspaces are configured in `.leashd/workspaces.yaml` and inject context into t
 
 By default, sessions are stored in SQLite (`.leashd/messages.db`) and persist across daemon restarts — Claude remembers conversation context between sessions. Every message is stored with cost, duration, and session metadata.
 
-For development or testing, use in-memory storage:
+For development or testing, use in-memory storage (in `.env`):
 
-```bash
+```env
 LEASHD_STORAGE_BACKEND=memory
 ```
 
 ---
 
-## Browser Testing
+## Browser Automation
 
-leashd integrates with [Playwright MCP](https://github.com/playwright-community/mcp) to give Claude browser automation capabilities — navigating pages, clicking elements, taking snapshots, and generating Playwright tests — all gated by the safety pipeline.
+leashd supports two browser backends for the `/web` and `/test` commands — both gated by the same safety pipeline:
 
-**Prerequisites:** Node.js 18+ and a one-time browser install:
+| Backend | Install | Best for |
+|---|---|---|
+| [Playwright MCP](https://github.com/playwright-community/mcp) *(default)* | `npx playwright install chromium` | Test generation, MCP-native tooling |
+| [agent-browser](https://github.com/vercel-labs/agent-browser) | `npm install -g agent-browser && agent-browser install` | Fast Rust CLI, snapshot-based refs, cloud browser providers |
 
-```bash
-npx playwright install chromium
-```
+Switch backends and manage profiles via `leashd browser` — see [Configuration > Browser](#browser) for all commands.
 
-The `.mcp.json` at the project root pre-configures Claude Code to spawn the Playwright MCP server. Read-only browser tools (snapshots, screenshots) are auto-allowed in `default.yaml`; mutation tools (click, navigate, type) require approval.
+**Playwright MCP** — the `.mcp.json` at the project root pre-configures Claude Code to spawn the Playwright MCP server. Read-only browser tools (snapshots, screenshots) are auto-allowed in `default.yaml`; mutation tools (click, navigate, type) require approval.
 
-**Typical workflow:**
+**agent-browser** — Vercel’s headless browser CLI with a native Rust binary and Node.js fallback. Uses accessibility-tree snapshots with deterministic element refs (`@e1`, `@e2`) for reliable AI-driven interaction. Supports cloud providers (Browserbase, Browser Use, Kernel) and iOS Simulator via the `-p` flag.
+
+See [docs/browser-testing.md](docs/browser-testing.md) for Chrome profile paths by OS, the full tool reference, and policy details.
+
+### Typical workflow
 
 1. Start your dev server (`npm run dev`, `uvicorn`, etc.)
 2. In Telegram: `/test --url http://localhost:3000`
 3. Claude navigates, verifies, and reports — each mutation tap needs your approval
 
-See [docs/browser-testing.md](docs/browser-testing.md) for the full guide.
+Or use the `/web` command for general web automation:
+
+1. In Telegram: `/web check my GitHub notifications`
+2. Claude navigates using your persistent browser profile, reads content, and reports back
+3. Any actions (commenting, clicking) are proposed via `AskUserQuestion` for your approval
 
 ---
 
@@ -396,7 +424,11 @@ See [docs/browser-testing.md](docs/browser-testing.md) for the full guide.
 
 Telegram responses stream in real time — the message updates progressively as Claude types. While tools are running, you see a live indicator (e.g., `🔧 Bash: pytest tests/`). The final message includes a tool usage summary (e.g., `🧰 Bash ×3, Read, Glob`).
 
-Disable with `LEASHD_STREAMING_ENABLED=false`.
+Disable in `.env`:
+
+```env
+LEASHD_STREAMING_ENABLED=false
+```
 
 ---
 
@@ -416,17 +448,17 @@ Note: actions requiring approval are auto-denied in CLI mode since there's no ap
 
 ## Logging
 
-leashd uses [structlog](https://www.structlog.org/) for structured logging.
+leashd uses [structlog](https://www.structlog.org/) for structured logging. Set log level in `.env`:
 
-```bash
+```env
 LEASHD_LOG_LEVEL=DEBUG     # full trace including policy decisions
 LEASHD_LOG_LEVEL=INFO      # default — operational events
 LEASHD_LOG_LEVEL=WARNING   # warnings and errors only
 ```
 
-Enable file logging (JSON, rotating):
+File logging (JSON, rotating) is enabled by default:
 
-```bash
+```env
 LEASHD_LOG_DIR=~/.leashd/logs
 ```
 
@@ -490,4 +522,4 @@ If you hit a bug or have a feature idea, [open an issue](https://github.com/node
 
 ## License
 
-[Apache 2.0](LICENSE) — © NodeNova Ltd
+[Apache 2.0](LICENSE)

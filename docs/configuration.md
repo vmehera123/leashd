@@ -1,5 +1,7 @@
 # Configuration Reference
 
+Most configuration is managed via the `leashd` CLI (`leashd init`, `leashd browser`, `leashd effort`, etc.). This document covers the environment variable reference for advanced use cases and automation.
+
 `LeashdConfig` (`core/config.py`) uses pydantic-settings to load configuration from environment variables prefixed with `LEASHD_`. Values can be set in `~/.leashd/config.yaml` (global), a `.env` file in the project root, or as environment variables.
 
 ## Loading Flow
@@ -34,12 +36,15 @@ Each layer overrides the one before it: `~/.leashd/config.yaml` → `.env` → e
 
 | Variable | Type | Default | Description |
 |---|---|---|---|
-| `LEASHD_MAX_TURNS` | `int` | `150` | Maximum agent turns per message |
+| `LEASHD_MAX_TURNS` | `int` | `150` | Maximum agent turns per message (default for all modes) |
+| `LEASHD_WEB_MAX_TURNS` | `int` | `300` | Maximum agent turns in `/web` mode. Falls back to `LEASHD_MAX_TURNS` if not set. |
+| `LEASHD_TEST_MAX_TURNS` | `int` | `200` | Maximum agent turns in `/test` mode. Falls back to `LEASHD_MAX_TURNS` if not set. |
 | `LEASHD_AGENT_TIMEOUT_SECONDS` | `int` | `3600` | Agent execution timeout in seconds (60 minutes) |
 | `LEASHD_SYSTEM_PROMPT` | `str \| None` | `None` | Additional system prompt appended to the agent |
 | `LEASHD_ALLOWED_TOOLS` | `list[str]` | `[]` | Whitelist of tools the agent can use (empty = all) |
 | `LEASHD_DISALLOWED_TOOLS` | `list[str]` | `[]` | Blacklist of tools the agent cannot use |
 | `LEASHD_MCP_SERVERS` | `dict` | `{}` | JSON dict of MCP server configurations |
+| `LEASHD_EFFORT` | `Literal["low", "medium", "high", "max"] \| None` | `"medium"` | Thinking depth for the Claude agent |
 
 ### Safety Settings
 
@@ -75,6 +80,14 @@ Each layer overrides the one before it: `~/.leashd/config.yaml` → `.env` → e
 | Variable | Type | Default | Description |
 |---|---|---|---|
 | `LEASHD_DEFAULT_MODE` | `str` | `"default"` | Default session mode: `"default"` (balanced), `"plan"` (review before execute), or `"auto"` (implement directly) |
+
+### Browser
+
+| Variable | Type | Default | Description |
+|---|---|---|---|
+| `LEASHD_BROWSER_BACKEND` | `Literal["playwright", "agent-browser"]` | `"playwright"` | Browser automation backend. `playwright` uses Playwright MCP; `agent-browser` uses the agent-browser CLI skill. |
+| `LEASHD_BROWSER_HEADLESS` | `bool` | `false` | Run Playwright browser in headless mode (no visible window). Useful for CI or remote sessions. Only applies to `playwright` backend. |
+| `LEASHD_BROWSER_USER_DATA_DIR` | `str \| None` | `None` | Chrome user data directory for persistent `/web` sessions. When set, `/web` injects `--user-data-dir` into Playwright MCP args at runtime. `/test` always uses a temporary profile. |
 
 ### Streaming
 
@@ -171,6 +184,8 @@ LEASHD_APPROVED_DIRECTORIES=/path/to/your/project
 
 # Agent
 LEASHD_MAX_TURNS=150
+LEASHD_WEB_MAX_TURNS=300
+LEASHD_TEST_MAX_TURNS=200
 LEASHD_AGENT_TIMEOUT_SECONDS=3600
 LEASHD_SYSTEM_PROMPT="Focus on writing tests first."
 LEASHD_DEFAULT_MODE=default
@@ -194,6 +209,11 @@ LEASHD_STORAGE_PATH=.leashd/messages.db
 # Streaming
 LEASHD_STREAMING_ENABLED=true
 LEASHD_STREAMING_THROTTLE_SECONDS=1.5
+
+# Browser
+LEASHD_BROWSER_BACKEND=playwright
+LEASHD_BROWSER_HEADLESS=false
+LEASHD_BROWSER_USER_DATA_DIR=~/.leashd/browser-profile
 
 # Task Orchestration
 LEASHD_TASK_ORCHESTRATOR=false

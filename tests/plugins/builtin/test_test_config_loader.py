@@ -203,3 +203,43 @@ class TestDiscoverApiSpecs:
     def test_explicit_missing_file_skipped(self, tmp_path):
         result = discover_api_specs(str(tmp_path), explicit_paths=["nonexistent.http"])
         assert result == []
+
+
+class TestYamlEdgeCases:
+    @pytest.fixture
+    def leashd_dir(self, tmp_path):
+        d = tmp_path / ".leashd"
+        d.mkdir()
+        return d
+
+    def test_yaml_with_anchors_and_aliases(self, tmp_path, leashd_dir):
+        config_file = leashd_dir / "test.yaml"
+        config_file.write_text(
+            "defaults: &defaults\n"
+            "  framework: django\n"
+            "<<: *defaults\n"
+            "url: http://localhost:8000\n"
+        )
+        result = load_project_test_config(str(tmp_path))
+        assert result is not None
+        assert result.url == "http://localhost:8000"
+
+    def test_yaml_with_unknown_fields_ignored(self, tmp_path, leashd_dir):
+        config_file = leashd_dir / "test.yaml"
+        config_file.write_text(
+            "url: http://localhost\n"
+            "unknown_field: should_be_ignored\n"
+            "another_unknown: 42\n"
+        )
+        result = load_project_test_config(str(tmp_path))
+        assert result is not None
+        assert result.url == "http://localhost"
+
+    def test_yaml_with_very_large_content(self, tmp_path, leashd_dir):
+        config_file = leashd_dir / "test.yaml"
+        large_value = "x" * 100_000
+        config_file.write_text(f"url: http://localhost\nframework: {large_value}\n")
+        result = load_project_test_config(str(tmp_path))
+        assert result is not None
+        assert result.url == "http://localhost"
+        assert len(result.framework) == 100_000

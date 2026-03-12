@@ -8,6 +8,7 @@ from leashd.core.events import COMMAND_TEST, TEST_STARTED, Event, EventBus
 from leashd.core.session import Session
 from leashd.plugins.base import PluginContext
 from leashd.plugins.builtin.browser_tools import (
+    AGENT_BROWSER_AUTO_APPROVE,
     BROWSER_MUTATION_TOOLS,
     BROWSER_READONLY_TOOLS,
 )
@@ -203,6 +204,10 @@ class TestParseTestArgs:
         assert c.include_e2e is True
         assert c.include_unit is False
         assert c.include_backend is False
+
+    def test_em_dash_url_flag(self):
+        c = parse_test_args("\u2014url http://localhost:3000")
+        assert c.app_url == "http://localhost:3000"
 
 
 # --- build_test_instruction ---
@@ -681,6 +686,7 @@ class TestAutoApproveTotalCount:
         expected = (
             len(BROWSER_READONLY_TOOLS)
             + len(BROWSER_MUTATION_TOOLS)
+            + len(AGENT_BROWSER_AUTO_APPROVE)
             + len(TEST_BASH_AUTO_APPROVE)
             + 2
         )
@@ -1115,3 +1121,43 @@ class TestBuildTestPromptWithContext:
     def test_no_context_no_section(self):
         prompt = _build_test_prompt(TestConfig())
         assert "PREVIOUS TEST SESSION CONTEXT" not in prompt
+
+
+class TestAllPhasesDisabledReset:
+    def test_all_three_no_flags_resets_enabled(self):
+        """--no-e2e --no-unit --no-backend → all three include flags reset to True."""
+        c = parse_test_args("--no-e2e --no-unit --no-backend")
+        assert c.include_e2e is True
+        assert c.include_unit is True
+        assert c.include_backend is True
+
+
+class TestBuildTestInstructionBackend:
+    def test_default_playwright_mentions_mcp(self):
+        instruction = build_test_instruction(TestConfig())
+        assert "browser MCP tools" in instruction
+
+    def test_agent_browser_mentions_cli(self):
+        instruction = build_test_instruction(
+            TestConfig(), browser_backend="agent-browser"
+        )
+        assert "agent-browser CLI" in instruction
+        assert "agent-browser open" in instruction
+        assert "Playwright MCP" not in instruction
+
+    def test_agent_browser_phase3_uses_correct_tools(self):
+        instruction = build_test_instruction(
+            TestConfig(), browser_backend="agent-browser"
+        )
+        assert "agent-browser open" in instruction
+
+    def test_playwright_phase6_uses_browser_snapshot(self):
+        instruction = build_test_instruction(TestConfig(), browser_backend="playwright")
+        assert "browser_snapshot" in instruction
+        assert "browser_navigate" in instruction
+
+    def test_agent_browser_phase6_uses_agent_tools(self):
+        instruction = build_test_instruction(
+            TestConfig(), browser_backend="agent-browser"
+        )
+        assert "agent-browser snapshot" in instruction

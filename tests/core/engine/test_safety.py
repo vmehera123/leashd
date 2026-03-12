@@ -370,10 +370,10 @@ class TestDefaultButtonSessionMode:
         assert session.mode == "default"
 
     @pytest.mark.asyncio
-    async def test_clean_edit_sets_session_mode_to_auto(
+    async def test_clean_edit_sets_session_mode_to_edit(
         self, config, policy_engine, audit_logger, mock_connector
     ):
-        """When user clicks 'clean_edit', _exit_plan_mode sets session.mode = 'auto'."""
+        """When user clicks 'clean_edit', _exit_plan_mode sets session.mode = 'edit'."""
         coordinator = InteractionCoordinator(mock_connector, config)
 
         class PlanAgent(BaseAgent):
@@ -415,4 +415,4 @@ class TestDefaultButtonSessionMode:
 
         await eng.handle_message("user1", "Plan it", "chat1")
         session = eng.session_manager.get("user1", "chat1")
-        assert session.mode == "auto"
+        assert session.mode == "edit"

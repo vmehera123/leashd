@@ -23,6 +23,9 @@ htmlcov/
 # Specs
 specs/
 
+# Playwright MCP artifacts (legacy default location)
+.playwright-mcp/
+
 # OS
 .DS_Store
 

@@ -10,6 +10,7 @@ import structlog.contextvars
 from leashd.agents.base import AgentResponse, BaseAgent
 from leashd.core.config import LeashdConfig
 from leashd.core.engine import Engine
+from leashd.core.interactions import InteractionCoordinator
 from leashd.core.session import SessionManager
 from leashd.exceptions import AgentError
 from leashd.middleware.base import MessageContext
@@ -651,7 +652,7 @@ class TestAutoPlanActivation:
     ):
         """After plan approval, the implementation turn must not re-enter plan mode.
 
-        Regression test: _exit_plan_mode sets session.mode='auto' and clears
+        Regression test: _exit_plan_mode sets session.mode='edit' and clears
         claude_session_id, which would re-trigger auto_plan in the recursive
         _execute_turn call without the _skip_auto_plan guard.
         """
@@ -698,10 +699,111 @@ class TestAutoPlanActivation:
         )
 
         assert len(execute_modes) == 1
-        assert execute_modes[0] == "auto"
+        assert execute_modes[0] == "edit"
 
         final_session = sm.get("u1", "c1")
-        assert final_session.mode == "auto"
+        assert final_session.mode == "edit"
+
+
+class TestAutoPlanGuardWithPlanOrigin:
+    """Tests for plan_origin-based auto_plan guard."""
+
+    @pytest.mark.asyncio
+    async def test_auto_plan_blocked_when_plan_origin_set(
+        self, audit_logger, policy_engine, tmp_path
+    ):
+        """plan_origin='edit' + auto mode → auto_plan does NOT trigger."""
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            auto_plan=True,
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        agent = FakeAgent()
+        sm = SessionManager()
+        eng = Engine(
+            connector=None,
+            agent=agent,
+            config=config,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        session = await sm.get_or_create("u1", "c1", str(tmp_path))
+        session.mode = "auto"
+        session.plan_origin = "edit"
+        await sm.save(session)
+
+        await eng.handle_message("u1", "implement it", "c1")
+
+        session = sm.get("u1", "c1")
+        assert session.mode == "auto"
+
+    @pytest.mark.asyncio
+    async def test_auto_plan_triggers_when_plan_origin_none(
+        self, audit_logger, policy_engine, tmp_path
+    ):
+        """plan_origin=None + auto mode → auto_plan activates."""
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            auto_plan=True,
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        agent = FakeAgent()
+        sm = SessionManager()
+        eng = Engine(
+            connector=None,
+            agent=agent,
+            config=config,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        session = await sm.get_or_create("u1", "c1", str(tmp_path))
+        session.mode = "auto"
+        session.plan_origin = None
+        await sm.save(session)
+
+        await eng.handle_message("u1", "hello", "c1")
+
+        session = sm.get("u1", "c1")
+        assert session.mode == "plan"
+
+    @pytest.mark.asyncio
+    async def test_exit_plan_mode_clears_plan_origin(
+        self, audit_logger, policy_engine, tmp_path
+    ):
+        """After _exit_plan_mode, plan_origin should be None."""
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            auto_plan=True,
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        agent = FakeAgent()
+        sm = SessionManager()
+        eng = Engine(
+            connector=None,
+            agent=agent,
+            config=config,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        session = await sm.get_or_create("u1", "c1", str(tmp_path))
+        session.mode = "plan"
+        session.plan_origin = "auto"
+        session.claude_session_id = "plan-session"
+        await sm.save(session)
+
+        plan_text = "A detailed implementation plan with enough content to pass the length check."
+        await eng._exit_plan_mode(
+            session, "c1", "u1", plan_text, trigger="test", clear_context=True
+        )
+
+        session = sm.get("u1", "c1")
+        assert session.plan_origin is None
 
 
 class TestRetryableResponsePatterns:
@@ -742,3 +844,70 @@ class TestRetryableResponsePatterns:
             content="authentication_error: invalid API key", is_error=True
         )
         assert Engine._is_retryable_response(resp) is False
+
+
+class TestAgentDeadlinePauseDuringQuestion:
+    @pytest.mark.asyncio
+    async def test_agent_timeout_pauses_during_question(
+        self, config, policy_engine, audit_logger
+    ):
+        """User answering AskUserQuestion pauses the agent deadline."""
+        from tests.conftest import MockConnector
+
+        connector = MockConnector(support_streaming=True)
+        config_short = LeashdConfig(
+            approved_directories=config.approved_directories,
+            max_turns=5,
+            agent_timeout_seconds=1,
+            streaming_enabled=True,
+            audit_log_path=config.audit_log_path,
+        )
+        coordinator = InteractionCoordinator(connector, config_short)
+
+        class QuestionAgent(BaseAgent):
+            async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
+                async def answer_later():
+                    await asyncio.sleep(1.5)
+                    req = connector.question_requests[0]
+                    await coordinator.resolve_option(req["interaction_id"], "Yes")
+
+                task = asyncio.create_task(answer_later())
+                await can_use_tool(
+                    "AskUserQuestion",
+                    {
+                        "questions": [
+                            {
+                                "question": "Continue?",
+                                "header": "Confirm",
+                                "options": [
+                                    {"label": "Yes", "description": "Proceed"},
+                                    {"label": "No", "description": "Stop"},
+                                ],
+                                "multiSelect": False,
+                            }
+                        ]
+                    },
+                    None,
+                )
+                await task
+                return AgentResponse(content="Done", session_id="sid", cost=0.01)
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=connector,
+            agent=QuestionAgent(),
+            config=config_short,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            interaction_coordinator=coordinator,
+        )
+
+        result = await eng.handle_message("user1", "hello", "chat1")
+        assert "timed out" not in result.lower()
+        assert "Done" in result

@@ -135,7 +135,12 @@ def inject_global_config_as_env(*, force: bool = False) -> None:
                 [str(uid) for uid in user_ids]
             )
 
+    effort = data.get("effort")
+    if effort and (force or "LEASHD_EFFORT" not in os.environ):
+        os.environ["LEASHD_EFFORT"] = str(effort)
+
     _inject_autonomous_config(data, force=force)
+    _inject_browser_config(data, force=force)
 
 
 # --- Autonomous config bridging ---
@@ -205,6 +210,44 @@ def _inject_autonomous_config(data: dict[str, Any], *, force: bool = False) -> N
                 os.environ[env_key] = str(value).lower()
             else:
                 os.environ[env_key] = str(value)
+
+
+# --- Browser config bridging ---
+
+
+def get_browser_config(data: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Read the ``browser`` section from global config.
+
+    Returns an empty dict when the section is missing or not a dict.
+    """
+    if data is None:
+        data = load_global_config()
+    browser = data.get("browser", {})
+    if not isinstance(browser, dict):
+        return {}
+    return browser
+
+
+def _inject_browser_config(data: dict[str, Any], *, force: bool = False) -> None:
+    """Bridge browser YAML config → LEASHD_BROWSER_* env vars."""
+    browser = data.get("browser", {})
+    if not isinstance(browser, dict):
+        return
+    user_data_dir = browser.get("user_data_dir")
+    if user_data_dir:
+        key = "LEASHD_BROWSER_USER_DATA_DIR"
+        if force or key not in os.environ:
+            os.environ[key] = str(user_data_dir)
+    backend = browser.get("backend")
+    if backend:
+        key = "LEASHD_BROWSER_BACKEND"
+        if force or key not in os.environ:
+            os.environ[key] = str(backend)
+    headless = browser.get("headless")
+    if headless is not None:
+        key = "LEASHD_BROWSER_HEADLESS"
+        if force or key not in os.environ:
+            os.environ[key] = str(headless).lower()
 
 
 # --- Workspace config at ~/.leashd/workspaces.yaml ---
@@ -300,6 +343,55 @@ def merge_workspace_dirs(
     data["workspaces"] = workspaces
     save_workspaces_config(data)
     return (newly_added, already_present)
+
+
+def get_skills_config(data: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Read the ``skills`` section from global config.
+
+    Returns an empty dict when the section is missing or not a dict.
+    """
+    if data is None:
+        data = load_global_config()
+    skills = data.get("skills", {})
+    if not isinstance(skills, dict):
+        return {}
+    return skills
+
+
+def save_skill_metadata(
+    *,
+    name: str,
+    description: str,
+    source: str,
+    installed_at: str,
+    tags: list[str] | None = None,
+) -> None:
+    """Upsert a skill entry in the global config."""
+    data = load_global_config()
+    skills = data.get("skills", {})
+    if not isinstance(skills, dict):
+        skills = {}
+    skills[name] = {
+        "description": description,
+        "installed_at": installed_at,
+        "source": source,
+    }
+    if tags:
+        skills[name]["tags"] = tags
+    data["skills"] = skills
+    save_global_config(data)
+
+
+def remove_skill_metadata(name: str) -> bool:
+    """Delete a skill entry from config. Returns True if it existed."""
+    data = load_global_config()
+    skills = data.get("skills", {})
+    if not isinstance(skills, dict) or name not in skills:
+        return False
+    del skills[name]
+    data["skills"] = skills
+    save_global_config(data)
+    return True
 
 
 def remove_workspace_dirs(name: str, directories: list[str]) -> list[str]:

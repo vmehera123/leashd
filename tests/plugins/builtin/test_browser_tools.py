@@ -15,11 +15,17 @@ from leashd.core.events import (
 )
 from leashd.plugins.base import PluginContext
 from leashd.plugins.builtin.browser_tools import (
+    AGENT_BROWSER_AUTO_APPROVE,
+    AGENT_BROWSER_MUTATION_COMMANDS,
+    AGENT_BROWSER_READONLY_COMMANDS,
     ALL_BROWSER_TOOLS,
     BROWSER_MUTATION_TOOLS,
     BROWSER_READONLY_TOOLS,
+    BROWSER_TOOL_SETS,
     BrowserToolsPlugin,
+    is_agent_browser_command,
     is_browser_tool,
+    parse_agent_browser_command,
 )
 
 
@@ -232,4 +238,264 @@ class TestBrowserToolsPlugin:
     def test_meta(self):
         plugin = BrowserToolsPlugin()
         assert plugin.meta.name == "browser_tools"
-        assert plugin.meta.version == "0.1.0"
+        assert plugin.meta.version == "0.2.0"
+
+
+class TestMissingEventData:
+    @pytest.mark.asyncio
+    async def test_gated_handler_missing_tool_name(self, config):
+        bus = EventBus()
+        ctx = PluginContext(event_bus=bus, config=config)
+        plugin = BrowserToolsPlugin()
+        await plugin.initialize(ctx)
+
+        await bus.emit(Event(name=TOOL_GATED, data={}))
+
+    @pytest.mark.asyncio
+    async def test_gated_handler_empty_data(self, config):
+        bus = EventBus()
+        ctx = PluginContext(event_bus=bus, config=config)
+        plugin = BrowserToolsPlugin()
+        await plugin.initialize(ctx)
+
+        await bus.emit(Event(name=TOOL_GATED, data={}))
+
+    @pytest.mark.asyncio
+    async def test_allowed_handler_missing_tool_name(self, config):
+        bus = EventBus()
+        ctx = PluginContext(event_bus=bus, config=config)
+        plugin = BrowserToolsPlugin()
+        await plugin.initialize(ctx)
+
+        await bus.emit(Event(name=TOOL_ALLOWED, data={}))
+
+    @pytest.mark.asyncio
+    async def test_denied_handler_missing_tool_name(self, config):
+        bus = EventBus()
+        ctx = PluginContext(event_bus=bus, config=config)
+        plugin = BrowserToolsPlugin()
+        await plugin.initialize(ctx)
+
+        await bus.emit(Event(name=TOOL_DENIED, data={"reason": "test"}))
+
+
+class TestAgentBrowserConstants:
+    def test_readonly_commands_populated(self):
+        assert "snapshot" in AGENT_BROWSER_READONLY_COMMANDS
+        assert "console" in AGENT_BROWSER_READONLY_COMMANDS
+
+    def test_mutation_commands_populated(self):
+        assert "click" in AGENT_BROWSER_MUTATION_COMMANDS
+        assert "open" in AGENT_BROWSER_MUTATION_COMMANDS
+        assert "scrollintoview" in AGENT_BROWSER_MUTATION_COMMANDS
+        assert "evaluate" in AGENT_BROWSER_MUTATION_COMMANDS
+        assert "key" in AGENT_BROWSER_MUTATION_COMMANDS
+        assert "mouse-wheel" in AGENT_BROWSER_MUTATION_COMMANDS
+
+    def test_no_overlap(self):
+        assert (
+            frozenset()
+            == AGENT_BROWSER_READONLY_COMMANDS & AGENT_BROWSER_MUTATION_COMMANDS
+        )
+
+    def test_auto_approve_keys_format(self):
+        for key in AGENT_BROWSER_AUTO_APPROVE:
+            assert key.startswith("Bash::agent-browser ")
+
+
+class TestParseAgentBrowserCommand:
+    def test_readonly_snapshot(self):
+        result = parse_agent_browser_command("agent-browser snapshot -i")
+        assert result is not None
+        assert result == ("snapshot", False)
+
+    def test_mutation_click(self):
+        result = parse_agent_browser_command("agent-browser click '#submit'")
+        assert result is not None
+        assert result == ("click", True)
+
+    def test_mutation_open(self):
+        result = parse_agent_browser_command("agent-browser open https://example.com")
+        assert result is not None
+        assert result == ("open", True)
+
+    def test_tab_list_readonly(self):
+        result = parse_agent_browser_command("agent-browser tab list")
+        assert result is not None
+        assert result == ("tab list", False)
+
+    def test_tab_new_mutation(self):
+        result = parse_agent_browser_command("agent-browser tab new")
+        assert result is not None
+        assert result == ("tab new", True)
+
+    def test_tab_close_mutation(self):
+        result = parse_agent_browser_command("agent-browser tab close")
+        assert result is not None
+        assert result == ("tab close", True)
+
+    def test_session_list_readonly(self):
+        result = parse_agent_browser_command("agent-browser session list")
+        assert result is not None
+        assert result == ("session list", False)
+
+    def test_non_agent_browser_returns_none(self):
+        assert parse_agent_browser_command("npm install") is None
+
+    def test_scrollintoview_mutation(self):
+        result = parse_agent_browser_command("agent-browser scrollintoview @e5")
+        assert result is not None
+        assert result == ("scrollintoview", True)
+
+    def test_evaluate_mutation(self):
+        result = parse_agent_browser_command("agent-browser evaluate 'document.title'")
+        assert result is not None
+        assert result == ("evaluate", True)
+
+    def test_key_mutation(self):
+        result = parse_agent_browser_command("agent-browser key Enter")
+        assert result is not None
+        assert result == ("key", True)
+
+    def test_mouse_wheel_mutation(self):
+        result = parse_agent_browser_command("agent-browser mouse-wheel 0 500")
+        assert result is not None
+        assert result == ("mouse-wheel", True)
+
+    def test_unknown_subcommand_returns_none(self):
+        assert parse_agent_browser_command("agent-browser unknown") is None
+
+    def test_empty_string_returns_none(self):
+        assert parse_agent_browser_command("") is None
+
+
+class TestIsAgentBrowserCommand:
+    def test_bash_with_agent_browser(self):
+        assert (
+            is_agent_browser_command("Bash", {"command": "agent-browser snapshot"})
+            is True
+        )
+
+    def test_bash_without_agent_browser(self):
+        assert is_agent_browser_command("Bash", {"command": "npm install"}) is False
+
+    def test_non_bash_tool(self):
+        assert (
+            is_agent_browser_command("Read", {"command": "agent-browser snapshot"})
+            is False
+        )
+
+    def test_empty_command(self):
+        assert is_agent_browser_command("Bash", {"command": ""}) is False
+
+    def test_missing_command_key(self):
+        assert is_agent_browser_command("Bash", {}) is False
+
+
+class TestBrowserToolsPluginAgentBrowser:
+    @pytest.mark.asyncio
+    async def test_gated_detects_agent_browser(self, config, capsys):
+        bus = EventBus()
+        ctx = PluginContext(event_bus=bus, config=config)
+        plugin = BrowserToolsPlugin()
+        await plugin.initialize(ctx)
+
+        await bus.emit(
+            Event(
+                name=TOOL_GATED,
+                data={
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "agent-browser click '#btn'"},
+                    "session_id": "s1",
+                },
+            )
+        )
+
+        captured = capsys.readouterr()
+        assert "browser_tool_gated" in captured.out
+        assert "agent-browser" in captured.out
+        assert "is_mutation=True" in captured.out
+
+    @pytest.mark.asyncio
+    async def test_gated_detects_agent_browser_readonly(self, config, capsys):
+        bus = EventBus()
+        ctx = PluginContext(event_bus=bus, config=config)
+        plugin = BrowserToolsPlugin()
+        await plugin.initialize(ctx)
+
+        await bus.emit(
+            Event(
+                name=TOOL_GATED,
+                data={
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "agent-browser snapshot -i"},
+                    "session_id": "s1",
+                },
+            )
+        )
+
+        captured = capsys.readouterr()
+        assert "browser_tool_gated" in captured.out
+        assert "is_mutation=False" in captured.out
+
+    @pytest.mark.asyncio
+    async def test_allowed_detects_agent_browser(self, config, capsys):
+        bus = EventBus()
+        ctx = PluginContext(event_bus=bus, config=config)
+        plugin = BrowserToolsPlugin()
+        await plugin.initialize(ctx)
+
+        await bus.emit(
+            Event(
+                name=TOOL_ALLOWED,
+                data={
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "agent-browser open https://example.com"},
+                    "session_id": "s1",
+                },
+            )
+        )
+
+        captured = capsys.readouterr()
+        assert "browser_tool_allowed" in captured.out
+
+    @pytest.mark.asyncio
+    async def test_non_agent_browser_bash_skipped(self, config, capsys):
+        bus = EventBus()
+        ctx = PluginContext(event_bus=bus, config=config)
+        plugin = BrowserToolsPlugin()
+        await plugin.initialize(ctx)
+
+        await bus.emit(
+            Event(
+                name=TOOL_GATED,
+                data={
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "npm install"},
+                    "session_id": "s1",
+                },
+            )
+        )
+
+        captured = capsys.readouterr()
+        assert "browser_tool_gated" not in captured.out
+
+
+class TestBrowserToolSets:
+    def test_browser_tool_sets_has_both_backends(self):
+        assert "playwright" in BROWSER_TOOL_SETS
+        assert "agent-browser" in BROWSER_TOOL_SETS
+
+    def test_tool_set_fields(self):
+        for name, tool_set in BROWSER_TOOL_SETS.items():
+            for field in (
+                "snap_tool",
+                "screenshot_tool",
+                "eval_tool",
+                "click_tool",
+                "type_tool",
+                "navigate_tool",
+                "press_key_tool",
+            ):
+                value = getattr(tool_set, field)
+                assert value, f"{name}.{field} is empty"

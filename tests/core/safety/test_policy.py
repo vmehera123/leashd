@@ -333,18 +333,25 @@ class TestAgentInternalTools:
 
     @pytest.mark.parametrize(
         "tool",
-        ["AskUserQuestion", "ExitPlanMode", "Task", "TaskCreate", "EnterPlanMode"],
+        [
+            "AskUserQuestion",
+            "ExitPlanMode",
+            "Task",
+            "TaskCreate",
+            "EnterPlanMode",
+            "Skill",
+        ],
     )
     def test_agent_tools_allowed_default(self, engine, tool):
         c = engine.classify(tool, {})
         assert engine.evaluate(c) == PolicyDecision.ALLOW
 
-    @pytest.mark.parametrize("tool", ["AskUserQuestion", "ExitPlanMode"])
+    @pytest.mark.parametrize("tool", ["AskUserQuestion", "ExitPlanMode", "Skill"])
     def test_agent_tools_allowed_strict(self, strict_policy_engine, tool):
         c = strict_policy_engine.classify(tool, {})
         assert strict_policy_engine.evaluate(c) == PolicyDecision.ALLOW
 
-    @pytest.mark.parametrize("tool", ["AskUserQuestion", "ExitPlanMode"])
+    @pytest.mark.parametrize("tool", ["AskUserQuestion", "ExitPlanMode", "Skill"])
     def test_agent_tools_allowed_permissive(self, permissive_policy_engine, tool):
         c = permissive_policy_engine.classify(tool, {})
         assert permissive_policy_engine.evaluate(c) == PolicyDecision.ALLOW
@@ -773,3 +780,134 @@ class TestBrowserToolPolicies:
     ):
         c = permissive_policy_engine.classify(tool, {})
         assert c.category != "unmatched"
+
+
+class TestCrossPolicyInvariants:
+    """Security invariants that must hold across ALL policy files."""
+
+    POLICIES_DIR = Path(__file__).parent.parent.parent.parent / "leashd" / "policies"
+
+    @pytest.fixture(
+        params=["default.yaml", "strict.yaml", "permissive.yaml", "autonomous.yaml"]
+    )
+    def any_policy_engine(self, request):
+        policy_path = self.POLICIES_DIR / request.param
+        if not policy_path.exists():
+            pytest.skip(f"{request.param} not found")
+        return PolicyEngine([policy_path])
+
+    def test_all_policies_deny_rm_rf(self, any_policy_engine):
+        c = any_policy_engine.classify("Bash", {"command": "rm -rf /"})
+        assert any_policy_engine.evaluate(c) == PolicyDecision.DENY
+
+    @pytest.fixture(params=["default.yaml", "permissive.yaml", "autonomous.yaml"])
+    def force_push_policy_engine(self, request):
+        """Policies with explicit no-force-push deny rules.
+
+        strict.yaml uses a blanket all-bash require_approval instead.
+        """
+        policy_path = self.POLICIES_DIR / request.param
+        if not policy_path.exists():
+            pytest.skip(f"{request.param} not found")
+        return PolicyEngine([policy_path])
+
+    def test_policies_with_force_push_rule_deny_it(self, force_push_policy_engine):
+        c = force_push_policy_engine.classify(
+            "Bash", {"command": "git push --force origin main"}
+        )
+        assert force_push_policy_engine.evaluate(c) == PolicyDecision.DENY
+
+    def test_strict_policy_does_not_allow_force_push(self):
+        """Strict policy gates force push behind require_approval (not allow)."""
+        policy_path = self.POLICIES_DIR / "strict.yaml"
+        if not policy_path.exists():
+            pytest.skip("strict.yaml not found")
+        engine = PolicyEngine([policy_path])
+        c = engine.classify("Bash", {"command": "git push --force origin main"})
+        assert engine.evaluate(c) != PolicyDecision.ALLOW
+
+    def test_all_policies_deny_credential_access(self, any_policy_engine):
+        c = any_policy_engine.classify("Read", {"file_path": "/home/user/.env"})
+        assert any_policy_engine.evaluate(c) == PolicyDecision.DENY
+
+
+class TestAgentBrowserPolicyRules:
+    """Verify agent-browser commands are handled by all policy files."""
+
+    POLICIES_DIR = Path(__file__).parent.parent.parent.parent / "leashd" / "policies"
+
+    def test_default_allows_readonly(self):
+        engine = PolicyEngine([self.POLICIES_DIR / "default.yaml"])
+        c = engine.classify("Bash", {"command": "agent-browser snapshot -i"})
+        assert engine.evaluate(c) == PolicyDecision.ALLOW
+
+    def test_default_requires_approval_for_mutations(self):
+        engine = PolicyEngine([self.POLICIES_DIR / "default.yaml"])
+        c = engine.classify("Bash", {"command": "agent-browser click '#btn'"})
+        assert engine.evaluate(c) == PolicyDecision.REQUIRE_APPROVAL
+
+    def test_default_allows_console(self):
+        engine = PolicyEngine([self.POLICIES_DIR / "default.yaml"])
+        c = engine.classify("Bash", {"command": "agent-browser console"})
+        assert engine.evaluate(c) == PolicyDecision.ALLOW
+
+    def test_default_requires_approval_for_open(self):
+        engine = PolicyEngine([self.POLICIES_DIR / "default.yaml"])
+        c = engine.classify(
+            "Bash", {"command": "agent-browser open https://example.com"}
+        )
+        assert engine.evaluate(c) == PolicyDecision.REQUIRE_APPROVAL
+
+    def test_permissive_allows_all(self):
+        engine = PolicyEngine([self.POLICIES_DIR / "permissive.yaml"])
+        c = engine.classify("Bash", {"command": "agent-browser click '#btn'"})
+        assert engine.evaluate(c) == PolicyDecision.ALLOW
+
+    def test_strict_requires_approval_for_readonly(self):
+        engine = PolicyEngine([self.POLICIES_DIR / "strict.yaml"])
+        c = engine.classify("Bash", {"command": "agent-browser snapshot -i"})
+        assert engine.evaluate(c) == PolicyDecision.REQUIRE_APPROVAL
+
+    def test_autonomous_allows_readonly(self):
+        engine = PolicyEngine([self.POLICIES_DIR / "autonomous.yaml"])
+        c = engine.classify("Bash", {"command": "agent-browser screenshot"})
+        assert engine.evaluate(c) == PolicyDecision.ALLOW
+
+    def test_autonomous_requires_approval_for_mutations(self):
+        engine = PolicyEngine([self.POLICIES_DIR / "autonomous.yaml"])
+        c = engine.classify(
+            "Bash", {"command": "agent-browser fill '#email' test@test.com"}
+        )
+        assert engine.evaluate(c) == PolicyDecision.REQUIRE_APPROVAL
+
+    def test_default_requires_approval_for_scrollintoview(self):
+        engine = PolicyEngine([self.POLICIES_DIR / "default.yaml"])
+        c = engine.classify("Bash", {"command": "agent-browser scrollintoview @e5"})
+        assert engine.evaluate(c) == PolicyDecision.REQUIRE_APPROVAL
+        assert c.category == "agent-browser-mutations"
+
+    def test_default_requires_approval_for_evaluate(self):
+        engine = PolicyEngine([self.POLICIES_DIR / "default.yaml"])
+        c = engine.classify(
+            "Bash", {"command": "agent-browser evaluate 'document.title'"}
+        )
+        assert engine.evaluate(c) == PolicyDecision.REQUIRE_APPROVAL
+        assert c.category == "agent-browser-mutations"
+
+    def test_default_requires_approval_for_key(self):
+        engine = PolicyEngine([self.POLICIES_DIR / "default.yaml"])
+        c = engine.classify("Bash", {"command": "agent-browser key Enter"})
+        assert engine.evaluate(c) == PolicyDecision.REQUIRE_APPROVAL
+        assert c.category == "agent-browser-mutations"
+
+    def test_default_requires_approval_for_mouse_wheel(self):
+        engine = PolicyEngine([self.POLICIES_DIR / "default.yaml"])
+        c = engine.classify("Bash", {"command": "agent-browser mouse-wheel 0 500"})
+        assert engine.evaluate(c) == PolicyDecision.REQUIRE_APPROVAL
+        assert c.category == "agent-browser-mutations"
+
+    def test_autonomous_requires_approval_for_scrollintoview(self):
+        engine = PolicyEngine([self.POLICIES_DIR / "autonomous.yaml"])
+        c = engine.classify("Bash", {"command": "agent-browser scrollintoview @e5"})
+        assert engine.evaluate(c) == PolicyDecision.REQUIRE_APPROVAL
+        assert c.category == "agent-browser-mutations"

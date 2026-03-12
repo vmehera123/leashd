@@ -123,6 +123,28 @@ def run_setup(
         else:
             print("  - Skipped\n")
 
+    browser = data.get("browser", {})
+    if not isinstance(browser, dict):
+        browser = {}
+    if not browser.get("user_data_dir"):
+        print(
+            "  \U0001f310 Browser profile for /web command (optional \u2014 press Enter to skip)"
+        )
+        print("  (Persists login sessions and cookies across /web invocations)")
+        profile_path = _prompt_optional(
+            "Profile directory",
+            "e.g., ~/.leashd/browser-profile",
+            input_fn=input_fn,
+        )
+        if profile_path:
+            resolved = Path(profile_path).expanduser().resolve()
+            resolved.mkdir(parents=True, exist_ok=True)
+            browser["user_data_dir"] = str(resolved)
+            data["browser"] = browser
+            print(f"  \u2713 Browser profile set to {resolved}\n")
+        else:
+            print("  - Skipped\n")
+
     save_global_config(data)
     print(f"  \u2713 Config saved to {config_path()}")
     return data

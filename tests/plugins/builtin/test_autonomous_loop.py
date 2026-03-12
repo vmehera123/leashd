@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -112,6 +113,24 @@ class TestSessionCompletedIgnoresNonAuto:
         await loop_plugin.initialize(ctx)
 
         session = _make_session(mode="test")
+        event = Event(
+            name=SESSION_COMPLETED,
+            data={"session": session, "chat_id": "chat-1", "response_content": "done"},
+        )
+        await loop_plugin._on_session_completed(event)
+        assert loop_plugin.active_chats == set()
+
+    async def test_ignores_edit_mode(self, loop_plugin, event_bus, tmp_path):
+        """Edit-mode completions must NOT trigger /test.
+
+        Regression: 'edit' mode was previously 'auto', which let the
+        AutonomousLoop fire during interactive /edit sessions.
+        """
+        config = LeashdConfig(approved_directories=[tmp_path])
+        ctx = PluginContext(event_bus=event_bus, config=config)
+        await loop_plugin.initialize(ctx)
+
+        session = _make_session(mode="edit")
         event = Event(
             name=SESSION_COMPLETED,
             data={"session": session, "chat_id": "chat-1", "response_content": "done"},
@@ -789,3 +808,253 @@ class TestEvaluatorIntegration:
             )
 
         assert "chat-1" not in loop_plugin.session_states
+
+
+class TestOrphanCleanup:
+    """_MAX_SESSION_STATES=500 cleanup."""
+
+    async def test_orphan_states_cleaned_on_max_threshold(
+        self, loop_plugin, mock_engine, event_bus, tmp_path
+    ):
+        config = LeashdConfig(approved_directories=[tmp_path])
+        ctx = PluginContext(event_bus=event_bus, config=config)
+        await loop_plugin.initialize(ctx)
+
+        for i in range(500):
+            loop_plugin._session_states[f"orphan-{i}"] = _LoopState(
+                phase="testing",
+                retry_count=0,
+                chat_id=f"orphan-{i}",
+                session_id=f"sess-{i}",
+                user_id="user-1",
+            )
+
+        assert len(loop_plugin._session_states) == 500
+
+        session = _make_session(mode="auto", chat_id="new-chat")
+        event = Event(
+            name=SESSION_COMPLETED,
+            data={
+                "session": session,
+                "chat_id": "new-chat",
+                "user_id": "user-1",
+                "response_content": "done",
+            },
+        )
+        await loop_plugin._on_session_completed(event)
+        await asyncio.sleep(0.05)
+
+        assert "new-chat" in loop_plugin.session_states
+        assert len(loop_plugin._session_states) < 502
+
+    async def test_active_states_preserved_during_cleanup(
+        self, loop_plugin, mock_engine, event_bus, tmp_path
+    ):
+        config = LeashdConfig(approved_directories=[tmp_path])
+        ctx = PluginContext(event_bus=event_bus, config=config)
+        await loop_plugin.initialize(ctx)
+
+        async def slow_work():
+            await asyncio.sleep(100)
+
+        active_task = asyncio.create_task(slow_work())
+        loop_plugin._active_tasks["active-chat"] = active_task
+        loop_plugin._session_states["active-chat"] = _LoopState(
+            phase="testing",
+            retry_count=1,
+            chat_id="active-chat",
+            session_id="active-sess",
+            user_id="user-1",
+        )
+
+        for i in range(500):
+            loop_plugin._session_states[f"orphan-{i}"] = _LoopState(
+                phase="testing",
+                retry_count=0,
+                chat_id=f"orphan-{i}",
+                session_id=f"sess-{i}",
+                user_id="user-1",
+            )
+
+        session = _make_session(mode="auto", chat_id="trigger-chat")
+        event = Event(
+            name=SESSION_COMPLETED,
+            data={
+                "session": session,
+                "chat_id": "trigger-chat",
+                "user_id": "user-1",
+                "response_content": "done",
+            },
+        )
+        await loop_plugin._on_session_completed(event)
+        await asyncio.sleep(0.05)
+
+        assert "active-chat" in loop_plugin._session_states
+        active_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await active_task
+
+
+class TestMultiChatIsolationLoop:
+    async def test_independent_state_per_chat(self, loop_plugin):
+        loop_plugin._session_states["chat-1"] = _LoopState(
+            phase="testing",
+            retry_count=0,
+            chat_id="chat-1",
+            session_id="sess-1",
+            user_id="user-1",
+        )
+        loop_plugin._session_states["chat-2"] = _LoopState(
+            phase="retrying",
+            retry_count=2,
+            chat_id="chat-2",
+            session_id="sess-2",
+            user_id="user-2",
+        )
+
+        loop_plugin._session_states["chat-2"].phase = "testing"
+
+        assert loop_plugin._session_states["chat-1"].phase == "testing"
+        assert loop_plugin._session_states["chat-1"].retry_count == 0
+
+
+class TestInvalidStateTransitions:
+    async def test_test_completion_without_state_ignored(
+        self, loop_plugin, event_bus, tmp_path
+    ):
+        """mode='test' completion with no tracking state → no crash."""
+        config = LeashdConfig(approved_directories=[tmp_path])
+        ctx = PluginContext(event_bus=event_bus, config=config)
+        await loop_plugin.initialize(ctx)
+
+        session = _make_session(mode="test")
+        event = Event(
+            name=SESSION_COMPLETED,
+            data={
+                "session": session,
+                "chat_id": "chat-1",
+                "response_content": "done",
+            },
+        )
+        await loop_plugin._on_session_completed(event)
+        assert "chat-1" not in loop_plugin.session_states
+
+    async def test_unmatched_mode_state_combo_ignored(
+        self, loop_plugin, event_bus, tmp_path
+    ):
+        """mode='test' but state.phase='creating_pr' → no action."""
+        config = LeashdConfig(approved_directories=[tmp_path])
+        ctx = PluginContext(event_bus=event_bus, config=config)
+        await loop_plugin.initialize(ctx)
+
+        loop_plugin._session_states["chat-1"] = _LoopState(
+            phase="creating_pr",
+            retry_count=0,
+            chat_id="chat-1",
+            session_id="sess-1",
+            user_id="user-1",
+        )
+
+        session = _make_session(mode="test")
+        event = Event(
+            name=SESSION_COMPLETED,
+            data={
+                "session": session,
+                "chat_id": "chat-1",
+                "response_content": "done",
+            },
+        )
+        await loop_plugin._on_session_completed(event)
+
+        assert loop_plugin._session_states["chat-1"].phase == "creating_pr"
+
+
+class TestConnectorNonePaths:
+    async def test_escalation_no_connector_no_crash(
+        self, mock_engine, event_bus, tmp_path
+    ):
+        loop = AutonomousLoop(None, max_retries=2)
+        loop.set_engine(mock_engine)
+        config = LeashdConfig(approved_directories=[tmp_path])
+        ctx = PluginContext(event_bus=event_bus, config=config)
+        await loop.initialize(ctx)
+
+        await loop._escalate(
+            chat_id="chat-1",
+            session_id="sess-1",
+            response_content="FAILED",
+            attempt=2,
+        )
+
+    async def test_success_notification_no_connector_no_crash(self, mock_engine):
+        loop = AutonomousLoop(None, max_retries=2)
+        loop.set_engine(mock_engine)
+
+        state = _LoopState(
+            phase="testing",
+            retry_count=1,
+            chat_id="chat-1",
+            session_id="sess-1",
+            user_id="user-1",
+        )
+        loop._session_states["chat-1"] = state
+
+        await loop._handle_success("chat-1", state)
+        assert "chat-1" not in loop.session_states
+
+    async def test_pr_error_no_connector_no_crash(self, mock_engine):
+        mock_engine.handle_message = AsyncMock(side_effect=RuntimeError("gh failed"))
+        loop = AutonomousLoop(None, max_retries=2, auto_pr=True)
+        loop.set_engine(mock_engine)
+
+        state = _LoopState(
+            phase="testing",
+            retry_count=0,
+            chat_id="chat-1",
+            session_id="sess-1",
+            user_id="user-1",
+        )
+        loop._session_states["chat-1"] = state
+
+        await loop._submit_pr_creation("chat-1", state)
+        assert "chat-1" not in loop.session_states
+
+
+class TestEventDataValidation:
+    async def test_session_completed_without_session_key(
+        self, loop_plugin, event_bus, tmp_path
+    ):
+        config = LeashdConfig(approved_directories=[tmp_path])
+        ctx = PluginContext(event_bus=event_bus, config=config)
+        await loop_plugin.initialize(ctx)
+
+        event = Event(name=SESSION_COMPLETED, data={})
+        await loop_plugin._on_session_completed(event)
+
+    async def test_session_completed_with_none_session(
+        self, loop_plugin, event_bus, tmp_path
+    ):
+        config = LeashdConfig(approved_directories=[tmp_path])
+        ctx = PluginContext(event_bus=event_bus, config=config)
+        await loop_plugin.initialize(ctx)
+
+        event = Event(name=SESSION_COMPLETED, data={"session": None})
+        await loop_plugin._on_session_completed(event)
+
+    async def test_user_message_without_chat_id(self, loop_plugin, event_bus, tmp_path):
+        config = LeashdConfig(approved_directories=[tmp_path])
+        ctx = PluginContext(event_bus=event_bus, config=config)
+        await loop_plugin.initialize(ctx)
+
+        event = Event(name=MESSAGE_IN, data={})
+        await loop_plugin._on_user_message(event)
+
+
+class TestBackoffEdgeCases:
+    def test_very_large_attempt_capped_at_max(self):
+        d = AutonomousLoop._compute_backoff_delay(1000, jitter=0.0)
+        assert d <= 30.0
+
+    def test_negative_attempt_returns_positive_delay(self):
+        d = AutonomousLoop._compute_backoff_delay(-1, jitter=0.0)
+        assert d >= 0.0

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import shutil
 import sys
+import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -16,6 +17,8 @@ from leashd.config_store import (
     config_path,
     get_approved_directories,
     get_autonomous_config,
+    get_browser_config,
+    get_skills_config,
     get_workspaces,
     inject_global_config_as_env,
     load_global_config,
@@ -152,11 +155,22 @@ def _print_resolved_config(config: LeashdConfig, yaml_data: dict[str, Any]) -> N
     else:
         print("\nTelegram: not configured")
 
+    effort_hint = _source_hint("effort", yaml_data)
+    print(f"\nThinking effort: {config.effort or 'default'}{effort_hint}")
+
     autonomous = get_autonomous_config(yaml_data)
     if autonomous.get("enabled"):
         print("\nAutonomous mode: ENABLED")
     else:
         print("\nAutonomous mode: disabled")
+
+    skills = get_skills_config(yaml_data)
+    if skills:
+        print(f"\nSkills ({len(skills)}):")
+        for name, entry in skills.items():
+            if isinstance(entry, dict):
+                desc = entry.get("description", "")
+                print(f"  {name}: {desc}")
 
 
 def _print_yaml_only_config(yaml_data: dict[str, Any]) -> None:
@@ -177,11 +191,22 @@ def _print_yaml_only_config(yaml_data: dict[str, Any]) -> None:
     else:
         print("\nTelegram: not configured")
 
+    effort = yaml_data.get("effort", "medium")
+    print(f"\nThinking effort: {effort}")
+
     autonomous = get_autonomous_config(yaml_data)
     if autonomous.get("enabled"):
         print("\nAutonomous mode: ENABLED")
     else:
         print("\nAutonomous mode: disabled")
+
+    skills = get_skills_config(yaml_data)
+    if skills:
+        print(f"\nSkills ({len(skills)}):")
+        for name, entry in skills.items():
+            if isinstance(entry, dict):
+                desc = entry.get("description", "")
+                print(f"  {name}: {desc}")
 
 
 def _handle_autonomous(args: argparse.Namespace) -> None:
@@ -288,6 +313,178 @@ def _handle_autonomous_disable() -> None:
     print("\u2713 Autonomous mode disabled")
 
 
+def _handle_browser(args: argparse.Namespace) -> None:
+    """Route browser subcommands."""
+    sub = getattr(args, "browser_command", None)
+    if sub is None or sub == "show":
+        _handle_browser_show()
+    elif sub == "set-profile":
+        _handle_browser_set_profile(args.path)
+    elif sub == "clear-profile":
+        _handle_browser_clear_profile()
+    elif sub == "set-backend":
+        _handle_browser_set_backend(args.backend)
+    elif sub == "headless":
+        state = getattr(args, "state", None)
+        _handle_browser_headless(state)
+
+
+def _handle_browser_show() -> None:
+    """Display browser profile and backend settings."""
+    data = load_global_config()
+    browser = get_browser_config(data)
+
+    backend = browser.get("backend", "playwright")
+    print(f"Browser backend: {backend}")
+
+    headless = browser.get("headless", False)
+    print(f"Headless: {'on' if headless else 'off'}")
+
+    user_data_dir = browser.get("user_data_dir")
+    if user_data_dir:
+        print(f"Browser profile: {user_data_dir}")
+        print("  (used for /web command; /test always uses a fresh profile)")
+    else:
+        print("Browser profile: not configured (using temporary profile)")
+        print("  Run 'leashd browser set-profile <path>' to persist login sessions.")
+
+
+def _handle_browser_set_profile(path: str) -> None:
+    """Set the browser user data directory."""
+    resolved = Path(path).expanduser().resolve()
+    resolved.mkdir(parents=True, exist_ok=True)
+
+    data = load_global_config()
+    browser = data.get("browser", {})
+    if not isinstance(browser, dict):
+        browser = {}
+    browser["user_data_dir"] = str(resolved)
+    data["browser"] = browser
+    save_global_config(data)
+    inject_global_config_as_env(force=True)
+
+    print(f"\u2713 Browser profile set to {resolved}")
+    _notify_daemon_reload()
+
+
+def _handle_browser_clear_profile() -> None:
+    """Clear the browser profile setting."""
+    data = load_global_config()
+    browser = data.get("browser", {})
+    if not isinstance(browser, dict) or not browser.get("user_data_dir"):
+        print("\u2713 Browser profile already not configured")
+        return
+
+    del browser["user_data_dir"]
+    if not browser:
+        data.pop("browser", None)
+    else:
+        data["browser"] = browser
+    save_global_config(data)
+    inject_global_config_as_env(force=True)
+
+    print("\u2713 Browser profile cleared (will use temporary profile)")
+    _notify_daemon_reload()
+
+
+def _handle_browser_headless(state: str | None) -> None:
+    """Show or toggle headless mode for Playwright browser."""
+    data = load_global_config()
+    browser = get_browser_config(data)
+
+    if state is None:
+        current = browser.get("headless", False)
+        print(f"Headless: {'on' if current else 'off'}")
+        return
+
+    enabled = state == "on"
+    browser = data.get("browser", {})
+    if not isinstance(browser, dict):
+        browser = {}
+    browser["headless"] = enabled
+    data["browser"] = browser
+    save_global_config(data)
+    inject_global_config_as_env(force=True)
+
+    label = "on (headless)" if enabled else "off (headed)"
+    print(f"\u2713 Browser headless mode set to {label}")
+    _notify_daemon_reload()
+
+
+_VALID_BACKENDS = {"playwright", "agent-browser"}
+
+
+def _handle_browser_set_backend(backend: str) -> None:
+    """Set the browser automation backend."""
+    if backend not in _VALID_BACKENDS:
+        print(
+            f"Error: invalid backend '{backend}'. "
+            f"Must be one of: {', '.join(sorted(_VALID_BACKENDS))}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    data = load_global_config()
+    browser = data.get("browser", {})
+    if not isinstance(browser, dict):
+        browser = {}
+    browser["backend"] = backend
+    data["browser"] = browser
+    save_global_config(data)
+    inject_global_config_as_env(force=True)
+
+    if backend == "agent-browser":
+        from leashd.skills import ensure_agent_browser_skill
+
+        ensure_agent_browser_skill()
+        print(f"\u2713 Browser backend set to {backend}")
+        print("  agent-browser skill installed; Playwright MCP will be disabled.")
+    else:
+        from leashd.skills import remove_agent_browser_skill
+
+        remove_agent_browser_skill()
+        print(f"\u2713 Browser backend set to {backend}")
+        print("  Playwright MCP will be used for browser automation.")
+    _notify_daemon_reload()
+
+
+_VALID_EFFORT_LEVELS = {"low", "medium", "high", "max"}
+
+
+def _handle_effort(args: argparse.Namespace) -> None:
+    """Route effort subcommands."""
+    sub = getattr(args, "effort_command", None)
+    if sub is None or sub == "show":
+        _handle_effort_show()
+    elif sub == "set":
+        _handle_effort_set(args.level)
+
+
+def _handle_effort_show() -> None:
+    """Display current thinking effort level."""
+    data = load_global_config()
+    level = data.get("effort", "medium")
+    print(f"Thinking effort: {level}")
+
+
+def _handle_effort_set(level: str) -> None:
+    """Set the thinking effort level."""
+    if level not in _VALID_EFFORT_LEVELS:
+        print(
+            f"Error: invalid effort level '{level}'. "
+            f"Must be one of: {', '.join(sorted(_VALID_EFFORT_LEVELS))}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    data = load_global_config()
+    data["effort"] = level
+    save_global_config(data)
+    inject_global_config_as_env(force=True)
+    print(f"\u2713 Thinking effort set to {level}")
+    _notify_daemon_reload()
+
+
 def _handle_clean() -> None:
     """Remove all runtime artifacts from approved project directories."""
     dirs = get_approved_directories()
@@ -299,6 +496,8 @@ def _handle_clean() -> None:
         ("logs", True),  # (relative path, is_directory)
         ("audit.jsonl", False),
         ("messages.db", False),
+        (".playwright", True),
+        ("web-session.md", False),
     ]
 
     cleaned = 0
@@ -314,6 +513,10 @@ def _handle_clean() -> None:
             elif not is_dir and path.is_file():
                 path.unlink()
                 cleaned += 1
+        for pattern in ("*.png", "*.jpg"):
+            for img in leashd_dir.glob(pattern):
+                img.unlink()
+                cleaned += 1
 
     # Clean global ~/.leashd/ artifacts
     home_leashd = Path.home() / ".leashd"
@@ -327,6 +530,134 @@ def _handle_clean() -> None:
         print(f"Cleaned {cleaned} artifact(s) across {len(dirs)} project(s)")
     else:
         print("Nothing to clean — no runtime artifacts found.")
+
+
+def _handle_workflow(args: argparse.Namespace) -> None:
+    """Route workflow subcommands."""
+    sub = getattr(args, "workflow_command", None)
+    if sub is None or sub == "list":
+        _handle_workflow_list()
+    elif sub == "show":
+        _handle_workflow_show(args.name)
+
+
+def _handle_workflow_list() -> None:
+    """List all available playbooks."""
+    from leashd.plugins.builtin.workflow import list_playbooks
+
+    cwd = str(Path.cwd())
+    playbooks = list_playbooks(cwd)
+    if not playbooks:
+        print("No playbooks found.")
+        print(
+            "Place YAML playbooks in .leashd/workflows/ (project) "
+            "or ~/.leashd/workflows/ (global)."
+        )
+        return
+    print(f"Playbooks ({len(playbooks)}):")
+    for name, source in playbooks:
+        print(f"  {name} ({source})")
+
+
+def _handle_workflow_show(name: str) -> None:
+    """Display a playbook's phases and steps."""
+    from leashd.plugins.builtin.workflow import load_playbook
+
+    cwd = str(Path.cwd())
+    playbook = load_playbook(cwd, name)
+    if not playbook:
+        print(f"Error: playbook '{name}' not found", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Playbook: {playbook.name}")
+    print(f"Platform: {playbook.platform}")
+    if playbook.url_patterns:
+        print(f"URL patterns: {len(playbook.url_patterns)}")
+        for label, pattern in playbook.url_patterns.items():
+            print(f"  {label}: {pattern}")
+    if playbook.element_patterns:
+        print(f"Element patterns: {len(playbook.element_patterns)}")
+        for label, desc in playbook.element_patterns.items():
+            print(f"  {label}: {desc}")
+    if playbook.phases:
+        print(f"Phases ({len(playbook.phases)}):")
+        for phase in playbook.phases:
+            print(f"  {phase.name}: {len(phase.steps)} steps")
+
+
+def _handle_skill(args: argparse.Namespace) -> None:
+    """Route skill subcommands."""
+    sub = getattr(args, "skill_command", None)
+    if sub is None or sub == "list":
+        _handle_skill_list()
+    elif sub == "add":
+        _handle_skill_add(args.zip_path, getattr(args, "tag", None) or [])
+    elif sub == "remove":
+        _handle_skill_remove(args.name)
+    elif sub == "show":
+        _handle_skill_show(args.name)
+
+
+def _handle_skill_list() -> None:
+    """List installed skills."""
+    from leashd.skills import list_skills
+
+    skills = list_skills()
+    if not skills:
+        print("No skills installed.")
+        print("Run 'leashd skill add <zip>' to install one.")
+        return
+    print(f"Skills ({len(skills)}):")
+    for s in skills:
+        tags_part = f" [{', '.join(s.tags)}]" if s.tags else ""
+        print(f"  {s.name}: {s.description}{tags_part}")
+
+
+def _handle_skill_add(zip_path: str, tags: list[str]) -> None:
+    """Install a skill from a zip file."""
+    from leashd.skills import install_skill
+
+    path = Path(zip_path).expanduser().resolve()
+    if not path.is_file():
+        print(f"Error: file not found: {path}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        skill = install_skill(path, tags=tags or None)
+    except (ValueError, FileNotFoundError, zipfile.BadZipFile) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    tags_part = f" [{', '.join(skill.tags)}]" if skill.tags else ""
+    print(f"\u2713 Installed skill '{skill.name}': {skill.description}{tags_part}")
+    _notify_daemon_reload()
+
+
+def _handle_skill_remove(name: str) -> None:
+    """Uninstall a skill."""
+    from leashd.skills import remove_skill
+
+    if not remove_skill(name):
+        print(f"Error: skill '{name}' not found", file=sys.stderr)
+        sys.exit(1)
+    print(f"\u2713 Removed skill '{name}'")
+    _notify_daemon_reload()
+
+
+def _handle_skill_show(name: str) -> None:
+    """Show details of an installed skill."""
+    from leashd.skills import get_skill
+
+    skill = get_skill(name)
+    if not skill:
+        print(f"Error: skill '{name}' not found", file=sys.stderr)
+        sys.exit(1)
+    print(f"Skill: {skill.name}")
+    print(f"Description: {skill.description}")
+    print(f"Source: {skill.source}")
+    print(f"Installed: {skill.installed_at}")
+    if skill.tags:
+        print(f"Tags: {', '.join(skill.tags)}")
 
 
 def _handle_ws(args: argparse.Namespace) -> None:
@@ -668,6 +999,64 @@ def main() -> None:
     auto_sub.add_parser("enable", help="Quick-enable autonomous mode with defaults")
     auto_sub.add_parser("disable", help="Disable autonomous mode")
 
+    # Browser profile
+    browser_parser = subparsers.add_parser(
+        "browser", help="Manage browser profile settings"
+    )
+    browser_sub = browser_parser.add_subparsers(dest="browser_command")
+    browser_sub.add_parser("show", help="Show browser profile settings (default)")
+    browser_set = browser_sub.add_parser(
+        "set-profile", help="Set browser profile directory for /web"
+    )
+    browser_set.add_argument("path", help="Path to browser user data directory")
+    browser_sub.add_parser(
+        "clear-profile", help="Clear browser profile (use temporary)"
+    )
+    browser_backend = browser_sub.add_parser(
+        "set-backend", help="Set browser automation backend"
+    )
+    browser_backend.add_argument("backend", choices=["playwright", "agent-browser"])
+    browser_headless = browser_sub.add_parser(
+        "headless", help="Show or toggle headless mode (on/off)"
+    )
+    browser_headless.add_argument(
+        "state",
+        nargs="?",
+        choices=["on", "off"],
+        default=None,
+        help="Set headless on or off (omit to show current)",
+    )
+
+    # Thinking effort
+    effort_parser = subparsers.add_parser("effort", help="Manage thinking effort level")
+    effort_sub = effort_parser.add_subparsers(dest="effort_command")
+    effort_sub.add_parser("show", help="Show current effort level (default)")
+    effort_set = effort_sub.add_parser("set", help="Set thinking effort level")
+    effort_set.add_argument("level", choices=["low", "medium", "high", "max"])
+
+    # Workflow / playbook management
+    workflow_parser = subparsers.add_parser(
+        "workflow", help="Manage web workflow playbooks"
+    )
+    workflow_sub = workflow_parser.add_subparsers(dest="workflow_command")
+    workflow_sub.add_parser("list", help="List available playbooks (default)")
+    workflow_show = workflow_sub.add_parser("show", help="Show playbook details")
+    workflow_show.add_argument("name", help="Playbook name to show")
+
+    # Skill management
+    skill_parser = subparsers.add_parser("skill", help="Manage agent skills")
+    skill_sub = skill_parser.add_subparsers(dest="skill_command")
+    skill_sub.add_parser("list", help="List installed skills (default)")
+    skill_add = skill_sub.add_parser("add", help="Install a skill from a zip file")
+    skill_add.add_argument("zip_path", help="Path to the skill zip file")
+    skill_add.add_argument(
+        "--tag", action="append", default=[], help="Tag for the skill (repeatable)"
+    )
+    skill_remove = skill_sub.add_parser("remove", help="Uninstall a skill")
+    skill_remove.add_argument("name", help="Skill name to remove")
+    skill_show = skill_sub.add_parser("show", help="Show skill details")
+    skill_show.add_argument("name", help="Skill name to show")
+
     # Workspace management
     ws_parser = subparsers.add_parser("ws", help="Manage workspaces")
     ws_sub = ws_parser.add_subparsers(dest="ws_command")
@@ -732,5 +1121,13 @@ def main() -> None:
         print(f"leashd {__version__}")
     elif args.command == "autonomous":
         _handle_autonomous(args)
+    elif args.command == "browser":
+        _handle_browser(args)
+    elif args.command == "effort":
+        _handle_effort(args)
+    elif args.command == "workflow":
+        _handle_workflow(args)
+    elif args.command == "skill":
+        _handle_skill(args)
     elif args.command == "ws":
         _handle_ws(args)

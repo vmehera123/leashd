@@ -830,3 +830,240 @@ class TestBranchNameValidation:
         with _patch_subprocess(proc):
             result = await service.checkout(cwd, "my_branch_name")
         assert result.success is True
+
+
+class TestBranchNameSecurityEdgeCases:
+    """Security edge cases for branch name validation."""
+
+    async def test_rejects_empty_string(self, service, cwd):
+        result = await service.checkout(cwd, "")
+        assert result.success is False
+        assert "Invalid branch name" in result.message
+
+    async def test_rejects_null_byte(self, service, cwd):
+        result = await service.checkout(cwd, "main\x00--exec=bad")
+        assert result.success is False
+
+    async def test_rejects_newline(self, service, cwd):
+        result = await service.checkout(cwd, "main\nflag")
+        assert result.success is False
+
+    async def test_rejects_unicode_cyrillic(self, service, cwd):
+        result = await service.checkout(cwd, "ma\u0456n")
+        assert result.success is False
+
+    async def test_rejects_tilde(self, service, cwd):
+        result = await service.checkout(cwd, "~/.ssh/id_rsa")
+        assert result.success is False
+
+    async def test_rejects_caret(self, service, cwd):
+        result = await service.checkout(cwd, "HEAD^{commit}")
+        assert result.success is False
+
+    async def test_rejects_colon(self, service, cwd):
+        result = await service.checkout(cwd, "HEAD:file")
+        assert result.success is False
+
+    async def test_rejects_at_sign_reflog(self, service, cwd):
+        result = await service.checkout(cwd, "main@{0}")
+        assert result.success is False
+
+    async def test_rejects_double_dot_range(self, service, cwd):
+        """Double dots are git range operators and must be rejected."""
+        result = await service.checkout(cwd, "main..develop")
+        assert result.success is False
+        assert "Invalid branch name" in result.message
+
+    async def test_rejects_triple_dot_range(self, service, cwd):
+        result = await service.merge(cwd, "main...develop")
+        assert result.success is False
+
+
+class TestPushInputValidation:
+    """Push doesn't validate remote/branch but subprocess_exec prevents injection."""
+
+    async def test_push_remote_with_semicolon(self, service, cwd):
+        """subprocess_exec prevents shell injection even without validation."""
+        proc = _make_proc(returncode=128, stderr="fatal: bad remote")
+        with _patch_subprocess(proc) as mock_exec:
+            result = await service.push(cwd, remote="origin; rm -rf /")
+        assert result.success is False
+        args = mock_exec.call_args[0]
+        assert "origin; rm -rf /" in args
+
+    async def test_push_branch_with_special_chars(self, service, cwd):
+        proc = _make_proc(returncode=128, stderr="error")
+        with _patch_subprocess(proc) as mock_exec:
+            result = await service.push(cwd, branch="main; echo pwned")
+        assert result.success is False
+        args = mock_exec.call_args[0]
+        assert "main; echo pwned" in args
+
+    async def test_push_empty_remote(self, service, cwd):
+        proc = _make_proc(
+            returncode=128, stderr="fatal: '' does not appear to be a git repository"
+        )
+        with _patch_subprocess(proc):
+            result = await service.push(cwd, remote="")
+        assert result.success is False
+
+    async def test_push_empty_branch(self, service, cwd):
+        proc = _make_proc(returncode=0, stderr="Everything up-to-date")
+        with _patch_subprocess(proc) as mock_exec:
+            await service.push(cwd, branch="")
+        args = mock_exec.call_args[0]
+        assert args == ("git", "push", "origin")
+
+
+class TestCommitMessageSecurity:
+    async def test_commit_message_only_coauthor_trailer(self, service, cwd):
+        """After stripping Claude co-author, message may be empty."""
+        msg = "Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
+        proc = _make_proc(returncode=1, stderr="empty commit message")
+        with _patch_subprocess(proc):
+            result = await service.commit(cwd, msg)
+        assert result.success is False
+
+    async def test_commit_message_very_long(self, service, cwd):
+        msg = "x" * 100_000
+        proc = _make_proc(stdout=f"[main abc1234] {msg[:50]}\n")
+        with _patch_subprocess(proc) as mock_exec:
+            result = await service.commit(cwd, msg)
+        assert result.success is True
+        args = mock_exec.call_args[0]
+        commit_msg = args[args.index("-m") + 1]
+        assert len(commit_msg) == 100_000
+
+    async def test_commit_message_preserves_human_signed_off(self, service, cwd):
+        msg = (
+            "feat: add feature\n\n"
+            "Signed-off-by: Alice <alice@example.com>\n"
+            "Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
+        )
+        proc = _make_proc(stdout="[main abc] feat\n")
+        with _patch_subprocess(proc) as mock_exec:
+            await service.commit(cwd, msg)
+        args = mock_exec.call_args[0]
+        commit_msg = args[args.index("-m") + 1]
+        assert "Signed-off-by: Alice" in commit_msg
+        assert "Claude" not in commit_msg
+
+    async def test_commit_message_flag_like(self, service, cwd):
+        """Flag-like messages are safe with subprocess_exec (no shell)."""
+        msg = "-m bad --exec=cmd"
+        proc = _make_proc(stdout="[main abc] msg\n")
+        with _patch_subprocess(proc) as mock_exec:
+            await service.commit(cwd, msg)
+        args = mock_exec.call_args[0]
+        m_idx = args.index("-m")
+        assert args[m_idx + 1] == msg
+
+
+class TestDiffCombinedArgs:
+    async def test_diff_staged_and_path_simultaneously(self, service, cwd):
+        proc = _make_proc(stdout="staged path diff\n")
+        with _patch_subprocess(proc) as mock_exec:
+            await service.diff(cwd, staged=True, path="src/app.py")
+        args = mock_exec.call_args[0]
+        assert "--cached" in args
+        assert "--" in args
+        assert "src/app.py" in args
+
+    async def test_diff_path_with_spaces(self, service, cwd):
+        proc = _make_proc(stdout="diff output\n")
+        with _patch_subprocess(proc) as mock_exec:
+            await service.diff(cwd, path="src/my file.py")
+        args = mock_exec.call_args[0]
+        assert "src/my file.py" in args
+
+    async def test_diff_path_with_special_chars(self, service, cwd):
+        proc = _make_proc(stdout="diff output\n")
+        with _patch_subprocess(proc) as mock_exec:
+            await service.diff(cwd, path="src/[test].py")
+        args = mock_exec.call_args[0]
+        assert "src/[test].py" in args
+
+
+class TestAddPathSeparator:
+    async def test_add_uses_double_dash_separator(self, service, cwd):
+        """git add -- prevents --help from being treated as a flag."""
+        proc = _make_proc(returncode=0)
+        with _patch_subprocess(proc) as mock_exec:
+            await service.add(cwd, ["--help"])
+        args = mock_exec.call_args[0]
+        assert "--" in args
+        dash_idx = args.index("--")
+        assert args[dash_idx + 1] == "--help"
+
+    async def test_add_path_with_leading_dash(self, service, cwd):
+        proc = _make_proc(returncode=0)
+        with _patch_subprocess(proc) as mock_exec:
+            await service.add(cwd, ["-rf"])
+        args = mock_exec.call_args[0]
+        assert "--" in args
+        assert "-rf" in args
+
+
+class TestLogEdgeCases:
+    async def test_log_count_zero(self, service, cwd):
+        proc = _make_proc(stdout="")
+        with _patch_subprocess(proc) as mock_exec:
+            entries = await service.log(cwd, count=0)
+        args = mock_exec.call_args[0]
+        assert "-0" in args
+        assert entries == []
+
+    async def test_log_count_negative(self, service, cwd):
+        proc = _make_proc(stdout="")
+        with _patch_subprocess(proc) as mock_exec:
+            await service.log(cwd, count=-1)
+        args = mock_exec.call_args[0]
+        assert "--1" in args or "-1" in args
+
+    async def test_log_delimiter_in_author_name(self, service, cwd):
+        """Author containing delimiter corrupts parsing — documents known limitation."""
+        stdout = "abc123||abc||Alice||Bob||2 hours ago||fix: bug\n"
+        proc = _make_proc(stdout=stdout)
+        with _patch_subprocess(proc):
+            entries = await service.log(cwd)
+        assert len(entries) == 1
+        assert entries[0].author == "Alice"
+
+
+class TestSearchBranchesEdgeCases:
+    async def test_search_with_regex_special_chars_in_query(self, service, cwd):
+        """Query is used as plain string, not regex, so special chars are safe."""
+        stdout = "  main\n  feature/test\n"
+        proc = _make_proc(stdout=stdout)
+        with _patch_subprocess(proc):
+            results = await service.search_branches(cwd, "feat(.+)")
+        assert results == []
+
+    async def test_search_long_remote_prefix(self, service, cwd):
+        stdout = "  remotes/upstream/feature/deep/path/branch\n"
+        proc = _make_proc(stdout=stdout)
+        with _patch_subprocess(proc):
+            results = await service.search_branches(cwd, "deep")
+        assert len(results) == 1
+
+
+class TestRunEdgeCases:
+    async def test_merge_uses_60s_timeout(self, service, cwd):
+        proc = _make_proc(returncode=0, stdout="Merge made.\n")
+        with _patch_subprocess(proc) as mock_exec:
+            await service.merge(cwd, "feature")
+        call_kwargs = mock_exec.call_args[1]
+        assert call_kwargs.get("cwd") == cwd
+
+    async def test_default_timeout_is_30s(self, service, cwd):
+        from leashd.git.service import _DEFAULT_TIMEOUT
+
+        assert _DEFAULT_TIMEOUT == 30
+
+    async def test_status_unmerged_short_line_skipped(self, service, cwd):
+        """Unmerged line with fewer than 11 parts is silently skipped."""
+        stdout = "# branch.head main\nu UU short\n"
+        proc = _make_proc(stdout=stdout)
+        with _patch_subprocess(proc):
+            status = await service.status(cwd)
+        assert len(status.staged) == 0

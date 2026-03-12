@@ -11,15 +11,19 @@ from leashd.config_store import (
     add_workspace,
     config_path,
     get_approved_directories,
+    get_browser_config,
+    get_skills_config,
     get_workspaces,
     inject_global_config_as_env,
     load_global_config,
     load_workspaces_config,
     merge_workspace_dirs,
     remove_approved_directory,
+    remove_skill_metadata,
     remove_workspace,
     remove_workspace_dirs,
     save_global_config,
+    save_skill_metadata,
     save_workspaces_config,
     workspaces_path,
 )
@@ -413,3 +417,241 @@ class TestRemoveWorkspaceDirs:
         missing = exc_info.value.args[0]
         assert "/c" in missing
         assert "/d" in missing
+
+
+class TestGetBrowserConfig:
+    def test_returns_browser_section(self, fake_config_dir):
+        save_global_config({"browser": {"user_data_dir": "/tmp/profile"}})
+        result = get_browser_config()
+        assert result == {"user_data_dir": "/tmp/profile"}
+
+    def test_missing_section_returns_empty(self, fake_config_dir):
+        save_global_config({"approved_directories": ["/tmp/a"]})
+        assert get_browser_config() == {}
+
+    def test_non_dict_returns_empty(self, fake_config_dir):
+        save_global_config({"browser": "not-a-dict"})
+        assert get_browser_config() == {}
+
+    def test_accepts_data_param(self):
+        data = {"browser": {"user_data_dir": "/some/path"}}
+        assert get_browser_config(data) == {"user_data_dir": "/some/path"}
+
+
+class TestInjectBrowserConfig:
+    def test_bridges_yaml_to_env(self, fake_config_dir, monkeypatch):
+        save_global_config({"browser": {"user_data_dir": "/tmp/profile"}})
+        monkeypatch.delenv("LEASHD_BROWSER_USER_DATA_DIR", raising=False)
+        inject_global_config_as_env()
+        assert os.environ["LEASHD_BROWSER_USER_DATA_DIR"] == "/tmp/profile"
+
+    def test_skips_existing_env(self, fake_config_dir, monkeypatch):
+        save_global_config({"browser": {"user_data_dir": "/tmp/profile"}})
+        monkeypatch.setenv("LEASHD_BROWSER_USER_DATA_DIR", "/existing")
+        inject_global_config_as_env()
+        assert os.environ["LEASHD_BROWSER_USER_DATA_DIR"] == "/existing"
+
+    def test_force_overwrites_existing(self, fake_config_dir, monkeypatch):
+        save_global_config({"browser": {"user_data_dir": "/tmp/new"}})
+        monkeypatch.setenv("LEASHD_BROWSER_USER_DATA_DIR", "/old")
+        inject_global_config_as_env(force=True)
+        assert os.environ["LEASHD_BROWSER_USER_DATA_DIR"] == "/tmp/new"
+
+    def test_non_dict_browser_skipped(self, fake_config_dir, monkeypatch):
+        save_global_config({"browser": "garbage"})
+        monkeypatch.delenv("LEASHD_BROWSER_USER_DATA_DIR", raising=False)
+        inject_global_config_as_env()
+        assert "LEASHD_BROWSER_USER_DATA_DIR" not in os.environ
+
+    def test_empty_user_data_dir_not_injected(self, fake_config_dir, monkeypatch):
+        save_global_config({"browser": {"user_data_dir": ""}})
+        monkeypatch.delenv("LEASHD_BROWSER_USER_DATA_DIR", raising=False)
+        inject_global_config_as_env()
+        assert "LEASHD_BROWSER_USER_DATA_DIR" not in os.environ
+
+    def test_none_user_data_dir_not_injected(self, fake_config_dir, monkeypatch):
+        save_global_config({"browser": {}})
+        monkeypatch.delenv("LEASHD_BROWSER_USER_DATA_DIR", raising=False)
+        inject_global_config_as_env()
+        assert "LEASHD_BROWSER_USER_DATA_DIR" not in os.environ
+
+    def test_bridges_backend_to_env(self, fake_config_dir, monkeypatch):
+        save_global_config({"browser": {"backend": "agent-browser"}})
+        monkeypatch.delenv("LEASHD_BROWSER_BACKEND", raising=False)
+        inject_global_config_as_env()
+        assert os.environ["LEASHD_BROWSER_BACKEND"] == "agent-browser"
+
+    def test_backend_skips_existing_env(self, fake_config_dir, monkeypatch):
+        save_global_config({"browser": {"backend": "agent-browser"}})
+        monkeypatch.setenv("LEASHD_BROWSER_BACKEND", "playwright")
+        inject_global_config_as_env()
+        assert os.environ["LEASHD_BROWSER_BACKEND"] == "playwright"
+
+    def test_backend_force_overwrites(self, fake_config_dir, monkeypatch):
+        save_global_config({"browser": {"backend": "agent-browser"}})
+        monkeypatch.setenv("LEASHD_BROWSER_BACKEND", "playwright")
+        inject_global_config_as_env(force=True)
+        assert os.environ["LEASHD_BROWSER_BACKEND"] == "agent-browser"
+
+    def test_missing_backend_not_injected(self, fake_config_dir, monkeypatch):
+        save_global_config({"browser": {}})
+        monkeypatch.delenv("LEASHD_BROWSER_BACKEND", raising=False)
+        inject_global_config_as_env()
+        assert "LEASHD_BROWSER_BACKEND" not in os.environ
+
+
+class TestInjectBrowserHeadlessConfig:
+    def test_bridges_headless_true_to_env(self, fake_config_dir, monkeypatch):
+        save_global_config({"browser": {"headless": True}})
+        monkeypatch.delenv("LEASHD_BROWSER_HEADLESS", raising=False)
+        inject_global_config_as_env()
+        assert os.environ["LEASHD_BROWSER_HEADLESS"] == "true"
+
+    def test_bridges_headless_false_to_env(self, fake_config_dir, monkeypatch):
+        save_global_config({"browser": {"headless": False}})
+        monkeypatch.delenv("LEASHD_BROWSER_HEADLESS", raising=False)
+        inject_global_config_as_env()
+        assert os.environ["LEASHD_BROWSER_HEADLESS"] == "false"
+
+    def test_missing_headless_not_injected(self, fake_config_dir, monkeypatch):
+        save_global_config({"browser": {}})
+        monkeypatch.delenv("LEASHD_BROWSER_HEADLESS", raising=False)
+        inject_global_config_as_env()
+        assert "LEASHD_BROWSER_HEADLESS" not in os.environ
+
+    def test_headless_skips_existing_env(self, fake_config_dir, monkeypatch):
+        save_global_config({"browser": {"headless": True}})
+        monkeypatch.setenv("LEASHD_BROWSER_HEADLESS", "false")
+        inject_global_config_as_env()
+        assert os.environ["LEASHD_BROWSER_HEADLESS"] == "false"
+
+    def test_headless_force_overwrites(self, fake_config_dir, monkeypatch):
+        save_global_config({"browser": {"headless": True}})
+        monkeypatch.setenv("LEASHD_BROWSER_HEADLESS", "false")
+        inject_global_config_as_env(force=True)
+        assert os.environ["LEASHD_BROWSER_HEADLESS"] == "true"
+
+
+class TestInjectEffortConfig:
+    def test_bridges_yaml_to_env(self, fake_config_dir, monkeypatch):
+        save_global_config({"effort": "high"})
+        monkeypatch.delenv("LEASHD_EFFORT", raising=False)
+        inject_global_config_as_env()
+        assert os.environ["LEASHD_EFFORT"] == "high"
+
+    def test_skips_existing_env(self, fake_config_dir, monkeypatch):
+        save_global_config({"effort": "high"})
+        monkeypatch.setenv("LEASHD_EFFORT", "low")
+        inject_global_config_as_env()
+        assert os.environ["LEASHD_EFFORT"] == "low"
+
+    def test_force_overwrites_existing(self, fake_config_dir, monkeypatch):
+        save_global_config({"effort": "max"})
+        monkeypatch.setenv("LEASHD_EFFORT", "low")
+        inject_global_config_as_env(force=True)
+        assert os.environ["LEASHD_EFFORT"] == "max"
+
+    def test_missing_effort_not_injected(self, fake_config_dir, monkeypatch):
+        save_global_config({"approved_directories": ["/tmp/a"]})
+        monkeypatch.delenv("LEASHD_EFFORT", raising=False)
+        inject_global_config_as_env()
+        assert "LEASHD_EFFORT" not in os.environ
+
+    def test_none_effort_not_injected(self, fake_config_dir, monkeypatch):
+        save_global_config({"effort": None})
+        monkeypatch.delenv("LEASHD_EFFORT", raising=False)
+        inject_global_config_as_env()
+        assert "LEASHD_EFFORT" not in os.environ
+
+
+class TestGetSkillsConfig:
+    def test_returns_skills_section(self, fake_config_dir):
+        save_global_config(
+            {"skills": {"my-skill": {"description": "test", "source": "/tmp/a.zip"}}}
+        )
+        result = get_skills_config()
+        assert "my-skill" in result
+        assert result["my-skill"]["description"] == "test"
+
+    def test_missing_section_returns_empty(self, fake_config_dir):
+        save_global_config({"approved_directories": ["/tmp/a"]})
+        assert get_skills_config() == {}
+
+    def test_non_dict_returns_empty(self, fake_config_dir):
+        save_global_config({"skills": "not-a-dict"})
+        assert get_skills_config() == {}
+
+    def test_accepts_data_param(self):
+        data = {"skills": {"foo": {"description": "bar"}}}
+        assert get_skills_config(data) == {"foo": {"description": "bar"}}
+
+
+class TestSaveSkillMetadata:
+    def test_upserts_skill(self, fake_config_dir):
+        save_skill_metadata(
+            name="my-skill",
+            description="test skill",
+            source="/tmp/skill.zip",
+            installed_at="2026-03-09T00:00:00Z",
+            tags=["web"],
+        )
+        config = get_skills_config()
+        assert "my-skill" in config
+        assert config["my-skill"]["description"] == "test skill"
+        assert config["my-skill"]["tags"] == ["web"]
+
+    def test_overwrites_existing(self, fake_config_dir):
+        save_skill_metadata(
+            name="my-skill",
+            description="v1",
+            source="/tmp/v1.zip",
+            installed_at="2026-01-01",
+        )
+        save_skill_metadata(
+            name="my-skill",
+            description="v2",
+            source="/tmp/v2.zip",
+            installed_at="2026-02-01",
+        )
+        config = get_skills_config()
+        assert config["my-skill"]["description"] == "v2"
+
+    def test_no_tags_omits_key(self, fake_config_dir):
+        save_skill_metadata(
+            name="my-skill",
+            description="test",
+            source="/tmp/a.zip",
+            installed_at="2026-01-01",
+        )
+        config = get_skills_config()
+        assert "tags" not in config["my-skill"]
+
+    def test_handles_non_dict_skills_section(self, fake_config_dir):
+        save_global_config({"skills": "garbage"})
+        save_skill_metadata(
+            name="fix",
+            description="fixed",
+            source="/tmp/fix.zip",
+            installed_at="2026-01-01",
+        )
+        config = get_skills_config()
+        assert config["fix"]["description"] == "fixed"
+
+
+class TestRemoveSkillMetadata:
+    def test_removes_existing(self, fake_config_dir):
+        save_skill_metadata(
+            name="my-skill",
+            description="test",
+            source="/tmp/a.zip",
+            installed_at="2026-01-01",
+        )
+        assert remove_skill_metadata("my-skill") is True
+        assert get_skills_config() == {}
+
+    def test_nonexistent_returns_false(self, fake_config_dir):
+        assert remove_skill_metadata("nope") is False
+
+    def test_non_dict_returns_false(self, fake_config_dir):
+        save_global_config({"skills": "garbage"})
+        assert remove_skill_metadata("nope") is False

@@ -192,3 +192,14 @@ class TestReloadConfig:
 
         assert reload_engine.config is new_config
         assert reload_engine.config is not old_config
+
+    async def test_reload_updates_agent_config(self, reload_engine, tmp_path):
+        new_config = _make_config(tmp_path)
+
+        with (
+            patch("leashd.config_store.inject_global_config_as_env"),
+            patch("leashd.core.config.LeashdConfig", return_value=new_config),
+        ):
+            await reload_engine.reload_config()
+
+        assert reload_engine.agent._config is new_config

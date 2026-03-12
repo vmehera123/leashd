@@ -3,7 +3,14 @@
 import pytest
 from pydantic import ValidationError
 
-from leashd.git.models import FileChange, GitBranch, GitLogEntry, GitResult, GitStatus
+from leashd.git.models import (
+    FileChange,
+    GitBranch,
+    GitLogEntry,
+    GitResult,
+    GitStatus,
+    MergeResult,
+)
 
 
 class TestFileChange:
@@ -158,3 +165,48 @@ class TestGitResult:
     def test_default_details(self):
         r = GitResult(success=True, message="ok")
         assert r.details == ""
+
+
+class TestMergeResult:
+    def test_create_success(self):
+        r = MergeResult(success=True, message="Merged 'feat' into main")
+        assert r.success is True
+        assert r.had_conflicts is False
+        assert r.conflicted_files == []
+        assert r.details == ""
+
+    def test_create_with_conflicts(self):
+        r = MergeResult(
+            success=False,
+            had_conflicts=True,
+            conflicted_files=["a.py", "b.py"],
+            message="Merge conflicts detected",
+            details="CONFLICT in a.py",
+        )
+        assert r.success is False
+        assert r.had_conflicts is True
+        assert len(r.conflicted_files) == 2
+        assert r.details == "CONFLICT in a.py"
+
+    def test_frozen_immutability(self):
+        r = MergeResult(success=True, message="ok")
+        with pytest.raises(ValidationError):
+            r.success = False
+
+    def test_defaults(self):
+        r = MergeResult(success=True, message="ok")
+        assert r.had_conflicts is False
+        assert r.conflicted_files == []
+        assert r.details == ""
+
+    def test_requires_success_and_message(self):
+        with pytest.raises(ValidationError):
+            MergeResult()
+
+    def test_conflicted_files_independent_instances(self):
+        """Each instance has its own list, no shared state."""
+        r1 = MergeResult(success=False, message="m1", conflicted_files=["a.py"])
+        r2 = MergeResult(success=False, message="m2", conflicted_files=["b.py"])
+        assert r1.conflicted_files != r2.conflicted_files
+        assert r1.conflicted_files == ["a.py"]
+        assert r2.conflicted_files == ["b.py"]

@@ -19,7 +19,7 @@ from leashd.git.models import (
 
 logger = structlog.get_logger()
 
-_BRANCH_NAME_RE = re.compile(r"^[a-zA-Z0-9._/\-]+$")
+_BRANCH_NAME_RE = re.compile(r"^(?!.*\.\.)[a-zA-Z0-9._/\-]+$")
 _DEFAULT_TIMEOUT = 30
 _LOG_DELIMITER = "||"
 

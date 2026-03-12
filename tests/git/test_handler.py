@@ -1053,3 +1053,479 @@ class TestCommitPromptAutoSuggestion:
         await handler.handle_callback("user1", "chat1", "commit_auto", "", session)
         assert len(mock_connector.sent_messages) == 1
         assert "No pending commit" in mock_connector.sent_messages[0]["text"]
+
+
+class TestCallbackDataSecurity:
+    """Security tests for callback data payloads from Telegram."""
+
+    async def test_checkout_callback_path_traversal(
+        self, handler, mock_service, mock_connector, session
+    ):
+        mock_service.checkout.return_value = GitResult(
+            success=False, message="Failed to checkout '../../etc/passwd'"
+        )
+        mock_service.search_branches.return_value = []
+        await handler.handle_callback(
+            "user1", "chat1", "checkout", "../../etc/passwd", session
+        )
+        mock_service.checkout.assert_called_once()
+
+    async def test_checkout_callback_with_semicolon(
+        self, handler, mock_service, mock_connector, session
+    ):
+        """Semicolons in branch name are rejected by service regex."""
+        mock_service.checkout.return_value = GitResult(
+            success=False, message="Invalid branch name"
+        )
+        await handler.handle_callback(
+            "user1", "chat1", "checkout", "main; rm -rf /", session
+        )
+        assert len(mock_connector.sent_messages) == 1
+
+    async def test_add_callback_path_traversal(
+        self, handler, mock_service, mock_connector, session
+    ):
+        """Path traversal in add callback should be rejected by sandbox validation."""
+        await handler.handle_callback(
+            "user1", "chat1", "add", "../../../etc/passwd", session
+        )
+        assert len(mock_connector.sent_messages) == 1
+        text = mock_connector.sent_messages[0]["text"]
+        assert "\u274c" in text
+
+    async def test_add_callback_shell_metacharacters(
+        self, handler, mock_service, mock_connector, session
+    ):
+        """Shell metacharacters are safe with subprocess_exec."""
+        mock_service.add.return_value = GitResult(
+            success=True, message="Staged 1 file(s)"
+        )
+        await handler.handle_callback(
+            "user1", "chat1", "add", "file.py; cat /etc/passwd", session
+        )
+        assert len(mock_connector.sent_messages) == 1
+
+    async def test_merge_resolve_callback_injection(
+        self, handler, mock_service, mock_connector, session
+    ):
+        mock_service.conflict_files = AsyncMock(return_value=["a.py"])
+        mock_service.status = AsyncMock(return_value=GitStatus(branch="main"))
+        await handler.handle_callback(
+            "user1", "chat1", "merge_resolve", "feat; rm -rf /", session
+        )
+        pending = handler.pop_pending_merge_event()
+        assert pending is not None
+        _, event = pending
+        assert event.data["source_branch"] == "feat; rm -rf /"
+
+    async def test_callback_empty_action(self, handler, mock_connector, session):
+        await handler.handle_callback("user1", "chat1", "", "", session)
+        assert len(mock_connector.sent_messages) == 0
+
+    async def test_callback_very_long_payload(
+        self, handler, mock_service, mock_connector, session
+    ):
+        long_payload = "a" * 10000
+        mock_service.checkout.return_value = GitResult(
+            success=False, message="Invalid branch name"
+        )
+        mock_service.search_branches.return_value = []
+        await handler.handle_callback(
+            "user1", "chat1", "checkout", long_payload, session
+        )
+        assert len(mock_connector.sent_messages) == 1
+
+    async def test_callback_null_byte_in_payload(
+        self, handler, mock_service, mock_connector, session
+    ):
+        mock_service.checkout.return_value = GitResult(success=False, message="Invalid")
+        mock_service.search_branches.return_value = []
+        await handler.handle_callback(
+            "user1", "chat1", "checkout", "file\x00.py", session
+        )
+        assert len(mock_connector.sent_messages) == 1
+
+    async def test_callback_unicode_bidi_payload(
+        self, handler, mock_service, mock_connector, session
+    ):
+        """RTL override characters in path should be handled safely."""
+        bidi_payload = "\u202efile.py"
+        mock_service.add.return_value = GitResult(success=True, message="Staged")
+        await handler.handle_callback("user1", "chat1", "add", bidi_payload, session)
+        assert len(mock_connector.sent_messages) == 1
+
+    async def test_callback_search_with_regex_chars(
+        self, handler, mock_service, mock_connector, session
+    ):
+        mock_service.search_branches.return_value = []
+        await handler.handle_callback("user1", "chat1", "search", "feat(.*)", session)
+        assert len(mock_connector.sent_messages) >= 1
+
+
+class TestDiffArgParsing:
+    async def test_diff_staged_with_path(self, handler, mock_service, session):
+        """After fix: --staged + path should both be passed to service."""
+        mock_service.diff.return_value = "staged path diff"
+        await handler.handle_command(
+            "user1", "diff --staged src/file.py", "chat1", session
+        )
+        call_kwargs = mock_service.diff.call_args[1]
+        assert call_kwargs["staged"] is True
+        assert call_kwargs["path"] == "src/file.py"
+
+    async def test_diff_with_leading_trailing_whitespace(
+        self, handler, mock_service, session
+    ):
+        mock_service.diff.return_value = "diff output"
+        await handler.handle_command("user1", "diff   src/file.py  ", "chat1", session)
+        call_kwargs = mock_service.diff.call_args[1]
+        assert call_kwargs["path"] == "src/file.py"
+
+    async def test_diff_with_relative_path_traversal(
+        self, handler, mock_service, session
+    ):
+        """Relative paths are passed to git as-is; git handles them safely."""
+        mock_service.diff.return_value = ""
+        await handler.handle_command("user1", "diff ../other/file.py", "chat1", session)
+        call_kwargs = mock_service.diff.call_args[1]
+        assert call_kwargs["path"] == "../other/file.py"
+
+
+class TestCommitPromptStateManagement:
+    async def test_commit_prompt_timeout_fires(
+        self, handler, mock_service, mock_connector, session
+    ):
+        mock_service.status.return_value = GitStatus(
+            branch="main",
+            staged=[FileChange(path="a.py", status="modified")],
+        )
+        mock_service.commit.return_value = GitResult(success=True, message="done")
+
+        task = asyncio.create_task(
+            handler.handle_command("user1", "commit", "chat1", session)
+        )
+        for _ in range(50):
+            if handler.has_pending_input("chat1"):
+                break
+            await asyncio.sleep(0.01)
+
+        pending = handler._pending.get("chat1")
+        assert pending is not None
+
+        await handler.resolve_input("chat1", "")
+        result = await task
+        assert "No commit message" in result
+        assert not handler.has_pending_input("chat1")
+
+    async def test_commit_prompt_timeout_then_new_prompt_works(
+        self, handler, mock_service, mock_connector, session
+    ):
+        mock_service.status.return_value = GitStatus(
+            branch="main",
+            staged=[FileChange(path="a.py", status="modified")],
+        )
+        mock_service.commit.return_value = GitResult(success=True, message="done")
+
+        task1 = asyncio.create_task(
+            handler.handle_command("user1", "commit", "chat1", session)
+        )
+        for _ in range(50):
+            if handler.has_pending_input("chat1"):
+                break
+            await asyncio.sleep(0.01)
+        await handler.resolve_input("chat1", "")
+        await task1
+        assert not handler.has_pending_input("chat1")
+
+        task2 = asyncio.create_task(
+            handler.handle_command("user1", "commit", "chat1", session)
+        )
+        for _ in range(50):
+            if handler.has_pending_input("chat1"):
+                break
+            await asyncio.sleep(0.01)
+        assert handler.has_pending_input("chat1")
+        await handler.resolve_input("chat1", "my message")
+        result2 = await task2
+        assert "done" in result2
+
+    async def test_commit_prompt_concurrent_same_chat(
+        self, handler, mock_service, mock_connector, session
+    ):
+        """Second prompt on same chat overwrites the first."""
+        from leashd.git.handler import _PendingInput
+
+        p1 = _PendingInput(kind="commit", auto_message="msg1")
+        handler._pending["chat1"] = p1
+
+        p2 = _PendingInput(kind="commit", auto_message="msg2")
+        handler._pending["chat1"] = p2
+
+        assert handler._pending["chat1"] is p2
+
+    async def test_commit_with_only_whitespace_message(
+        self, handler, mock_service, mock_connector, session
+    ):
+        """Whitespace-only sub_args triggers commit prompt (split strips it)."""
+        mock_service.status.return_value = GitStatus(
+            branch="main",
+            staged=[FileChange(path="a.py", status="modified")],
+        )
+        mock_service.commit.return_value = GitResult(success=True, message="done")
+
+        task = asyncio.create_task(
+            handler.handle_command("user1", "commit    ", "chat1", session)
+        )
+        for _ in range(50):
+            if handler.has_pending_input("chat1"):
+                break
+            await asyncio.sleep(0.01)
+        assert handler.has_pending_input("chat1")
+        await handler.resolve_input("chat1", "msg")
+        await task
+
+    async def test_commit_prompt_empty_resolve(
+        self, handler, mock_service, mock_connector, session
+    ):
+        mock_service.status.return_value = GitStatus(
+            branch="main",
+            staged=[FileChange(path="a.py", status="modified")],
+        )
+
+        task = asyncio.create_task(
+            handler.handle_command("user1", "commit", "chat1", session)
+        )
+        for _ in range(50):
+            if handler.has_pending_input("chat1"):
+                break
+            await asyncio.sleep(0.01)
+        await handler.resolve_input("chat1", "")
+        result = await task
+        assert "No commit message" in result
+
+
+class TestHandlerStateEdgeCases:
+    def test_pop_pending_merge_event_returns_none_initially(self, handler):
+        assert handler.pop_pending_merge_event() is None
+
+    def test_pop_pending_merge_event_twice_returns_none_second(
+        self, handler, mock_service, session
+    ):
+        from leashd.core.events import COMMAND_MERGE, Event
+
+        handler._pending_merge_event = (
+            "chat1",
+            Event(name=COMMAND_MERGE, data={}),
+        )
+        first = handler.pop_pending_merge_event()
+        assert first is not None
+        second = handler.pop_pending_merge_event()
+        assert second is None
+
+    async def test_handler_state_clean_after_sandbox_rejection(
+        self, mock_service, mock_connector, audit, event_bus
+    ):
+        from pathlib import Path
+
+        sandbox = SandboxEnforcer([Path("/allowed/dir")])
+        handler = GitCommandHandler(
+            service=mock_service,
+            connector=mock_connector,
+            sandbox=sandbox,
+            audit=audit,
+            event_bus=event_bus,
+        )
+        bad_session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory="/forbidden/path",
+        )
+        await handler.handle_command("u1", "status", "c1", bad_session)
+        assert not handler.has_pending_input("c1")
+        assert handler.pop_pending_merge_event() is None
+
+    async def test_status_callback_no_empty_message(
+        self, handler, mock_service, mock_connector, session
+    ):
+        """Bug #1 fix: status callback with buttons should not send empty message."""
+        mock_service.status.return_value = GitStatus(
+            branch="main",
+            unstaged=[FileChange(path="file.py", status="modified")],
+        )
+        await handler.handle_callback("user1", "chat1", "status", "", session)
+        for msg in mock_connector.sent_messages:
+            assert msg["text"] != ""
+
+    async def test_status_callback_clean_repo_single_message(
+        self, handler, mock_service, mock_connector, session
+    ):
+        """Clean repo status: _status returns text, callback sends it once."""
+        mock_service.status.return_value = GitStatus(branch="main")
+        await handler.handle_callback("user1", "chat1", "status", "", session)
+        assert len(mock_connector.sent_messages) == 1
+        assert "main" in mock_connector.sent_messages[0]["text"]
+
+    async def test_add_with_spaces_in_filename_splits(
+        self, handler, mock_service, session
+    ):
+        """Known limitation: /git add 'my file.py' splits on whitespace."""
+        mock_service.add.return_value = GitResult(
+            success=True, message="Staged 2 file(s)"
+        )
+        await handler.handle_command("user1", "add my file.py", "chat1", session)
+        call_args = mock_service.add.call_args[0]
+        assert call_args[1] == ["my", "file.py"]
+
+    async def test_checkout_trailing_whitespace_stripped(
+        self, handler, mock_service, session
+    ):
+        """Bug #4 fix: trailing whitespace is stripped before passing to service."""
+        mock_service.checkout.return_value = GitResult(
+            success=True, message="Switched to branch 'main'"
+        )
+        mock_service.search_branches.return_value = []
+        await handler.handle_command("user1", "checkout main  ", "chat1", session)
+        mock_service.checkout.assert_called_once()
+        call_args = mock_service.checkout.call_args[0]
+        assert call_args[1] == "main"
+
+
+class TestSubcommandWhitespace:
+    async def test_status_with_extra_whitespace(self, handler, mock_service, session):
+        mock_service.status.return_value = GitStatus(branch="main")
+        result = await handler.handle_command("user1", "  status  ", "chat1", session)
+        assert "main" in result
+
+    async def test_checkout_with_extra_whitespace(self, handler, mock_service, session):
+        """Bug #4 fix: extra whitespace is stripped from branch name."""
+        mock_service.checkout.return_value = GitResult(success=True, message="Switched")
+        await handler.handle_command("user1", "checkout   main  ", "chat1", session)
+        call_args = mock_service.checkout.call_args[0]
+        assert call_args[1] == "main"
+
+    async def test_unknown_subcommand_with_special_chars(self, handler, session):
+        result = await handler.handle_command("user1", "st@tus!!", "chat1", session)
+        assert "Unknown git subcommand" in result
+        assert "st@tus!!" in result
+
+    async def test_add_dot_with_extra_whitespace(self, handler, mock_service, session):
+        mock_service.add_all.return_value = GitResult(success=True, message="Staged")
+        await handler.handle_command("user1", "add  .", "chat1", session)
+        mock_service.add_all.assert_called_once()
+
+
+class TestAuditCompleteness:
+    async def test_audit_entry_contains_user_id(
+        self, handler, mock_service, session, tmp_path
+    ):
+        import json
+
+        mock_service.pull.return_value = GitResult(success=True, message="ok")
+        await handler.handle_command("user1", "pull", "chat1", session)
+        content = (tmp_path / "audit.jsonl").read_text()
+        entry = json.loads(content.strip())
+        assert entry.get("user_id") == "user1"
+
+    async def test_all_operation_types_produce_audit(
+        self, handler, mock_service, session, tmp_path
+    ):
+        import json
+
+        mock_service.checkout.return_value = GitResult(success=True, message="ok")
+        mock_service.add.return_value = GitResult(success=True, message="ok")
+        mock_service.add_all.return_value = GitResult(success=True, message="ok")
+        mock_service.commit.return_value = GitResult(success=True, message="ok")
+        mock_service.pull.return_value = GitResult(success=True, message="ok")
+        mock_service.push.return_value = GitResult(success=True, message="ok")
+
+        await handler.handle_command("user1", "checkout main", "chat1", session)
+        await handler.handle_command("user1", "add file.py", "chat1", session)
+        await handler.handle_command("user1", "add .", "chat1", session)
+        await handler.handle_command("user1", "commit msg", "chat1", session)
+        await handler.handle_command("user1", "pull", "chat1", session)
+        await handler.handle_callback("user1", "chat1", "push_confirm", "", session)
+
+        content = (tmp_path / "audit.jsonl").read_text()
+        entries = [json.loads(line) for line in content.strip().splitlines()]
+        operations = {e["operation"] for e in entries}
+        assert "checkout" in operations
+        assert "add" in operations
+        assert "add_all" in operations
+        assert "commit" in operations
+        assert "pull" in operations
+        assert "push" in operations
+
+
+class TestPushFlow:
+    async def test_push_confirm_no_ahead_count(
+        self, handler, mock_service, mock_connector, session
+    ):
+        mock_service.status.return_value = GitStatus(
+            branch="main", tracking="origin/main"
+        )
+        await handler.handle_command("user1", "push", "chat1", session)
+        msg = mock_connector.sent_messages[0]
+        assert "commits ahead" not in msg["text"]
+        assert "Push" in msg["text"]
+
+    async def test_push_with_tracking_shows_remote_name(
+        self, handler, mock_service, mock_connector, session
+    ):
+        mock_service.status.return_value = GitStatus(
+            branch="feat", tracking="upstream/feat"
+        )
+        await handler.handle_command("user1", "push", "chat1", session)
+        msg = mock_connector.sent_messages[0]
+        assert "upstream/feat" in msg["text"]
+
+    async def test_push_cancel_no_audit_entry(
+        self, handler, mock_connector, session, tmp_path
+    ):
+        await handler.handle_callback("user1", "chat1", "push_cancel", "", session)
+        audit_path = tmp_path / "audit.jsonl"
+        content = audit_path.read_text() if audit_path.exists() else ""
+        assert "push" not in content
+
+
+class TestAddInteractiveFlow:
+    async def test_add_interactive_only_untracked(
+        self, handler, mock_service, mock_connector, session
+    ):
+        mock_service.status.return_value = GitStatus(
+            branch="main",
+            untracked=["new1.py", "new2.py"],
+        )
+        result = await handler.handle_command("user1", "add", "chat1", session)
+        assert result == ""
+        msg = mock_connector.sent_messages[0]
+        button_texts = [b.text for row in msg["buttons"] for b in row]
+        assert "new1.py" in button_texts
+        assert "new2.py" in button_texts
+
+    async def test_add_interactive_file_button_callback_data_format(
+        self, handler, mock_service, mock_connector, session
+    ):
+        mock_service.status.return_value = GitStatus(
+            branch="main",
+            unstaged=[FileChange(path="src/app.py", status="modified")],
+        )
+        await handler.handle_command("user1", "add", "chat1", session)
+        msg = mock_connector.sent_messages[0]
+        button_data = [b.callback_data for row in msg["buttons"] for b in row]
+        assert f"{GIT_CALLBACK_PREFIX}add:src/app.py" in button_data
+
+    async def test_add_interactive_shows_both_unstaged_and_untracked(
+        self, handler, mock_service, mock_connector, session
+    ):
+        mock_service.status.return_value = GitStatus(
+            branch="main",
+            unstaged=[FileChange(path="modified.py", status="modified")],
+            untracked=["new.py"],
+        )
+        await handler.handle_command("user1", "add", "chat1", session)
+        msg = mock_connector.sent_messages[0]
+        button_texts = [b.text for row in msg["buttons"] for b in row]
+        assert "modified.py" in button_texts
+        assert "new.py" in button_texts
+        assert "Stage All" in button_texts

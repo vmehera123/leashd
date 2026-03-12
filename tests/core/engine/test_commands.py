@@ -1,6 +1,7 @@
 """Engine tests — /test, /dir, /commit, /plan, /edit, /clear, /task, /cancel, /tasks commands."""
 
-from unittest.mock import AsyncMock, MagicMock, create_autospec
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, create_autospec, patch
 
 import pytest
 
@@ -54,7 +55,7 @@ class TestHandleCommand:
 
         assert "accept edits" in result.lower() or "auto-approve" in result.lower()
         session = eng.session_manager.get("user1", "chat1")
-        assert session.mode == "auto"
+        assert session.mode == "edit"
         auto_tools = eng._gatekeeper._auto_approved_tools.get("chat1", set())
         assert auto_tools == {"Write", "Edit", "NotebookEdit"}
         assert "chat1" not in eng._gatekeeper._auto_approved_chats
@@ -1414,7 +1415,7 @@ class TestEditWithArgs:
 
         assert result == ""
         session = eng.session_manager.get("user1", "chat1")
-        assert session.mode == "auto"
+        assert session.mode == "edit"
         confirmation_msgs = [
             m
             for m in mock_connector.sent_messages
@@ -1446,7 +1447,7 @@ class TestEditWithArgs:
 
         assert "accept edits" in result.lower() or "auto-approve" in result.lower()
         session = eng.session_manager.get("user1", "chat1")
-        assert session.mode == "auto"
+        assert session.mode == "edit"
 
     @pytest.mark.asyncio
     async def test_edit_with_args_auto_approves_tools(
@@ -1486,6 +1487,365 @@ class TestEditWithArgs:
         result = await eng.handle_command("user1", "edit", "   ", "chat1")
 
         assert "accept edits" in result.lower() or "auto-approve" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_edit_sets_plan_origin(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = FakeAgent()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_command("user1", "edit", "", "chat1")
+
+        session = eng.session_manager.get("user1", "chat1")
+        assert session.plan_origin == "edit"
+
+    @pytest.mark.asyncio
+    async def test_edit_with_args_skips_auto_plan(
+        self, audit_logger, policy_engine, mock_connector, tmp_path
+    ):
+        """Regression: /edit must skip auto_plan even when auto_plan=True."""
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            auto_plan=True,
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        agent = FakeAgent()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_command("user1", "edit", "fix the bug", "chat1")
+
+        session = eng.session_manager.get("user1", "chat1")
+        assert session.mode == "edit"
+        assert session.plan_origin == "edit"
+
+    @pytest.mark.asyncio
+    async def test_edit_no_args_follow_up_skips_auto_plan(
+        self, audit_logger, policy_engine, mock_connector, tmp_path
+    ):
+        """/edit (no args) + follow-up message must not trigger auto_plan."""
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            auto_plan=True,
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        agent = FakeAgent()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_command("user1", "edit", "", "chat1")
+        await eng.handle_message("user1", "now fix the auth bug", "chat1")
+
+        session = eng.session_manager.get("user1", "chat1")
+        assert session.mode == "edit"
+
+    @pytest.mark.asyncio
+    async def test_edit_resumed_session_with_auto_plan(
+        self, audit_logger, policy_engine, mock_connector, tmp_path
+    ):
+        """auto_plan=True + claude_session_id set → mode stays edit."""
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            auto_plan=True,
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        agent = FakeAgent()
+        sm = SessionManager()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_command("user1", "edit", "", "chat1")
+        session = sm.get("user1", "chat1")
+        session.claude_session_id = "existing-abc"
+
+        await eng.handle_message("user1", "continue work", "chat1")
+
+        session = sm.get("user1", "chat1")
+        assert session.mode == "edit"
+
+    @pytest.mark.asyncio
+    async def test_edit_from_plan_mode(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = FakeAgent()
+        sm = SessionManager()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_command("user1", "plan", "", "chat1")
+        session = sm.get("user1", "chat1")
+        assert session.mode == "plan"
+
+        await eng.handle_command("user1", "edit", "", "chat1")
+        session = sm.get("user1", "chat1")
+        assert session.mode == "edit"
+        assert session.plan_origin == "edit"
+
+    @pytest.mark.asyncio
+    async def test_edit_from_test_mode(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = FakeAgent()
+        sm = SessionManager()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        session = await sm.get_or_create(
+            "user1", "chat1", str(config.approved_directories[0])
+        )
+        session.mode = "test"
+
+        await eng.handle_command("user1", "edit", "", "chat1")
+        session = sm.get("user1", "chat1")
+        assert session.mode == "edit"
+        assert session.plan_origin == "edit"
+
+    @pytest.mark.asyncio
+    async def test_edit_from_task_mode(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = FakeAgent()
+        sm = SessionManager()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        session = await sm.get_or_create(
+            "user1", "chat1", str(config.approved_directories[0])
+        )
+        session.mode = "task"
+
+        await eng.handle_command("user1", "edit", "", "chat1")
+        session = sm.get("user1", "chat1")
+        assert session.mode == "edit"
+        assert session.plan_origin == "edit"
+
+    @pytest.mark.asyncio
+    async def test_two_sequential_edit_commands(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = FakeAgent()
+        sm = SessionManager()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_command("user1", "edit", "", "chat1")
+        await eng.handle_command("user1", "edit", "", "chat1")
+
+        session = sm.get("user1", "chat1")
+        assert session.mode == "edit"
+        assert session.plan_origin == "edit"
+
+    @pytest.mark.asyncio
+    async def test_default_after_edit_resets_state(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = FakeAgent()
+        sm = SessionManager()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_command("user1", "edit", "", "chat1")
+        session = sm.get("user1", "chat1")
+        assert session.plan_origin == "edit"
+
+        await eng.handle_command("user1", "default", "", "chat1")
+        session = sm.get("user1", "chat1")
+        assert session.mode == "default"
+        assert session.plan_origin is None
+        assert "chat1" not in eng._gatekeeper._auto_approved_tools
+
+    @pytest.mark.asyncio
+    async def test_edit_only_approves_file_tools(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = FakeAgent()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_command("user1", "edit", "", "chat1")
+
+        auto_tools = eng._gatekeeper._auto_approved_tools.get("chat1", set())
+        assert "Write" in auto_tools
+        assert "Edit" in auto_tools
+        assert "NotebookEdit" in auto_tools
+        assert "Bash" not in auto_tools
+
+    @pytest.mark.asyncio
+    async def test_edit_auto_approve_isolated_to_chat(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = FakeAgent()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_command("user1", "edit", "", "chat1")
+
+        chat1_tools = eng._gatekeeper._auto_approved_tools.get("chat1", set())
+        chat2_tools = eng._gatekeeper._auto_approved_tools.get("chat2", set())
+        assert "Write" in chat1_tools
+        assert "Write" not in chat2_tools
+
+    @pytest.mark.asyncio
+    async def test_edit_preserves_claude_session_id(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = FakeAgent()
+        sm = SessionManager()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        session = await sm.get_or_create(
+            "user1", "chat1", str(config.approved_directories[0])
+        )
+        session.claude_session_id = "prev-session-xyz"
+
+        await eng.handle_command("user1", "edit", "", "chat1")
+
+        session = sm.get("user1", "chat1")
+        assert session.claude_session_id == "prev-session-xyz"
+        assert session.mode == "edit"
+        assert session.plan_origin == "edit"
+
+    @pytest.mark.asyncio
+    async def test_edit_plan_origin_persists_across_messages(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = FakeAgent()
+        sm = SessionManager()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_command("user1", "edit", "", "chat1")
+
+        for i in range(3):
+            await eng.handle_message("user1", f"follow-up {i}", "chat1")
+            session = sm.get("user1", "chat1")
+            assert session.mode == "edit"
+            assert session.plan_origin == "edit"
+
+    @pytest.mark.asyncio
+    async def test_clear_resets_plan_origin(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = FakeAgent()
+        sm = SessionManager()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_command("user1", "edit", "", "chat1")
+        session = sm.get("user1", "chat1")
+        assert session.plan_origin == "edit"
+
+        await eng.handle_command("user1", "clear", "", "chat1")
+        session = sm.get("user1", "chat1")
+        assert session.plan_origin is None
+
+    @pytest.mark.asyncio
+    async def test_edit_agent_error_preserves_mode(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = FakeAgent(fail=True)
+        sm = SessionManager()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_command("user1", "edit", "fix something", "chat1")
+
+        session = sm.get("user1", "chat1")
+        assert session.mode == "edit"
+        assert session.plan_origin == "edit"
 
     # --- /clear cancellation tests ---
 
@@ -2004,3 +2364,208 @@ class TestClearEmitsEvent:
 
         assert any(e.data["text"] == "/clear" for e in captured_events)
         assert any(e.data["chat_id"] == "chat1" for e in captured_events)
+
+
+class TestBrowserShutdown:
+    def _make_engine(self, config, audit_logger, policy_engine, connector=None, **kw):
+        return Engine(
+            connector=connector,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            **kw,
+        )
+
+    async def _create_session(self, eng, config, *, mode="web"):
+        await eng.handle_message("user1", "hello", "chat1")
+        session = eng.session_manager.get("user1", "chat1")
+        session.mode = mode
+        return session
+
+    @pytest.mark.asyncio
+    async def test_shutdown_browser_noop_for_non_web_mode(
+        self, config, audit_logger, policy_engine
+    ):
+        eng = self._make_engine(config, audit_logger, policy_engine)
+        session = await self._create_session(eng, config, mode="default")
+
+        with patch("asyncio.create_subprocess_exec") as mock_exec:
+            await eng._shutdown_browser(session)
+            mock_exec.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_shutdown_browser_agent_browser_backend(
+        self, tmp_path, audit_logger, policy_engine
+    ):
+        ab_config = LeashdConfig(
+            approved_directories=[tmp_path],
+            max_turns=5,
+            audit_log_path=tmp_path / "audit.jsonl",
+            browser_backend="agent-browser",
+        )
+        eng = self._make_engine(ab_config, audit_logger, policy_engine)
+        session = await self._create_session(eng, ab_config)
+        session.browser_backend = "agent-browser"
+
+        mock_proc = AsyncMock()
+        mock_proc.wait = AsyncMock(return_value=0)
+
+        with patch(
+            "asyncio.create_subprocess_exec", return_value=mock_proc
+        ) as mock_exec:
+            await eng._shutdown_browser(session)
+            mock_exec.assert_called_once_with(
+                "agent-browser",
+                "close",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+
+    @pytest.mark.asyncio
+    async def test_shutdown_browser_playwright_backend(
+        self, config, audit_logger, policy_engine
+    ):
+        eng = self._make_engine(config, audit_logger, policy_engine)
+        session = await self._create_session(eng, config)
+        session.browser_backend = "playwright"
+
+        with patch.object(
+            eng, "_kill_playwright_mcp", new_callable=AsyncMock
+        ) as mock_kill:
+            await eng._shutdown_browser(session)
+            mock_kill.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_shutdown_browser_uses_session_backend_over_config(
+        self, config, audit_logger, policy_engine
+    ):
+        """Session was started with agent-browser but config changed to playwright."""
+        eng = self._make_engine(config, audit_logger, policy_engine)
+        session = await self._create_session(eng, config)
+        session.browser_backend = "agent-browser"
+
+        mock_proc = AsyncMock()
+        mock_proc.wait = AsyncMock(return_value=0)
+
+        with patch(
+            "asyncio.create_subprocess_exec", return_value=mock_proc
+        ) as mock_exec:
+            await eng._shutdown_browser(session)
+            mock_exec.assert_called_once_with(
+                "agent-browser",
+                "close",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+
+    @pytest.mark.asyncio
+    async def test_shutdown_browser_handles_exceptions(
+        self, config, audit_logger, policy_engine
+    ):
+        eng = self._make_engine(config, audit_logger, policy_engine)
+        session = await self._create_session(eng, config)
+        session.browser_backend = "playwright"
+
+        with patch.object(
+            eng,
+            "_kill_playwright_mcp",
+            new_callable=AsyncMock,
+            side_effect=OSError("boom"),
+        ):
+            await eng._shutdown_browser(session)
+
+    @pytest.mark.asyncio
+    async def test_stop_calls_browser_shutdown_for_web_session(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        eng = self._make_engine(
+            config, audit_logger, policy_engine, connector=mock_connector
+        )
+        session = await self._create_session(eng, config)
+
+        with patch.object(
+            eng, "_shutdown_browser", new_callable=AsyncMock
+        ) as mock_shutdown:
+            await eng.handle_command("user1", "stop", "", "chat1")
+            mock_shutdown.assert_awaited_once_with(session)
+
+    @pytest.mark.asyncio
+    async def test_clear_calls_browser_shutdown_before_reset(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        sm = SessionManager()
+        eng = Engine(
+            connector=mock_connector,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_message("user1", "hello", "chat1")
+        session = sm.get("user1", "chat1")
+        session.mode = "web"
+
+        call_order: list[str] = []
+        original_reset = sm.reset
+
+        async def tracking_reset(user_id, chat_id):
+            call_order.append("reset")
+            return await original_reset(user_id, chat_id)
+
+        async def tracking_shutdown(s):
+            call_order.append("browser_shutdown")
+
+        with (
+            patch.object(eng, "_shutdown_browser", side_effect=tracking_shutdown),
+            patch.object(sm, "reset", side_effect=tracking_reset),
+        ):
+            await eng.handle_command("user1", "clear", "", "chat1")
+
+        assert call_order == ["browser_shutdown", "reset"]
+
+    @pytest.mark.asyncio
+    async def test_default_closes_browser_when_leaving_web_mode(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        eng = self._make_engine(
+            config, audit_logger, policy_engine, connector=mock_connector
+        )
+        session = await self._create_session(eng, config)
+
+        with patch.object(
+            eng, "_shutdown_browser", new_callable=AsyncMock
+        ) as mock_shutdown:
+            result = await eng.handle_command("user1", "default", "", "chat1")
+            mock_shutdown.assert_awaited_once_with(session)
+        assert "Default mode" in result
+
+    @pytest.mark.asyncio
+    async def test_default_skips_browser_shutdown_for_non_web_mode(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        eng = self._make_engine(
+            config, audit_logger, policy_engine, connector=mock_connector
+        )
+        await self._create_session(eng, config, mode="edit")
+
+        with patch.object(
+            eng, "_shutdown_browser", new_callable=AsyncMock
+        ) as mock_shutdown:
+            await eng.handle_command("user1", "default", "", "chat1")
+            mock_shutdown.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_kill_playwright_mcp_no_processes(
+        self, config, audit_logger, policy_engine
+    ):
+        eng = self._make_engine(config, audit_logger, policy_engine)
+
+        mock_proc = AsyncMock()
+        mock_proc.communicate = AsyncMock(return_value=(b"", b""))
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+            await eng._kill_playwright_mcp()

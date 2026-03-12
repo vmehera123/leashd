@@ -675,6 +675,60 @@ class TestClean:
         captured = capsys.readouterr()
         assert "Cleaned 2 artifact(s)" in captured.out
 
+    def test_clean_removes_playwright_dir_and_web_session(
+        self, fake_config_dir, tmp_path, capsys, monkeypatch
+    ):
+        from leashd.cli import _handle_clean
+
+        project = tmp_path / "myproject"
+        leashd_dir = project / ".leashd"
+        playwright_dir = leashd_dir / ".playwright"
+        playwright_dir.mkdir(parents=True)
+        (playwright_dir / "screenshot.png").write_bytes(b"\x89PNG")
+        (leashd_dir / "web-session.md").write_text("# Web Session")
+
+        fake_home = tmp_path / "fake_home"
+        fake_home.mkdir()
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+
+        add_approved_directory(project)
+        _handle_clean()
+
+        assert not playwright_dir.exists()
+        assert not (leashd_dir / "web-session.md").exists()
+
+        captured = capsys.readouterr()
+        assert "Cleaned 2 artifact(s)" in captured.out
+
+    def test_clean_removes_screenshots(
+        self, fake_config_dir, tmp_path, capsys, monkeypatch
+    ):
+        from leashd.cli import _handle_clean
+
+        project = tmp_path / "myproject"
+        leashd_dir = project / ".leashd"
+        leashd_dir.mkdir(parents=True)
+        (leashd_dir / "screenshot1.png").write_bytes(b"\x89PNG")
+        (leashd_dir / "screenshot2.png").write_bytes(b"\x89PNG")
+        (leashd_dir / "capture.jpg").write_bytes(b"\xff\xd8")
+        (leashd_dir / ".gitignore").write_text("*")
+        (leashd_dir / "test.yaml").write_text("tests: true")
+
+        fake_home = tmp_path / "fake_home"
+        fake_home.mkdir()
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+
+        add_approved_directory(project)
+        _handle_clean()
+
+        assert not list(leashd_dir.glob("*.png"))
+        assert not list(leashd_dir.glob("*.jpg"))
+        assert (leashd_dir / ".gitignore").exists()
+        assert (leashd_dir / "test.yaml").exists()
+
+        captured = capsys.readouterr()
+        assert "Cleaned 3 artifact(s)" in captured.out
+
 
 class TestVersion:
     def test_version_subcommand(self, capsys):
@@ -1380,3 +1434,268 @@ class TestNotifyDaemonReload:
             _notify_daemon_reload()
         captured = capsys.readouterr()
         assert captured.out == ""
+
+
+class TestEffort:
+    def test_effort_show_default(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_effort_show
+
+        _handle_effort_show()
+        captured = capsys.readouterr()
+        assert "medium" in captured.out
+
+    def test_effort_show_custom(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_effort_show
+
+        save_global_config({"effort": "high"})
+        _handle_effort_show()
+        captured = capsys.readouterr()
+        assert "high" in captured.out
+
+    def test_effort_set_valid(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_effort_set
+
+        with patch("leashd.cli._notify_daemon_reload"):
+            _handle_effort_set("high")
+        captured = capsys.readouterr()
+        assert "\u2713" in captured.out
+        assert "high" in captured.out
+        from leashd.config_store import load_global_config
+
+        data = load_global_config()
+        assert data["effort"] == "high"
+
+    def test_effort_set_invalid(self, fake_config_dir):
+        from leashd.cli import _handle_effort_set
+
+        with pytest.raises(SystemExit) as exc_info:
+            _handle_effort_set("turbo")
+        assert exc_info.value.code == 1
+
+
+class TestSkillCli:
+    def test_skill_list_empty(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_skill_list
+
+        _handle_skill_list()
+        captured = capsys.readouterr()
+        assert "No skills installed" in captured.out
+
+    def test_skill_list_shows_installed(self, fake_config_dir, tmp_path, capsys):
+        import zipfile
+
+        from leashd.cli import _handle_skill_list
+        from leashd.skills import install_skill
+
+        skills_dir = tmp_path / "skills"
+        zip_path = tmp_path / "test-skill.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr(
+                "SKILL.md",
+                "---\nname: test-skill\ndescription: A test\n---\n# Body",
+            )
+        with patch("leashd.skills._SKILLS_DIR", skills_dir):
+            install_skill(zip_path, tags=["web"])
+
+        _handle_skill_list()
+        captured = capsys.readouterr()
+        assert "test-skill" in captured.out
+        assert "A test" in captured.out
+        assert "web" in captured.out
+
+    def test_skill_add_success(self, fake_config_dir, tmp_path, capsys):
+        import zipfile
+
+        from leashd.cli import _handle_skill_add
+
+        skills_dir = tmp_path / "skills"
+        zip_path = tmp_path / "my-skill.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr(
+                "SKILL.md",
+                "---\nname: my-skill\ndescription: My skill\n---\n# Body",
+            )
+        with (
+            patch("leashd.skills._SKILLS_DIR", skills_dir),
+            patch("leashd.cli._notify_daemon_reload"),
+        ):
+            _handle_skill_add(str(zip_path), ["web", "content"])
+        captured = capsys.readouterr()
+        assert "\u2713" in captured.out
+        assert "my-skill" in captured.out
+
+    def test_skill_add_not_found(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_skill_add
+
+        with pytest.raises(SystemExit) as exc_info:
+            _handle_skill_add("/nonexistent/file.zip", [])
+        assert exc_info.value.code == 1
+
+    def test_skill_remove_success(self, fake_config_dir, tmp_path, capsys):
+        import zipfile
+
+        from leashd.cli import _handle_skill_remove
+        from leashd.skills import install_skill
+
+        skills_dir = tmp_path / "skills"
+        zip_path = tmp_path / "test-skill.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr(
+                "SKILL.md",
+                "---\nname: test-skill\ndescription: A test\n---\n# Body",
+            )
+        with patch("leashd.skills._SKILLS_DIR", skills_dir):
+            install_skill(zip_path)
+
+        with (
+            patch("leashd.skills._SKILLS_DIR", skills_dir),
+            patch("leashd.cli._notify_daemon_reload"),
+        ):
+            _handle_skill_remove("test-skill")
+        captured = capsys.readouterr()
+        assert "\u2713" in captured.out
+        assert "Removed" in captured.out
+
+    def test_skill_remove_not_found(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_skill_remove
+
+        with (
+            patch("leashd.skills._SKILLS_DIR", Path("/tmp/nonexistent-skills")),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            _handle_skill_remove("nope")
+        assert exc_info.value.code == 1
+
+    def test_skill_show_success(self, fake_config_dir, tmp_path, capsys):
+        import zipfile
+
+        from leashd.cli import _handle_skill_show
+        from leashd.skills import install_skill
+
+        skills_dir = tmp_path / "skills"
+        zip_path = tmp_path / "test-skill.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr(
+                "SKILL.md",
+                "---\nname: test-skill\ndescription: A test\n---\n# Body",
+            )
+        with patch("leashd.skills._SKILLS_DIR", skills_dir):
+            install_skill(zip_path, tags=["web"])
+
+        _handle_skill_show("test-skill")
+        captured = capsys.readouterr()
+        assert "test-skill" in captured.out
+        assert "A test" in captured.out
+        assert "web" in captured.out
+
+    def test_skill_show_not_found(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_skill_show
+
+        with pytest.raises(SystemExit) as exc_info:
+            _handle_skill_show("nonexistent")
+        assert exc_info.value.code == 1
+
+    def test_skill_dispatch(self):
+        from leashd.cli import main
+
+        with (
+            patch("leashd.cli.inject_global_config_as_env"),
+            patch("leashd.cli._handle_skill") as mock_skill,
+            patch("sys.argv", ["leashd", "skill"]),
+        ):
+            main()
+            mock_skill.assert_called_once()
+
+
+class TestBrowserSetBackend:
+    def test_set_agent_browser(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_browser_set_backend
+
+        with patch("leashd.skills.ensure_agent_browser_skill"):
+            _handle_browser_set_backend("agent-browser")
+        captured = capsys.readouterr()
+        assert "agent-browser" in captured.out
+        assert "\u2713" in captured.out
+
+    def test_set_playwright(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_browser_set_backend
+
+        with patch("leashd.skills.remove_agent_browser_skill"):
+            _handle_browser_set_backend("playwright")
+        captured = capsys.readouterr()
+        assert "playwright" in captured.out
+        assert "\u2713" in captured.out
+
+    def test_invalid_backend_exits(self, fake_config_dir):
+        from leashd.cli import _handle_browser_set_backend
+
+        with pytest.raises(SystemExit) as exc_info:
+            _handle_browser_set_backend("selenium")
+        assert exc_info.value.code == 1
+
+    def test_persists_to_config(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_browser_set_backend
+        from leashd.config_store import get_browser_config
+
+        with patch("leashd.skills.ensure_agent_browser_skill"):
+            _handle_browser_set_backend("agent-browser")
+        browser = get_browser_config()
+        assert browser["backend"] == "agent-browser"
+
+    def test_show_includes_backend(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_browser_show
+
+        save_global_config({"browser": {"backend": "agent-browser"}})
+        _handle_browser_show()
+        captured = capsys.readouterr()
+        assert "agent-browser" in captured.out
+
+
+class TestBrowserHeadless:
+    def test_headless_on(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_browser_headless
+
+        _handle_browser_headless("on")
+        captured = capsys.readouterr()
+        assert "\u2713" in captured.out
+        assert "on (headless)" in captured.out
+
+    def test_headless_off(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_browser_headless
+
+        save_global_config({"browser": {"headless": True}})
+        _handle_browser_headless("off")
+        captured = capsys.readouterr()
+        assert "\u2713" in captured.out
+        assert "off (headed)" in captured.out
+
+    def test_headless_show_default(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_browser_headless
+
+        _handle_browser_headless(None)
+        captured = capsys.readouterr()
+        assert "Headless: off" in captured.out
+
+    def test_headless_show_enabled(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_browser_headless
+
+        save_global_config({"browser": {"headless": True}})
+        _handle_browser_headless(None)
+        captured = capsys.readouterr()
+        assert "Headless: on" in captured.out
+
+    def test_headless_persists_to_config(self, fake_config_dir):
+        from leashd.cli import _handle_browser_headless
+        from leashd.config_store import get_browser_config
+
+        _handle_browser_headless("on")
+        browser = get_browser_config()
+        assert browser["headless"] is True
+
+    def test_show_includes_headless(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_browser_show
+
+        save_global_config({"browser": {"headless": True}})
+        _handle_browser_show()
+        captured = capsys.readouterr()
+        assert "Headless: on" in captured.out

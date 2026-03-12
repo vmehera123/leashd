@@ -1,5 +1,6 @@
 """Tests for the Claude Code agent wrapper (unit tests with mocks)."""
 
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -8,10 +9,12 @@ from leashd.agents.base import AgentResponse, ToolActivity
 from leashd.agents.claude_code import (
     _AUTO_MODE_INSTRUCTION,
     _PLAN_MODE_INSTRUCTION,
+    _STDERR_MAX_LINES,
     ClaudeCodeAgent,
     _describe_tool,
     _friendly_error,
     _is_retryable_error,
+    _StderrBuffer,
     _truncate,
 )
 from leashd.core.config import LeashdConfig
@@ -143,7 +146,7 @@ class TestClaudeCodeAgent:
         assert opts.cwd == session.working_directory
         assert opts.max_turns == 5  # from config fixture
         assert opts.permission_mode == "default"
-        assert opts.setting_sources == ["project"]
+        assert opts.setting_sources == ["project", "user"]
         assert opts.resume is None
 
     def test_build_options_with_resume(self, agent, session):
@@ -181,7 +184,66 @@ class TestClaudeCodeAgent:
             working_directory=str(tmp_path),
         )
         opts = agent._build_options(session, can_use_tool=None)
-        assert opts.allowed_tools == ["Read", "Glob"]
+        assert "Read" in opts.allowed_tools
+        assert "Glob" in opts.allowed_tools
+
+    def test_build_options_setting_sources_includes_user(self, agent, session):
+        opts = agent._build_options(session, can_use_tool=None)
+        assert opts.setting_sources == ["project", "user"]
+
+    def test_build_options_injects_skill_tool(self, tmp_path):
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            allowed_tools=["Read", "Glob"],
+        )
+        agent = ClaudeCodeAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=str(tmp_path),
+        )
+        with patch("leashd.skills.has_installed_skills", return_value=True):
+            opts = agent._build_options(session, can_use_tool=None)
+        assert "Skill" in opts.allowed_tools
+        assert "Read" in opts.allowed_tools
+        assert "Glob" in opts.allowed_tools
+
+    def test_build_options_no_skill_when_none_installed(self, tmp_path):
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            allowed_tools=["Read", "Glob"],
+        )
+        agent = ClaudeCodeAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=str(tmp_path),
+        )
+        with patch("leashd.skills.has_installed_skills", return_value=False):
+            opts = agent._build_options(session, can_use_tool=None)
+        assert "Skill" not in opts.allowed_tools
+
+    def test_build_options_no_duplicate_skill(self, tmp_path):
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            allowed_tools=["Read", "Skill"],
+        )
+        agent = ClaudeCodeAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=str(tmp_path),
+        )
+        with patch("leashd.skills.has_installed_skills", return_value=True):
+            opts = agent._build_options(session, can_use_tool=None)
+        assert opts.allowed_tools.count("Skill") == 1
+
+    def test_build_options_empty_allowed_tools_no_injection(self, agent, session):
+        opts = agent._build_options(session, can_use_tool=None)
+        assert not hasattr(opts, "allowed_tools") or not opts.allowed_tools
 
     def test_build_options_with_can_use_tool(self, agent, session):
         async def my_hook(name, inp, ctx):
@@ -340,6 +402,16 @@ class TestClaudeCodeAgent:
         opts = agent._build_options(session, can_use_tool=None)
         assert opts.permission_mode == "acceptEdits"
 
+    def test_edit_mode_sets_instruction(self, agent, session):
+        session.mode = "edit"
+        opts = agent._build_options(session, can_use_tool=None)
+        assert opts.system_prompt == _AUTO_MODE_INSTRUCTION
+
+    def test_edit_mode_sets_accept_edits_permission(self, agent, session):
+        session.mode = "edit"
+        opts = agent._build_options(session, can_use_tool=None)
+        assert opts.permission_mode == "acceptEdits"
+
     def test_build_options_plan_mode_sets_plan_permission(self, agent, session):
         session.mode = "plan"
         opts = agent._build_options(session, can_use_tool=None)
@@ -490,6 +562,533 @@ class TestClaudeCodeAgent:
         assert "agent_mcp_servers" in captured.out
         assert "playwright" in captured.out
         assert "custom-tool" in captured.out
+
+    def test_build_options_web_mode_injects_user_data_dir(self, tmp_path):
+        import json
+
+        mcp_file = tmp_path / ".mcp.json"
+        mcp_file.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "playwright": {"command": "npx", "args": ["@playwright/mcp"]}
+                    }
+                }
+            )
+        )
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            browser_user_data_dir="~/browser-profile",
+        )
+        agent = ClaudeCodeAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=str(tmp_path),
+            mode="web",
+        )
+        opts = agent._build_options(session, can_use_tool=None)
+        pw_args = opts.mcp_servers["playwright"]["args"]
+        assert "--user-data-dir" in pw_args
+        idx = pw_args.index("--user-data-dir")
+        assert pw_args[idx + 1] == str(Path("~/browser-profile").expanduser())
+
+    def test_build_options_test_mode_no_user_data_dir(self, tmp_path):
+        import json
+
+        mcp_file = tmp_path / ".mcp.json"
+        mcp_file.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "playwright": {"command": "npx", "args": ["@playwright/mcp"]}
+                    }
+                }
+            )
+        )
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            browser_user_data_dir="~/browser-profile",
+        )
+        agent = ClaudeCodeAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=str(tmp_path),
+            mode="test",
+        )
+        opts = agent._build_options(session, can_use_tool=None)
+        pw_args = opts.mcp_servers["playwright"]["args"]
+        assert "--user-data-dir" not in pw_args
+
+    def test_build_options_default_mode_no_user_data_dir(self, tmp_path):
+        import json
+
+        mcp_file = tmp_path / ".mcp.json"
+        mcp_file.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "playwright": {"command": "npx", "args": ["@playwright/mcp"]}
+                    }
+                }
+            )
+        )
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            browser_user_data_dir="~/browser-profile",
+        )
+        agent = ClaudeCodeAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=str(tmp_path),
+        )
+        opts = agent._build_options(session, can_use_tool=None)
+        pw_args = opts.mcp_servers["playwright"]["args"]
+        assert "--user-data-dir" not in pw_args
+
+    def test_build_options_web_fresh_no_user_data_dir(self, tmp_path):
+        import json
+
+        mcp_file = tmp_path / ".mcp.json"
+        mcp_file.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "playwright": {"command": "npx", "args": ["@playwright/mcp"]}
+                    }
+                }
+            )
+        )
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            browser_user_data_dir="~/browser-profile",
+        )
+        agent = ClaudeCodeAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=str(tmp_path),
+            mode="web",
+            browser_fresh=True,
+        )
+        opts = agent._build_options(session, can_use_tool=None)
+        pw_args = opts.mcp_servers["playwright"]["args"]
+        assert "--user-data-dir" not in pw_args
+
+    def test_build_options_web_no_profile_configured(self, tmp_path):
+        import json
+
+        mcp_file = tmp_path / ".mcp.json"
+        mcp_file.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "playwright": {"command": "npx", "args": ["@playwright/mcp"]}
+                    }
+                }
+            )
+        )
+        config = LeashdConfig(approved_directories=[tmp_path])
+        agent = ClaudeCodeAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=str(tmp_path),
+            mode="web",
+        )
+        opts = agent._build_options(session, can_use_tool=None)
+        pw_args = opts.mcp_servers["playwright"]["args"]
+        assert "--user-data-dir" not in pw_args
+
+    def test_build_options_web_no_playwright_server(self, tmp_path):
+        import json
+
+        mcp_file = tmp_path / ".mcp.json"
+        mcp_file.write_text(
+            json.dumps({"mcpServers": {"other-tool": {"command": "node", "args": []}}})
+        )
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            browser_user_data_dir="~/browser-profile",
+        )
+        agent = ClaudeCodeAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=str(tmp_path),
+            mode="web",
+        )
+        opts = agent._build_options(session, can_use_tool=None)
+        assert "playwright" not in opts.mcp_servers
+
+    def test_build_options_web_does_not_mutate_shared_config(self, tmp_path):
+        import json
+
+        mcp_file = tmp_path / ".mcp.json"
+        mcp_file.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "playwright": {"command": "npx", "args": ["@playwright/mcp"]}
+                    }
+                }
+            )
+        )
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            browser_user_data_dir="~/browser-profile",
+        )
+        agent = ClaudeCodeAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=str(tmp_path),
+            mode="web",
+        )
+        agent._build_options(session, can_use_tool=None)
+        original = json.loads(mcp_file.read_text())
+        assert "--user-data-dir" not in original["mcpServers"]["playwright"]["args"]
+        assert "--output-dir" not in original["mcpServers"]["playwright"]["args"]
+
+    def test_build_options_output_dir_injected_all_modes(self, tmp_path):
+        import json
+
+        mcp_file = tmp_path / ".mcp.json"
+        mcp_file.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "playwright": {"command": "npx", "args": ["@playwright/mcp"]}
+                    }
+                }
+            )
+        )
+        config = LeashdConfig(approved_directories=[tmp_path])
+        agent = ClaudeCodeAgent(config)
+
+        for mode in ("default", "web", "test", "plan", "auto"):
+            session = Session(
+                session_id="s1",
+                user_id="u1",
+                chat_id="c1",
+                working_directory=str(tmp_path),
+                mode=mode,
+            )
+            opts = agent._build_options(session, can_use_tool=None)
+            pw_args = opts.mcp_servers["playwright"]["args"]
+            assert "--output-dir" in pw_args, f"--output-dir missing in {mode} mode"
+            idx = pw_args.index("--output-dir")
+            expected = str(Path(str(tmp_path)) / ".leashd" / ".playwright")
+            assert pw_args[idx + 1] == expected
+
+    def test_build_options_output_dir_not_injected_without_playwright(self, tmp_path):
+        import json
+
+        mcp_file = tmp_path / ".mcp.json"
+        mcp_file.write_text(
+            json.dumps({"mcpServers": {"other-tool": {"command": "node", "args": []}}})
+        )
+        config = LeashdConfig(approved_directories=[tmp_path])
+        agent = ClaudeCodeAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=str(tmp_path),
+        )
+        opts = agent._build_options(session, can_use_tool=None)
+        assert "playwright" not in opts.mcp_servers
+
+    def test_build_options_headless_comes_from_config_servers(self, tmp_path):
+        """Headless is baked into config.mcp_servers at startup, not injected at runtime."""
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            browser_headless=True,
+            mcp_servers={
+                "playwright": {
+                    "command": "npx",
+                    "args": ["@playwright/mcp", "--headless"],
+                }
+            },
+        )
+        agent = ClaudeCodeAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=str(tmp_path),
+        )
+        opts = agent._build_options(session, can_use_tool=None)
+        pw_args = opts.mcp_servers["playwright"]["args"]
+        assert "--headless" in pw_args
+
+    def test_build_options_headless_not_injected_at_runtime(self, tmp_path):
+        """_build_options does NOT add --headless — it comes from config.mcp_servers."""
+        import json
+
+        mcp_file = tmp_path / ".mcp.json"
+        mcp_file.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "playwright": {"command": "npx", "args": ["@playwright/mcp"]}
+                    }
+                }
+            )
+        )
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            browser_headless=True,
+        )
+        agent = ClaudeCodeAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=str(tmp_path),
+        )
+        opts = agent._build_options(session, can_use_tool=None)
+        pw_args = opts.mcp_servers["playwright"]["args"]
+        assert "--headless" not in pw_args
+
+    def test_build_options_agent_browser_strips_playwright(self, tmp_path):
+        """When backend is agent-browser, playwright is stripped even if local .mcp.json has it."""
+        import json
+
+        mcp_file = tmp_path / ".mcp.json"
+        mcp_file.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "playwright": {"command": "npx", "args": ["@playwright/mcp"]}
+                    }
+                }
+            )
+        )
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            browser_backend="agent-browser",
+        )
+        agent = ClaudeCodeAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=str(tmp_path),
+        )
+        opts = agent._build_options(session, can_use_tool=None)
+        assert "playwright" not in (opts.mcp_servers or {})
+
+    def test_build_options_agent_browser_disallows_playwright_tools(self, tmp_path):
+        """When backend is agent-browser, all playwright MCP tools are in disallowed_tools."""
+        from leashd.plugins.builtin.browser_tools import ALL_BROWSER_TOOLS
+
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            browser_backend="agent-browser",
+        )
+        agent = ClaudeCodeAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=str(tmp_path),
+        )
+        opts = agent._build_options(session, can_use_tool=None)
+        disallowed = set(opts.disallowed_tools or [])
+        for tool in ALL_BROWSER_TOOLS:
+            assert f"mcp__playwright__{tool}" in disallowed
+
+    def test_build_options_playwright_backend_no_disallowed_tools(self, tmp_path):
+        """When backend is playwright (default), no mcp__playwright__ tools are disallowed."""
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            browser_backend="playwright",
+        )
+        agent = ClaudeCodeAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=str(tmp_path),
+        )
+        opts = agent._build_options(session, can_use_tool=None)
+        disallowed = set(opts.disallowed_tools or [])
+        pw_tools = {t for t in disallowed if t.startswith("mcp__playwright__")}
+        assert pw_tools == set()
+
+    def test_build_options_agent_browser_preserves_existing_disallowed(self, tmp_path):
+        """agent-browser merges playwright tools with existing disallowed_tools."""
+        from leashd.plugins.builtin.browser_tools import ALL_BROWSER_TOOLS
+
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            browser_backend="agent-browser",
+            disallowed_tools=["SomeTool"],
+        )
+        agent = ClaudeCodeAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=str(tmp_path),
+        )
+        opts = agent._build_options(session, can_use_tool=None)
+        disallowed = set(opts.disallowed_tools or [])
+        assert "SomeTool" in disallowed
+        for tool in ALL_BROWSER_TOOLS:
+            assert f"mcp__playwright__{tool}" in disallowed
+
+    def test_build_options_agent_browser_sets_headed_env(self, tmp_path):
+        """agent-browser backend sets AGENT_BROWSER_HEADED in opts.env."""
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            browser_backend="agent-browser",
+            browser_headless=False,
+        )
+        agent = ClaudeCodeAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=str(tmp_path),
+        )
+        opts = agent._build_options(session, can_use_tool=None)
+        assert opts.env.get("AGENT_BROWSER_HEADED") == "1"
+
+    def test_build_options_agent_browser_headless_no_headed_env(self, tmp_path):
+        """Headless agent-browser does not set AGENT_BROWSER_HEADED."""
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            browser_backend="agent-browser",
+            browser_headless=True,
+        )
+        agent = ClaudeCodeAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=str(tmp_path),
+        )
+        opts = agent._build_options(session, can_use_tool=None)
+        assert "AGENT_BROWSER_HEADED" not in opts.env
+
+    def test_build_options_agent_browser_profile_in_web_mode(self, tmp_path):
+        """agent-browser injects profile env when in web mode with profile configured."""
+        profile_dir = str(tmp_path / "browser-profile")
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            browser_backend="agent-browser",
+            browser_user_data_dir=profile_dir,
+        )
+        agent = ClaudeCodeAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=str(tmp_path),
+            mode="web",
+        )
+        opts = agent._build_options(session, can_use_tool=None)
+        assert opts.env.get("AGENT_BROWSER_PROFILE") == profile_dir
+
+    def test_build_options_agent_browser_no_profile_when_fresh(self, tmp_path):
+        """agent-browser skips profile when browser_fresh is True."""
+        profile_dir = str(tmp_path / "browser-profile")
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            browser_backend="agent-browser",
+            browser_user_data_dir=profile_dir,
+        )
+        agent = ClaudeCodeAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=str(tmp_path),
+            mode="web",
+            browser_fresh=True,
+        )
+        opts = agent._build_options(session, can_use_tool=None)
+        assert "AGENT_BROWSER_PROFILE" not in opts.env
+
+    def test_build_options_web_mode_uses_web_max_turns(self, tmp_path):
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            max_turns=150,
+            web_max_turns=300,
+        )
+        agent = ClaudeCodeAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=str(tmp_path),
+            mode="web",
+        )
+        session.mode_instruction = "web mode"
+        opts = agent._build_options(session, can_use_tool=None)
+        assert opts.max_turns == 300
+
+    def test_build_options_test_mode_uses_test_max_turns(self, tmp_path):
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            max_turns=150,
+            test_max_turns=200,
+        )
+        agent = ClaudeCodeAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=str(tmp_path),
+            mode="test",
+        )
+        session.mode_instruction = "test mode"
+        opts = agent._build_options(session, can_use_tool=None)
+        assert opts.max_turns == 200
+
+    def test_build_options_default_mode_uses_global_max_turns(self, agent, session):
+        session.mode = "default"
+        opts = agent._build_options(session, can_use_tool=None)
+        assert opts.max_turns == 5
+
+    def test_build_options_effort_default(self, agent, session):
+        opts = agent._build_options(session, can_use_tool=None)
+        assert opts.effort == "medium"
+
+    def test_build_options_effort_high(self, tmp_path):
+        config = LeashdConfig(approved_directories=[tmp_path], effort="high")
+        high_agent = ClaudeCodeAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=str(tmp_path),
+        )
+        opts = high_agent._build_options(session, can_use_tool=None)
+        assert opts.effort == "high"
+
+    def test_build_options_effort_none(self, tmp_path):
+        config = LeashdConfig(approved_directories=[tmp_path], effort=None)
+        none_agent = ClaudeCodeAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=str(tmp_path),
+        )
+        opts = none_agent._build_options(session, can_use_tool=None)
+        assert opts.effort is None
 
     @pytest.mark.asyncio
     async def test_shutdown_suppresses_disconnect_errors(self, agent):
@@ -1107,6 +1706,14 @@ class TestDescribeTool:
         )
         assert result == "Asking a question"
 
+    def test_skill_shows_name(self):
+        assert (
+            _describe_tool("Skill", {"skill": "linkedin-writer"}) == "linkedin-writer"
+        )
+
+    def test_skill_empty(self):
+        assert _describe_tool("Skill", {}) == ""
+
     def test_unknown_tool_shows_first_string(self):
         assert _describe_tool("CustomTool", {"arg": "value"}) == "value"
 
@@ -1568,3 +2175,106 @@ class TestSystemMessageSessionCapture:
             await agent.execute("hello", session)
         # session_id comes from ResultMessage, not SystemMessage
         assert session.claude_session_id is None
+
+
+class TestStderrBuffer:
+    def test_collects_lines(self):
+        buf = _StderrBuffer()
+        buf("line 1")
+        buf("line 2")
+        assert buf.get() == "line 1\nline 2"
+
+    def test_respects_max_cap(self):
+        buf = _StderrBuffer(max_lines=3)
+        for i in range(10):
+            buf(f"line {i}")
+        assert buf.get() == "line 0\nline 1\nline 2"
+
+    def test_clear(self):
+        buf = _StderrBuffer()
+        buf("hello")
+        buf.clear()
+        assert buf.get() == ""
+
+    def test_empty_returns_empty_string(self):
+        buf = _StderrBuffer()
+        assert buf.get() == ""
+
+    def test_default_max_lines_matches_constant(self):
+        buf = _StderrBuffer()
+        assert buf._max_lines == _STDERR_MAX_LINES
+
+
+class TestStderrCapture:
+    @pytest.fixture
+    def agent(self, tmp_path):
+        config = LeashdConfig(approved_directories=[str(tmp_path)])
+        return ClaudeCodeAgent(config)
+
+    @pytest.fixture
+    def session(self, tmp_path):
+        return Session(
+            session_id="test-session",
+            user_id="user-1",
+            chat_id="chat-1",
+            working_directory=str(tmp_path),
+        )
+
+    @pytest.mark.asyncio
+    async def test_buffer_cleaned_up_on_success(self, agent, session):
+        """Stderr buffer is removed from _stderr_buffers after successful execute."""
+        messages = [
+            _make_assistant_message([_make_text_block("done")]),
+            _make_result_message(result="done"),
+        ]
+        ctx, _ = _patch_sdk_client(messages)
+        with ctx:
+            await agent.execute("hello", session)
+        assert session.session_id not in agent._stderr_buffers
+
+    @pytest.mark.asyncio
+    async def test_buffer_cleaned_up_on_failure(self, agent, session):
+        """Stderr buffer is removed from _stderr_buffers even after failure."""
+
+        def _raise_on_enter(*args, **kwargs):
+            raise RuntimeError("boom")
+
+        ctx = patch(
+            "leashd.agents.claude_code._SafeSDKClient",
+            side_effect=_raise_on_enter,
+        )
+        with ctx, pytest.raises(AgentError):
+            await agent.execute("hello", session)
+        assert session.session_id not in agent._stderr_buffers
+
+    @pytest.mark.asyncio
+    async def test_stderr_buffer_cleared_between_retries(self, agent, session):
+        """Stderr buffer is cleared at the start of each retry iteration."""
+        call_count = 0
+
+        class FakeClient:
+            def __init__(self, options):
+                self.options = options
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                pass
+
+            async def query(self, prompt):
+                nonlocal call_count
+                call_count += 1
+                stderr_cb = self.options.stderr
+                if stderr_cb:
+                    stderr_cb(f"attempt {call_count} error")
+                raise RuntimeError("api_error: overloaded")
+
+        with (
+            patch("leashd.agents.claude_code._SafeSDKClient", FakeClient),
+            patch("asyncio.sleep", new_callable=AsyncMock),
+        ):
+            result = await agent.execute("hello", session)
+
+        assert result.is_error
+        assert call_count == 3

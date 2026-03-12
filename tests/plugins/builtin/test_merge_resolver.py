@@ -510,3 +510,144 @@ def _make_mock_gatekeeper():
     gatekeeper = Mock(spec=ToolGatekeeper)
     gatekeeper.enable_tool_auto_approve = Mock()
     return gatekeeper
+
+
+class TestBuildMergeInstructionEdgeCases:
+    def test_empty_conflicted_files_list(self):
+        config = MergeConfig(
+            source_branch="feat",
+            target_branch="main",
+            conflicted_files=[],
+            working_directory="/tmp",
+        )
+        instruction = build_merge_instruction(config)
+        assert "MERGE MODE" in instruction
+        assert "feat" in instruction
+
+    def test_single_file_lists_correctly(self):
+        config = MergeConfig(
+            source_branch="feat",
+            target_branch="main",
+            conflicted_files=["a.py"],
+            working_directory="/tmp",
+        )
+        instruction = build_merge_instruction(config)
+        assert "a.py" in instruction
+
+
+class TestHandlerMergeCallbackEdgeCases:
+    async def test_merge_resolve_callback_when_conflict_files_raises(
+        self, handler, mock_service, mock_connector, session
+    ):
+        """If conflict_files raises, the callback should propagate the error."""
+        mock_service.conflict_files = AsyncMock(side_effect=Exception("git error"))
+        mock_service.status = AsyncMock(return_value=GitStatus(branch="main"))
+        with pytest.raises(Exception, match="git error"):
+            await handler.handle_callback(
+                "user1", "chat1", "merge_resolve", "feat", session
+            )
+
+    async def test_merge_resolve_callback_when_status_raises(
+        self, handler, mock_service, mock_connector, session
+    ):
+        mock_service.conflict_files = AsyncMock(return_value=["a.py"])
+        mock_service.status = AsyncMock(side_effect=Exception("status error"))
+        with pytest.raises(Exception, match="status error"):
+            await handler.handle_callback(
+                "user1", "chat1", "merge_resolve", "feat", session
+            )
+
+    async def test_merge_abort_callback_failure(
+        self, handler, mock_service, mock_connector, session
+    ):
+        mock_service.merge_abort = AsyncMock(
+            return_value=GitResult(
+                success=False,
+                message="Failed to abort merge",
+                details="fatal: There is no merge to abort",
+            )
+        )
+        await handler.handle_callback("user1", "chat1", "merge_abort", "", session)
+        assert len(mock_connector.sent_messages) == 1
+        text = mock_connector.sent_messages[0]["text"]
+        assert "Failed" in text
+
+    async def test_merge_no_conflict_failure_returns_no_buttons(
+        self, handler, mock_service, mock_connector, session
+    ):
+        mock_service.merge = AsyncMock(
+            return_value=MergeResult(
+                success=False,
+                message="Merge failed for 'nonexistent'",
+                details="fatal: not something we can merge",
+            )
+        )
+        result = await handler.handle_command(
+            "user1", "merge nonexistent", "chat1", session
+        )
+        assert "failed" in result.lower()
+        assert len(mock_connector.sent_messages) == 0
+
+    async def test_merge_conflicts_audit_includes_branch(
+        self, handler, mock_service, mock_connector, session, tmp_path
+    ):
+        import json
+
+        mock_service.merge = AsyncMock(
+            return_value=MergeResult(
+                success=False,
+                had_conflicts=True,
+                conflicted_files=["a.py"],
+                message="Merge conflicts detected",
+            )
+        )
+        mock_service.status = AsyncMock(return_value=GitStatus(branch="main"))
+        await handler.handle_command("user1", "merge feat-branch", "chat1", session)
+        content = (tmp_path / "audit.jsonl").read_text()
+        entry = json.loads(content.strip())
+        assert entry["operation"] == "merge_conflicts"
+        assert "feat-branch" in entry["detail"]
+
+
+class TestMergeAuditTrail:
+    async def test_successful_merge_audit(
+        self, handler, mock_service, session, tmp_path
+    ):
+        import json
+
+        mock_service.merge = AsyncMock(
+            return_value=MergeResult(
+                success=True, message="Merged 'feat' into current branch"
+            )
+        )
+        await handler.handle_command("user1", "merge feat", "chat1", session)
+        content = (tmp_path / "audit.jsonl").read_text()
+        entry = json.loads(content.strip())
+        assert entry["operation"] == "merge"
+        assert "feat" in entry["detail"]
+
+    async def test_merge_abort_command_audit(
+        self, handler, mock_service, session, tmp_path
+    ):
+        import json
+
+        mock_service.merge_abort = AsyncMock(
+            return_value=GitResult(success=True, message="Merge aborted")
+        )
+        await handler.handle_command("user1", "merge --abort", "chat1", session)
+        content = (tmp_path / "audit.jsonl").read_text()
+        entry = json.loads(content.strip())
+        assert entry["operation"] == "merge_abort"
+
+    async def test_merge_abort_callback_audit(
+        self, handler, mock_service, mock_connector, session, tmp_path
+    ):
+        import json
+
+        mock_service.merge_abort = AsyncMock(
+            return_value=GitResult(success=True, message="Merge aborted")
+        )
+        await handler.handle_callback("user1", "chat1", "merge_abort", "", session)
+        content = (tmp_path / "audit.jsonl").read_text()
+        entry = json.loads(content.strip())
+        assert entry["operation"] == "merge_abort"

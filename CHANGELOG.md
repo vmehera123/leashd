@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.7.0] - 2026-03-11
+- **added**: `/web` command — autonomous web browser agent with content-level human approval and recipe system (e.g., `/web linkedin_comment --topic "AI"`)
+- **added**: Two browser backends — choose between Playwright MCP (default) and agent-browser (Vercel's Rust CLI) via `leashd browser set-backend`; persistent login profiles via `leashd browser set-profile`
+- **added**: Agent skills system — installable capability packages managed via `leashd skill add/remove/list/show`, auto-discovered by Claude Agent SDK
+- **added**: Workflow playbooks — YAML-defined navigation guides with `leashd workflow list/show`; bundled LinkedIn commenting playbook
+- **added**: Configurable thinking effort — `leashd effort show/set` controls Claude reasoning depth
+- **added**: Per-mode turn limits — `/web` (300) and `/test` (200) get independent defaults for long-running workflows
+- **changed**: CLI-first configuration — README restructured around CLI commands; env vars documented as advanced overrides
+- **fixed**: Agent timeout now pauses during user interactions — think time no longer counts against the 60-minute limit
+- **fixed**: `/edit` mode no longer activates AutoApprover and AutonomousLoop — separated from task orchestrator mode
+- **fixed**: Git security hardening — sandbox validation on add callback, `..` rejection in branch names
+
 ## [0.6.0] - 2026-03-07
 - **added**: Task orchestrator — multi-phase autonomous workflow (plan→implement→test→PR) with crash recovery, SQLite persistence, and per-chat concurrency; dynamic phase insertion (explore, validate) based on task keywords
 - **added**: AI-driven phase transition evaluator replaces brittle substring heuristics — uses Claude CLI to decide advance/retry/escalate/complete between phases

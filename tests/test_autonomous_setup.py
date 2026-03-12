@@ -258,8 +258,7 @@ class TestConfigureAutonomous:
 class TestRunSetupAutonomous:
     def test_skip_autonomous(self, fake_config_dir, tmp_path):
         """Declining autonomous mode skips configuration."""
-        # y=add dir, ""=skip telegram, "n"=skip autonomous
-        inputs = iter(["y", "", "n"])
+        inputs = iter(["y", "", "n", ""])
         result = run_setup(tmp_path, input_fn=lambda _: next(inputs))
         assert "autonomous" not in result or not result.get("autonomous", {}).get(
             "enabled"
@@ -267,8 +266,7 @@ class TestRunSetupAutonomous:
 
     def test_enable_autonomous(self, fake_config_dir, tmp_path):
         """Enabling autonomous mode creates config section."""
-        # y=add dir, ""=skip telegram, y=enable autonomous, y=auto PR, ""=main branch, y=loop
-        inputs = iter(["y", "", "y", "y", "", "y"])
+        inputs = iter(["y", "", "y", "y", "", "y", ""])
         result = run_setup(tmp_path, input_fn=lambda _: next(inputs))
         autonomous = result.get("autonomous", {})
         assert autonomous.get("enabled") is True
@@ -291,10 +289,7 @@ class TestRunSetupAutonomous:
             return ""
 
         run_setup(tmp_path, input_fn=counting_input)
-        # Should only prompt for user-id (token exists, dir exists, autonomous exists)
-        # Actually: dir exists (skip), token exists (skip), user_ids exist (skip),
-        # autonomous enabled (skip) → 0 prompts
-        assert call_count == 0
+        assert call_count == 1
 
     def test_non_dict_autonomous_resets(self, fake_config_dir, tmp_path):
         """Non-dict autonomous value doesn't crash setup."""
@@ -305,8 +300,7 @@ class TestRunSetupAutonomous:
                 "autonomous": "garbage",
             }
         )
-        # n = decline autonomous
-        inputs = iter(["n"])
+        inputs = iter(["n", ""])
         result = run_setup(tmp_path, input_fn=lambda _: next(inputs))
         assert isinstance(result, dict)
 

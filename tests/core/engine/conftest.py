@@ -33,6 +33,9 @@ class FakeAgent(BaseAgent):
     async def shutdown(self):
         pass
 
+    def update_config(self, config):
+        self._config = config
+
 
 @pytest.fixture
 def fake_agent():

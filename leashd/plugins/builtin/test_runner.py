@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict
 from leashd.core.events import COMMAND_TEST, TEST_STARTED, Event
 from leashd.plugins.base import LeashdPlugin, PluginMeta
 from leashd.plugins.builtin.browser_tools import (
+    AGENT_BROWSER_AUTO_APPROVE,
     BROWSER_MUTATION_TOOLS,
     BROWSER_READONLY_TOOLS,
 )
@@ -94,6 +95,11 @@ class TestConfig(BaseModel):
     include_backend: bool = False
 
 
+def _normalize_dashes(text: str) -> str:
+    """Replace unicode em/en dashes with ASCII double-hyphens (mobile keyboards auto-correct)."""
+    return text.replace("\u2014", "--").replace("\u2013", "--")
+
+
 def _is_flag(token: str) -> bool:
     return token.startswith("-")
 
@@ -102,6 +108,8 @@ def parse_test_args(args: str) -> TestConfig:
     """Parse /test command arguments into a TestConfig."""
     if not args.strip():
         return TestConfig()
+
+    args = _normalize_dashes(args)
 
     try:
         tokens = shlex.split(args)
@@ -193,11 +201,37 @@ def merge_project_config(cli: TestConfig, project: ProjectTestConfig) -> TestCon
     return cli
 
 
+def _browser_preamble(backend: str) -> str:
+    """Return the browser tools introduction for the given backend."""
+    if backend == "agent-browser":
+        return (
+            "You have browser tools via agent-browser CLI "
+            "(agent-browser open, agent-browser click, agent-browser fill, "
+            "agent-browser snapshot -i, agent-browser console, and more). "
+            "These tools are pre-configured and ready to use via the Bash tool. "
+            "Use them directly for all browser interactions — do not fall back "
+            "to curl or code analysis as a substitute."
+        )
+    return (
+        "You have browser MCP tools available via Playwright MCP (browser_navigate, "
+        "browser_click, browser_type, browser_snapshot, browser_console_messages, "
+        "browser_network_requests, browser_take_screenshot, and more). These tools "
+        "are pre-configured and ready to use. Use them directly for all browser "
+        "interactions — do not fall back to curl or code analysis as a substitute."
+    )
+
+
+def _b(backend: str, playwright: str, agent_browser: str) -> str:
+    """Select the right tool name string based on backend."""
+    return agent_browser if backend == "agent-browser" else playwright
+
+
 def build_test_instruction(
     config: TestConfig,
     *,
     project_config: ProjectTestConfig | None = None,
     api_specs: list[tuple[str, str]] | None = None,
+    browser_backend: str = "playwright",
 ) -> str:
     """Generate a multi-phase system prompt based on test config."""
     sections: list[str] = []
@@ -207,11 +241,7 @@ def build_test_instruction(
         "application works correctly through a systematic multi-phase workflow. "
         "Work autonomously — fix issues as you find them, re-run to verify, and "
         "only ask the human when genuinely stuck.\n\n"
-        "You have browser MCP tools available via Playwright MCP (browser_navigate, "
-        "browser_click, browser_type, browser_snapshot, browser_console_messages, "
-        "browser_network_requests, browser_take_screenshot, and more). These tools "
-        "are pre-configured and ready to use. Use them directly for all browser "
-        "interactions — do not fall back to curl or code analysis as a substitute."
+        + _browser_preamble(browser_backend)
     )
 
     # Context persistence — placed early so the agent sees write-ahead rules
@@ -314,18 +344,29 @@ def build_test_instruction(
 
     # Phase 3: Smoke Test (e2e only)
     if config.include_e2e:
+        bb = browser_backend
         sections.append(
             "PHASE 3 — SMOKE TEST:\n"
-            "- Navigate to the app URL with browser_navigate\n"
-            "- Take browser_snapshot to capture the initial accessibility tree\n"
-            "- Check browser_console_messages for JavaScript errors\n"
-            "- Check browser_network_requests for failed requests (4xx/5xx)\n"
-            "- Take browser_take_screenshot as the visual baseline\n"
+            f"- Navigate to the app URL with "
+            f"{_b(bb, 'browser_navigate', 'agent-browser open')}\n"
+            f"- Take {_b(bb, 'browser_snapshot', 'agent-browser snapshot -i')} "
+            f"to capture the initial accessibility tree\n"
+            f"- Check {_b(bb, 'browser_console_messages', 'agent-browser console')} "
+            f"for JavaScript errors\n"
+            f"- Check {_b(bb, 'browser_network_requests', 'agent-browser network')} "
+            f"for failed requests (4xx/5xx)\n"
+            f"- Take {_b(bb, 'browser_take_screenshot', 'agent-browser screenshot')} "
+            f"as the visual baseline\n"
             "- If the page fails to load, stop here and report the blocker"
         )
 
     # Phase 4: Unit & Integration (unit only)
     if config.include_unit:
+        p6_tool = _b(
+            browser_backend,
+            "MCP tools",
+            "agent-browser CLI commands",
+        )
         sections.append(
             "PHASE 4 — UNIT & INTEGRATION TESTS:\n"
             "- Run existing test suites (pytest, jest, vitest, go test, cargo test)\n"
@@ -334,7 +375,7 @@ def build_test_instruction(
             "- Re-run fixed tests to verify they pass\n"
             "- If no tests exist, write tests for critical functions\n"
             "- Do NOT run npx playwright test or any e2e test suites here — "
-            "browser-based E2E testing is handled in Phase 6 via MCP tools"
+            f"browser-based E2E testing is handled in Phase 6 via {p6_tool}"
         )
 
     # Phase 5: Backend (backend only)
@@ -353,32 +394,45 @@ def build_test_instruction(
 
     # Phase 6: Agentic E2E (e2e only)
     if config.include_e2e:
+        bb = browser_backend
+        tool_label = _b(bb, "browser MCP tools", "agent-browser CLI commands")
+        nav = _b(bb, "browser_navigate", "agent-browser open <url>")
+        snap = _b(bb, "browser_snapshot", "agent-browser snapshot -i")
+        console = _b(bb, "browser_console_messages", "agent-browser console")
+        net = _b(bb, "browser_network_requests", "agent-browser network")
+        screenshot = _b(bb, "browser_take_screenshot", "agent-browser screenshot")
+        actions = _b(
+            bb,
+            "(browser_click, browser_type, browser_navigate, "
+            "browser_select_option, browser_press_key, etc.)",
+            "(agent-browser click @ref, agent-browser fill @ref, "
+            "agent-browser open <url>, agent-browser select @ref, "
+            "agent-browser press <key>, etc.)",
+        )
         sections.append(
             "PHASE 6 — AGENTIC E2E TESTING:\n"
             "You ARE the test executor. Do not write .spec.ts files or run "
-            "npx playwright test. Execute every test case live through browser "
-            "MCP tools.\n\n"
+            f"npx playwright test. Execute every test case live through {tool_label}."
+            "\n\n"
             "6a TEST PLAN:\n"
             "- Analyze the app structure from Phase 1 discovery\n"
             "- List all testable user flows ordered by criticality "
             "(auth > CRUD > navigation > edge cases)\n"
             "- For each flow define: steps, expected outcome, starting URL\n\n"
             "6b EXECUTION LOOP (repeat for each test case):\n"
-            "1. SETUP — browser_navigate to starting URL, establish required state\n"
-            "2. ACTIONS — execute steps via browser tools "
-            "(browser_click, browser_type, browser_navigate, browser_select_option, "
-            "browser_press_key, etc.)\n"
+            f"1. SETUP — {nav} to starting URL, establish required state\n"
+            f"2. ACTIONS — execute steps via browser tools {actions}\n"
             "3. ASSERT — after each action:\n"
-            "   - browser_snapshot to verify accessibility tree matches expected state\n"
-            "   - browser_console_messages for JS errors\n"
-            "   - browser_network_requests for failed API calls (4xx/5xx)\n"
-            "   - browser_take_screenshot only for visual layout checks\n"
+            f"   - {snap} to verify accessibility tree matches expected state\n"
+            f"   - {console} for JS errors\n"
+            f"   - {net} for failed API calls (4xx/5xx)\n"
+            f"   - {screenshot} only for visual layout checks\n"
             "4. VERDICT — mark PASS, FAIL, or SKIP with evidence\n"
-            "5. RESET — browser_navigate to clean state before next test\n\n"
+            f"5. RESET — {nav} to clean state before next test\n\n"
             "6c EVIDENCE COLLECTION:\n"
-            "- For failures: browser_snapshot + browser_take_screenshot at point "
+            f"- For failures: {snap} + {screenshot} at point "
             "of failure\n"
-            "- For passes: final browser_snapshot as proof\n"
+            f"- For passes: final {snap} as proof\n"
             "- Collect all console errors and failed network requests across "
             "the run\n\n"
             "6d OPTIONAL PERSISTENT TESTS (SECONDARY):\n"
@@ -427,18 +481,23 @@ def build_test_instruction(
     )
 
     # General rules
+    snap_cmd = _b(
+        browser_backend,
+        "browser_snapshot",
+        "agent-browser snapshot -i",
+    )
     sections.append(
         "RULES:\n"
         "- Run the fastest tests first (unit → integration → E2E)\n"
         "- If a specific focus was provided, prioritize that area\n"
-        "- Always use browser_snapshot over screenshots for page verification\n"
+        f"- Always use {snap_cmd} over screenshots for page verification\n"
         "- Fix issues as you find them — don't just report, heal\n"
         "- If you write new test files, place them alongside existing tests\n"
         "- In Phase 6, you ARE the test executor — do not default to writing "
         ".spec.ts files\n"
         "- NEVER run npx playwright test — Phase 6 agentic testing replaces "
         "it entirely\n"
-        "- Take browser_snapshot before AND after key browser actions to track "
+        f"- Take {snap_cmd} before AND after key browser actions to track "
         "state transitions\n"
         "- Keep a running tally of PASS/FAIL/SKIP — include it in the Phase 9 "
         "report\n"
@@ -511,6 +570,7 @@ class TestRunnerPlugin(LeashdPlugin):
 
     async def initialize(self, context: PluginContext) -> None:
         self._event_bus = context.event_bus
+        self._browser_backend = context.config.browser_backend
         context.event_bus.subscribe(COMMAND_TEST, self._on_test_command)
 
     async def start(self) -> None:
@@ -539,7 +599,10 @@ class TestRunnerPlugin(LeashdPlugin):
 
         session.mode = "test"
         session.mode_instruction = build_test_instruction(
-            config, project_config=project_config, api_specs=api_specs or None
+            config,
+            project_config=project_config,
+            api_specs=api_specs or None,
+            browser_backend=self._browser_backend,
         )
 
         gatekeeper = event.data["gatekeeper"]
@@ -552,6 +615,10 @@ class TestRunnerPlugin(LeashdPlugin):
         # Auto-approve browser mutation tools
         for tool in BROWSER_MUTATION_TOOLS:
             gatekeeper.enable_tool_auto_approve(chat_id, tool)
+
+        # Auto-approve agent-browser CLI commands
+        for key in AGENT_BROWSER_AUTO_APPROVE:
+            gatekeeper.enable_tool_auto_approve(chat_id, key)
 
         # Auto-approve test-related bash commands
         for key in TEST_BASH_AUTO_APPROVE:

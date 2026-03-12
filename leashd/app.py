@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import logging.handlers
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -32,6 +33,7 @@ from leashd.plugins.builtin.browser_tools import BrowserToolsPlugin
 from leashd.plugins.builtin.merge_resolver import MergeResolverPlugin
 from leashd.plugins.builtin.task_orchestrator import TaskOrchestrator
 from leashd.plugins.builtin.test_runner import TestRunnerPlugin
+from leashd.plugins.builtin.web_agent import WebAgentPlugin
 from leashd.plugins.registry import PluginRegistry
 from leashd.storage.memory import MemorySessionStore
 from leashd.storage.sqlite import SqliteSessionStore
@@ -179,6 +181,32 @@ def build_engine(
     leashd_pkg_root = Path(__file__).resolve().parent.parent
     _load_default_mcp_servers(config, leashd_pkg_root)
 
+    # Bake headless into Playwright MCP args at startup (single source of truth)
+    pw = config.mcp_servers.get("playwright")
+    if isinstance(pw, dict):
+        pw = dict(pw)
+        args_list = list(pw.get("args", []))
+        if config.browser_headless and "--headless" not in args_list:
+            args_list.append("--headless")
+        elif not config.browser_headless and "--headless" in args_list:
+            args_list.remove("--headless")
+        pw["args"] = args_list
+        config.mcp_servers["playwright"] = pw
+
+    if config.browser_backend == "agent-browser":
+        config.mcp_servers.pop("playwright", None)
+        from leashd.skills import ensure_agent_browser_skill
+
+        ensure_agent_browser_skill()
+        if not config.browser_headless:
+            os.environ.setdefault("AGENT_BROWSER_HEADED", "1")
+        else:
+            os.environ.pop("AGENT_BROWSER_HEADED", None)
+        if config.browser_user_data_dir:
+            resolved = str(Path(config.browser_user_data_dir).expanduser())
+            os.environ.setdefault("AGENT_BROWSER_PROFILE", resolved)
+        logger.info("browser_backend_configured", backend="agent-browser")
+
     if config.workspace_config_root is None:
         config.workspace_config_root = Path.home()
 
@@ -293,6 +321,7 @@ def build_engine(
     registry.register(AuditPlugin(audit))
     registry.register(BrowserToolsPlugin())
     registry.register(TestRunnerPlugin())
+    registry.register(WebAgentPlugin())
     registry.register(MergeResolverPlugin())
     if auto_approver:
         registry.register(auto_approver)

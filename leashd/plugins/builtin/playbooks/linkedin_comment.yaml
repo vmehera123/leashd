@@ -1,0 +1,150 @@
+name: LinkedIn Commenting
+recipe: linkedin_comment
+platform: LinkedIn
+
+url_patterns:
+  search: "https://www.linkedin.com/search/results/content/?keywords={topic}&origin=GLOBAL_SEARCH_HEADER"
+  feed: "https://www.linkedin.com/feed/"
+  profile: "https://www.linkedin.com/in/me/"
+
+element_patterns:
+  comment_button: "Button labeled 'Comment' below each post, usually next to Like and Repost"
+  comment_input: "Contenteditable div or textarea that appears after clicking Comment, with placeholder 'Add a comment…'"
+  comment_input_selector: "div.ql-editor[contenteditable='true'] or div[data-placeholder='Add a comment…']"
+  submit_comment: "Button labeled 'Post' inside the comment box area (not the main post button)"
+  post_content: "The main text content of a post, inside a div with class 'feed-shared-update-v2__description'"
+  search_input: "Search input in the top navigation bar, with placeholder 'Search'"
+
+phases:
+  - name: authentication
+    description: "Verify LinkedIn login state before proceeding"
+    steps:
+      - action: navigate
+        description: "Open LinkedIn feed to check login status"
+        target: "https://www.linkedin.com/feed/"
+        expected_state: "Feed page loads with posts visible, or login page appears"
+      - action: verify
+        description: "Check if authenticated by looking for feed content"
+        target: "browser_snapshot"
+        expected_state: "Feed posts visible, profile avatar in top nav"
+        fallback: "If login page shown, use AskUserQuestion to tell user to log in manually in the headed browser"
+
+  - name: search
+    description: "Navigate directly to search results using URL pattern"
+    steps:
+      - action: navigate
+        description: "Go directly to content search results — do NOT use the search box"
+        target: "https://www.linkedin.com/search/results/content/?keywords={topic}&origin=GLOBAL_SEARCH_HEADER"
+        expected_state: "Search results page with posts related to the topic"
+        notes: "This direct URL skips the search box interaction entirely, saving significant time"
+      - action: verify
+        description: "Confirm search results loaded"
+        target: "browser_snapshot"
+        expected_state: "Multiple post cards visible in search results"
+        fallback: "If no results, try broader search terms"
+
+  - name: scan_and_select
+    description: "Scan visible posts and let user choose which one to comment on"
+    steps:
+      - action: snapshot
+        description: "Take ONE browser_snapshot to read all visible posts"
+        tool_hint: browser_snapshot
+        expected_state: "Multiple posts visible with author names and content"
+        verify: true
+        script: >-
+          (function(){
+            var posts = document.querySelectorAll('.feed-shared-update-v2');
+            var results = [];
+            posts.forEach(function(p, i){
+              var author = (p.querySelector('.update-components-actor__name span[aria-hidden]') || {}).innerText || 'Unknown';
+              var text = (p.querySelector('.feed-shared-update-v2__description .break-words') || {}).innerText || '';
+              var snippet = text.substring(0, 120);
+              var time = (p.querySelector('.update-components-actor__sub-description span[aria-hidden]') || {}).innerText || '';
+              var reactions = (p.querySelector('.social-details-social-counts__reactions-count') || {}).innerText || '0';
+              results.push({index: i, author: author.trim(), snippet: snippet.trim(), time: time.trim(), reactions: reactions.trim()});
+            });
+            return JSON.stringify(results.slice(0, 10));
+          })()
+        backends:
+          agent-browser:
+            tool_hint: "agent-browser snapshot -i"
+            script: null
+            notes: "Compact interactive refs — no JS extraction needed, use `agent-browser get text @eN` to read post content"
+      - action: present
+        description: "Present a numbered list to user via AskUserQuestion with post author, brief summary, and relevance. Ask which post to comment on (number / skip to scroll / stop)"
+        tool_hint: AskUserQuestion
+        verify: false
+      - action: select
+        description: "After user picks a post number, proceed to comment_on_post phase for that specific post. If user says 'skip', scroll down and repeat scan. If user says 'stop', end the workflow."
+        verify: false
+
+  - name: comment_on_post
+    description: "Comment on the user-selected post with minimal tool calls"
+    steps:
+      - action: scroll
+        description: "Scroll to the selected post if not fully visible"
+        tool_hint: browser_evaluate
+        verify: false
+        notes: "Use window.scrollBy() or element.scrollIntoView() — only if the post is off-screen"
+        backends:
+          agent-browser:
+            tool_hint: "agent-browser scrollintoview"
+            notes: "`agent-browser scrollintoview @eN` or `agent-browser scroll down 500`"
+      - action: click
+        description: "Click the Comment button below the selected post"
+        tool_hint: browser_click
+        verify: false
+        fallback: "If Comment button not found, scroll to reveal it"
+        script: >-
+          (function(postIndex){
+            var posts = document.querySelectorAll('.feed-shared-update-v2');
+            if(!posts[postIndex]) return 'Post not found';
+            var btn = posts[postIndex].querySelector('button[aria-label*="Comment"], button[aria-label*="comment"]');
+            if(!btn) return 'Comment button not found';
+            btn.click();
+            return 'clicked';
+          })({POST_INDEX})
+        backends:
+          agent-browser:
+            tool_hint: "agent-browser click"
+            script: null
+            notes: "`agent-browser click @eN` or `agent-browser find text \"Comment\" click`"
+      - action: draft
+        description: "Draft a thoughtful comment following the COMMENT DRAFTING GUIDE. Present draft to user via AskUserQuestion (approve / edit / skip)"
+        tool_hint: AskUserQuestion
+        verify: false
+        notes: "Include post author, brief summary, and your draft. Wait for user response before proceeding."
+      - action: type
+        description: "Type the approved comment into the comment editor"
+        tool_hint: browser_type
+        verify: false
+        notes: "Click the comment editor to focus it, then use browser_type (native keyboard input) to type the comment. NEVER use JavaScript (browser_evaluate, innerHTML, execCommand) to set text in contenteditable editors — it bypasses the editor's internal state (e.g. Quill) and leaves Submit buttons disabled."
+        backends:
+          agent-browser:
+            notes: "`agent-browser type @eN \"text\"`. NEVER use `agent-browser eval` or JavaScript to set text in contenteditable editors — it bypasses the editor's internal state and leaves Submit buttons disabled."
+      - action: wait
+        description: "Brief pause to let the editor state settle after typing"
+        tool_hint: browser_evaluate
+        verify: false
+        script: "new Promise(r => setTimeout(r, 500))"
+        backends:
+          agent-browser:
+            tool_hint: "agent-browser wait"
+            script: null
+            notes: "`agent-browser wait 500` — native wait, no JS needed"
+      - action: submit
+        description: "Click the Post button to submit the comment"
+        tool_hint: browser_click
+        expected_state: "Comment appears in the post's comment section"
+        verify: true
+        notes: "If Submit/Post button is still disabled: re-click the editor, select all (Ctrl+A / Cmd+A), delete, then re-type the comment natively via browser_type."
+        fallback: "Press Ctrl+Enter (or Cmd+Enter on Mac) as a keyboard shortcut to submit the comment"
+        backends:
+          agent-browser:
+            tool_hint: "agent-browser click"
+            notes: "`agent-browser click @eN` or `agent-browser find text \"Post\" click`"
+            fallback: "`agent-browser press Control+Enter`"
+      - action: stop
+        description: "Inform the user the comment was posted and STOP. Wait for user to say 'continue' for more posts or give next instruction. Do NOT autonomously proceed to another post."
+        tool_hint: AskUserQuestion
+        verify: false

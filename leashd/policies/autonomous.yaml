@@ -65,7 +65,7 @@ rules:
   # ── Auto-allow: agent internals ────────────────────────────────────────────
 
   - name: agent-internal-tools
-    tools: [AskUserQuestion, ExitPlanMode, Task, TaskCreate, TaskUpdate, TaskList, TaskGet, TodoWrite, EnterPlanMode]
+    tools: [AskUserQuestion, ExitPlanMode, Task, TaskCreate, TaskUpdate, TaskList, TaskGet, TodoWrite, EnterPlanMode, Skill]
     action: allow
 
   # ── Auto-allow: reads ──────────────────────────────────────────────────────
@@ -84,6 +84,14 @@ rules:
       - browser_wait_for
       - browser_generate_playwright_test
     action: allow
+
+  - name: agent-browser-readonly
+    tool: Bash
+    command_patterns:
+      - "^agent-browser\\s+(snapshot|screenshot|console|get|find|wait|diff|errors|highlight|session\\s+list)\\b"
+      - "^agent-browser\\s+tab\\s+list\\b"
+    action: allow
+    description: "Read-only agent-browser observation"
 
   - name: read-only-bash
     tool: Bash
@@ -200,6 +208,15 @@ rules:
       - browser_install
     action: require_approval
     description: "Browser interaction/mutation"
+
+  - name: agent-browser-mutations
+    tool: Bash
+    command_patterns:
+      - "^agent-browser\\s+(open|back|forward|reload|close|click|fill|type|check|select|press|keyboard|key|scroll|scrollintoview|hover|drag|upload|dialog|eval|evaluate|set|download|pdf|state|record|profiler|network|mouse-wheel)\\b"
+      - "^agent-browser\\s+tab\\s+(new|switch|close)\\b"
+      - "^agent-browser\\s+auth\\b"
+    action: require_approval
+    description: "Agent-browser interaction/mutation"
 
 settings:
   default_action: require_approval

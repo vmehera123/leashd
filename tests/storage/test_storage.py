@@ -553,6 +553,22 @@ class TestSessionManagerReset:
         assert session.is_active is True
 
     @pytest.mark.asyncio
+    async def test_session_manager_reset_clears_browser_fresh(self):
+        mgr = SessionManager()
+        session = await mgr.get_or_create("u1", "c1", "/tmp/project")
+        session.browser_fresh = True
+
+        await mgr.reset("u1", "c1")
+
+        assert session.browser_fresh is False
+
+    @pytest.mark.asyncio
+    async def test_session_browser_fresh_defaults_false(self):
+        mgr = SessionManager()
+        session = await mgr.get_or_create("u1", "c1", "/tmp/project")
+        assert session.browser_fresh is False
+
+    @pytest.mark.asyncio
     async def test_session_manager_reset_noop_when_no_session(self):
         mgr = SessionManager()
         await mgr.reset("nonexistent", "nope")  # Should not raise

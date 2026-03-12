@@ -1412,3 +1412,130 @@ class TestEvaluatorIntegration:
         assert "RETRY FIX OUTPUT" in prompt
         assert "test_foo FAILED" in prompt
         assert "Fixed import" in prompt
+
+
+class TestAutoApproveScoping:
+    async def test_auto_approve_scoped_to_chat_id(
+        self, orchestrator, task_store, mock_engine, event_bus
+    ):
+        task = _make_task(chat_id="chat-A")
+        await task_store.save(task)
+
+        await orchestrator._advance(task)
+        await asyncio.sleep(0.05)
+
+        for call in mock_engine.enable_tool_auto_approve.call_args_list:
+            assert call.args[0] == "chat-A"
+
+    async def test_auto_approve_cleared_on_terminal(
+        self, orchestrator, task_store, mock_engine, event_bus
+    ):
+        task = _make_task(chat_id="chat-A", phase="completed")
+        await task_store.save(task)
+
+        await orchestrator._handle_terminal(task)
+
+        mock_engine.disable_auto_approve.assert_called_with("chat-A")
+
+
+class TestMultiChatIsolationOrchestrator:
+    async def test_independent_tasks_per_chat(
+        self, orchestrator, task_store, event_bus
+    ):
+        task_a = _make_task(chat_id="chat-A", task="Fix bug A")
+        task_b = _make_task(chat_id="chat-B", task="Fix bug B")
+        await task_store.save(task_a)
+        await task_store.save(task_b)
+
+        orchestrator._active_tasks["chat-A"] = task_a
+        orchestrator._active_tasks["chat-B"] = task_b
+
+        assert (
+            orchestrator._active_tasks["chat-A"].run_id
+            != orchestrator._active_tasks["chat-B"].run_id
+        )
+
+
+class TestPhaseContextHandling:
+    def test_large_phase_output_stored(self):
+        task = _make_task(phase="implement")
+        large_output = "x" * 5000
+        task.phase_context["plan_output"] = large_output
+        prompt = _build_phase_prompt(task)
+        assert "AUTONOMOUS TASK" in prompt
+
+    def test_prior_phase_contexts_preserved(self):
+        task = _make_task(
+            phase="implement",
+            phase_pipeline=["pending", "plan", "implement", "test", "completed"],
+        )
+        task.phase_context["plan_output"] = "Plan: do stuff"
+        prompt = _build_phase_prompt(task)
+        assert "Plan: do stuff" in prompt
+
+
+class TestConcurrentTaskSubmission:
+    async def test_second_task_same_chat_rejected(
+        self, orchestrator, task_store, mock_connector, mock_engine, event_bus
+    ):
+        task1 = _make_task(chat_id="c1", task="Task 1")
+        await task_store.save(task1)
+        orchestrator._active_tasks["c1"] = task1
+
+        event = Event(
+            name=TASK_SUBMITTED,
+            data={
+                "user_id": "u1",
+                "chat_id": "c1",
+                "task": "Task 2",
+                "working_directory": "/tmp/test",
+            },
+        )
+        await orchestrator._on_task_submitted(event)
+        await asyncio.sleep(0.05)
+
+        rejection_found = any(
+            "already" in msg.get("text", "").lower()
+            for msg in mock_connector.sent_messages
+        )
+        assert rejection_found or "c1" in orchestrator._active_tasks
+
+
+class TestEventDataValidationOrchestrator:
+    async def test_session_completed_without_session_no_crash(
+        self, orchestrator, event_bus
+    ):
+        event = Event(name=SESSION_COMPLETED, data={})
+        await orchestrator._on_session_completed(event)
+
+    async def test_task_submitted_missing_keys(
+        self, orchestrator, mock_connector, event_bus
+    ):
+        event = Event(name=TASK_SUBMITTED, data={})
+        with pytest.raises(KeyError):
+            await orchestrator._on_task_submitted(event)
+
+    async def test_message_in_no_active_task_no_crash(self, orchestrator, event_bus):
+        event = Event(
+            name=MESSAGE_IN,
+            data={"chat_id": "no-task-chat", "text": "/cancel"},
+        )
+        await orchestrator._on_user_message(event)
+
+
+class TestLongTaskDescriptions:
+    def test_build_phase_prompt_very_long_description(self):
+        task = _make_task(task="A" * 10000, phase="plan")
+        prompt = _build_phase_prompt(task)
+        assert "AUTONOMOUS TASK" in prompt
+
+    def test_build_phase_prompt_all_prior_contexts(self):
+        task = _make_task(
+            phase="test",
+            phase_pipeline=["pending", "plan", "implement", "test", "completed"],
+        )
+        task.phase_context["plan_output"] = "Plan output here"
+        task.phase_context["implement_output"] = "Implement output here"
+        prompt = _build_phase_prompt(task)
+        assert "Plan output here" in prompt
+        assert "Implement output here" in prompt
