@@ -45,6 +45,11 @@ class TestPolicyRuleMatching:
         c = engine.classify("Bash", {"command": "ls -la"})
         assert engine.evaluate(c) == PolicyDecision.ALLOW
 
+    def test_read_only_bash_cd(self, engine):
+        c = engine.classify("Bash", {"command": "cd /some/path"})
+        assert engine.evaluate(c) == PolicyDecision.ALLOW
+        assert c.matched_rule.name == "read-only-bash"
+
     def test_read_only_bash_git_log(self, engine):
         c = engine.classify("Bash", {"command": "git log --oneline -10"})
         assert engine.evaluate(c) == PolicyDecision.ALLOW

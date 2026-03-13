@@ -1,5 +1,8 @@
 # Changelog
 
+## [0.7.2] - 2026-03-13
+- **fixed**: `cd /path && uv run pytest` and similar compound commands no longer require approval — `cd` added to read-only-bash pattern so compound classifier treats it as safe
+
 ## [0.7.1] - 2026-03-13
 - **fixed**: `/stop` clears stale SDK session ID — prevents resume failures on next message
 - **fixed**: Streaming responder resets on agent retry — error text from failed resume no longer leaks into responses

@@ -172,6 +172,11 @@ class TestCompoundCommandAllow:
         # cat is allowed, grep is allowed; pipe between them is fine
         assert engine.evaluate(c) == PolicyDecision.ALLOW
 
+    def test_cd_and_git_status(self, engine):
+        """cd segment should be read-only-bash, not unmatched."""
+        c = engine.classify_compound("Bash", {"command": "cd /project && git status"})
+        assert engine.evaluate(c) == PolicyDecision.ALLOW
+
 
 class TestCompoundCommandSimple:
     """Simple (non-compound) commands are unaffected by compound handling."""
@@ -346,6 +351,40 @@ class TestAutonomousBareGitPush:
             "Bash", {"command": "git push origin feature-branch"}
         )
         assert autonomous_engine.evaluate(c) == PolicyDecision.REQUIRE_APPROVAL
+
+
+class TestCompoundWithDevToolsOverlay:
+    """cd + dev tool commands should be allowed when dev-tools overlay is loaded."""
+
+    @pytest.fixture
+    def dev_overlay_engine(self):
+        policies_dir = (
+            Path(__file__).parent.parent.parent.parent / "leashd" / "policies"
+        )
+        return PolicyEngine(
+            [policies_dir / "default.yaml", policies_dir / "dev-tools.yaml"]
+        )
+
+    def test_cd_and_uv_run_pytest(self, dev_overlay_engine):
+        c = dev_overlay_engine.classify_compound(
+            "Bash",
+            {"command": "cd /projects/myapp && uv run pytest tests/ -v"},
+        )
+        assert dev_overlay_engine.evaluate(c) == PolicyDecision.ALLOW
+
+    def test_cd_and_npm_run_test(self, dev_overlay_engine):
+        c = dev_overlay_engine.classify_compound(
+            "Bash",
+            {"command": "cd /projects/myapp/front && npm run test"},
+        )
+        assert dev_overlay_engine.evaluate(c) == PolicyDecision.ALLOW
+
+    def test_cd_and_make_check(self, dev_overlay_engine):
+        c = dev_overlay_engine.classify_compound(
+            "Bash",
+            {"command": "cd /projects/myapp && make check"},
+        )
+        assert dev_overlay_engine.evaluate(c) == PolicyDecision.ALLOW
 
 
 class TestShellMetacharacterEvasion:

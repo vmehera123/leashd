@@ -96,7 +96,7 @@ rules:
   - name: read-only-bash
     tool: Bash
     command_patterns:
-      - "^(ls|cat|head|tail|find|grep|wc|du|df|pwd|echo|date|whoami|which|type|file|stat)\\b"
+      - "^(cd|ls|cat|head|tail|find|grep|wc|du|df|pwd|echo|date|whoami|which|type|file|stat)\\b"
       - "^git\\s+(-[a-zA-Z]\\s+\\S+\\s+|--[a-z-]+(=\\S+)?\\s+)*?(status|log|diff|show|branch|remote|tag)\\b"
     action: allow
 
