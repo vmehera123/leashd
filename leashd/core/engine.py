@@ -1543,12 +1543,7 @@ class Engine:
         old_workspace = session.workspace_name
         await self._cleanup_session(session, chat_id)
         await self.session_manager.reset(user_id, chat_id)
-        session = self.session_manager.get(user_id, chat_id)
-
         session.working_directory = str(target_path)
-        session.workspace_name = None
-        session.workspace_directories = []
-
         await self.session_manager.save(session)
         await self._switch_paths(target_path)
 
@@ -1602,8 +1597,6 @@ class Engine:
             old_name = session.workspace_name
             await self._cleanup_session(session, chat_id)
             await self.session_manager.reset(user_id, chat_id)
-            session = self.session_manager.get(user_id, chat_id)
-            await self.session_manager.save(session)
             logger.info("workspace_deactivated", chat_id=chat_id, workspace=old_name)
             return f"Exited workspace '{old_name}'. Back to single-directory mode."
 
@@ -1616,7 +1609,6 @@ class Engine:
 
         await self._cleanup_session(session, chat_id)
         await self.session_manager.reset(user_id, chat_id)
-        session = self.session_manager.get(user_id, chat_id)
 
         session.workspace_name = ws.name
         session.workspace_directories = [str(d) for d in ws.directories]
