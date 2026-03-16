@@ -1,7 +1,7 @@
 [project]
 name = "leashd"
 version = "0.8.0"
-description = "End-to-end agentic coding workflow with safety guardrails. Plan, execute, test - with human-in-the-loop approval"
+description = "Safety-first agentic coding framework with pluggable runtimes. Run Claude Code or Codex as a governed daemon — sandbox, YAML policies, human-in-the-loop approval"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
@@ -12,6 +12,8 @@ keywords = [
     "ai-agents",
     "agentic-coding",
     "claude-code",
+    "openai-codex",
+    "multi-runtime",
     "human-in-the-loop",
     "safety-guardrails",
     "audit-trail",
@@ -25,9 +27,7 @@ keywords = [
     "developer-tools",
     "automation",
     "devops",
-    "compliance",
     "policy-engine",
-    "remote-coding",
 ]
 classifiers = [
     # Development maturity
@@ -70,6 +70,7 @@ classifiers = [
 ]
 dependencies = [
     "claude-agent-sdk>=0.1.39",
+    "codex-sdk-python>=0.114.0",
     "pydantic>=2.12.5",
     "pydantic-settings>=2.13.1",
     "structlog>=25.5.0",
@@ -158,6 +159,10 @@ warn_unused_configs = true
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
 no_implicit_optional = true
+
+[[tool.mypy.overrides]]
+module = "codex_sdk.*"
+ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "tests.*"

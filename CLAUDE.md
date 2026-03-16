@@ -64,6 +64,21 @@ leashd autonomous show     # show current autonomous config
 leashd effort show          # show current effort level
 leashd effort set <level>   # set effort (low, medium, high, max)
 
+leashd runtime show         # show current agent runtime
+leashd runtime set <name>   # switch runtime (claude-code, codex)
+leashd runtime list         # list available runtimes
+
+# Browser
+leashd browser show                                 # show backend and profile
+leashd browser set-backend agent-browser             # switch browser backend
+leashd browser set-profile ~/.leashd/browser-profile # set persistent profile
+leashd browser clear-profile                          # remove profile
+leashd browser headless                               # toggle headless mode
+
+# Workflows
+leashd workflow list         # list available playbooks
+leashd workflow show <name>  # show playbook details
+
 # Skill management
 leashd skill list            # list installed skills (default)
 leashd skill add <zip> [--tag web --tag content]  # install from zip
@@ -76,7 +91,7 @@ uv run mypy leashd/
 
 ## Mandatory Post-Implementation Check
 
-**ALWAYS run `make check` after finishing any implementation work (features, bug fixes, refactors, etc.) and fix ALL issues it reports before considering the task complete.** This is non-negotiable. `make check` runs lint+format (ruff), type checking (mypy), and the full test suite (pytest). Do not skip this step. Do not leave failing checks for the user to fix.
+**ALWAYS run `make check` after finishing any implementation work (features, bug fixes, refactors, etc.) and fix ALL issues it reports before considering the task complete.** This is non-negotiable. `make check` runs lint+format (ruff), type checking (mypy), and the full test suite (pytest). Do not skip this step. Do not leave failing checks for the user to fix. Note: mypy runs with `|| true` in the Makefile (non-blocking) but you should still fix any type errors it reports.
 
 ## Architecture
 
@@ -121,8 +136,14 @@ The system follows a three-layer safety pipeline: **Sandbox → Policy → Appro
 - Built-in: `AutoApprover` replaces human approval taps with Claude CLI evaluation for `require_approval` actions; has circuit breaker and audit logging
 - Built-in: `AutoPlanReviewer` AI-driven plan review via Claude CLI when `auto_plan=True`
 - Built-in: `AutonomousLoop` post-task test-and-retry with exponential backoff, optional PR creation
+- Built-in: `WebAgentPlugin` (`web_agent.py`) handles `/web` command — autonomous web automation with content-level human approval, browser backend selection, persistent profiles
+- Built-in: `WebCheckpointPlugin` (`web_checkpoint.py`) — structured JSON checkpoint for web sessions (posts scanned, comments drafted/posted, phase tracking); Pydantic models with atomic save/load
+- Built-in: `WebInteractionLogger` (`web_interaction_logger.py`) — persists web interaction feedback (AskUserQuestion drafts + user responses) to messages.db and auto-writes web checkpoints from interaction events
+- Built-in: `WorkflowPlugin` (`workflow.py`) — YAML playbook loader and system prompt formatter for web workflows; playbooks in `.leashd/workflows/` (project) or `~/.leashd/workflows/` (global)
 
 **Interactions** (`core/interactions.py`): `InteractionCoordinator` bridges Claude's `AskUserQuestion` and `ExitPlanMode` SDK events to connectors — forwards questions/plan reviews to Telegram, collects user responses, and returns them to the agent.
+
+**MessageLogger** (`core/message_logger.py`): Shared thin wrapper around `MessageStore` for message persistence. Used by Engine, `InteractionCoordinator`, and plugins instead of direct store access.
 
 **Session management** (`core/session.py`): `SessionManager` handles session lifecycle — creation, lookup by user+chat pair, working directory switching, and delegation to the storage backend.
 
@@ -136,7 +157,14 @@ The system follows a three-layer safety pipeline: **Sandbox → Policy → Appro
 
 **Skills** (`skills.py`): Filesystem-based capability packages for the Claude Agent SDK. Each skill is a directory with a `SKILL.md` file (YAML frontmatter with `name` + `description`, markdown instructions). Installed to `~/.claude/skills/{name}/` from zip files via `leashd skill add`. SDK discovers skills via `setting_sources=["project", "user"]`; `"Skill"` is auto-injected into `allowed_tools` when skills exist. Skills tagged `"web"` or `"content"` appear in the `/web` system prompt's `AVAILABLE SKILLS` section. Config metadata stored in `~/.leashd/config.yaml` under `skills:`.
 
-**Agent abstraction** (`agents/`): `BaseAgent` protocol with `ClaudeCodeAgent` implementation wrapping `claude-agent-sdk`. Supports session resume for multi-turn continuity.
+**Agent abstraction** (`agents/`): Multi-runtime architecture with config-driven agent selection.
+- `BaseAgent` protocol in `base.py` — all runtimes implement `execute()`, `cancel()`, `capabilities`
+- `AgentCapabilities` (`capabilities.py`) — declares what each runtime supports (tool gating, session resume, streaming, MCP)
+- `PermissionAllow`/`PermissionDeny` (`types.py`) — agent-agnostic permission types used by the safety pipeline; converted to SDK-specific types at the agent boundary
+- `AgentRegistry` (`registry.py`) — `get_agent(name, config)` / `register_agent()` pattern; builtins auto-registered at import
+- `ClaudeCodeAgent` (`runtimes/claude_code.py`) — wraps `claude-agent-sdk`, stable, full feature support
+- `CodexAgent` (`runtimes/codex.py`, beta) — `codex-sdk-python` integration with dual-mode communication: `AppServerClient` for interactive approval bridge, `Thread` API for autonomous streaming. Session resume via thread IDs
+- `SubprocessAgent` (`runtimes/subprocess_agent.py`) — base class for CLI-driven agents (stdin/stdout, SIGTERM cancellation, streaming output)
 
 **Connector protocol** (`connectors/base.py`): Abstract interface for I/O transports (Telegram, Slack, etc.). Handles message delivery, typing indicators, approval requests, and file sending.
 
@@ -208,7 +236,7 @@ Session metadata lives in a separate fixed-location store at `{leashd_root}/.lea
 After completing each feature, bug fix, or notable change, add a concise entry to `CHANGELOG.md` under the **current (latest) version heading**. All new entries accumulate under that version until a new version is explicitly introduced (e.g., bumping from `0.2.1` to `0.2.2` or `0.3.0`).
 
 ```markdown
-## [0.6.0] - 2026-03-07
+## [0.8.0] - 2026-03-16
 - **category**: Short description of what changed
 ```
 

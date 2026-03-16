@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from leashd.core.config import LeashdConfig
 
 _REGISTRY: dict[str, Callable[[LeashdConfig], BaseAgent]] = {}
+_CAPABILITIES: dict[str, dict[str, str]] = {}
 
 
 def get_agent(name: str, config: LeashdConfig) -> BaseAgent:
@@ -27,12 +28,30 @@ def register_agent(name: str, factory: Callable[[LeashdConfig], BaseAgent]) -> N
     _REGISTRY[name] = factory
 
 
+def get_available_runtime_names() -> list[str]:
+    """Return sorted list of registered runtime names."""
+    return sorted(_REGISTRY)
+
+
+def list_runtimes() -> list[dict[str, str]]:
+    """Return name and stability for each registered runtime."""
+    return [
+        {
+            "name": name,
+            "stability": _CAPABILITIES.get(name, {}).get("stability", "unknown"),
+        }
+        for name in sorted(_REGISTRY)
+    ]
+
+
 def _register_builtins() -> None:
     from leashd.agents.runtimes.claude_code import ClaudeCodeAgent
     from leashd.agents.runtimes.codex import CodexAgent
 
     register_agent("claude-code", lambda config: ClaudeCodeAgent(config))
     register_agent("codex", lambda config: CodexAgent(config))
+    _CAPABILITIES["claude-code"] = {"stability": "stable"}
+    _CAPABILITIES["codex"] = {"stability": "beta"}
 
 
 _register_builtins()

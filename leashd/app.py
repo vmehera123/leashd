@@ -16,6 +16,7 @@ from leashd.core.config import LeashdConfig, ensure_leashd_dir
 from leashd.core.engine import Engine, PathConfig
 from leashd.core.events import EventBus
 from leashd.core.interactions import InteractionCoordinator
+from leashd.core.message_logger import MessageLogger
 from leashd.core.safety.approvals import ApprovalCoordinator
 from leashd.core.safety.audit import AuditLogger
 from leashd.core.safety.policy import PolicyEngine
@@ -34,6 +35,7 @@ from leashd.plugins.builtin.merge_resolver import MergeResolverPlugin
 from leashd.plugins.builtin.task_orchestrator import TaskOrchestrator
 from leashd.plugins.builtin.test_runner import TestRunnerPlugin
 from leashd.plugins.builtin.web_agent import WebAgentPlugin
+from leashd.plugins.builtin.web_interaction_logger import WebInteractionLogger
 from leashd.plugins.registry import PluginRegistry
 from leashd.storage.memory import MemorySessionStore
 from leashd.storage.sqlite import SqliteSessionStore
@@ -235,6 +237,8 @@ def build_engine(
     if config.storage_backend == "sqlite":
         message_store = SqliteSessionStore(resolved_storage)
 
+    message_logger = MessageLogger(message_store)
+
     session_manager = SessionManager(store=session_store)
     agent = get_agent(config.agent_runtime, config)
     event_bus = EventBus()
@@ -284,7 +288,11 @@ def build_engine(
     if connector:
         approval_coordinator = ApprovalCoordinator(connector, config)
         interaction_coordinator = InteractionCoordinator(
-            connector, config, event_bus, auto_plan_reviewer=auto_plan_reviewer
+            connector,
+            config,
+            event_bus,
+            auto_plan_reviewer=auto_plan_reviewer,
+            message_logger=message_logger,
         )
 
     autonomous_loop = None
@@ -322,6 +330,7 @@ def build_engine(
     registry.register(BrowserToolsPlugin())
     registry.register(TestRunnerPlugin())
     registry.register(WebAgentPlugin())
+    registry.register(WebInteractionLogger())
     registry.register(MergeResolverPlugin())
     if auto_approver:
         registry.register(auto_approver)
@@ -378,6 +387,7 @@ def build_engine(
         middleware_chain=middleware_chain,
         store=session_store,
         message_store=message_store,
+        message_logger=message_logger,
         git_handler=git_handler,
         path_config=PathConfig(
             audit_path=config.audit_log_path,

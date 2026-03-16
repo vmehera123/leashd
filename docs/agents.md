@@ -181,3 +181,14 @@ class MyAgent:
 ```
 
 The agent is passed to `build_engine()` — there is no separate registration mechanism.
+
+## Switching Runtimes
+
+```bash
+leashd runtime show          # current runtime
+leashd runtime list          # available runtimes with stability
+leashd runtime set codex     # switch to codex
+```
+
+The runtime is persisted in `~/.leashd/config.yaml`. The agent is created once at
+daemon startup, so a restart (`leashd restart`) is required after switching.

@@ -68,6 +68,7 @@ _THINK_TOOLS = frozenset(
         "TodoWrite",
         "TaskCreate",
         "TaskUpdate",
+        "Thinking",
     }
 )
 

@@ -2,7 +2,13 @@
 
 import pytest
 
-from leashd.agents.registry import _REGISTRY, get_agent, register_agent
+from leashd.agents.registry import (
+    _REGISTRY,
+    get_agent,
+    get_available_runtime_names,
+    list_runtimes,
+    register_agent,
+)
 from leashd.agents.runtimes.claude_code import ClaudeCodeAgent
 from leashd.agents.runtimes.codex import CodexAgent
 from leashd.core.config import LeashdConfig
@@ -40,3 +46,25 @@ class TestRegisterAgent:
             assert get_agent("test-agent", config) is sentinel
         finally:
             _REGISTRY.pop("test-agent", None)
+
+
+class TestGetAvailableRuntimeNames:
+    def test_returns_sorted_names(self):
+        names = get_available_runtime_names()
+        assert names == ["claude-code", "codex"]
+
+    def test_returns_list(self):
+        assert isinstance(get_available_runtime_names(), list)
+
+
+class TestListRuntimes:
+    def test_returns_metadata(self):
+        runtimes = list_runtimes()
+        for rt in runtimes:
+            assert "name" in rt
+            assert "stability" in rt
+
+    def test_stability_values(self):
+        runtimes = {rt["name"]: rt["stability"] for rt in list_runtimes()}
+        assert runtimes["claude-code"] == "stable"
+        assert runtimes["codex"] == "beta"

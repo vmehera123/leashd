@@ -1,5 +1,6 @@
 """Tests for the WebAgentPlugin."""
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -12,6 +13,7 @@ from leashd.plugins.builtin.browser_tools import (
     ALL_BROWSER_TOOLS,
 )
 from leashd.plugins.builtin.web_agent import (
+    _LINKEDIN_TASK_TEMPLATE,
     BUILTIN_RECIPES,
     LINKEDIN_COMMENTING,
     WEB_STARTED,
@@ -265,15 +267,16 @@ class TestBuildWebInstruction:
     def test_context_persistence_section_fresh(self):
         config = WebConfig()
         instruction = build_web_instruction(config, None)
+        assert "web-checkpoint.json" in instruction
         assert "web-session.md" in instruction
         assert "fresh session" in instruction
-        assert "resume from recorded progress" not in instruction
 
     def test_context_persistence_section_resume(self):
         config = WebConfig()
         instruction = build_web_instruction(config, None, resume=True)
+        assert "web-checkpoint.json" in instruction
         assert "web-session.md" in instruction
-        assert "resume from recorded progress" in instruction
+        assert "resume from recorded progress" in instruction.lower()
         assert "fresh session" not in instruction
 
 
@@ -314,6 +317,38 @@ class TestBuildWebPrompt:
         prompt = _build_web_prompt(config, None)
         assert "web-session.md" in prompt
 
+    def test_recipe_with_url(self):
+        config = WebConfig(
+            recipe_name="linkedin_comment", topic="AI", url="https://linkedin.com/feed"
+        )
+        prompt = _build_web_prompt(config, LINKEDIN_COMMENTING)
+        assert "LinkedIn" in prompt
+        assert "https://linkedin.com/feed" in prompt
+        assert "Start at:" in prompt
+
+    def test_description_with_url(self):
+        config = WebConfig(description="check the news", url="https://example.com/news")
+        prompt = _build_web_prompt(config, None)
+        assert "check the news" in prompt
+        assert "https://example.com/news" in prompt
+        assert "Navigate to:" in prompt
+
+    def test_no_session_context_no_checkpoint_json(self):
+        config = WebConfig(description="browse")
+        prompt = _build_web_prompt(config, None)
+        assert "PREVIOUS WEB SESSION" not in prompt
+        assert "browse" in prompt
+
+    def test_checkpoint_json_with_recipe_and_url(self):
+        config = WebConfig(
+            recipe_name="linkedin_comment", topic="AI", url="https://x.com"
+        )
+        prompt = _build_web_prompt(
+            config, LINKEDIN_COMMENTING, checkpoint_json='{"session_id": "x"}'
+        )
+        assert "PREVIOUS WEB SESSION STATE" in prompt
+        assert "Start at: https://x.com" in prompt
+
 
 class TestReadWebSessionContext:
     def test_missing_file(self, tmp_path):
@@ -344,6 +379,28 @@ class TestReadWebSessionContext:
         result = _read_web_session_context(str(tmp_path))
         assert result is not None
         assert len(result) == 4000
+
+    def test_oserror_on_legacy_file_returns_none(self, tmp_path):
+        (tmp_path / ".leashd").mkdir()
+        (tmp_path / ".leashd" / "web-session.md").write_text("some content")
+        with patch.object(Path, "read_text", side_effect=OSError("permission denied")):
+            result = _read_web_session_context(str(tmp_path))
+        assert result is None
+
+    def test_checkpoint_markdown_truncated_to_max_chars(self, tmp_path):
+        from leashd.plugins.builtin.web_checkpoint import WebCheckpoint, save_checkpoint
+
+        cp = WebCheckpoint(
+            session_id="trunc-1",
+            platform="LinkedIn",
+            progress_summary="x" * 5000,
+            created_at="2026-03-16T10:00:00Z",
+            updated_at="2026-03-16T10:05:00Z",
+        )
+        save_checkpoint(str(tmp_path), cp)
+        result = _read_web_session_context(str(tmp_path))
+        assert result is not None
+        assert len(result) <= 4000
 
 
 class TestWebAgentPlugin:
@@ -1283,3 +1340,233 @@ class TestRecipeTextWithRegistry:
         recipe = _build_linkedin_recipe("agent-browser")
         assert "agent-browser snapshot -i" in recipe.auth_instruction
         assert "browser_snapshot" not in recipe.auth_instruction
+
+
+class TestLinkedInPlaybookCommentBugFix:
+    def test_playbook_has_verify_draft_step(self):
+        from leashd.plugins.builtin.workflow import load_playbook
+
+        playbook = load_playbook(str(Path(__file__).parent), "linkedin_comment")
+        assert playbook is not None
+        comment_phase = next(
+            (p for p in playbook.phases if p.name == "comment_on_post"), None
+        )
+        assert comment_phase is not None
+        verify_step = next(
+            (s for s in comment_phase.steps if s.action == "verify_draft"), None
+        )
+        assert verify_step is not None
+        assert verify_step.verify is True
+        assert "approved draft" in (verify_step.notes or "")
+
+    def test_playbook_type_step_has_clear_instruction(self):
+        from leashd.plugins.builtin.workflow import load_playbook
+
+        playbook = load_playbook(str(Path(__file__).parent), "linkedin_comment")
+        assert playbook is not None
+        comment_phase = next(
+            (p for p in playbook.phases if p.name == "comment_on_post"), None
+        )
+        assert comment_phase is not None
+        type_step = next((s for s in comment_phase.steps if s.action == "type"), None)
+        assert type_step is not None
+        notes = type_step.notes or ""
+        assert "Select All" in notes or "clear" in notes.lower()
+
+    def test_playbook_verify_draft_before_submit(self):
+        from leashd.plugins.builtin.workflow import load_playbook
+
+        playbook = load_playbook(str(Path(__file__).parent), "linkedin_comment")
+        assert playbook is not None
+        comment_phase = next(
+            (p for p in playbook.phases if p.name == "comment_on_post"), None
+        )
+        assert comment_phase is not None
+        actions = [s.action for s in comment_phase.steps]
+        verify_idx = actions.index("verify_draft")
+        submit_idx = actions.index("submit")
+        assert verify_idx < submit_idx
+
+    def test_task_template_has_verification(self):
+        assert "verification snapshot" in _LINKEDIN_TASK_TEMPLATE
+        assert "clear the editor" in _LINKEDIN_TASK_TEMPLATE.lower() or (
+            "Select All" in _LINKEDIN_TASK_TEMPLATE
+        )
+
+    def test_submit_step_no_retype_recovery(self):
+        from leashd.plugins.builtin.workflow import load_playbook
+
+        playbook = load_playbook(str(Path(__file__).parent), "linkedin_comment")
+        assert playbook is not None
+        comment_phase = next(
+            (p for p in playbook.phases if p.name == "comment_on_post"), None
+        )
+        assert comment_phase is not None
+        submit_step = next(
+            (s for s in comment_phase.steps if s.action == "submit"), None
+        )
+        assert submit_step is not None
+        notes = submit_step.notes or ""
+        assert "re-type" not in notes.lower()
+        assert "verify_draft" in notes
+
+
+class TestCheckpointIntegration:
+    def test_read_session_context_prefers_checkpoint(self, tmp_path):
+        from leashd.plugins.builtin.web_checkpoint import (
+            WebCheckpoint,
+            save_checkpoint,
+        )
+
+        cp = WebCheckpoint(
+            session_id="cp-1",
+            platform="LinkedIn",
+            created_at="2026-03-16T10:00:00Z",
+            updated_at="2026-03-16T10:05:00Z",
+        )
+        save_checkpoint(str(tmp_path), cp)
+        # Also write legacy markdown
+        (tmp_path / ".leashd" / "web-session.md").write_text("legacy content")
+
+        result = _read_web_session_context(str(tmp_path))
+        assert result is not None
+        assert "LinkedIn" in result
+        assert "legacy content" not in result
+
+    def test_read_session_context_falls_back_to_markdown(self, tmp_path):
+        (tmp_path / ".leashd").mkdir()
+        (tmp_path / ".leashd" / "web-session.md").write_text("Platform: LinkedIn")
+        result = _read_web_session_context(str(tmp_path))
+        assert result == "Platform: LinkedIn"
+
+    def test_prompt_includes_checkpoint_json_when_available(self):
+        config = WebConfig(recipe_name="linkedin_comment", topic="AI")
+        checkpoint_json = '{"session_id": "x", "platform": "LinkedIn"}'
+        prompt = _build_web_prompt(
+            config, LINKEDIN_COMMENTING, checkpoint_json=checkpoint_json
+        )
+        assert "PREVIOUS WEB SESSION STATE" in prompt
+        assert "web-checkpoint.json" in prompt
+        assert checkpoint_json in prompt
+
+    def test_prompt_prefers_checkpoint_over_session_context(self):
+        config = WebConfig(recipe_name="linkedin_comment", topic="AI")
+        prompt = _build_web_prompt(
+            config,
+            LINKEDIN_COMMENTING,
+            session_context="legacy session data",
+            checkpoint_json='{"session_id": "x"}',
+        )
+        assert "PREVIOUS WEB SESSION STATE" in prompt
+        assert "legacy session data" not in prompt
+
+    def test_prompt_uses_session_context_without_checkpoint(self):
+        config = WebConfig(recipe_name="linkedin_comment", topic="AI")
+        prompt = _build_web_prompt(
+            config,
+            LINKEDIN_COMMENTING,
+            session_context="legacy session data",
+        )
+        assert "PREVIOUS WEB SESSION CONTEXT" in prompt
+        assert "legacy session data" in prompt
+
+    def test_fresh_instruction_mentions_checkpoint_json(self):
+        config = WebConfig(recipe_name="linkedin_comment")
+        instruction = build_web_instruction(config, LINKEDIN_COMMENTING)
+        assert "web-checkpoint.json" in instruction
+
+    def test_resume_instruction_mentions_checkpoint_json(self):
+        config = WebConfig(recipe_name="linkedin_comment")
+        instruction = build_web_instruction(config, LINKEDIN_COMMENTING, resume=True)
+        assert "web-checkpoint.json" in instruction
+        assert "fall back to" in instruction.lower()
+
+    @pytest.mark.asyncio
+    async def test_resume_with_checkpoint_json_takes_precedence(
+        self, initialized_plugin, event_bus, session, gatekeeper, tmp_path
+    ):
+        from leashd.plugins.builtin.web_checkpoint import (
+            WebCheckpoint,
+            save_checkpoint,
+        )
+
+        cp = WebCheckpoint(
+            session_id="cp-resume",
+            platform="LinkedIn",
+            auth_status="authenticated",
+            created_at="2026-03-16T10:00:00Z",
+            updated_at="2026-03-16T10:05:00Z",
+        )
+        save_checkpoint(str(tmp_path), cp)
+
+        event = Event(
+            name=COMMAND_WEB,
+            data={
+                "session": session,
+                "chat_id": "chat1",
+                "args": 'linkedin_comment --topic "test" --resume',
+                "gatekeeper": gatekeeper,
+                "prompt": "",
+            },
+        )
+        await event_bus.emit(event)
+
+        assert "PREVIOUS WEB SESSION STATE" in event.data["prompt"]
+        assert "cp-resume" in event.data["prompt"]
+
+    @pytest.mark.asyncio
+    async def test_resume_with_only_legacy_markdown_still_works(
+        self, initialized_plugin, event_bus, session, gatekeeper, tmp_path
+    ):
+        leashd_dir = tmp_path / ".leashd"
+        leashd_dir.mkdir()
+        (leashd_dir / "web-session.md").write_text("Platform: LinkedIn\nLegacy data")
+
+        event = Event(
+            name=COMMAND_WEB,
+            data={
+                "session": session,
+                "chat_id": "chat1",
+                "args": 'linkedin_comment --topic "test" --resume',
+                "gatekeeper": gatekeeper,
+                "prompt": "",
+            },
+        )
+        await event_bus.emit(event)
+
+        assert "PREVIOUS WEB SESSION CONTEXT" in event.data["prompt"]
+        assert "Legacy data" in event.data["prompt"]
+
+
+class TestCheckpointFieldsInPrompt:
+    def test_fresh_instruction_mentions_progress_and_pending(self):
+        config = WebConfig()
+        instruction = build_web_instruction(config, None)
+        assert "progress_summary" in instruction
+        assert "pending_work" in instruction
+
+    def test_resume_instruction_mentions_progress_and_pending(self):
+        config = WebConfig()
+        instruction = build_web_instruction(config, None, resume=True)
+        assert "progress_summary" in instruction
+        assert "pending_work" in instruction
+
+    def test_checkpoint_instruction_contains_comment_phase(self):
+        config = WebConfig()
+        instruction = build_web_instruction(config, None)
+        assert "comment_phase" in instruction
+
+    def test_checkpoint_has_specific_trigger_points(self):
+        config = WebConfig()
+        instruction = build_web_instruction(config, None)
+        assert "After authentication completes" in instruction
+        assert "After typing/filling the comment" in instruction
+        assert "After successfully submitting" in instruction
+
+    def test_task_template_has_agent_browser_fill_guidance(self):
+        assert "fill" in _LINKEDIN_TASK_TEMPLATE
+        assert "contenteditable" in _LINKEDIN_TASK_TEMPLATE
+
+    def test_task_template_has_submit_button_guidance(self):
+        assert "NOT the main feed" in _LINKEDIN_TASK_TEMPLATE
+        assert "find role button name Post click" in _LINKEDIN_TASK_TEMPLATE

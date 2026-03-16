@@ -25,6 +25,9 @@ leashd is controlled entirely from the command line. The `leashd` command manage
 | `leashd browser headless [on\|off]` | Show or toggle headless mode |
 | `leashd browser set-profile <path>` | Set browser profile directory for `/web` |
 | `leashd browser clear-profile` | Clear browser profile (use temporary) |
+| `leashd runtime show` | Show current agent runtime |
+| `leashd runtime set <name>` | Switch runtime (`claude-code`, `codex`) |
+| `leashd runtime list` | List available runtimes with stability |
 | `leashd clean` | Remove all runtime artifacts |
 | `leashd version` | Show version |
 
@@ -101,6 +104,35 @@ leashd browser clear-profile    # revert to temporary profiles
 Sets `LEASHD_BROWSER_USER_DATA_DIR` in `~/.leashd/config.yaml`. The directory is created automatically on first use. When set, `/web` sessions retain cookies, logins, and local storage across invocations. `/test` always uses a temporary profile for isolation.
 
 **Source:** `cli.py`
+
+## Runtime Selection
+
+Manage which agent runtime powers your sessions. The agent is created once at daemon startup, so a restart is required after switching.
+
+### Viewing Current Runtime
+
+```bash
+leashd runtime show
+```
+
+### Switching Runtime
+
+```bash
+leashd runtime set codex          # switch to codex
+leashd runtime set claude-code    # switch back to claude-code
+```
+
+Persists the choice in `~/.leashd/config.yaml` under the `agent_runtime` key. A daemon restart (`leashd restart`) is required for the change to take effect.
+
+### Listing Available Runtimes
+
+```bash
+leashd runtime list
+```
+
+Shows all registered runtimes with their stability level and marks the active one.
+
+**Source:** `cli.py`, `agents/registry.py`
 
 ## Daemon Lifecycle
 
@@ -229,6 +261,10 @@ Removes runtime artifacts from all approved project directories:
 - `.leashd/logs/` — rotating app log files
 - `.leashd/audit.jsonl` — audit trail
 - `.leashd/messages.db` — message history
+- `.leashd/.playwright/` — Playwright browser data
+- `.leashd/web-session.md` — web session summary
+- `.leashd/web-checkpoint.json` — web session checkpoint
+- `.leashd/*.png`, `.leashd/*.jpg` — screenshots
 
 Also cleans global artifacts from `~/.leashd/`:
 
@@ -255,3 +291,5 @@ leashd --version
 | App logs | `{project}/.leashd/logs/app.log` | Per-project structured logs |
 | Audit log | `{project}/.leashd/audit.jsonl` | Per-project tool decisions |
 | Messages DB | `{project}/.leashd/messages.db` | Per-project conversation history |
+| Web checkpoint | `{project}/.leashd/web-checkpoint.json` | Structured web session state (JSON) |
+| Web session | `{project}/.leashd/web-session.md` | Human-readable web session summary |

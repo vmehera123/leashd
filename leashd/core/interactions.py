@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from leashd.connectors.base import BaseConnector
     from leashd.core.config import LeashdConfig
     from leashd.core.events import EventBus
+    from leashd.core.message_logger import MessageLogger
     from leashd.plugins.builtin.auto_plan_reviewer import AutoPlanReviewer
 
 logger = structlog.get_logger()
@@ -44,6 +45,11 @@ class PendingInteraction(BaseModel):
     decision: PlanDecision | None = None
     feedback: str | None = None
     awaiting_feedback: bool = False
+    question: str = ""
+    header: str = ""
+    options: list[dict[str, str]] = Field(default_factory=list)
+    user_id: str | None = None
+    session_id: str | None = None
 
 
 class InteractionCoordinator:
@@ -53,6 +59,7 @@ class InteractionCoordinator:
         config: LeashdConfig,
         event_bus: EventBus | None = None,
         auto_plan_reviewer: AutoPlanReviewer | None = None,
+        message_logger: MessageLogger | None = None,
     ) -> None:
         self.connector = connector
         self.config = config
@@ -60,11 +67,15 @@ class InteractionCoordinator:
         self.pending: dict[str, PendingInteraction] = {}
         self._chat_index: dict[str, str] = {}  # chat_id → interaction_id
         self._auto_plan_reviewer = auto_plan_reviewer
+        self._message_logger = message_logger
 
     async def handle_question(
         self,
         chat_id: str,
         tool_input: dict[str, Any],
+        *,
+        user_id: str | None = None,
+        session_id: str | None = None,
     ) -> PermissionAllow | PermissionDeny:
         questions = tool_input.get("questions", [])
         if not questions:
@@ -85,6 +96,11 @@ class InteractionCoordinator:
                 interaction_id=interaction_id,
                 chat_id=chat_id,
                 kind="question",
+                question=question_text,
+                header=header,
+                options=options,
+                user_id=user_id,
+                session_id=session_id,
             )
             self.pending[interaction_id] = pending
             self._chat_index[chat_id] = interaction_id
@@ -111,12 +127,23 @@ class InteractionCoordinator:
                         interaction_id=interaction_id,
                     )
                     answers[question_text] = pending.answer
+                    await self._log_interaction(
+                        user_id=pending.user_id or chat_id,
+                        chat_id=chat_id,
+                        question=question_text,
+                        answer=pending.answer,
+                        session_id=pending.session_id,
+                    )
                     await self._emit(
                         INTERACTION_RESOLVED,
                         {
                             "interaction_id": interaction_id,
                             "chat_id": chat_id,
                             "answer": pending.answer,
+                            "question": pending.question,
+                            "header": pending.header,
+                            "options": pending.options,
+                            "kind": "question",
                         },
                     )
                 else:
@@ -395,6 +422,32 @@ class InteractionCoordinator:
         if feedback is not None:
             data["feedback"] = feedback
         await self._emit(INTERACTION_RESOLVED, data)
+
+    async def _log_interaction(
+        self,
+        *,
+        user_id: str,
+        chat_id: str,
+        question: str,
+        answer: str,
+        session_id: str | None = None,
+    ) -> None:
+        if not self._message_logger:
+            return
+        await self._message_logger.log(
+            user_id=user_id,
+            chat_id=chat_id,
+            role="assistant",
+            content=question,
+            session_id=session_id,
+        )
+        await self._message_logger.log(
+            user_id=user_id,
+            chat_id=chat_id,
+            role="user",
+            content=answer,
+            session_id=session_id,
+        )
 
     async def _emit(self, event_name: str, data: dict[str, Any]) -> None:
         if self._event_bus:

@@ -1,14 +1,11 @@
 # Changelog
 
-## [0.8.0] - 2026-03-14
-- **added**: Multi-runtime agent support — pluggable agent backends via `LEASHD_AGENT_RUNTIME` config, registry pattern with `get_agent()`/`register_agent()` API
-- **added**: Agent capabilities system — `AgentCapabilities` model declares what each runtime supports (tool gating, session resume, streaming, MCP)
-- **added**: Subprocess agent base class — `SubprocessAgent` for CLI-driven agents (stdin/stdout, SIGTERM cancellation, streaming output)
-- **added**: Codex CLI agent — `codex exec` integration with NDJSON output parsing, registered as `codex` runtime
-- **changed**: Permission types extracted to `leashd.agents.types` — `PermissionAllow`/`PermissionDeny` replace SDK-specific types in core modules, with conversion boundary in `ClaudeCodeAgent`
-- **changed**: Session field `claude_session_id` renamed to `agent_resume_token` — SQLite migration handles existing databases automatically
-- **added**: Test coverage for new agent modules — types, registry, subprocess agent, and Codex agent (37 new tests)
-- **fixed**: Noop tool-gating path now logs `tool_gating_disabled` event for audit visibility when subprocess agents bypass the safety pipeline
+## [0.8.0] - 2026-03-16
+- **added**: Multi-runtime agent architecture — pluggable backends via registry pattern, agent capabilities model, `leashd runtime show/set/list` CLI, and subprocess agent base class for CLI-driven runtimes
+- **added**: Codex runtime — full `codex-sdk-python` integration with dual-mode communication (interactive approval bridge + autonomous streaming), session resume via thread IDs, and safety pipeline parity with Claude Code
+- **added**: Structured web session checkpoints — Pydantic-backed `web-checkpoint.json` with granular phase tracking, mid-process recovery, and automatic checkpoint writes from interaction events
+- **added**: `MessageLogger` — shared message persistence layer used by Engine, InteractionCoordinator, and plugins; web interaction feedback now persisted to messages.db
+- **fixed**: LinkedIn web agent reliability — comment duplication, Quill editor typing failures, submit button targeting, and checkpoint field clobbering
 
 ## [0.7.2] - 2026-03-13
 - **fixed**: `cd /path && uv run pytest` and similar compound commands no longer require approval — `cd` added to read-only-bash pattern so compound classifier treats it as safe

@@ -33,6 +33,7 @@ from leashd.core.events import (
     EventBus,
 )
 from leashd.core.interactions import PlanReviewDecision
+from leashd.core.message_logger import MessageLogger
 from leashd.core.safety.audit import AuditLogger
 from leashd.core.safety.gatekeeper import ToolGatekeeper
 from leashd.core.safety.policy import PolicyEngine
@@ -308,6 +309,7 @@ class Engine:
         middleware_chain: MiddlewareChain | None = None,
         store: SessionStore | None = None,
         message_store: MessageStore | None = None,
+        message_logger: MessageLogger | None = None,
         git_handler: GitCommandHandler | None = None,
         path_config: PathConfig | None = None,
     ) -> None:
@@ -339,6 +341,7 @@ class Engine:
             else (store if isinstance(store, MessageStore) else None)
         )
         self._shared_store = message_store is None and isinstance(store, MessageStore)
+        self._message_logger = message_logger or MessageLogger(self._message_store)
 
         self._path_config = path_config or PathConfig()
 
@@ -639,7 +642,7 @@ class Engine:
             while self._pending_messages.get(chat_id):
                 queued = self._pending_messages.pop(chat_id)
                 for q_user_id, q_text in queued:
-                    await self._log_message(
+                    await self._message_logger.log(
                         user_id=q_user_id,
                         chat_id=chat_id,
                         role="user",
@@ -719,7 +722,7 @@ class Engine:
             )
         )
 
-        await self._log_message(
+        await self._message_logger.log(
             user_id=user_id,
             chat_id=chat_id,
             role="user",
@@ -857,7 +860,7 @@ class Engine:
             )
 
             duration_ms = round((time.monotonic() - start) * 1000)
-            await self._log_message(
+            await self._message_logger.log(
                 user_id=user_id,
                 chat_id=chat_id,
                 role="assistant",
@@ -1149,32 +1152,6 @@ class Engine:
         if len(recent) >= 3:
             return min(10 * len(recent), 60)
         return 0
-
-    async def _log_message(
-        self,
-        *,
-        user_id: str,
-        chat_id: str,
-        role: str,
-        content: str,
-        cost: float | None = None,
-        duration_ms: int | None = None,
-        session_id: str | None = None,
-    ) -> None:
-        if not self._message_store:
-            return
-        try:
-            await self._message_store.save_message(
-                user_id=user_id,
-                chat_id=chat_id,
-                role=role,
-                content=content,
-                cost=cost,
-                duration_ms=duration_ms,
-                session_id=session_id,
-            )
-        except Exception:
-            logger.exception("message_log_failed")
 
     async def _handle_with_middleware(
         self, user_id: str, text: str, chat_id: str
@@ -1850,7 +1827,10 @@ class Engine:
                     deadline.pause()
                 try:
                     return await self.interaction_coordinator.handle_question(
-                        chat_id, tool_input
+                        chat_id,
+                        tool_input,
+                        user_id=session.user_id,
+                        session_id=session.session_id,
                     )
                 finally:
                     if deadline:

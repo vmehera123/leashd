@@ -177,6 +177,15 @@ wheels = [
 ]
 
 [[package]]
+name = "codex-sdk-python"
+version = "0.114.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/3a/da/bd8b8ff3ffcf7c60e3b0b9744b999d187223cebfc2d7593f4df6075d124d/codex_sdk_python-0.114.1.tar.gz", hash = "sha256:efc0b5e03245707fecd43188e535edcd2683e48d3ce441a0b55dade72edcf9e7", size = 65846, upload_time = "2026-03-13T11:26:24.838Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/24/74/ffdb3ea2fc7fc194974ca20539d5748d623d318c7035c9747573535cbd3c/codex_sdk_python-0.114.1-py3-none-any.whl", hash = "sha256:0545521cc2289bbe54ea8d65649b22f67ea2999a6931e9e64866545f1d11a0ae", size = 63083, upload_time = "2026-03-13T11:26:25.631Z" },
+]
+
+[[package]]
 name = "colorama"
 version = "0.4.6"
 source = { registry = "https://pypi.org/simple" }
@@ -473,6 +482,7 @@ source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
     { name = "claude-agent-sdk" },
+    { name = "codex-sdk-python" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "python-dotenv" },
@@ -495,6 +505,7 @@ dev = [
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.20.0" },
     { name = "claude-agent-sdk", specifier = ">=0.1.39" },
+    { name = "codex-sdk-python", specifier = ">=0.114.0" },
     { name = "pydantic", specifier = ">=2.12.5" },
     { name = "pydantic-settings", specifier = ">=2.13.1" },
     { name = "python-dotenv", specifier = ">=1.2.1" },

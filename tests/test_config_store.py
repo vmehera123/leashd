@@ -564,6 +564,32 @@ class TestInjectEffortConfig:
         assert "LEASHD_EFFORT" not in os.environ
 
 
+class TestInjectAgentRuntimeConfig:
+    def test_bridges_yaml_to_env(self, fake_config_dir, monkeypatch):
+        save_global_config({"agent_runtime": "codex"})
+        monkeypatch.delenv("LEASHD_AGENT_RUNTIME", raising=False)
+        inject_global_config_as_env()
+        assert os.environ["LEASHD_AGENT_RUNTIME"] == "codex"
+
+    def test_skips_existing_env(self, fake_config_dir, monkeypatch):
+        save_global_config({"agent_runtime": "codex"})
+        monkeypatch.setenv("LEASHD_AGENT_RUNTIME", "claude-code")
+        inject_global_config_as_env()
+        assert os.environ["LEASHD_AGENT_RUNTIME"] == "claude-code"
+
+    def test_force_overwrites_existing(self, fake_config_dir, monkeypatch):
+        save_global_config({"agent_runtime": "codex"})
+        monkeypatch.setenv("LEASHD_AGENT_RUNTIME", "claude-code")
+        inject_global_config_as_env(force=True)
+        assert os.environ["LEASHD_AGENT_RUNTIME"] == "codex"
+
+    def test_missing_runtime_not_injected(self, fake_config_dir, monkeypatch):
+        save_global_config({"approved_directories": ["/tmp/a"]})
+        monkeypatch.delenv("LEASHD_AGENT_RUNTIME", raising=False)
+        inject_global_config_as_env()
+        assert "LEASHD_AGENT_RUNTIME" not in os.environ
+
+
 class TestGetSkillsConfig:
     def test_returns_skills_section(self, fake_config_dir):
         save_global_config(

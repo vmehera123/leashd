@@ -26,6 +26,9 @@ specs/
 # Playwright MCP artifacts (legacy default location)
 .playwright-mcp/
 
+# Codex agent runtime instructions (auto-generated)
+AGENTS.md
+
 # OS
 .DS_Store
 

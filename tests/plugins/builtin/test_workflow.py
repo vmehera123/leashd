@@ -921,3 +921,30 @@ class TestBundledLinkedInPlaybookOverrides:
         comment_section_start = result.index("Phase: comment_on_post")
         scan_section = result[scan_section_start:comment_section_start]
         assert "feed-shared-update-v2" not in scan_section
+
+    def test_type_step_agent_browser_uses_fill(self, linkedin_playbook):
+        comment_phase = next(
+            p for p in linkedin_playbook.phases if p.name == "comment_on_post"
+        )
+        type_step = next(s for s in comment_phase.steps if s.action == "type")
+        resolved = resolve_step(type_step, "agent-browser")
+        assert resolved.tool_hint == "agent-browser fill"
+        assert "fill" in (resolved.notes or "").lower()
+
+    def test_submit_step_agent_browser_has_find_role_button(self, linkedin_playbook):
+        comment_phase = next(
+            p for p in linkedin_playbook.phases if p.name == "comment_on_post"
+        )
+        submit_step = next(s for s in comment_phase.steps if s.action == "submit")
+        resolved = resolve_step(submit_step, "agent-browser")
+        assert "find role button name Post click" in (resolved.notes or "")
+
+    def test_verify_draft_agent_browser_warns_stale_refs(self, linkedin_playbook):
+        comment_phase = next(
+            p for p in linkedin_playbook.phases if p.name == "comment_on_post"
+        )
+        verify_step = next(s for s in comment_phase.steps if s.action == "verify_draft")
+        resolved = resolve_step(verify_step, "agent-browser")
+        notes = resolved.notes or ""
+        assert "fresh snapshot" in notes.lower()
+        assert "fill" in notes.lower()

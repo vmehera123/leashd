@@ -73,6 +73,12 @@ class LeashdConfig(BaseSettings):
     mcp_servers: dict[str, Any] = {}
     effort: Literal["low", "medium", "high", "max"] | None = "medium"
 
+    # Codex agent settings (only apply when agent_runtime="codex")
+    codex_model: str | None = None
+    codex_sandbox: str | None = None
+    codex_approval: str | None = None
+    codex_search: bool = False
+
     # Safety settings
     policy_files: list[Path] = []
     approval_timeout_seconds: int = 300

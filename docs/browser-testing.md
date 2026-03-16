@@ -279,6 +279,35 @@ For autonomous web tasks driven from Telegram:
 3. **Send `/web` from Telegram** — e.g., `/web check my GitHub notifications` or `/web linkedin_comment --topic "AI"`
 4. **Approve content** — the agent proposes actions and content via `AskUserQuestion`; you approve or reject from Telegram before it executes
 
+### Session Persistence
+
+The `/web` agent writes two persistence files to `.leashd/`:
+
+| File | Format | Purpose |
+|---|---|---|
+| `web-checkpoint.json` | Structured JSON | Machine-readable state: session ID, platform, auth status, current phase/step, posts scanned, comments drafted/posted, pending actions, timestamps, errors |
+| `web-session.md` | Markdown | Human-readable summary derived from the checkpoint |
+
+On `--resume`, the agent reads `web-checkpoint.json` first (preferred) and falls back to `web-session.md` if JSON is missing. On fresh sessions (no `--resume`), both files are overwritten.
+
+The checkpoint schema tracks the full commenting workflow state:
+
+```
+session_id, recipe_name, platform, browser_backend, auth_status, auth_user,
+current_url, current_phase, current_step_index, task_description, topic,
+posts_scanned[], comments_drafted[], comments_posted[], pending_actions[],
+created_at, updated_at, last_error, retry_count
+```
+
+### Playbook: Comment Verification
+
+The bundled `linkedin_comment` playbook includes a `verify_draft` step between typing and submitting a comment. This prevents duplicated or sloppy text by:
+
+1. **Clear-before-type** — the `type` step instructs the agent to Select All + Delete before typing, ensuring the editor is empty
+2. **Single-call typing** — the full comment must be typed in one `browser_type` call, not paragraph by paragraph
+3. **Verification snapshot** — `verify_draft` takes a snapshot to confirm the typed text matches the approved draft before proceeding to submit
+4. **No re-type in submit** — the `submit` step delegates text correction back to `verify_draft` instead of containing its own recovery loop
+
 ## Token Cost Considerations
 
 Browser tools vary significantly in token usage:

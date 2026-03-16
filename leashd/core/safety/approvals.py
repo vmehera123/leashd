@@ -152,7 +152,10 @@ class ApprovalCoordinator:
 
         if tool_name == "Bash" or tool_name.startswith("Bash::"):
             cmd = tool_input.get("command", "")
-            parts.append(f"Command: {cmd[:200]}")
+            if cmd:
+                parts.append(f"Command: {cmd[:200]}")
+            else:
+                parts.append("Command: (details unavailable)")
         elif tool_name in ("Write", "Edit", "Read"):
             path = tool_input.get("file_path", "")
             parts.append(f"Path: {path}")
