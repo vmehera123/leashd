@@ -18,7 +18,7 @@ pip install leashd
 Or from source:
 
 ```bash
-git clone git@github.com:nodenova/leashd.git && cd leashd
+git clone git@github.com:vmehera123/leashd.git && cd leashd
 uv sync
 cp .env.example .env  # Set your Telegram bot token + user ID
 uv run -m leashd
@@ -51,4 +51,4 @@ Hard-blocks credential access, `rm -rf`, `sudo`, force push, and pipe-to-shell b
 - Web dashboard for approval workflows
 - Enhanced test reporting
 
-Full documentation: [README.md](https://github.com/nodenova/leashd/blob/main/README.md) | [CHANGELOG.md](https://github.com/nodenova/leashd/blob/main/CHANGELOG.md)
+Full documentation: [README.md](https://github.com/vmehera123/leashd/blob/main/README.md) | [CHANGELOG.md](https://github.com/vmehera123/leashd/blob/main/CHANGELOG.md)

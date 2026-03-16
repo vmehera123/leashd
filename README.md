@@ -496,7 +496,7 @@ Telegram connector
 
 ```bash
 # Clone and install (including dev dependencies)
-git clone git@github.com:nodenova/leashd.git && cd leashd
+git clone git@github.com:vmehera123/leashd.git && cd leashd
 uv sync
 
 # Run tests
@@ -516,7 +516,7 @@ uv run ruff format .
 
 leashd is **alpha** — the API and config schema may change between versions. Core functionality (daemon, safety pipeline, Telegram integration, policy engine, task orchestrator) is stable and tested at 89%+ coverage. Not recommended for production environments where agent actions could have irreversible consequences without review.
 
-If you hit a bug or have a feature idea, [open an issue](https://github.com/nodenova/leashd/issues).
+If you hit a bug or have a feature idea, [open an issue](https://github.com/vmehera123/leashd/issues).
 
 ---
 

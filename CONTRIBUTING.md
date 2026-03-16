@@ -29,7 +29,7 @@ Thanks for taking the time to contribute. leashd is an open-source project and w
 
 ```bash
 # Clone the repo
-git clone git@github.com:nodenova/leashd.git && cd leashd
+git clone git@github.com:vmehera123/leashd.git && cd leashd
 
 # Install all dependencies including dev extras
 uv sync
@@ -131,7 +131,7 @@ A few conventions we follow:
 
 ### Reporting Bugs
 
-Open a [bug report](https://github.com/nodenova/leashd/issues/new) and include:
+Open a [bug report](https://github.com/vmehera123/leashd/issues/new) and include:
 
 - What you expected to happen
 - What actually happened (paste the log output if relevant)
@@ -140,7 +140,7 @@ Open a [bug report](https://github.com/nodenova/leashd/issues/new) and include:
 
 ### Suggesting Features
 
-Open a [feature request issue](https://github.com/nodenova/leashd/issues/new). Describe the problem you're trying to solve — not just the solution you have in mind. Context helps a lot.
+Open a [feature request issue](https://github.com/vmehera123/leashd/issues/new). Describe the problem you're trying to solve — not just the solution you have in mind. Context helps a lot.
 
 ### Submitting Code
 
@@ -168,7 +168,7 @@ Not sure where to start? These are well-scoped areas that don't require deep kno
 - **Documentation fixes** — typos, unclear phrasing, outdated command examples in `docs/` or the README.
 - **`.env.example` completeness** — check that every `LEASHD_*` variable in the config reference is documented in `.env.example` with a sensible default and a comment.
 
-Look for issues tagged [`good first issue`](https://github.com/nodenova/leashd/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) on GitHub.
+Look for issues tagged [`good first issue`](https://github.com/vmehera123/leashd/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) on GitHub.
 
 ---
 
@@ -235,4 +235,4 @@ The key insight when reading the code: the Gatekeeper sits **between** the Engin
 
 ## Questions
 
-Open a [discussion](https://github.com/nodenova/leashd/discussions) in the Q&A category. We're happy to help you find your footing in the codebase.
+Open a [discussion](https://github.com/vmehera123/leashd/discussions) in the Q&A category. We're happy to help you find your footing in the codebase.

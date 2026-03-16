@@ -1,12 +1,12 @@
 [project]
 name = "leashd"
-version = "0.7.2"
+version = "0.7.3"
 description = "End-to-end agentic coding workflow with safety guardrails. Plan, execute, test - with human-in-the-loop approval"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
-authors = [{name = "NodeNova"}]
+authors = [{name = "Vladyslav Mehera"}]
 keywords = [
     "ai-safety",
     "ai-agents",
@@ -83,11 +83,11 @@ dependencies = [
 leashd = "leashd.main:run"
 
 [project.urls]
-Homepage = "https://github.com/nodenova/leashd"
-Repository = "https://github.com/nodenova/leashd"
-Documentation = "https://github.com/nodenova/leashd/tree/main/docs"
-Changelog = "https://github.com/nodenova/leashd/blob/main/CHANGELOG.md"
-Issues = "https://github.com/nodenova/leashd/issues"
+Homepage = "https://github.com/vmehera123/leashd"
+Repository = "https://github.com/vmehera123/leashd"
+Documentation = "https://github.com/vmehera123/leashd/tree/main/docs"
+Changelog = "https://github.com/vmehera123/leashd/blob/main/CHANGELOG.md"
+Issues = "https://github.com/vmehera123/leashd/issues"
 
 [build-system]
 requires = ["hatchling"]
