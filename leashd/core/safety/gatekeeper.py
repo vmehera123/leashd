@@ -6,8 +6,8 @@ import re
 from typing import TYPE_CHECKING, Any
 
 import structlog
-from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny
 
+from leashd.agents.types import PermissionAllow, PermissionDeny
 from leashd.core.events import (
     APPROVAL_ESCALATED,
     TOOL_ALLOWED,
@@ -137,7 +137,7 @@ class ToolGatekeeper:
         *,
         task_description: str = "",
         session_mode: str | None = None,
-    ) -> PermissionResultAllow | PermissionResultDeny:
+    ) -> PermissionAllow | PermissionDeny:
         # Normalize MCP tool names (mcp__playwright__browser_navigate → browser_navigate)
         # for policy/sandbox/approval matching. Keep original for events/audit.
         normalized = normalize_tool_name(tool_name)
@@ -234,7 +234,7 @@ class ToolGatekeeper:
         *,
         message: str | None = None,
         violation_type: str | None = None,
-    ) -> PermissionResultDeny:
+    ) -> PermissionDeny:
         data: dict[str, Any] = {
             "session_id": session_id,
             "tool_name": tool_name,
@@ -243,11 +243,11 @@ class ToolGatekeeper:
         if violation_type:
             data["violation_type"] = violation_type
         await self._event_bus.emit(Event(name=TOOL_DENIED, data=data))
-        return PermissionResultDeny(message=message or reason)
+        return PermissionDeny(message=message or reason)
 
     async def _emit_and_allow(
         self, session_id: str, tool_name: str, tool_input: dict[str, Any]
-    ) -> PermissionResultAllow:
+    ) -> PermissionAllow:
         await self._event_bus.emit(
             Event(
                 name=TOOL_ALLOWED,
@@ -257,7 +257,7 @@ class ToolGatekeeper:
                 },
             )
         )
-        return PermissionResultAllow(updated_input=tool_input)
+        return PermissionAllow(updated_input=tool_input)
 
     def _matches_auto_approved(self, chat_id: str, key: str) -> bool:
         """Check if *key* is covered by any stored auto-approve entry.
@@ -291,7 +291,7 @@ class ToolGatekeeper:
         *,
         task_description: str = "",
         session_mode: str | None = None,
-    ) -> PermissionResultAllow | PermissionResultDeny:
+    ) -> PermissionAllow | PermissionDeny:
         blanket = chat_id in self._auto_approved_chats
         key = _approval_key(tool_name, tool_input)
         if blanket or self._matches_auto_approved(chat_id, key):
@@ -338,7 +338,7 @@ class ToolGatekeeper:
         key: str,
         classification: Any,
         task_description: str,
-    ) -> PermissionResultAllow | PermissionResultDeny | None:
+    ) -> PermissionAllow | PermissionDeny | None:
         """AI approval with human escalation on denial. Returns None to fall through."""
         assert self._auto_approver is not None  # noqa: S101
 
@@ -368,7 +368,7 @@ class ToolGatekeeper:
                     },
                 )
             )
-            return PermissionResultAllow(updated_input=tool_input)
+            return PermissionAllow(updated_input=tool_input)
 
         ai_reason = result.reason or "AI approver denied the operation"
         logger.info(
@@ -420,7 +420,7 @@ class ToolGatekeeper:
                     },
                 )
             )
-            return PermissionResultAllow(updated_input=tool_input)
+            return PermissionAllow(updated_input=tool_input)
 
         deny_message = human_result.reason or "User denied the operation"
         return await self._emit_and_deny(
@@ -435,7 +435,7 @@ class ToolGatekeeper:
         tool_input: dict[str, Any],
         key: str,
         classification: Any,
-    ) -> PermissionResultAllow | PermissionResultDeny:
+    ) -> PermissionAllow | PermissionDeny:
         """Direct human approval (no AI involved)."""
         if not self._approval_coordinator:
             return await self._emit_and_deny(
@@ -471,7 +471,7 @@ class ToolGatekeeper:
                     },
                 )
             )
-            return PermissionResultAllow(updated_input=tool_input)
+            return PermissionAllow(updated_input=tool_input)
 
         deny_message = result.reason or "User denied the operation"
         return await self._emit_and_deny(

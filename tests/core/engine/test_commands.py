@@ -271,7 +271,7 @@ class TestHandleCommand:
         await eng.handle_message("user1", "hello", "chat1")
         session = eng.session_manager.get("user1", "chat1")
         original_id = session.session_id
-        assert session.claude_session_id == "test-session-123"
+        assert session.agent_resume_token == "test-session-123"
 
         # Enable auto-approve so we can verify it gets disabled
         eng._gatekeeper.enable_auto_approve("chat1")
@@ -284,7 +284,7 @@ class TestHandleCommand:
         assert "fresh" in result.lower()
         assert session.is_active is True
         assert session.session_id != original_id
-        assert session.claude_session_id is None
+        assert session.agent_resume_token is None
         assert session.message_count == 0
         assert session.total_cost == 0.0
         assert "chat1" not in eng._gatekeeper._auto_approved_chats
@@ -640,14 +640,14 @@ class TestDirCommand:
         # Create a session first
         await eng.handle_message("user1", "hello", "chat1")
         session = eng.session_manager.get("user1", "chat1")
-        session.claude_session_id = "old-session"
+        session.agent_resume_token = "old-session"
 
         result = await eng.handle_command("user1", "dir", "api", "chat1")
 
         assert "Switched to api" in result
         session = eng.session_manager.get("user1", "chat1")
         assert session.working_directory == str(d2.resolve())
-        assert session.claude_session_id is None
+        assert session.agent_resume_token is None
 
     @pytest.mark.asyncio
     async def test_dir_unknown_name_returns_error(
@@ -785,7 +785,7 @@ class TestDirSessionCleanup:
 
         session = eng.session_manager.get("user1", "chat1")
         assert session.session_id != original_id
-        assert session.claude_session_id is None
+        assert session.agent_resume_token is None
         assert session.message_count == 0
         assert session.total_cost == 0.0
         assert session.working_directory == str(d2.resolve())
@@ -956,7 +956,7 @@ class TestWorkspaceSessionCleanup:
 
         session = eng.session_manager.get("user1", "chat1")
         assert session.session_id != original_id
-        assert session.claude_session_id is None
+        assert session.agent_resume_token is None
         assert session.message_count == 0
         assert session.workspace_name == "myws"
 
@@ -1893,7 +1893,7 @@ class TestEditWithArgs:
     async def test_edit_resumed_session_with_auto_plan(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
-        """auto_plan=True + claude_session_id set → mode stays edit."""
+        """auto_plan=True + agent_resume_token set → mode stays edit."""
         config = LeashdConfig(
             approved_directories=[tmp_path],
             auto_plan=True,
@@ -1912,7 +1912,7 @@ class TestEditWithArgs:
 
         await eng.handle_command("user1", "edit", "", "chat1")
         session = sm.get("user1", "chat1")
-        session.claude_session_id = "existing-abc"
+        session.agent_resume_token = "existing-abc"
 
         await eng.handle_message("user1", "continue work", "chat1")
 
@@ -2084,7 +2084,7 @@ class TestEditWithArgs:
         assert "Write" not in chat2_tools
 
     @pytest.mark.asyncio
-    async def test_edit_preserves_claude_session_id(
+    async def test_edit_preserves_agent_resume_token(
         self, config, audit_logger, policy_engine, mock_connector
     ):
         agent = FakeAgent()
@@ -2101,12 +2101,12 @@ class TestEditWithArgs:
         session = await sm.get_or_create(
             "user1", "chat1", str(config.approved_directories[0])
         )
-        session.claude_session_id = "prev-session-xyz"
+        session.agent_resume_token = "prev-session-xyz"
 
         await eng.handle_command("user1", "edit", "", "chat1")
 
         session = sm.get("user1", "chat1")
-        assert session.claude_session_id == "prev-session-xyz"
+        assert session.agent_resume_token == "prev-session-xyz"
         assert session.mode == "edit"
         assert session.plan_origin == "edit"
 
@@ -2637,7 +2637,7 @@ class TestStopCommand:
         assert pending.event.is_set()
 
     @pytest.mark.asyncio
-    async def test_stop_clears_claude_session_id(
+    async def test_stop_clears_agent_resume_token(
         self, config, audit_logger, policy_engine, mock_connector
     ):
         agent = FakeAgent()
@@ -2659,7 +2659,7 @@ class TestStopCommand:
 
         session_after = eng.session_manager.get("user1", "chat1")
         assert session_after.session_id == original_id
-        assert session_after.claude_session_id is None
+        assert session_after.agent_resume_token is None
         assert session_after.message_count == original_count
 
 

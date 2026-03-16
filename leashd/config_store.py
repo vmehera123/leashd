@@ -139,6 +139,10 @@ def inject_global_config_as_env(*, force: bool = False) -> None:
     if effort and (force or "LEASHD_EFFORT" not in os.environ):
         os.environ["LEASHD_EFFORT"] = str(effort)
 
+    agent_runtime = data.get("agent_runtime")
+    if agent_runtime and (force or "LEASHD_AGENT_RUNTIME" not in os.environ):
+        os.environ["LEASHD_AGENT_RUNTIME"] = str(agent_runtime)
+
     _inject_autonomous_config(data, force=force)
     _inject_browser_config(data, force=force)
 

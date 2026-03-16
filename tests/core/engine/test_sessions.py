@@ -176,15 +176,15 @@ class TestEngineWithMiddleware:
 
 
 class ResumeFailAgent(BaseAgent):
-    """Simulates _run_with_resume clearing a stale claude_session_id then failing.
+    """Simulates _run_with_resume clearing a stale agent_resume_token then failing.
 
-    If session.claude_session_id is set → clears to None, raises AgentError.
-    If session.claude_session_id is None → succeeds with fresh response.
+    If session.agent_resume_token is set → clears to None, raises AgentError.
+    If session.agent_resume_token is None → succeeds with fresh response.
     """
 
     async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
-        if session.claude_session_id:
-            session.claude_session_id = None
+        if session.agent_resume_token:
+            session.agent_resume_token = None
             raise AgentError("resume failed — stale session")
         return AgentResponse(
             content=f"Fresh: {prompt}",
@@ -200,7 +200,7 @@ class ResumeFailAgent(BaseAgent):
 
 
 class ConnectFailAgent(BaseAgent):
-    """Simulates connect() failure: raises AgentError WITHOUT clearing claude_session_id.
+    """Simulates connect() failure: raises AgentError WITHOUT clearing agent_resume_token.
 
     This exercises the defense-in-depth path where the agent's retry logic
     is bypassed (e.g., connect() fails before the inner try/except).
@@ -220,14 +220,14 @@ class ConnectFailAgent(BaseAgent):
 class MidStreamIdAcquireAgent(BaseAgent):
     """Simulates agent acquiring a new session ID mid-stream then crashing.
 
-    Sets session.claude_session_id to new_id, then raises AgentError.
+    Sets session.agent_resume_token to new_id, then raises AgentError.
     """
 
     def __init__(self, new_id: str):
         self._new_id = new_id
 
     async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
-        session.claude_session_id = self._new_id
+        session.agent_resume_token = self._new_id
         raise AgentError("stream failed after acquiring new session ID")
 
     async def cancel(self, session_id):
@@ -255,7 +255,7 @@ class NullSessionIdAgent(BaseAgent):
 
 
 class CountingFailAgent(BaseAgent):
-    """First N calls fail (setting claude_session_id=None), then succeeds."""
+    """First N calls fail (setting agent_resume_token=None), then succeeds."""
 
     def __init__(self, fail_count: int, success_id: str):
         self._fail_count = fail_count
@@ -265,7 +265,7 @@ class CountingFailAgent(BaseAgent):
     async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
         self._call_count += 1
         if self._call_count <= self._fail_count:
-            session.claude_session_id = None
+            session.agent_resume_token = None
             raise AgentError(f"failure #{self._call_count}")
         return AgentResponse(
             content=f"Recovered: {prompt}",
@@ -327,7 +327,7 @@ class CostAccumulatorAgent(BaseAgent):
 class HangingAgent(BaseAgent):
     """Simulates an agent that hangs (for timeout tests).
 
-    Optionally updates session.claude_session_id during execution to simulate
+    Optionally updates session.agent_resume_token during execution to simulate
     receiving a SystemMessage with a new session ID.
     """
 
@@ -336,7 +336,7 @@ class HangingAgent(BaseAgent):
 
     async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
         if self._new_session_id:
-            session.claude_session_id = self._new_session_id
+            session.agent_resume_token = self._new_session_id
         await asyncio.sleep(60)
         return AgentResponse(content="unreachable", session_id="x", cost=0.0)
 
@@ -348,19 +348,19 @@ class HangingAgent(BaseAgent):
 
 
 class TestErrorPathSessionPersistence:
-    """Regression tests: stale claude_session_id cleared on both error and timeout paths."""
+    """Regression tests: stale agent_resume_token cleared on both error and timeout paths."""
 
     @pytest.mark.asyncio
-    async def test_save_captures_cleared_claude_session_id(
+    async def test_save_captures_cleared_agent_resume_token(
         self, audit_logger, policy_engine, tmp_path
     ):
-        """AgentError path: verify the saved session has claude_session_id=None."""
+        """AgentError path: verify the saved session has agent_resume_token=None."""
         save_snapshots: list[dict] = []
 
         async def capture_save(session):
             save_snapshots.append(
                 {
-                    "claude_session_id": session.claude_session_id,
+                    "agent_resume_token": session.agent_resume_token,
                     "session_id": session.session_id,
                 }
             )
@@ -385,13 +385,13 @@ class TestErrorPathSessionPersistence:
 
         # Pre-load stale session into memory
         session = await sm.get_or_create("user1", "chat1", str(tmp_path))
-        session.claude_session_id = "stale-id-123"
+        session.agent_resume_token = "stale-id-123"
 
         result = await eng.handle_message("user1", "hello", "chat1")
         assert "Error:" in result
 
-        # The save in the error handler must have captured claude_session_id=None
-        error_saves = [s for s in save_snapshots if s["claude_session_id"] is None]
+        # The save in the error handler must have captured agent_resume_token=None
+        error_saves = [s for s in save_snapshots if s["agent_resume_token"] is None]
         assert len(error_saves) >= 1
 
     @pytest.mark.asyncio
@@ -415,7 +415,7 @@ class TestErrorPathSessionPersistence:
                     user_id="user1",
                     chat_id="chat1",
                     working_directory=str(tmp_path),
-                    claude_session_id="stale-id-456",
+                    agent_resume_token="stale-id-456",
                 )
             )
 
@@ -435,7 +435,7 @@ class TestErrorPathSessionPersistence:
 
             loaded = await store.load("user1", "chat1")
             assert loaded is not None
-            assert loaded.claude_session_id is None
+            assert loaded.agent_resume_token is None
         finally:
             await store.teardown()
 
@@ -461,7 +461,7 @@ class TestErrorPathSessionPersistence:
                 user_id="user1",
                 chat_id="chat1",
                 working_directory=str(tmp_path),
-                claude_session_id="stale-id-789",
+                agent_resume_token="stale-id-789",
             )
         )
         sm1 = SessionManager(store=store1)
@@ -495,14 +495,14 @@ class TestErrorPathSessionPersistence:
         assert "Fresh:" in result2
 
         session2 = sm2.get("user1", "chat1")
-        assert session2.claude_session_id == "new-fresh-id"
+        assert session2.agent_resume_token == "new-fresh-id"
         await store2.teardown()
 
     @pytest.mark.asyncio
     async def test_timeout_with_stale_id_clears_it(
         self, audit_logger, policy_engine, tmp_path
     ):
-        """Timeout path: stale claude_session_id is cleared, not re-persisted."""
+        """Timeout path: stale agent_resume_token is cleared, not re-persisted."""
         config = LeashdConfig(
             approved_directories=[tmp_path],
             audit_log_path=tmp_path / "audit.jsonl",
@@ -523,12 +523,12 @@ class TestErrorPathSessionPersistence:
         )
 
         session = await sm.get_or_create("user1", "chat1", str(tmp_path))
-        session.claude_session_id = "stale-timeout-id"
+        session.agent_resume_token = "stale-timeout-id"
 
         result = await eng.handle_message("user1", "hello", "chat1")
         assert "timed out" in result
 
-        assert session.claude_session_id is None
+        assert session.agent_resume_token is None
 
     @pytest.mark.asyncio
     async def test_timeout_with_new_session_id_preserves_it(
@@ -543,7 +543,7 @@ class TestErrorPathSessionPersistence:
         save_snapshots: list[dict] = []
 
         async def capture_save(session):
-            save_snapshots.append({"claude_session_id": session.claude_session_id})
+            save_snapshots.append({"agent_resume_token": session.agent_resume_token})
 
         store = AsyncMock()
         store.load = AsyncMock(return_value=None)
@@ -563,7 +563,7 @@ class TestErrorPathSessionPersistence:
         assert "timed out" in result
 
         session = sm.get("user1", "chat1")
-        assert session.claude_session_id == "new-during-exec"
+        assert session.agent_resume_token == "new-during-exec"
 
     @pytest.mark.asyncio
     async def test_second_message_after_error_works_fresh(
@@ -586,7 +586,7 @@ class TestErrorPathSessionPersistence:
                     user_id="user1",
                     chat_id="chat1",
                     working_directory=str(tmp_path),
-                    claude_session_id="stale-e2e-id",
+                    agent_resume_token="stale-e2e-id",
                 )
             )
 
@@ -609,10 +609,10 @@ class TestErrorPathSessionPersistence:
             result2 = await eng.handle_message("user1", "world", "chat1")
             assert "Fresh:" in result2
 
-            # Final SQLite state has new claude_session_id
+            # Final SQLite state has new agent_resume_token
             loaded = await store.load("user1", "chat1")
             assert loaded is not None
-            assert loaded.claude_session_id == "new-fresh-id"
+            assert loaded.agent_resume_token == "new-fresh-id"
         finally:
             await store.teardown()
 
@@ -630,7 +630,7 @@ class TestErrorPathSessionPersistence:
         async def capture_save(session):
             save_snapshots.append(
                 {
-                    "claude_session_id": session.claude_session_id,
+                    "agent_resume_token": session.agent_resume_token,
                     "session_id": session.session_id,
                 }
             )
@@ -654,14 +654,14 @@ class TestErrorPathSessionPersistence:
         )
 
         session = await sm.get_or_create("user1", "chat1", str(tmp_path))
-        session.claude_session_id = "stale-connect-id"
+        session.agent_resume_token = "stale-connect-id"
 
         result = await eng.handle_message("user1", "hello", "chat1")
         assert "Error:" in result
 
         # Engine error handler must have cleared the stale ID before saving
-        assert session.claude_session_id is None
-        error_saves = [s for s in save_snapshots if s["claude_session_id"] is None]
+        assert session.agent_resume_token is None
+        error_saves = [s for s in save_snapshots if s["agent_resume_token"] is None]
         assert len(error_saves) >= 1
 
 
@@ -759,7 +759,7 @@ class TestSessionPersistenceOnDirSwitch:
         assert store.save.await_count >= 1
         saved_session = store.save.call_args_list[-1][0][0]
         assert saved_session.working_directory == str(d2.resolve())
-        assert saved_session.claude_session_id is None
+        assert saved_session.agent_resume_token is None
 
     @pytest.mark.asyncio
     async def test_exit_plan_mode_persists_to_store(
@@ -784,7 +784,7 @@ class TestSessionPersistenceOnDirSwitch:
             save_snapshots.append(
                 {
                     "mode": session.mode,
-                    "claude_session_id": session.claude_session_id,
+                    "agent_resume_token": session.agent_resume_token,
                     "working_directory": session.working_directory,
                 }
             )
@@ -831,7 +831,7 @@ class TestSessionPersistenceOnDirSwitch:
         # save() should have been called multiple times
         assert len(save_snapshots) >= 2
         # One of the saves should be from _exit_plan_mode with cleared session
-        exit_saves = [s for s in save_snapshots if s["claude_session_id"] is None]
+        exit_saves = [s for s in save_snapshots if s["agent_resume_token"] is None]
         assert len(exit_saves) >= 1
         assert exit_saves[0]["mode"] == "edit"
 
@@ -871,7 +871,7 @@ class TestSessionPersistenceOnDirSwitch:
             loaded = await store.load("user1", "chat1")
             assert loaded is not None
             assert loaded.working_directory == str(d2.resolve())
-            assert loaded.claude_session_id is None
+            assert loaded.agent_resume_token is None
         finally:
             await store.teardown()
 
@@ -1052,7 +1052,7 @@ class TestRealisticSessionScenarios:
         save_snapshots: list[dict] = []
 
         async def capture_save(session):
-            save_snapshots.append({"claude_session_id": session.claude_session_id})
+            save_snapshots.append({"agent_resume_token": session.agent_resume_token})
 
         store = AsyncMock()
         store.load = AsyncMock(return_value=None)
@@ -1076,9 +1076,9 @@ class TestRealisticSessionScenarios:
         assert "Error:" in result
 
         session = sm.get("user1", "chat1")
-        assert session.claude_session_id == "new-acquired-id"
+        assert session.agent_resume_token == "new-acquired-id"
         saved = [
-            s for s in save_snapshots if s["claude_session_id"] == "new-acquired-id"
+            s for s in save_snapshots if s["agent_resume_token"] == "new-acquired-id"
         ]
         assert len(saved) >= 1
 
@@ -1106,11 +1106,11 @@ class TestRealisticSessionScenarios:
         )
 
         session = await sm.get_or_create("user1", "chat1", str(tmp_path))
-        session.claude_session_id = "old-stale-id"
+        session.agent_resume_token = "old-stale-id"
 
         result = await eng.handle_message("user1", "hello", "chat1")
         assert "Error:" in result
-        assert session.claude_session_id == "new-acquired-id"
+        assert session.agent_resume_token == "new-acquired-id"
 
     @pytest.mark.asyncio
     async def test_null_response_session_id_does_not_overwrite_existing(
@@ -1136,11 +1136,11 @@ class TestRealisticSessionScenarios:
         )
 
         session = await sm.get_or_create("user1", "chat1", str(tmp_path))
-        session.claude_session_id = "existing-good-id"
+        session.agent_resume_token = "existing-good-id"
 
         await eng.handle_message("user1", "hello", "chat1")
 
-        assert session.claude_session_id == "existing-good-id"
+        assert session.agent_resume_token == "existing-good-id"
         assert session.message_count == 1
         assert session.total_cost == pytest.approx(0.005)
 
@@ -1170,7 +1170,7 @@ class TestRealisticSessionScenarios:
         await eng.handle_message("user1", "hello", "chat1")
 
         session = sm.get("user1", "chat1")
-        assert session.claude_session_id is None
+        assert session.agent_resume_token is None
         assert session.message_count == 1
 
     @pytest.mark.asyncio
@@ -1221,7 +1221,7 @@ class TestRealisticSessionScenarios:
         # session_id/cost would overwrite the freshly reset session state.
         assert session.message_count == 0
         assert session.total_cost == 0.0
-        assert session.claude_session_id is None
+        assert session.agent_resume_token is None
 
     @pytest.mark.asyncio
     async def test_two_consecutive_errors_then_recovery_sqlite(
@@ -1243,7 +1243,7 @@ class TestRealisticSessionScenarios:
                     user_id="user1",
                     chat_id="chat1",
                     working_directory=str(tmp_path),
-                    claude_session_id="stale-1",
+                    agent_resume_token="stale-1",
                 )
             )
 
@@ -1268,12 +1268,12 @@ class TestRealisticSessionScenarios:
             assert "Recovered:" in r3
 
             session = sm.get("user1", "chat1")
-            assert session.claude_session_id == "recovered-id"
+            assert session.agent_resume_token == "recovered-id"
             assert session.message_count == 1
 
             loaded = await store.load("user1", "chat1")
             assert loaded is not None
-            assert loaded.claude_session_id == "recovered-id"
+            assert loaded.agent_resume_token == "recovered-id"
             assert loaded.message_count == 1
         finally:
             await store.teardown()
@@ -1302,11 +1302,11 @@ class TestRealisticSessionScenarios:
         )
 
         session = await sm.get_or_create("user1", "chat1", str(tmp_path))
-        session.claude_session_id = "stale-id"
+        session.agent_resume_token = "stale-id"
 
         result = await eng.handle_message("user1", "hello", "chat1")
         assert "error" in result.lower()
-        assert session.claude_session_id is None
+        assert session.agent_resume_token is None
 
     @pytest.mark.asyncio
     async def test_update_from_result_save_failure_leaves_memory_ahead_of_storage(
@@ -1337,7 +1337,7 @@ class TestRealisticSessionScenarios:
         session = sm.get("user1", "chat1")
         assert session.message_count == 1
         assert session.total_cost == pytest.approx(0.01)
-        assert session.claude_session_id == "test-session-123"
+        assert session.agent_resume_token == "test-session-123"
 
     @pytest.mark.asyncio
     async def test_cost_accumulation_across_four_messages(
@@ -1364,7 +1364,7 @@ class TestRealisticSessionScenarios:
         session = sm.get("user1", "chat1")
         assert session.message_count == 4
         assert session.total_cost == pytest.approx(0.10)
-        assert session.claude_session_id == "session-4"
+        assert session.agent_resume_token == "session-4"
 
     @pytest.mark.asyncio
     async def test_error_after_success_preserves_previous_cost_and_count(
@@ -1376,7 +1376,7 @@ class TestRealisticSessionScenarios:
         async def capture_save(session):
             save_snapshots.append(
                 {
-                    "claude_session_id": session.claude_session_id,
+                    "agent_resume_token": session.agent_resume_token,
                     "message_count": session.message_count,
                     "total_cost": session.total_cost,
                 }
@@ -1409,7 +1409,7 @@ class TestRealisticSessionScenarios:
         session = sm.get("user1", "chat1")
         assert session.message_count == 1
         assert session.total_cost == pytest.approx(0.01)
-        assert session.claude_session_id is None
+        assert session.agent_resume_token is None
 
 
 class TestWorkspacePersistence:

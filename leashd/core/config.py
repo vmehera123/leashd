@@ -62,6 +62,7 @@ class LeashdConfig(BaseSettings):
     approved_directories: list[Path]
 
     # Agent settings
+    agent_runtime: str = "claude-code"
     max_turns: int = 150
     web_max_turns: int = 300
     test_max_turns: int = 200
@@ -71,6 +72,12 @@ class LeashdConfig(BaseSettings):
     disallowed_tools: list[str] = []
     mcp_servers: dict[str, Any] = {}
     effort: Literal["low", "medium", "high", "max"] | None = "medium"
+
+    # Codex agent settings (only apply when agent_runtime="codex")
+    codex_model: str | None = None
+    codex_sandbox: str | None = None
+    codex_approval: str | None = None
+    codex_search: bool = False
 
     # Safety settings
     policy_files: list[Path] = []

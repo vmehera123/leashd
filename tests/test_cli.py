@@ -686,6 +686,7 @@ class TestClean:
         playwright_dir.mkdir(parents=True)
         (playwright_dir / "screenshot.png").write_bytes(b"\x89PNG")
         (leashd_dir / "web-session.md").write_text("# Web Session")
+        (leashd_dir / "web-checkpoint.json").write_text("{}")
 
         fake_home = tmp_path / "fake_home"
         fake_home.mkdir()
@@ -696,9 +697,10 @@ class TestClean:
 
         assert not playwright_dir.exists()
         assert not (leashd_dir / "web-session.md").exists()
+        assert not (leashd_dir / "web-checkpoint.json").exists()
 
         captured = capsys.readouterr()
-        assert "Cleaned 2 artifact(s)" in captured.out
+        assert "Cleaned 3 artifact(s)" in captured.out
 
     def test_clean_removes_screenshots(
         self, fake_config_dir, tmp_path, capsys, monkeypatch
@@ -1471,6 +1473,62 @@ class TestEffort:
         with pytest.raises(SystemExit) as exc_info:
             _handle_effort_set("turbo")
         assert exc_info.value.code == 1
+
+
+class TestRuntime:
+    def test_runtime_show_default(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_runtime_show
+
+        _handle_runtime_show()
+        captured = capsys.readouterr()
+        assert "claude-code" in captured.out
+
+    def test_runtime_show_configured(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_runtime_show
+
+        save_global_config({"agent_runtime": "codex"})
+        _handle_runtime_show()
+        captured = capsys.readouterr()
+        assert "codex" in captured.out
+
+    def test_runtime_set_valid(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_runtime_set
+
+        with patch("leashd.cli._notify_daemon_reload"):
+            _handle_runtime_set("codex")
+        captured = capsys.readouterr()
+        assert "\u2713" in captured.out
+        assert "codex" in captured.out
+        from leashd.config_store import load_global_config
+
+        data = load_global_config()
+        assert data["agent_runtime"] == "codex"
+
+    def test_runtime_set_invalid(self, fake_config_dir):
+        from leashd.cli import _handle_runtime_set
+
+        with pytest.raises(SystemExit) as exc_info:
+            _handle_runtime_set("nope")
+        assert exc_info.value.code == 1
+
+    def test_runtime_list(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_runtime_list
+
+        _handle_runtime_list()
+        captured = capsys.readouterr()
+        assert "claude-code" in captured.out
+        assert "codex" in captured.out
+        assert "(active)" in captured.out
+
+    def test_runtime_bare_defaults_to_show(self, fake_config_dir, capsys):
+        import argparse
+
+        from leashd.cli import _handle_runtime
+
+        args = argparse.Namespace(runtime_command=None)
+        _handle_runtime(args)
+        captured = capsys.readouterr()
+        assert "claude-code" in captured.out
 
 
 class TestSkillCli:

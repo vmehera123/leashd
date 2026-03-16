@@ -577,15 +577,15 @@ class TestTurnLimitNotification:
         assert len(turn_msgs) == 1
 
         session = sm.get("user1", "chat1")
-        assert session.claude_session_id == "sid-1"
+        assert session.agent_resume_token == "sid-1"
 
         await eng.handle_command("user1", "clear", "", "chat1")
         session = sm.get("user1", "chat1")
-        assert session.claude_session_id is None
+        assert session.agent_resume_token is None
 
         await eng.handle_message("user1", "continue", "chat1")
         session = sm.get("user1", "chat1")
-        assert session.claude_session_id == "sid-2"
+        assert session.agent_resume_token == "sid-2"
 
 
 class TestTurnLimitWarningContent:

@@ -21,7 +21,7 @@ class Session(BaseModel):
     user_id: str
     chat_id: str
     working_directory: str
-    claude_session_id: str | None = None
+    agent_resume_token: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     last_used: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     total_cost: float = 0.0
@@ -106,14 +106,14 @@ class SessionManager:
     async def update_from_result(
         self,
         session: Session,
-        claude_session_id: str | None = None,
+        agent_resume_token: str | None = None,
         cost: float = 0.0,
     ) -> None:
         session.last_used = datetime.now(timezone.utc)
         session.message_count += 1
         session.total_cost += cost
-        if claude_session_id:
-            session.claude_session_id = claude_session_id
+        if agent_resume_token:
+            session.agent_resume_token = agent_resume_token
 
         if self._store:
             await self._store.save(session)
@@ -123,7 +123,7 @@ class SessionManager:
             session_id=session.session_id,
             message_count=session.message_count,
             total_cost=session.total_cost,
-            has_claude_session=session.claude_session_id is not None,
+            has_resume_token=session.agent_resume_token is not None,
         )
 
     async def reset(self, user_id: str, chat_id: str) -> None:
@@ -133,7 +133,7 @@ class SessionManager:
         if not session:
             return
         session.session_id = str(uuid.uuid4())
-        session.claude_session_id = None
+        session.agent_resume_token = None
         session.message_count = 0
         session.total_cost = 0.0
         session.mode = "default"

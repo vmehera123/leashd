@@ -16,6 +16,10 @@ from leashd.plugins.builtin.browser_tools import (
     ALL_BROWSER_TOOLS,
     BROWSER_TOOL_SETS,
 )
+from leashd.plugins.builtin.web_checkpoint import (
+    checkpoint_to_markdown,
+    load_checkpoint,
+)
 from leashd.plugins.builtin.workflow import (
     Playbook,
     format_playbook_instruction,
@@ -82,10 +86,20 @@ _LINKEDIN_TASK_TEMPLATE = (
     "2. Click the Comment button ({click_tool})\n"
     "3. Draft a comment (follow the COMMENT DRAFTING GUIDE in the playbook)\n"
     "4. Present draft to user via AskUserQuestion (approve / edit / skip)\n"
-    "5. Type the approved comment using ONLY native keyboard input ({type_tool}). "
+    "5. Before typing, clear the editor (Select All + Delete) to remove any residual "
+    "text. Then type the approved comment using ONLY native keyboard input ({type_tool}) "
+    "in a SINGLE call "
+    "(for agent-browser, prefer 'fill' over 'type' — it clears first and handles "
+    "contenteditable editors reliably; also re-snapshot if the element ref changed "
+    "since clicking Comment, as Quill re-renders cause ref instability). "
     "NEVER use {eval_tool} or JavaScript to set text in contenteditable editors "
     "— it bypasses the editor's state management and leaves Submit buttons disabled\n"
-    "6. Click Submit ({click_tool})\n"
+    "5.5. Take ONE verification snapshot to confirm the typed text matches your "
+    "approved draft. If it doesn't match, clear the field (Select All + Delete) "
+    "and re-type once\n"
+    "6. Click the Submit/Post button near the comment editor — NOT the main feed "
+    "Post button. For agent-browser: use 'find role button name Post click' to locate "
+    "it natively ({click_tool})\n"
     "7. Take ONE verification snapshot\n\n"
     "STEP 3 — STOP and inform user the comment was posted. Wait for user's next "
     "message.\n"
@@ -310,26 +324,40 @@ def build_web_instruction(
         )
 
     # Context persistence
+    checkpoint_fields = (
+        "Write BOTH files at these specific points:\n"
+        "  - After authentication completes\n"
+        "  - After scanning posts and presenting to user\n"
+        "  - After user selects a post (set comment_phase to 'selected')\n"
+        "  - After draft is approved (set comment_phase to 'approved')\n"
+        "  - After typing/filling the comment (set comment_phase to 'typed')\n"
+        "  - After successfully submitting (set comment_phase to 'submitted')\n"
+        "  1. .leashd/web-checkpoint.json — structured JSON with fields: "
+        "session_id, recipe_name, platform, browser_backend, auth_status, "
+        "auth_user, current_url, current_phase, current_step_index, "
+        "comment_phase, task_description, topic, progress_summary "
+        "(human-readable: what's been done so far), pending_work "
+        "(human-readable: what remains), posts_scanned (list of {index, author, "
+        "snippet, url}), comments_drafted (list of {target_post, draft_text, "
+        "status, approved_text}), comments_posted (list of {target_post, "
+        "comment_text, posted_at}), pending_actions, created_at, updated_at, "
+        "last_error, retry_count\n"
+        "  2. .leashd/web-session.md — human-readable summary"
+    )
     if resume:
         sections.append(
             "CONTEXT PERSISTENCE:\n"
-            "- Create .leashd/web-session.md at the start with: Platform, Auth "
-            "Status, Task Description, Actions Taken, Content Drafted, Content "
-            "Posted\n"
-            "- Update after each significant action (navigation, content draft, "
-            "post)\n"
-            "- If .leashd/web-session.md already exists, read it first and resume "
-            "from recorded progress"
+            "- On resume, read .leashd/web-checkpoint.json first (structured "
+            "state); fall back to .leashd/web-session.md if JSON is missing\n"
+            f"- {checkpoint_fields}\n"
+            "- Resume from recorded progress — do NOT restart completed actions"
         )
     else:
         sections.append(
             "CONTEXT PERSISTENCE:\n"
-            "- Create .leashd/web-session.md at the start with: Platform, Auth "
-            "Status, Task Description, Actions Taken, Content Drafted, Content "
-            "Posted\n"
-            "- Overwrite any existing web-session.md — this is a fresh session\n"
-            "- Update after each significant action (navigation, content draft, "
-            "post)"
+            f"- {checkpoint_fields}\n"
+            "- Overwrite any existing checkpoint/session files — this is a "
+            "fresh session"
         )
 
     # General rules
@@ -373,7 +401,11 @@ _WEB_SESSION_MAX_CHARS = 4000
 
 
 def _read_web_session_context(working_dir: str) -> str | None:
-    """Read .leashd/web-session.md, return tail content or None if missing."""
+    """Load checkpoint JSON → markdown, falling back to legacy .leashd/web-session.md."""
+    checkpoint = load_checkpoint(working_dir)
+    if checkpoint:
+        return checkpoint_to_markdown(checkpoint)[-_WEB_SESSION_MAX_CHARS:]
+
     path = Path(working_dir) / ".leashd" / "web-session.md"
     if not path.is_file():
         return None
@@ -391,11 +423,18 @@ def _build_web_prompt(
     recipe: WebRecipe | None,
     *,
     session_context: str | None = None,
+    checkpoint_json: str | None = None,
 ) -> str:
     """Build the user-facing prompt from web config."""
     parts: list[str] = []
 
-    if session_context:
+    if checkpoint_json:
+        parts.append(
+            "PREVIOUS WEB SESSION STATE (from .leashd/web-checkpoint.json):\n"
+            f"```json\n{checkpoint_json}\n```\n"
+            "Resume from this state. Do NOT restart completed actions."
+        )
+    elif session_context:
         parts.append(
             "PREVIOUS WEB SESSION CONTEXT (from .leashd/web-session.md):\n"
             f"```\n{session_context}\n```\n"
@@ -470,7 +509,7 @@ class WebAgentPlugin(LeashdPlugin):
         session.browser_backend = self._browser_backend
         session.browser_fresh = config.fresh
         if not config.resume:
-            session.claude_session_id = None
+            session.agent_resume_token = None
 
         playbook = None
         if config.recipe_name:
@@ -509,13 +548,19 @@ class WebAgentPlugin(LeashdPlugin):
         if not (playbook and playbook.inline_guidance):
             gatekeeper.enable_tool_auto_approve(chat_id, "Skill")
 
-        session_context = (
-            _read_web_session_context(session.working_directory)
-            if config.resume
-            else None
-        )
+        checkpoint_json: str | None = None
+        session_context: str | None = None
+        if config.resume:
+            cp = load_checkpoint(session.working_directory)
+            if cp:
+                checkpoint_json = cp.model_dump_json(indent=2)
+            else:
+                session_context = _read_web_session_context(session.working_directory)
         event.data["prompt"] = _build_web_prompt(
-            config, recipe, session_context=session_context
+            config,
+            recipe,
+            session_context=session_context,
+            checkpoint_json=checkpoint_json,
         )
 
         await self._event_bus.emit(
@@ -526,6 +571,8 @@ class WebAgentPlugin(LeashdPlugin):
                     "recipe": config.recipe_name,
                     "topic": config.topic,
                     "url": config.url,
+                    "working_directory": session.working_directory,
+                    "session_id": session.session_id,
                 },
             )
         )

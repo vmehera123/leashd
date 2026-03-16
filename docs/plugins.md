@@ -157,6 +157,47 @@ The module exports constants for classifying browser tools in other components:
 
 See [Browser Testing](browser-testing.md) for the full browser testing guide.
 
+## Built-In: `WebAgentPlugin`
+
+`WebAgentPlugin` (`plugins/builtin/web_agent.py`) handles the `/web` command for autonomous web automation with content-level human approval.
+
+| Aspect | Detail |
+|---|---|
+| Subscribes to | `COMMAND_WEB`, `CONFIG_RELOADED` |
+| Emits | `WEB_STARTED` |
+| Auto-approves | All 28 browser tools, agent-browser commands, Write, Edit, Skill |
+
+The plugin parses `/web` command arguments (recipe name, `--topic`, `--url`, `--fresh`, `--resume`), loads the matching playbook, builds the system prompt, and activates web mode on the session.
+
+### Recipes and Playbooks
+
+Built-in recipe: `linkedin_comment` — searches LinkedIn for posts on a topic, presents candidates to the user, drafts a comment with human approval, and posts it.
+
+Playbooks (YAML files in `plugins/builtin/playbooks/`) define step-by-step navigation guides with phases, steps, tool hints, verification flags, and backend-specific overrides.
+
+The `linkedin_comment` playbook includes a **comment verification pipeline** to prevent duplicated text:
+- `type` step: clears editor (Select All + Delete) before typing the full comment in a single call
+- `verify_draft` step: takes a snapshot to confirm typed text matches the approved draft
+- `submit` step: clicks Post only after verification passes
+
+### Session Checkpoint
+
+The web agent writes two persistence files during a session:
+
+| File | Format | Purpose |
+|---|---|---|
+| `.leashd/web-checkpoint.json` | JSON | Structured state — posts scanned, comments drafted/posted, phase tracking, timestamps |
+| `.leashd/web-session.md` | Markdown | Human-readable summary |
+
+On `--resume`, the checkpoint JSON is loaded and injected into the prompt as `PREVIOUS WEB SESSION STATE`. Falls back to legacy markdown if JSON is missing. The checkpoint models are defined in `web_checkpoint.py`:
+
+- `WebCheckpoint` — top-level model with session ID, platform, auth, phase, posts, comments, errors
+- `ScannedPost` — index, author, snippet, URL
+- `DraftedComment` — target post, draft text, status (drafted/approved/rejected/posted)
+- `PostedComment` — target post, comment text, timestamp
+
+Persistence uses atomic writes (temp file + rename) matching the `config_store.py` pattern.
+
 ## Built-In: `TestRunnerPlugin`
 
 `TestRunnerPlugin` (`plugins/builtin/test_runner.py`) activates the 9-phase test workflow via the `/test` command.

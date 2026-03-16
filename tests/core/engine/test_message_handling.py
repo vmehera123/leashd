@@ -159,6 +159,33 @@ class TestEngineMessageLogging:
             await store.teardown()
 
 
+class TestEngineUsesMessageLogger:
+    @pytest.mark.asyncio
+    async def test_uses_message_logger(self, config, audit_logger):
+        from unittest.mock import AsyncMock
+
+        from leashd.core.message_logger import MessageLogger
+
+        store = AsyncMock()
+        ml = MessageLogger(store)
+        eng = Engine(
+            connector=None,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            audit=audit_logger,
+            message_logger=ml,
+        )
+        await eng.handle_message("user1", "hello", "chat1")
+
+        calls = store.save_message.await_args_list
+        assert len(calls) == 2
+        assert calls[0].kwargs["role"] == "user"
+        assert calls[0].kwargs["content"] == "hello"
+        assert calls[1].kwargs["role"] == "assistant"
+        assert "Echo: hello" in calls[1].kwargs["content"]
+
+
 class TestBuildImplementationPrompt:
     def test_long_content_includes_plan(self, engine):
         plan = "A detailed plan with many steps and specifics to implement carefully"
@@ -359,11 +386,11 @@ class TestEngineResilience:
     async def test_agent_timeout_persists_session_id(
         self, config, audit_logger, policy_engine
     ):
-        """When agent sets session.claude_session_id before timeout, it gets persisted."""
+        """When agent sets session.agent_resume_token before timeout, it gets persisted."""
 
         class HangingAgentWithSession(BaseAgent):
             async def execute(self, prompt, session, **kwargs):
-                session.claude_session_id = "sdk-timeout-id"
+                session.agent_resume_token = "sdk-timeout-id"
                 await asyncio.sleep(9999)
 
             async def cancel(self, session_id):
@@ -395,7 +422,7 @@ class TestEngineResilience:
         session = await sm.get_or_create(
             "u1", "c1", config_short.approved_directories[0]
         )
-        assert session.claude_session_id == "sdk-timeout-id"
+        assert session.agent_resume_token == "sdk-timeout-id"
 
     @pytest.mark.asyncio
     async def test_agent_timeout_without_session_id(
@@ -436,7 +463,7 @@ class TestEngineResilience:
         session = await sm.get_or_create(
             "u1", "c1", config_short.approved_directories[0]
         )
-        assert session.claude_session_id is None
+        assert session.agent_resume_token is None
 
     @pytest.mark.asyncio
     async def test_sustained_degradation_backoff(
@@ -563,7 +590,7 @@ class TestAutoPlanActivation:
     async def test_auto_plan_activates_plan_mode_on_first_message(
         self, audit_logger, policy_engine, tmp_path
     ):
-        """auto_plan=True + auto mode + no claude_session_id → switches to plan."""
+        """auto_plan=True + auto mode + no agent_resume_token → switches to plan."""
         config = LeashdConfig(
             approved_directories=[tmp_path],
             auto_plan=True,
@@ -593,7 +620,7 @@ class TestAutoPlanActivation:
     async def test_auto_plan_does_not_reactivate_on_resume(
         self, audit_logger, policy_engine, tmp_path
     ):
-        """Existing session with claude_session_id should not re-trigger plan mode."""
+        """Existing session with agent_resume_token should not re-trigger plan mode."""
         config = LeashdConfig(
             approved_directories=[tmp_path],
             auto_plan=True,
@@ -609,10 +636,10 @@ class TestAutoPlanActivation:
             audit=audit_logger,
         )
 
-        # Create session with existing claude_session_id (resumed session)
+        # Create session with existing agent_resume_token (resumed session)
         session = await eng.session_manager.get_or_create("u1", "c1", str(tmp_path))
         session.mode = "auto"
-        session.claude_session_id = "existing-session-abc"
+        session.agent_resume_token = "existing-session-abc"
         await eng.session_manager.save(session)
 
         await eng.handle_message("u1", "follow up", "c1")
@@ -653,7 +680,7 @@ class TestAutoPlanActivation:
         """After plan approval, the implementation turn must not re-enter plan mode.
 
         Regression test: _exit_plan_mode sets session.mode='edit' and clears
-        claude_session_id, which would re-trigger auto_plan in the recursive
+        agent_resume_token, which would re-trigger auto_plan in the recursive
         _execute_turn call without the _skip_auto_plan guard.
         """
         config = LeashdConfig(
@@ -690,7 +717,7 @@ class TestAutoPlanActivation:
 
         session = await sm.get_or_create("u1", "c1", str(tmp_path))
         session.mode = "plan"
-        session.claude_session_id = "plan-session-xyz"
+        session.agent_resume_token = "plan-session-xyz"
         await sm.save(session)
 
         plan_text = "A detailed implementation plan with enough content to pass the length check."
@@ -794,7 +821,7 @@ class TestAutoPlanGuardWithPlanOrigin:
         session = await sm.get_or_create("u1", "c1", str(tmp_path))
         session.mode = "plan"
         session.plan_origin = "auto"
-        session.claude_session_id = "plan-session"
+        session.agent_resume_token = "plan-session"
         await sm.save(session)
 
         plan_text = "A detailed implementation plan with enough content to pass the length check."
@@ -844,6 +871,75 @@ class TestRetryableResponsePatterns:
             content="authentication_error: invalid API key", is_error=True
         )
         assert Engine._is_retryable_response(resp) is False
+
+
+class TestInteractionCoordinatorReceivesIds:
+    @pytest.mark.asyncio
+    async def test_message_logger_receives_user_id_and_session_id(
+        self, config, policy_engine, audit_logger
+    ):
+        from unittest.mock import AsyncMock
+
+        from leashd.core.interactions import InteractionCoordinator
+        from leashd.core.message_logger import MessageLogger
+        from tests.conftest import MockConnector
+
+        connector = MockConnector(support_streaming=True)
+        store = AsyncMock()
+        ml = MessageLogger(store)
+        coordinator = InteractionCoordinator(connector, config, message_logger=ml)
+
+        class QuestionAgent(BaseAgent):
+            async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
+                async def answer_later():
+                    await asyncio.sleep(0.05)
+                    req = connector.question_requests[0]
+                    await coordinator.resolve_option(req["interaction_id"], "Yes")
+
+                task = asyncio.create_task(answer_later())
+                await can_use_tool(
+                    "AskUserQuestion",
+                    {
+                        "questions": [
+                            {
+                                "question": "Continue?",
+                                "header": "Confirm",
+                                "options": [
+                                    {"label": "Yes", "description": "Proceed"},
+                                ],
+                                "multiSelect": False,
+                            }
+                        ]
+                    },
+                    None,
+                )
+                await task
+                return AgentResponse(content="Done", session_id="sid", cost=0.01)
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=connector,
+            agent=QuestionAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            interaction_coordinator=coordinator,
+        )
+
+        await eng.handle_message("user42", "hello", "chat99")
+
+        calls = store.save_message.await_args_list
+        assert len(calls) == 2
+        assert calls[0].kwargs["user_id"] == "user42"
+        assert calls[1].kwargs["user_id"] == "user42"
+        assert calls[0].kwargs["session_id"] is not None
+        assert calls[1].kwargs["session_id"] is not None
 
 
 class TestAgentDeadlinePauseDuringQuestion:

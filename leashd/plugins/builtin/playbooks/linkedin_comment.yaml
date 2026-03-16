@@ -118,10 +118,18 @@ phases:
         description: "Type the approved comment into the comment editor"
         tool_hint: browser_type
         verify: false
-        notes: "Click the comment editor to focus it, then use browser_type (native keyboard input) to type the comment. NEVER use JavaScript (browser_evaluate, innerHTML, execCommand) to set text in contenteditable editors — it bypasses the editor's internal state (e.g. Quill) and leaves Submit buttons disabled."
+        notes: "Before typing, ensure the editor is empty: click the editor to focus, then Select All (Ctrl+A / Cmd+A) and Delete to clear any residual text from prior attempts. Then type the FULL approved comment in a SINGLE browser_type / agent-browser type call. Do NOT type paragraph by paragraph. NEVER use JavaScript (browser_evaluate, innerHTML, execCommand) to set text in contenteditable editors — it bypasses the editor's internal state (e.g. Quill) and leaves Submit buttons disabled."
         backends:
           agent-browser:
-            notes: "`agent-browser type @eN \"text\"`. NEVER use `agent-browser eval` or JavaScript to set text in contenteditable editors — it bypasses the editor's internal state and leaves Submit buttons disabled."
+            tool_hint: "agent-browser fill"
+            notes: >-
+              Prefer `agent-browser fill @eN "text"` — it clears the field first then types
+              atomically, handling contenteditable editors (like Quill) reliably. No need to
+              manually Select All + Delete. If the element ref changed since clicking Comment
+              (Quill re-renders cause ref instability), take a fresh snapshot to get the current
+              ref before filling. Type the FULL approved comment in ONE call. NEVER use
+              `agent-browser eval` or JavaScript to set text — it bypasses the editor's internal
+              state and leaves Submit buttons disabled.
       - action: wait
         description: "Brief pause to let the editor state settle after typing"
         tool_hint: browser_evaluate
@@ -132,17 +140,38 @@ phases:
             tool_hint: "agent-browser wait"
             script: null
             notes: "`agent-browser wait 500` — native wait, no JS needed"
+      - action: verify_draft
+        description: "Take a snapshot to verify the typed text matches the approved draft"
+        tool_hint: browser_snapshot
+        verify: true
+        expected_state: "Comment editor contains the full approved comment, no duplicated or truncated text"
+        notes: "Compare visible text against your approved draft. If mismatched (duplicated paragraphs, missing text), clear the field completely (click editor -> Ctrl+A -> Delete) and re-type the full comment in ONE browser_type call. Only proceed to submit once text matches."
+        backends:
+          agent-browser:
+            tool_hint: "agent-browser snapshot -i"
+            notes: >-
+              Take a fresh snapshot to get current element refs (they change after
+              typing due to Quill re-rendering). Use `agent-browser get text @eN`
+              with the NEW ref to read editor content. If mismatched, use
+              `agent-browser fill @eN "corrected text"` with the fresh ref.
       - action: submit
         description: "Click the Post button to submit the comment"
         tool_hint: browser_click
         expected_state: "Comment appears in the post's comment section"
         verify: true
-        notes: "If Submit/Post button is still disabled: re-click the editor, select all (Ctrl+A / Cmd+A), delete, then re-type the comment natively via browser_type."
+        notes: "Click the Post/Submit button. The verify_draft step has already confirmed text correctness. If button is disabled, go back to verify_draft to diagnose."
         fallback: "Press Ctrl+Enter (or Cmd+Enter on Mac) as a keyboard shortcut to submit the comment"
         backends:
           agent-browser:
             tool_hint: "agent-browser click"
-            notes: "`agent-browser click @eN` or `agent-browser find text \"Post\" click`"
+            script: null
+            notes: >-
+              After verify_draft snapshot, find the Post button using native commands:
+              1. `agent-browser find role button name Post click` (most reliable)
+              2. If ambiguous, `agent-browser find text "Post" near @eN click` where @eN
+                 is the comment editor ref from the last snapshot
+              3. Fallback: `agent-browser press Control+Enter`
+              The Post button is inside the comment box area, NOT the main feed Post button.
             fallback: "`agent-browser press Control+Enter`"
       - action: stop
         description: "Inform the user the comment was posted and STOP. Wait for user to say 'continue' for more posts or give next instruction. Do NOT autonomously proceed to another post."

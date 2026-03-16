@@ -222,8 +222,8 @@ class TestBuildDirectoryNames:
         assert names == {"leashd": d1, "api": d2}
 
     def test_conflicting_basenames_disambiguated(self, tmp_path):
-        parent1 = tmp_path / "nodenova"
-        parent2 = tmp_path / "visionbrain"
+        parent1 = tmp_path / "orgalpha"
+        parent2 = tmp_path / "orgbeta"
         d1 = parent1 / "api"
         d2 = parent2 / "api"
         parent1.mkdir()
@@ -231,10 +231,10 @@ class TestBuildDirectoryNames:
         d1.mkdir()
         d2.mkdir()
         names = build_directory_names([d1, d2])
-        assert "nodenova/api" in names
-        assert "visionbrain/api" in names
-        assert names["nodenova/api"] == d1
-        assert names["visionbrain/api"] == d2
+        assert "orgalpha/api" in names
+        assert "orgbeta/api" in names
+        assert names["orgalpha/api"] == d1
+        assert names["orgbeta/api"] == d2
 
     def test_single_dir(self, tmp_path):
         d = tmp_path / "myproj"

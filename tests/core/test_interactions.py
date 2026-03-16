@@ -256,15 +256,14 @@ class TestPlanReviewHandling:
 
     @pytest.mark.asyncio
     async def test_plan_review_times_out(self, mock_connector, config):
-        from claude_agent_sdk.types import PermissionResultDeny
-
+        from leashd.agents.types import PermissionDeny
         from leashd.core.interactions import InteractionCoordinator
 
         config.interaction_timeout_seconds = 0.1
         coord = InteractionCoordinator(mock_connector, config)
 
         result = await coord.handle_plan_review("chat1", {})
-        assert isinstance(result, PermissionResultDeny)
+        assert isinstance(result, PermissionDeny)
         assert "timed out" in result.message
 
     @pytest.mark.asyncio
@@ -921,3 +920,315 @@ class TestInteractionEdgeCases:
         assert len(events) == 2
         assert events[0].name == INTERACTION_REQUESTED
         assert events[1].name == INTERACTION_RESOLVED
+
+    @pytest.mark.asyncio
+    async def test_resolved_event_includes_question_context(
+        self, interaction_coordinator, mock_connector, event_bus
+    ):
+        from leashd.core.events import INTERACTION_RESOLVED
+
+        resolved_events = []
+
+        async def capture(event):
+            resolved_events.append(event)
+
+        event_bus.subscribe(INTERACTION_RESOLVED, capture)
+
+        tool_input = {
+            "questions": [
+                {
+                    "question": "Which post?",
+                    "header": "Select",
+                    "options": [{"label": "Post1", "description": "first"}],
+                    "multiSelect": False,
+                }
+            ]
+        }
+
+        async def answer():
+            await asyncio.sleep(0.05)
+            req = mock_connector.question_requests[0]
+            await interaction_coordinator.resolve_option(req["interaction_id"], "Post1")
+
+        task = asyncio.create_task(answer())
+        await interaction_coordinator.handle_question("chat1", tool_input)
+        await task
+
+        assert len(resolved_events) == 1
+        data = resolved_events[0].data
+        assert data["question"] == "Which post?"
+        assert data["header"] == "Select"
+        assert data["options"] == [{"label": "Post1", "description": "first"}]
+        assert data["kind"] == "question"
+        assert data["answer"] == "Post1"
+
+    @pytest.mark.asyncio
+    async def test_interaction_messages_logged(self, mock_connector, config, event_bus):
+        from unittest.mock import AsyncMock
+
+        from leashd.core.interactions import InteractionCoordinator
+        from leashd.core.message_logger import MessageLogger
+
+        store = AsyncMock()
+        ml = MessageLogger(store)
+        coord = InteractionCoordinator(
+            mock_connector, config, event_bus, message_logger=ml
+        )
+
+        tool_input = {
+            "questions": [
+                {
+                    "question": "Draft OK?",
+                    "header": "Review",
+                    "options": [{"label": "Yes", "description": "approve"}],
+                    "multiSelect": False,
+                }
+            ]
+        }
+
+        async def answer():
+            await asyncio.sleep(0.05)
+            req = mock_connector.question_requests[0]
+            await coord.resolve_option(req["interaction_id"], "Yes")
+
+        task = asyncio.create_task(answer())
+        await coord.handle_question("chat1", tool_input)
+        await task
+
+        calls = store.save_message.await_args_list
+        assert len(calls) == 2
+        assert calls[0].kwargs["role"] == "assistant"
+        assert calls[0].kwargs["content"] == "Draft OK?"
+        assert calls[1].kwargs["role"] == "user"
+        assert calls[1].kwargs["content"] == "Yes"
+
+    @pytest.mark.asyncio
+    async def test_interaction_logged_with_correct_user_id(
+        self, mock_connector, config, event_bus
+    ):
+        from unittest.mock import AsyncMock
+
+        from leashd.core.interactions import InteractionCoordinator
+        from leashd.core.message_logger import MessageLogger
+
+        store = AsyncMock()
+        ml = MessageLogger(store)
+        coord = InteractionCoordinator(
+            mock_connector, config, event_bus, message_logger=ml
+        )
+
+        tool_input = {
+            "questions": [
+                {
+                    "question": "Approve?",
+                    "header": "Review",
+                    "options": [{"label": "Yes", "description": "ok"}],
+                    "multiSelect": False,
+                }
+            ]
+        }
+
+        async def answer():
+            await asyncio.sleep(0.05)
+            req = mock_connector.question_requests[0]
+            await coord.resolve_option(req["interaction_id"], "Yes")
+
+        task = asyncio.create_task(answer())
+        await coord.handle_question(
+            "chat1", tool_input, user_id="real-user-42", session_id="sess-1"
+        )
+        await task
+
+        calls = store.save_message.await_args_list
+        assert len(calls) == 2
+        assert calls[0].kwargs["user_id"] == "real-user-42"
+        assert calls[1].kwargs["user_id"] == "real-user-42"
+
+    @pytest.mark.asyncio
+    async def test_interaction_logged_with_session_id(
+        self, mock_connector, config, event_bus
+    ):
+        from unittest.mock import AsyncMock
+
+        from leashd.core.interactions import InteractionCoordinator
+        from leashd.core.message_logger import MessageLogger
+
+        store = AsyncMock()
+        ml = MessageLogger(store)
+        coord = InteractionCoordinator(
+            mock_connector, config, event_bus, message_logger=ml
+        )
+
+        tool_input = {
+            "questions": [
+                {
+                    "question": "OK?",
+                    "header": "H",
+                    "options": [{"label": "Y", "description": "y"}],
+                    "multiSelect": False,
+                }
+            ]
+        }
+
+        async def answer():
+            await asyncio.sleep(0.05)
+            req = mock_connector.question_requests[0]
+            await coord.resolve_option(req["interaction_id"], "Y")
+
+        task = asyncio.create_task(answer())
+        await coord.handle_question(
+            "chat1", tool_input, user_id="u1", session_id="sess-abc"
+        )
+        await task
+
+        calls = store.save_message.await_args_list
+        assert calls[0].kwargs["session_id"] == "sess-abc"
+        assert calls[1].kwargs["session_id"] == "sess-abc"
+
+    @pytest.mark.asyncio
+    async def test_text_answer_logged(self, mock_connector, config, event_bus):
+        from unittest.mock import AsyncMock
+
+        from leashd.core.interactions import InteractionCoordinator
+        from leashd.core.message_logger import MessageLogger
+
+        store = AsyncMock()
+        ml = MessageLogger(store)
+        coord = InteractionCoordinator(
+            mock_connector, config, event_bus, message_logger=ml
+        )
+
+        tool_input = {
+            "questions": [
+                {
+                    "question": "Project name?",
+                    "header": "Name",
+                    "options": [{"label": "foo", "description": "d"}],
+                    "multiSelect": False,
+                }
+            ]
+        }
+
+        async def send_text():
+            await asyncio.sleep(0.05)
+            await coord.resolve_text("chat1", "my-project")
+
+        task = asyncio.create_task(send_text())
+        await coord.handle_question("chat1", tool_input, user_id="u1")
+        await task
+
+        calls = store.save_message.await_args_list
+        assert len(calls) == 2
+        assert calls[0].kwargs["content"] == "Project name?"
+        assert calls[1].kwargs["content"] == "my-project"
+
+    @pytest.mark.asyncio
+    async def test_multiple_questions_all_logged(
+        self, mock_connector, config, event_bus
+    ):
+        from unittest.mock import AsyncMock
+
+        from leashd.core.interactions import InteractionCoordinator
+        from leashd.core.message_logger import MessageLogger
+
+        store = AsyncMock()
+        ml = MessageLogger(store)
+        coord = InteractionCoordinator(
+            mock_connector, config, event_bus, message_logger=ml
+        )
+
+        tool_input = {
+            "questions": [
+                {
+                    "question": "Q1?",
+                    "header": "H1",
+                    "options": [{"label": "A", "description": "a"}],
+                    "multiSelect": False,
+                },
+                {
+                    "question": "Q2?",
+                    "header": "H2",
+                    "options": [{"label": "B", "description": "b"}],
+                    "multiSelect": False,
+                },
+            ]
+        }
+
+        async def answer_both():
+            await asyncio.sleep(0.05)
+            req1 = mock_connector.question_requests[0]
+            await coord.resolve_option(req1["interaction_id"], "A")
+            await asyncio.sleep(0.05)
+            req2 = mock_connector.question_requests[1]
+            await coord.resolve_option(req2["interaction_id"], "B")
+
+        task = asyncio.create_task(answer_both())
+        await coord.handle_question("chat1", tool_input, user_id="u1")
+        await task
+
+        calls = store.save_message.await_args_list
+        assert len(calls) == 4
+        assert calls[0].kwargs["content"] == "Q1?"
+        assert calls[1].kwargs["content"] == "A"
+        assert calls[2].kwargs["content"] == "Q2?"
+        assert calls[3].kwargs["content"] == "B"
+
+    @pytest.mark.asyncio
+    async def test_timeout_does_not_log(self, mock_connector, config, event_bus):
+        from unittest.mock import AsyncMock
+
+        from leashd.core.interactions import InteractionCoordinator
+        from leashd.core.message_logger import MessageLogger
+
+        config.interaction_timeout_seconds = 0.1
+        store = AsyncMock()
+        ml = MessageLogger(store)
+        coord = InteractionCoordinator(
+            mock_connector, config, event_bus, message_logger=ml
+        )
+
+        tool_input = {
+            "questions": [
+                {
+                    "question": "Q?",
+                    "header": "H",
+                    "options": [{"label": "A", "description": "a"}],
+                    "multiSelect": False,
+                }
+            ]
+        }
+
+        result = await coord.handle_question("chat1", tool_input, user_id="u1")
+        assert result.behavior == "deny"
+        store.save_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_no_message_logger_skips_logging(
+        self, mock_connector, config, event_bus
+    ):
+        from leashd.core.interactions import InteractionCoordinator
+
+        coord = InteractionCoordinator(mock_connector, config, event_bus)
+        assert coord._message_logger is None
+
+        tool_input = {
+            "questions": [
+                {
+                    "question": "Q?",
+                    "header": "H",
+                    "options": [{"label": "A", "description": "a"}],
+                    "multiSelect": False,
+                }
+            ]
+        }
+
+        async def answer():
+            await asyncio.sleep(0.05)
+            req = mock_connector.question_requests[0]
+            await coord.resolve_option(req["interaction_id"], "A")
+
+        task = asyncio.create_task(answer())
+        result = await coord.handle_question("chat1", tool_input)
+        await task
+
+        assert result.behavior == "allow"

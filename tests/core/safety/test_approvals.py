@@ -344,6 +344,18 @@ class TestApprovalCoordinator:
             classification,
         )
         assert "Tool: Bash" in desc
+        assert "(details unavailable)" in desc
+
+    @pytest.mark.asyncio
+    async def test_format_description_empty_command_string(
+        self, approval_coordinator, classification
+    ):
+        desc = approval_coordinator._format_description(
+            "Bash",
+            {"command": ""},
+            classification,
+        )
+        assert "Command: (details unavailable)" in desc
 
     @pytest.mark.asyncio
     async def test_very_short_timeout_denies(

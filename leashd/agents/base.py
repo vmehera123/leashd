@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
 
+    from leashd.agents.capabilities import AgentCapabilities
     from leashd.core.session import Session
 
 
@@ -44,6 +45,9 @@ class BaseAgent(Protocol):
         | None = None,
         on_retry: Callable[[], Coroutine[Any, Any, None]] | None = None,
     ) -> AgentResponse: ...
+
+    @property
+    def capabilities(self) -> AgentCapabilities: ...
 
     async def cancel(self, session_id: str) -> None: ...
 

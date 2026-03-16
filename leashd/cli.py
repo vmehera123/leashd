@@ -158,6 +158,9 @@ def _print_resolved_config(config: LeashdConfig, yaml_data: dict[str, Any]) -> N
     effort_hint = _source_hint("effort", yaml_data)
     print(f"\nThinking effort: {config.effort or 'default'}{effort_hint}")
 
+    runtime_hint = _source_hint("agent_runtime", yaml_data)
+    print(f"Agent runtime: {config.agent_runtime}{runtime_hint}")
+
     autonomous = get_autonomous_config(yaml_data)
     if autonomous.get("enabled"):
         print("\nAutonomous mode: ENABLED")
@@ -193,6 +196,9 @@ def _print_yaml_only_config(yaml_data: dict[str, Any]) -> None:
 
     effort = yaml_data.get("effort", "medium")
     print(f"\nThinking effort: {effort}")
+
+    runtime = yaml_data.get("agent_runtime", "claude-code")
+    print(f"Agent runtime: {runtime}")
 
     autonomous = get_autonomous_config(yaml_data)
     if autonomous.get("enabled"):
@@ -485,6 +491,59 @@ def _handle_effort_set(level: str) -> None:
     _notify_daemon_reload()
 
 
+def _handle_runtime(args: argparse.Namespace) -> None:
+    """Route runtime subcommands."""
+    sub = getattr(args, "runtime_command", None)
+    if sub is None or sub == "show":
+        _handle_runtime_show()
+    elif sub == "set":
+        _handle_runtime_set(args.name)
+    elif sub == "list":
+        _handle_runtime_list()
+
+
+def _handle_runtime_show() -> None:
+    """Display current agent runtime."""
+    data = load_global_config()
+    runtime = data.get("agent_runtime", "claude-code")
+    print(f"Agent runtime: {runtime}")
+
+
+def _handle_runtime_set(name: str) -> None:
+    """Set the agent runtime."""
+    from leashd.agents.registry import get_available_runtime_names
+
+    available = get_available_runtime_names()
+    if name not in available:
+        print(
+            f"Error: unknown runtime '{name}'. Available: {', '.join(available)}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    data = load_global_config()
+    data["agent_runtime"] = name
+    save_global_config(data)
+    inject_global_config_as_env(force=True)
+    print(f"\u2713 Agent runtime set to {name}")
+    print("  Restart the daemon for changes to take effect.")
+    _notify_daemon_reload()
+
+
+def _handle_runtime_list() -> None:
+    """List available agent runtimes."""
+    from leashd.agents.registry import list_runtimes
+
+    runtimes = list_runtimes()
+    data = load_global_config()
+    current = data.get("agent_runtime", "claude-code")
+    print("Available runtimes:")
+    for rt in runtimes:
+        marker = " (active)" if rt["name"] == current else ""
+        stability = f" [{rt['stability']}]" if rt.get("stability") else ""
+        print(f"  {rt['name']}{stability}{marker}")
+
+
 def _handle_clean() -> None:
     """Remove all runtime artifacts from approved project directories."""
     dirs = get_approved_directories()
@@ -498,6 +557,7 @@ def _handle_clean() -> None:
         ("messages.db", False),
         (".playwright", True),
         ("web-session.md", False),
+        ("web-checkpoint.json", False),
     ]
 
     cleaned = 0
@@ -1034,6 +1094,14 @@ def main() -> None:
     effort_set = effort_sub.add_parser("set", help="Set thinking effort level")
     effort_set.add_argument("level", choices=["low", "medium", "high", "max"])
 
+    # Agent runtime
+    runtime_parser = subparsers.add_parser("runtime", help="Manage agent runtime")
+    runtime_sub = runtime_parser.add_subparsers(dest="runtime_command")
+    runtime_sub.add_parser("show", help="Show current runtime (default)")
+    runtime_sub.add_parser("list", help="List available runtimes")
+    runtime_set = runtime_sub.add_parser("set", help="Set agent runtime")
+    runtime_set.add_argument("name", help="Runtime name (e.g. claude-code, codex)")
+
     # Workflow / playbook management
     workflow_parser = subparsers.add_parser(
         "workflow", help="Manage web workflow playbooks"
@@ -1125,6 +1193,8 @@ def main() -> None:
         _handle_browser(args)
     elif args.command == "effort":
         _handle_effort(args)
+    elif args.command == "runtime":
+        _handle_runtime(args)
     elif args.command == "workflow":
         _handle_workflow(args)
     elif args.command == "skill":

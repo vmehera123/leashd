@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0] - 2026-03-16
+- **added**: Multi-runtime agent architecture — pluggable backends via registry pattern, agent capabilities model, `leashd runtime show/set/list` CLI, and subprocess agent base class for CLI-driven runtimes
+- **added**: Codex runtime — full `codex-sdk-python` integration with dual-mode communication (interactive approval bridge + autonomous streaming), session resume via thread IDs, and safety pipeline parity with Claude Code
+- **added**: Structured web session checkpoints — Pydantic-backed `web-checkpoint.json` with granular phase tracking, mid-process recovery, and automatic checkpoint writes from interaction events
+- **added**: `MessageLogger` — shared message persistence layer used by Engine, InteractionCoordinator, and plugins; web interaction feedback now persisted to messages.db
+- **fixed**: LinkedIn web agent reliability — comment duplication, Quill editor typing failures, submit button targeting, and checkpoint field clobbering
+
 ## [0.7.2] - 2026-03-13
 - **fixed**: `cd /path && uv run pytest` and similar compound commands no longer require approval — `cd` added to read-only-bash pattern so compound classifier treats it as safe
 

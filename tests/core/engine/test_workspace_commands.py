@@ -205,16 +205,16 @@ class TestWorkspaceCommand:
             config, mock_connector, policy_engine, audit_logger, workspaces
         )
 
-        # Create session with claude_session_id
+        # Create session with agent_resume_token
         session = await eng.session_manager.get_or_create(
             "user1", "chat1", str(tmp_path)
         )
-        session.claude_session_id = "old-session-id"
+        session.agent_resume_token = "old-session-id"
 
         result = await eng.handle_command("user1", "workspace", "ws", "chat1")
         assert "ws" in result
         session = eng.session_manager.get("user1", "chat1")
-        assert session.claude_session_id is None
+        assert session.agent_resume_token is None
 
     @pytest.mark.asyncio
     async def test_exit_workspace(
