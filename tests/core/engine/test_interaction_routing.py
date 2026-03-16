@@ -188,7 +188,7 @@ class TestEngineInteractionRouting:
         )
         await eng.handle_message("user1", "hello", "chat1")
         session = eng.session_manager.get("user1", "chat1")
-        session.claude_session_id = "existing-session-123"
+        session.agent_resume_token = "existing-session-123"
         session.mode = "plan"
         hook = fake_agent.last_can_use_tool
 
@@ -202,7 +202,7 @@ class TestEngineInteractionRouting:
         await task
 
         assert result.behavior == "allow"
-        assert session.claude_session_id is None
+        assert session.agent_resume_token is None
         # Auto-approve for Write/Edit is deferred to _exit_plan_mode
 
 
@@ -222,7 +222,7 @@ class TestCleanProceedAutoImplementation:
             async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
                 self.last_can_use_tool = can_use_tool
                 prompts_seen.append(prompt)
-                session_ids_at_start.append(session.claude_session_id)
+                session_ids_at_start.append(session.agent_resume_token)
                 if not prompt.startswith("Implement"):
                     session.mode = "plan"
 
@@ -265,7 +265,7 @@ class TestCleanProceedAutoImplementation:
         assert len(prompts_seen) == 2
         assert prompts_seen[0] == "Make a plan"
         assert prompts_seen[1].startswith("Implement")
-        # Second call started with a clean session (no prior claude_session_id)
+        # Second call started with a clean session (no prior agent_resume_token)
         assert session_ids_at_start[1] is None
         cleared_msgs = [
             m

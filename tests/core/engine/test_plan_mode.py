@@ -5,9 +5,9 @@ import time
 from unittest.mock import patch
 
 import pytest
-from claude_agent_sdk.types import PermissionResultDeny
 
 from leashd.agents.base import AgentResponse, BaseAgent
+from leashd.agents.types import PermissionDeny
 from leashd.core.config import LeashdConfig
 from leashd.core.engine import Engine
 from leashd.core.interactions import InteractionCoordinator
@@ -1057,7 +1057,7 @@ class TestDirectoryPersistenceThroughPlanMode:
             async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
                 self.working_dirs.append(session.working_directory)
                 self.prompts.append(prompt)
-                self.session_ids.append(session.claude_session_id)
+                self.session_ids.append(session.agent_resume_token)
                 if session.mode == "plan":
 
                     async def click():
@@ -1132,7 +1132,7 @@ class TestDirectoryPersistenceThroughPlanMode:
             async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
                 self.working_dirs.append(session.working_directory)
                 self.prompts.append(prompt)
-                self.session_ids.append(session.claude_session_id)
+                self.session_ids.append(session.agent_resume_token)
                 if session.mode == "plan":
 
                     async def click():
@@ -1491,7 +1491,7 @@ class TestPlanModeRegression:
     """Verify /plan clears session context and blocks non-plan edits."""
 
     @pytest.mark.asyncio
-    async def test_plan_command_preserves_claude_session_id(
+    async def test_plan_command_preserves_agent_resume_token(
         self, config, audit_logger, policy_engine, mock_connector
     ):
         agent = FakeAgent()
@@ -1505,15 +1505,15 @@ class TestPlanModeRegression:
             audit=audit_logger,
         )
 
-        # Build up a session with a claude_session_id
+        # Build up a session with a agent_resume_token
         await eng.handle_message("user1", "hello", "chat1")
         session = sm.get("user1", "chat1")
-        assert session.claude_session_id == "test-session-123"
+        assert session.agent_resume_token == "test-session-123"
 
         # Switch to plan mode
         await eng.handle_command("user1", "plan", "", "chat1")
         session = sm.get("user1", "chat1")
-        assert session.claude_session_id == "test-session-123"
+        assert session.agent_resume_token == "test-session-123"
         assert session.mode == "plan"
 
     @pytest.mark.asyncio
@@ -1546,7 +1546,7 @@ class TestPlanModeRegression:
 
             loaded = await store.load("user1", "chat1")
             assert loaded is not None
-            assert loaded.claude_session_id is not None
+            assert loaded.agent_resume_token is not None
         finally:
             await store.teardown()
 
@@ -1572,9 +1572,9 @@ class TestPlanModeRegression:
         result = await hook(
             "Write", {"file_path": "/tmp/project/src/main.py", "content": "x"}, None
         )
-        from claude_agent_sdk.types import PermissionResultDeny
+        from leashd.agents.types import PermissionDeny
 
-        assert isinstance(result, PermissionResultDeny)
+        assert isinstance(result, PermissionDeny)
         assert "plan mode" in result.message.lower()
 
     @pytest.mark.asyncio
@@ -1605,9 +1605,9 @@ class TestPlanModeRegression:
             },
             None,
         )
-        from claude_agent_sdk.types import PermissionResultDeny
+        from leashd.agents.types import PermissionDeny
 
-        assert isinstance(result, PermissionResultDeny)
+        assert isinstance(result, PermissionDeny)
 
     @pytest.mark.asyncio
     async def test_write_to_plan_file_allowed_in_plan_mode(
@@ -1636,8 +1636,7 @@ class TestPlanModeRegression:
         )
         # Should NOT be the plan-mode deny — may still be denied by sandbox/policy
         assert not (
-            isinstance(result, PermissionResultDeny)
-            and "plan mode" in result.message.lower()
+            isinstance(result, PermissionDeny) and "plan mode" in result.message.lower()
         )
 
     @pytest.mark.asyncio
@@ -1666,8 +1665,7 @@ class TestPlanModeRegression:
         )
         # Should NOT be the plan-mode deny — may still be denied by sandbox/policy
         assert not (
-            isinstance(result, PermissionResultDeny)
-            and "plan mode" in result.message.lower()
+            isinstance(result, PermissionDeny) and "plan mode" in result.message.lower()
         )
 
     @pytest.mark.asyncio
@@ -1696,8 +1694,7 @@ class TestPlanModeRegression:
         )
         # Should NOT be the plan-mode deny — goes through to gatekeeper instead
         assert not (
-            isinstance(result, PermissionResultDeny)
-            and "plan mode" in result.message.lower()
+            isinstance(result, PermissionDeny) and "plan mode" in result.message.lower()
         )
 
 
@@ -1731,7 +1728,7 @@ class TestModeGuards:
         hook = agent.last_can_use_tool
         result = await hook("ExitPlanMode", {}, None)
 
-        assert isinstance(result, PermissionResultDeny)
+        assert isinstance(result, PermissionDeny)
         assert "implementation mode" in result.message.lower()
         assert len(connector.plan_review_requests) == 0
 
@@ -1762,7 +1759,7 @@ class TestModeGuards:
         hook = agent.last_can_use_tool
         result = await hook("ExitPlanMode", {}, None)
 
-        assert isinstance(result, PermissionResultDeny)
+        assert isinstance(result, PermissionDeny)
         assert "implementation mode" in result.message.lower()
 
     @pytest.mark.asyncio
@@ -1786,7 +1783,7 @@ class TestModeGuards:
         hook = agent.last_can_use_tool
         result = await hook("EnterPlanMode", {}, None)
 
-        assert isinstance(result, PermissionResultDeny)
+        assert isinstance(result, PermissionDeny)
         assert "accept-edits mode" in result.message.lower()
 
     @pytest.mark.asyncio
@@ -1816,7 +1813,7 @@ class TestModeGuards:
         hook = agent.last_can_use_tool
         result = await hook("ExitPlanMode", {}, None)
 
-        assert isinstance(result, PermissionResultDeny)
+        assert isinstance(result, PermissionDeny)
         assert "implementation mode" in result.message.lower()
 
     @pytest.mark.asyncio
@@ -1841,7 +1838,7 @@ class TestModeGuards:
         result = await hook("EnterPlanMode", {}, None)
 
         # Should NOT be denied — goes through to gatekeeper
-        assert not isinstance(result, PermissionResultDeny)
+        assert not isinstance(result, PermissionDeny)
 
 
 class TestResolvePlanContentFallbacks:
@@ -2029,8 +2026,7 @@ class TestExitPlanModeDeniedAfterApproval:
         self, config, policy_engine, audit_logger
     ):
         """Agent calling ExitPlanMode twice in one execute() — second call is denied."""
-        from claude_agent_sdk.types import PermissionResultDeny
-
+        from leashd.agents.types import PermissionDeny
         from tests.conftest import MockConnector
 
         streaming_connector = MockConnector(support_streaming=True)
@@ -2091,7 +2087,7 @@ class TestExitPlanModeDeniedAfterApproval:
 
         assert len(second_call_results) == 1
         result = second_call_results[0]
-        assert isinstance(result, PermissionResultDeny)
+        assert isinstance(result, PermissionDeny)
         # After edit approval, mode switches to "auto" — second ExitPlanMode
         # is denied by the mode guard (not the plan_approved guard)
         assert (
@@ -2266,8 +2262,7 @@ class TestPlanApprovalBehavior:
         self, config, policy_engine, audit_logger
     ):
         """clean_edit: cancel fires → new implementation turn → Write ALLOW."""
-        from claude_agent_sdk.types import PermissionResultAllow
-
+        from leashd.agents.types import PermissionAllow
         from tests.conftest import MockConnector
 
         approved_dir = str(config.approved_directories[0])
@@ -2352,15 +2347,14 @@ class TestPlanApprovalBehavior:
         assert len(prompts_seen) == 2
         assert prompts_seen[1].startswith("Implement")
         assert len(write_results) == 1
-        assert isinstance(write_results[0], PermissionResultAllow)
+        assert isinstance(write_results[0], PermissionAllow)
 
     @pytest.mark.asyncio
     async def test_edit_approval_write_allowed_in_implementation_turn(
         self, config, policy_engine, audit_logger
     ):
         """edit (non-clean): cancel+restart → Write succeeds in implementation turn."""
-        from claude_agent_sdk.types import PermissionResultAllow
-
+        from leashd.agents.types import PermissionAllow
         from tests.conftest import MockConnector
 
         approved_dir = str(config.approved_directories[0])
@@ -2435,7 +2429,7 @@ class TestPlanApprovalBehavior:
         assert len(prompts_seen) == 2
         assert prompts_seen[1].startswith("Implement")
         assert len(write_results) == 1
-        assert isinstance(write_results[0], PermissionResultAllow)
+        assert isinstance(write_results[0], PermissionAllow)
 
     @pytest.mark.asyncio
     async def test_edit_approval_cancels_agent(
@@ -2530,7 +2524,7 @@ class TestPlanApprovalBehavior:
                 on_text_chunk=None,
                 **kwargs,
             ):
-                session_ids_seen.append(session.claude_session_id)
+                session_ids_seen.append(session.agent_resume_token)
                 if not prompt.startswith("Implement"):
                     session.mode = "plan"
                     await can_use_tool(
@@ -2582,8 +2576,7 @@ class TestPlanApprovalBehavior:
         self, config, policy_engine, audit_logger
     ):
         """default approval: mode → 'default', no Write/Edit auto-approve."""
-        from claude_agent_sdk.types import PermissionResultAllow
-
+        from leashd.agents.types import PermissionAllow
         from tests.conftest import MockConnector
 
         approved_dir = str(config.approved_directories[0])
@@ -2649,7 +2642,7 @@ class TestPlanApprovalBehavior:
         await eng.handle_message("user1", "Plan something", "chat1")
 
         assert len(exit_results) == 1
-        assert isinstance(exit_results[0], PermissionResultAllow)
+        assert isinstance(exit_results[0], PermissionAllow)
         assert session_ref[0].mode == "default"
         # default approval must NOT auto-approve Write/Edit
         auto_tools = eng._gatekeeper._auto_approved_tools.get("chat1", set())
@@ -2662,8 +2655,7 @@ class TestPlanApprovalBehavior:
     ):
         """Security regression: edit approval auto-approves Write/Edit but Bash
         must still flow through the gatekeeper (not auto-approved)."""
-        from claude_agent_sdk.types import PermissionResultAllow
-
+        from leashd.agents.types import PermissionAllow
         from tests.conftest import MockConnector
 
         approved_dir = str(config.approved_directories[0])
@@ -2743,10 +2735,10 @@ class TestPlanApprovalBehavior:
         await eng.handle_message("user1", "Plan something", "chat1")
 
         assert len(write_results) == 1
-        assert isinstance(write_results[0], PermissionResultAllow)
+        assert isinstance(write_results[0], PermissionAllow)
         # Bash goes through gatekeeper — should NOT be auto-approved
         assert len(bash_results) == 1
-        assert not isinstance(bash_results[0], PermissionResultAllow)
+        assert not isinstance(bash_results[0], PermissionAllow)
 
 
 class TestPlanOriginRouting:
@@ -2989,7 +2981,7 @@ class TestExitPlanModeDeniedForTaskSessions:
         hook, _ = eng._build_can_use_tool(session, "chat1")
         result = await hook("ExitPlanMode", {}, None)
 
-        assert isinstance(result, PermissionResultDeny)
+        assert isinstance(result, PermissionDeny)
         assert "orchestrator" in result.message.lower()
 
 

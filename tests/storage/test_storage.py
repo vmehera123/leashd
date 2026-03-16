@@ -113,14 +113,14 @@ class TestSqliteSessionStore:
             await store.teardown()
 
     @pytest.mark.asyncio
-    async def test_claude_session_id_persists(self, tmp_path):
+    async def test_agent_resume_token_persists(self, tmp_path):
         store = SqliteSessionStore(tmp_path / "test.db")
         await store.setup()
         try:
-            session = _make_session(claude_session_id="claude-abc")
+            session = _make_session(agent_resume_token="claude-abc")
             await store.save(session)
             loaded = await store.load("u1", "c1")
-            assert loaded.claude_session_id == "claude-abc"
+            assert loaded.agent_resume_token == "claude-abc"
         finally:
             await store.teardown()
 
@@ -136,7 +136,7 @@ class TestSessionManagerWithStore:
     async def test_update_from_result_without_store(self):
         mgr = SessionManager()
         session = await mgr.get_or_create("u1", "c1", "/tmp")
-        await mgr.update_from_result(session, claude_session_id="s1", cost=0.5)
+        await mgr.update_from_result(session, agent_resume_token="s1", cost=0.5)
         assert session.message_count == 1
         assert session.total_cost == 0.5
 
@@ -242,7 +242,7 @@ class TestSqliteEdgeCases:
                 user_id="full-u1",
                 chat_id="full-c1",
                 working_directory="/tmp/full",
-                claude_session_id="claude-xyz",
+                agent_resume_token="claude-xyz",
                 message_count=42,
                 total_cost=9.99,
                 is_active=True,
@@ -252,7 +252,7 @@ class TestSqliteEdgeCases:
             loaded = await store.load("full-u1", "full-c1")
             assert loaded.session_id == "full-s1"
             assert loaded.working_directory == "/tmp/full"
-            assert loaded.claude_session_id == "claude-xyz"
+            assert loaded.agent_resume_token == "claude-xyz"
             assert loaded.message_count == 42
             assert loaded.total_cost == pytest.approx(9.99)
             assert loaded.is_active is True
@@ -537,7 +537,7 @@ class TestSessionManagerReset:
         mgr = SessionManager()
         session = await mgr.get_or_create("u1", "c1", "/tmp/project")
         original_id = session.session_id
-        session.claude_session_id = "claude-abc"
+        session.agent_resume_token = "claude-abc"
         session.message_count = 5
         session.total_cost = 1.23
         session.mode = "auto"
@@ -546,7 +546,7 @@ class TestSessionManagerReset:
 
         assert session.working_directory == "/tmp/project"
         assert session.session_id != original_id
-        assert session.claude_session_id is None
+        assert session.agent_resume_token is None
         assert session.message_count == 0
         assert session.total_cost == 0.0
         assert session.mode == "default"

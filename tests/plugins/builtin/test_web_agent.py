@@ -606,10 +606,10 @@ class TestWebAgentPlugin:
         assert session.browser_fresh is False
 
     @pytest.mark.asyncio
-    async def test_non_resume_clears_claude_session_id(
+    async def test_non_resume_clears_agent_resume_token(
         self, initialized_plugin, event_bus, session, gatekeeper
     ):
-        session.claude_session_id = "old-session-123"
+        session.agent_resume_token = "old-session-123"
         event = Event(
             name=COMMAND_WEB,
             data={
@@ -622,13 +622,13 @@ class TestWebAgentPlugin:
         )
         await event_bus.emit(event)
 
-        assert session.claude_session_id is None
+        assert session.agent_resume_token is None
 
     @pytest.mark.asyncio
-    async def test_resume_preserves_claude_session_id(
+    async def test_resume_preserves_agent_resume_token(
         self, initialized_plugin, event_bus, session, gatekeeper, tmp_path
     ):
-        session.claude_session_id = "old-session-123"
+        session.agent_resume_token = "old-session-123"
         leashd_dir = tmp_path / ".leashd"
         leashd_dir.mkdir()
         (leashd_dir / "web-session.md").write_text("Platform: LinkedIn")
@@ -645,7 +645,7 @@ class TestWebAgentPlugin:
         )
         await event_bus.emit(event)
 
-        assert session.claude_session_id == "old-session-123"
+        assert session.agent_resume_token == "old-session-123"
 
 
 class TestGatekeeperNegativeAutoApproval:

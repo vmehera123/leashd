@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.8.0] - 2026-03-14
+- **added**: Multi-runtime agent support — pluggable agent backends via `LEASHD_AGENT_RUNTIME` config, registry pattern with `get_agent()`/`register_agent()` API
+- **added**: Agent capabilities system — `AgentCapabilities` model declares what each runtime supports (tool gating, session resume, streaming, MCP)
+- **added**: Subprocess agent base class — `SubprocessAgent` for CLI-driven agents (stdin/stdout, SIGTERM cancellation, streaming output)
+- **added**: Codex CLI agent — `codex exec` integration with NDJSON output parsing, registered as `codex` runtime
+- **changed**: Permission types extracted to `leashd.agents.types` — `PermissionAllow`/`PermissionDeny` replace SDK-specific types in core modules, with conversion boundary in `ClaudeCodeAgent`
+- **changed**: Session field `claude_session_id` renamed to `agent_resume_token` — SQLite migration handles existing databases automatically
+- **added**: Test coverage for new agent modules — types, registry, subprocess agent, and Codex agent (37 new tests)
+- **fixed**: Noop tool-gating path now logs `tool_gating_disabled` event for audit visibility when subprocess agents bypass the safety pipeline
+
 ## [0.7.2] - 2026-03-13
 - **fixed**: `cd /path && uv run pytest` and similar compound commands no longer require approval — `cd` added to read-only-bash pattern so compound classifier treats it as safe
 

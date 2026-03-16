@@ -62,6 +62,7 @@ class LeashdConfig(BaseSettings):
     approved_directories: list[Path]
 
     # Agent settings
+    agent_runtime: str = "claude-code"
     max_turns: int = 150
     web_max_turns: int = 300
     test_max_turns: int = 200

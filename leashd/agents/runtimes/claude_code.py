@@ -26,8 +26,15 @@ from claude_agent_sdk import (
 # skip unknown message types instead of crashing on new SDK additions.
 from claude_agent_sdk._errors import MessageParseError
 from claude_agent_sdk._internal.message_parser import parse_message
+from claude_agent_sdk.types import (
+    PermissionResultAllow as SDKAllow,
+)
+from claude_agent_sdk.types import (
+    PermissionResultDeny as SDKDeny,
+)
 
 from leashd.agents.base import AgentResponse, BaseAgent, ToolActivity
+from leashd.agents.types import PermissionAllow, PermissionDeny
 from leashd.exceptions import AgentError
 
 if TYPE_CHECKING:
@@ -35,6 +42,7 @@ if TYPE_CHECKING:
 
     from claude_agent_sdk import Message
 
+    from leashd.agents.capabilities import AgentCapabilities
     from leashd.core.config import LeashdConfig
     from leashd.core.session import Session
 
@@ -238,9 +246,23 @@ class _SafeSDKClient(ClaudeSDKClient):
 
 class ClaudeCodeAgent(BaseAgent):
     def __init__(self, config: LeashdConfig) -> None:
+        from leashd.agents.capabilities import AgentCapabilities
+
         self._config = config
         self._active_clients: dict[str, ClaudeSDKClient] = {}
         self._stderr_buffers: dict[str, _StderrBuffer] = {}
+        self._capabilities = AgentCapabilities(
+            supports_tool_gating=True,
+            supports_session_resume=True,
+            supports_streaming=True,
+            supports_mcp=True,
+            instruction_path="CLAUDE.md",
+            stability="stable",
+        )
+
+    @property
+    def capabilities(self) -> AgentCapabilities:
+        return self._capabilities
 
     def update_config(self, config: LeashdConfig) -> None:
         self._config = config
@@ -256,6 +278,21 @@ class ClaudeCodeAgent(BaseAgent):
         | None = None,
         on_retry: Callable[[], Coroutine[Any, Any, None]] | None = None,
     ) -> AgentResponse:
+        if can_use_tool:
+            _original = can_use_tool
+
+            async def _sdk_can_use_tool(
+                tool_name: str, tool_input: dict[str, Any], context: Any
+            ) -> Any:
+                result = await _original(tool_name, tool_input, context)
+                if isinstance(result, PermissionAllow):
+                    return SDKAllow(updated_input=result.updated_input)
+                if isinstance(result, PermissionDeny):
+                    return SDKDeny(message=result.message)
+                return result
+
+            can_use_tool = _sdk_can_use_tool
+
         options = self._build_options(session, can_use_tool)
 
         logger.info(
@@ -263,7 +300,7 @@ class ClaudeCodeAgent(BaseAgent):
             session_id=session.session_id,
             prompt_length=len(prompt),
             mode=session.mode,
-            has_resume=session.claude_session_id is not None,
+            has_resume=session.agent_resume_token is not None,
         )
 
         try:
@@ -372,8 +409,8 @@ class ClaudeCodeAgent(BaseAgent):
                     session_id=session.session_id,
                     profile=resolved,
                 )
-        if session.claude_session_id:
-            opts.resume = session.claude_session_id
+        if session.agent_resume_token:
+            opts.resume = session.agent_resume_token
 
         local_servers = self._read_local_mcp_servers(session.working_directory)
         leashd_servers = self._config.mcp_servers
@@ -503,7 +540,7 @@ class ClaudeCodeAgent(BaseAgent):
                             elif isinstance(message, SystemMessage):
                                 sid = message.data.get("session_id")
                                 if sid and isinstance(sid, str):
-                                    session.claude_session_id = sid
+                                    session.agent_resume_token = sid
 
                             elif isinstance(message, ResultMessage):
                                 duration = int((time.monotonic() - start) * 1000)
@@ -514,7 +551,7 @@ class ClaudeCodeAgent(BaseAgent):
                                         session=session.session_id,
                                     )
                                     options.resume = None
-                                    session.claude_session_id = None
+                                    session.agent_resume_token = None
                                     break
 
                                 content = message.result or "\n".join(text_parts)
@@ -575,7 +612,7 @@ class ClaudeCodeAgent(BaseAgent):
                         stderr=stderr_buf.get()[:_ERROR_TRUNCATION_LENGTH] or None,
                     )
                     options.resume = None
-                    session.claude_session_id = None
+                    session.agent_resume_token = None
                     continue
 
                 if _is_retryable_error(str(exc)):
@@ -588,7 +625,7 @@ class ClaudeCodeAgent(BaseAgent):
                     )
                     last_error = AgentResponse(
                         content=str(exc),
-                        session_id=session.claude_session_id,
+                        session_id=session.agent_resume_token,
                         cost=0.0,
                         duration_ms=int((time.monotonic() - start) * 1000),
                         num_turns=0,

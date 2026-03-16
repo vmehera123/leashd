@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from leashd.agents.claude_code import ClaudeCodeAgent
+from leashd.agents.registry import get_agent
 from leashd.core.config import LeashdConfig, ensure_leashd_dir
 from leashd.core.engine import Engine, PathConfig
 from leashd.core.events import EventBus
@@ -236,7 +236,7 @@ def build_engine(
         message_store = SqliteSessionStore(resolved_storage)
 
     session_manager = SessionManager(store=session_store)
-    agent = ClaudeCodeAgent(config)
+    agent = get_agent(config.agent_runtime, config)
     event_bus = EventBus()
 
     # Safety components

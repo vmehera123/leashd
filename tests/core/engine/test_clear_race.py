@@ -73,7 +73,7 @@ class TestClearDuringExecution:
         # Session should be freshly reset, not corrupted by old agent result
         session = eng.session_manager.get("user1", "chat1")
         assert session is not None
-        assert session.claude_session_id is None
+        assert session.agent_resume_token is None
         assert session.message_count == 0
         assert session.total_cost == 0.0
 
@@ -106,7 +106,7 @@ class TestClearDuringExecution:
         session = eng.session_manager.get("user1", "chat1")
         assert session.session_id != pre_clear_id
         # The old agent's session_id ("old-agent-session-id") must NOT be persisted
-        assert session.claude_session_id is None
+        assert session.agent_resume_token is None
 
     @pytest.mark.asyncio
     async def test_interrupt_then_clear_then_new_message(

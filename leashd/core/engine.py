@@ -12,9 +12,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import structlog
-from claude_agent_sdk.types import PermissionResultDeny
 from pydantic import BaseModel, ConfigDict
 
+from leashd.agents.types import PermissionAllow, PermissionDeny
 from leashd.connectors.base import InlineButton
 from leashd.core.config import build_directory_names, ensure_leashd_dir
 from leashd.core.events import (
@@ -737,7 +737,7 @@ class Engine:
         if (
             self.config.auto_plan
             and session.mode == "auto"
-            and session.claude_session_id is None
+            and session.agent_resume_token is None
             and session.plan_origin is None
             and not _skip_auto_plan
         ):
@@ -766,7 +766,7 @@ class Engine:
         can_use_tool, tool_state = self._build_can_use_tool(
             session, chat_id, responder, task_description=text, deadline=deadline
         )
-        pre_exec_claude_id = session.claude_session_id
+        pre_exec_resume_token = session.agent_resume_token
 
         async def _handle_agent_retry() -> None:
             if responder:
@@ -818,7 +818,7 @@ class Engine:
                 self._interrupted_chats.discard(chat_id)
                 if responder:
                     await responder.deactivate()
-                session.claude_session_id = None
+                session.agent_resume_token = None
                 await self.session_manager.save(session)
                 if self.connector:
                     int_msg_id = await self.connector.send_message_with_id(
@@ -852,7 +852,7 @@ class Engine:
 
             await self.session_manager.update_from_result(
                 session,
-                claude_session_id=response.session_id,
+                agent_resume_token=response.session_id,
                 cost=response.cost,
             )
 
@@ -984,7 +984,7 @@ class Engine:
                         clear_context=review.clear_context,
                         target_mode=review.target_mode,
                     )
-                if review.behavior == "deny":
+                if isinstance(review, PermissionDeny):
                     return await self._execute_turn(
                         user_id, review.message, chat_id, _skip_auto_plan=True
                     )
@@ -996,7 +996,7 @@ class Engine:
                 self._interrupted_chats.discard(chat_id)
                 if responder:
                     await responder.deactivate()
-                session.claude_session_id = None
+                session.agent_resume_token = None
                 await self.session_manager.save(session)
                 return ""
             if tool_state.plan_adjustment_feedback:
@@ -1035,14 +1035,14 @@ class Engine:
             if self.interaction_coordinator:
                 self.interaction_coordinator.cancel_pending(chat_id)
             if (
-                session.claude_session_id
-                and session.claude_session_id == pre_exec_claude_id
+                session.agent_resume_token
+                and session.agent_resume_token == pre_exec_resume_token
             ):
-                session.claude_session_id = None
+                session.agent_resume_token = None
                 logger.info(
                     "stale_session_cleared_on_error",
                     session_id=session.session_id,
-                    stale_claude_id=pre_exec_claude_id,
+                    stale_resume_token=pre_exec_resume_token,
                 )
             await self.session_manager.save(session)
             error_msg = f"Error: {e}"
@@ -1064,7 +1064,7 @@ class Engine:
         deadline: AgentDeadline | None = None,
         on_retry: Any = None,
     ) -> AgentResponse:
-        pre_exec_claude_id = session.claude_session_id
+        pre_exec_resume_token = session.agent_resume_token
         if deadline is None:
             deadline = AgentDeadline(self.config.agent_timeout_seconds)
         agent_task = asyncio.create_task(
@@ -1097,25 +1097,25 @@ class Engine:
             )
             await self.agent.cancel(session.session_id)
             if (
-                session.claude_session_id
-                and session.claude_session_id != pre_exec_claude_id
+                session.agent_resume_token
+                and session.agent_resume_token != pre_exec_resume_token
             ):
                 await self.session_manager.update_from_result(
                     session,
-                    claude_session_id=session.claude_session_id,
+                    agent_resume_token=session.agent_resume_token,
                     cost=0.0,
                 )
                 logger.info(
                     "session_persisted_on_timeout",
                     session_id=session.session_id,
-                    claude_session_id=session.claude_session_id,
+                    agent_resume_token=session.agent_resume_token,
                 )
-            elif pre_exec_claude_id:
-                session.claude_session_id = None
+            elif pre_exec_resume_token:
+                session.agent_resume_token = None
                 logger.info(
                     "stale_session_cleared_on_timeout",
                     session_id=session.session_id,
-                    stale_claude_id=pre_exec_claude_id,
+                    stale_resume_token=pre_exec_resume_token,
                 )
             raise AgentError(
                 f"Agent timed out after {self.config.agent_timeout_seconds // 60} minutes. "
@@ -1336,8 +1336,8 @@ class Engine:
                 )
             )
             await self._cleanup_session(session, chat_id)
-            if session.claude_session_id:
-                session.claude_session_id = None
+            if session.agent_resume_token:
+                session.agent_resume_token = None
                 await self.session_manager.save(session)
             logger.info("all_work_stopped", user_id=user_id, chat_id=chat_id)
             return "All work stopped."
@@ -1789,7 +1789,7 @@ class Engine:
     ) -> str:
         logger.info("plan_mode_exit", chat_id=chat_id, trigger=trigger)
         if clear_context:
-            session.claude_session_id = None
+            session.agent_resume_token = None
         session.mode = "edit" if target_mode == "edit" else "default"
         session.plan_origin = None
         await self.session_manager.save(session)
@@ -1823,6 +1823,23 @@ class Engine:
     ) -> tuple[Any, _ToolCallbackState]:
         state = _ToolCallbackState()
 
+        caps = getattr(self.agent, "capabilities", None)
+        if caps and not caps.supports_tool_gating:
+            logger.info(
+                "tool_gating_disabled",
+                session_id=session.session_id,
+                agent_type=type(self.agent).__name__,
+            )
+
+            async def _noop_can_use_tool(
+                _tool_name: str,
+                _tool_input: dict[str, Any],
+                _context: Any,
+            ) -> PermissionAllow:
+                return PermissionAllow(updated_input=_tool_input)
+
+            return _noop_can_use_tool, state
+
         async def can_use_tool(
             tool_name: str,
             tool_input: dict[str, Any],
@@ -1849,24 +1866,24 @@ class Engine:
                     if tool_name == "Write":
                         state.plan_file_content = tool_input.get("content")
                 elif session.mode == "plan":
-                    return PermissionResultDeny(
+                    return PermissionDeny(
                         message="In plan mode — create a plan first, then call ExitPlanMode."
                     )
 
             if self.interaction_coordinator and tool_name == "ExitPlanMode":
                 if session.task_run_id is not None:
-                    return PermissionResultDeny(
+                    return PermissionDeny(
                         message="Task orchestrator manages phase transitions. "
                         "Do not call ExitPlanMode — finish your review and the "
                         "orchestrator will advance to the next phase."
                     )
                 if session.mode != "plan":
-                    return PermissionResultDeny(
+                    return PermissionDeny(
                         message="You are in implementation mode. Implement changes directly "
                         "using Edit and Write tools — do not call ExitPlanMode."
                     )
                 if state.plan_approved:
-                    return PermissionResultDeny(
+                    return PermissionDeny(
                         message="Plan already approved. Implement changes directly "
                         "using Edit and Write tools — do not call ExitPlanMode again."
                     )
@@ -1934,7 +1951,7 @@ class Engine:
                         await responder.delete_all_messages()
                         responder.reset()
                     if result.clear_context:
-                        session.claude_session_id = None
+                        session.agent_resume_token = None
                         state.clean_proceed = True
                     else:
                         state.proceed_in_context = True
@@ -1976,7 +1993,7 @@ class Engine:
                 return result
 
             if tool_name == "EnterPlanMode" and session.mode in ("auto", "edit"):
-                return PermissionResultDeny(
+                return PermissionDeny(
                     message="You are in accept-edits mode. Implement changes directly "
                     "— do not enter plan mode."
                 )

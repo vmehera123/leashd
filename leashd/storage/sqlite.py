@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     chat_id TEXT NOT NULL,
     session_id TEXT NOT NULL,
     working_directory TEXT NOT NULL,
-    claude_session_id TEXT,
+    agent_resume_token TEXT,
     created_at TEXT NOT NULL,
     last_used TEXT NOT NULL,
     total_cost REAL DEFAULT 0.0,
@@ -119,6 +119,12 @@ class SqliteSessionStore:
                 await self._db.execute(
                     "ALTER TABLE sessions ADD COLUMN task_run_id TEXT"
                 )
+            # Rename claude_session_id → agent_resume_token for existing DBs
+            if "claude_session_id" in existing and "agent_resume_token" not in existing:
+                await self._db.execute(
+                    "ALTER TABLE sessions "
+                    "RENAME COLUMN claude_session_id TO agent_resume_token"
+                )
             await self._db.commit()
             logger.info("sqlite_store_initialized", db_path=self._db_path)
         except Exception as e:
@@ -151,7 +157,7 @@ class SqliteSessionStore:
         await self._db.execute(
             """INSERT OR REPLACE INTO sessions
                (user_id, chat_id, session_id, working_directory,
-                claude_session_id, created_at, last_used,
+                agent_resume_token, created_at, last_used,
                 total_cost, message_count, is_active,
                 workspace_name, mode, mode_instruction, task_run_id)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -160,7 +166,7 @@ class SqliteSessionStore:
                 session.chat_id,
                 session.session_id,
                 session.working_directory,
-                session.claude_session_id,
+                session.agent_resume_token,
                 session.created_at.isoformat(),
                 session.last_used.isoformat(),
                 session.total_cost,
@@ -204,7 +210,7 @@ class SqliteSessionStore:
             user_id=row["user_id"],
             chat_id=row["chat_id"],
             working_directory=row["working_directory"],
-            claude_session_id=row["claude_session_id"],
+            agent_resume_token=row["agent_resume_token"],
             created_at=datetime.fromisoformat(row["created_at"]).replace(
                 tzinfo=timezone.utc
             ),

@@ -470,7 +470,7 @@ class WebAgentPlugin(LeashdPlugin):
         session.browser_backend = self._browser_backend
         session.browser_fresh = config.fresh
         if not config.resume:
-            session.claude_session_id = None
+            session.agent_resume_token = None
 
         playbook = None
         if config.recipe_name:

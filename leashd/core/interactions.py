@@ -7,9 +7,9 @@ import uuid
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import structlog
-from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny
 from pydantic import BaseModel, ConfigDict, Field
 
+from leashd.agents.types import PermissionAllow, PermissionDeny
 from leashd.core.events import INTERACTION_REQUESTED, INTERACTION_RESOLVED, Event
 
 if TYPE_CHECKING:
@@ -24,7 +24,7 @@ logger = structlog.get_logger()
 class PlanReviewDecision(BaseModel):
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
-    permission: PermissionResultAllow
+    permission: PermissionAllow
     clear_context: bool
     target_mode: Literal["edit", "default"]
 
@@ -65,10 +65,10 @@ class InteractionCoordinator:
         self,
         chat_id: str,
         tool_input: dict[str, Any],
-    ) -> PermissionResultAllow | PermissionResultDeny:
+    ) -> PermissionAllow | PermissionDeny:
         questions = tool_input.get("questions", [])
         if not questions:
-            return PermissionResultAllow(updated_input=tool_input)
+            return PermissionAllow(updated_input=tool_input)
 
         logger.info("question_started", chat_id=chat_id, question_count=len(questions))
 
@@ -125,14 +125,14 @@ class InteractionCoordinator:
                         chat_id=chat_id,
                         interaction_id=interaction_id,
                     )
-                    return PermissionResultDeny(message="No answer received")
+                    return PermissionDeny(message="No answer received")
             except TimeoutError:
                 logger.warning(
                     "interaction_timeout",
                     interaction_id=interaction_id,
                     kind="question",
                 )
-                return PermissionResultDeny(message="No response received")
+                return PermissionDeny(message="No response received")
             finally:
                 self.pending.pop(interaction_id, None)
                 if self._chat_index.get(chat_id) == interaction_id:
@@ -140,7 +140,7 @@ class InteractionCoordinator:
 
         logger.info("question_completed", chat_id=chat_id, answer_count=len(answers))
         updated = {**tool_input, "answers": answers}
-        return PermissionResultAllow(updated_input=updated)
+        return PermissionAllow(updated_input=updated)
 
     async def handle_plan_review(
         self,
@@ -148,7 +148,7 @@ class InteractionCoordinator:
         tool_input: dict[str, Any],
         *,
         plan_content: str | None = None,
-    ) -> PermissionResultDeny | PlanReviewDecision:
+    ) -> PermissionDeny | PlanReviewDecision:
         interaction_id = str(uuid.uuid4())
 
         pending = PendingInteraction(
@@ -188,7 +188,7 @@ class InteractionCoordinator:
                 interaction_id=interaction_id,
                 kind="plan_review",
             )
-            return PermissionResultDeny(message="Plan review timed out")
+            return PermissionDeny(message="Plan review timed out")
         finally:
             self.pending.pop(interaction_id, None)
             if self._chat_index.get(chat_id) == interaction_id:
@@ -199,7 +199,7 @@ class InteractionCoordinator:
         if decision == "edit":
             await self._resolve_and_emit(chat_id, interaction_id, "edit")
             return PlanReviewDecision(
-                permission=PermissionResultAllow(updated_input=tool_input),
+                permission=PermissionAllow(updated_input=tool_input),
                 clear_context=False,
                 target_mode="edit",
             )
@@ -207,7 +207,7 @@ class InteractionCoordinator:
         if decision == "clean_edit":
             await self._resolve_and_emit(chat_id, interaction_id, "clean_edit")
             return PlanReviewDecision(
-                permission=PermissionResultAllow(updated_input=tool_input),
+                permission=PermissionAllow(updated_input=tool_input),
                 clear_context=True,
                 target_mode="edit",
             )
@@ -215,7 +215,7 @@ class InteractionCoordinator:
         if decision == "default":
             await self._resolve_and_emit(chat_id, interaction_id, "default")
             return PlanReviewDecision(
-                permission=PermissionResultAllow(updated_input=tool_input),
+                permission=PermissionAllow(updated_input=tool_input),
                 clear_context=False,
                 target_mode="default",
             )
@@ -225,10 +225,10 @@ class InteractionCoordinator:
             await self._resolve_and_emit(
                 chat_id, interaction_id, "adjust", feedback=feedback
             )
-            return PermissionResultDeny(message=feedback)
+            return PermissionDeny(message=feedback)
 
         await self._resolve_and_emit(chat_id, interaction_id, "cancelled")
-        return PermissionResultDeny(message="Plan review cancelled")
+        return PermissionDeny(message="Plan review cancelled")
 
     async def handle_plan_review_auto(
         self,
@@ -238,10 +238,10 @@ class InteractionCoordinator:
         plan_content: str,
         task_description: str,
         session_id: str,
-    ) -> PermissionResultDeny | PlanReviewDecision:
+    ) -> PermissionDeny | PlanReviewDecision:
         """AI-powered plan review — delegates to AutoPlanReviewer instead of Telegram."""
         if not self._auto_plan_reviewer:
-            return PermissionResultDeny(message="AutoPlanReviewer not configured")
+            return PermissionDeny(message="AutoPlanReviewer not configured")
 
         logger.info(
             "auto_plan_review_started",
@@ -264,7 +264,7 @@ class InteractionCoordinator:
                 chat_id=chat_id,
             )
             return PlanReviewDecision(
-                permission=PermissionResultAllow(updated_input=tool_input),
+                permission=PermissionAllow(updated_input=tool_input),
                 clear_context=True,
                 target_mode="edit",
             )
@@ -275,9 +275,7 @@ class InteractionCoordinator:
             chat_id=chat_id,
             feedback=result.feedback,
         )
-        return PermissionResultDeny(
-            message=result.feedback or "Please revise the plan."
-        )
+        return PermissionDeny(message=result.feedback or "Please revise the plan.")
 
     async def resolve_option(self, interaction_id: str, answer: str) -> bool:
         pending = self.pending.get(interaction_id)

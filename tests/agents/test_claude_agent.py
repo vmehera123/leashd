@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from leashd.agents.base import AgentResponse, ToolActivity
-from leashd.agents.claude_code import (
+from leashd.agents.runtimes.claude_code import (
     _AUTO_MODE_INSTRUCTION,
     _PLAN_MODE_INSTRUCTION,
     _STDERR_MAX_LINES,
@@ -120,7 +120,7 @@ def _patch_sdk_client(messages):
     mock_ctx.__aexit__ = AsyncMock(return_value=False)
 
     return patch(
-        "leashd.agents.claude_code._SafeSDKClient",
+        "leashd.agents.runtimes.claude_code._SafeSDKClient",
         return_value=mock_ctx,
     ), mock_client
 
@@ -150,7 +150,7 @@ class TestClaudeCodeAgent:
         assert opts.resume is None
 
     def test_build_options_with_resume(self, agent, session):
-        session.claude_session_id = "existing-session-id"
+        session.agent_resume_token = "existing-session-id"
         opts = agent._build_options(session, can_use_tool=None)
         assert opts.resume == "existing-session-id"
 
@@ -328,8 +328,8 @@ class TestClaudeCodeAgent:
         opts = agent._build_options(session, can_use_tool=None)
         assert opts.disallowed_tools == ["Bash"]
 
-    def test_no_resume_without_claude_session_id(self, agent, session):
-        session.claude_session_id = None
+    def test_no_resume_without_agent_resume_token(self, agent, session):
+        session.agent_resume_token = None
         opts = agent._build_options(session, can_use_tool=None)
         assert opts.resume is None
 
@@ -1177,7 +1177,7 @@ class TestRunWithResume:
 
     @pytest.mark.asyncio
     async def test_zero_turns_retry(self, agent, session):
-        session.claude_session_id = "stale-session"
+        session.agent_resume_token = "stale-session"
         opts = agent._build_options(session, None)
         assert opts.resume == "stale-session"
 
@@ -1207,17 +1207,19 @@ class TestRunWithResume:
             async def __aexit__(self, *args):
                 return False
 
-        with patch("leashd.agents.claude_code._SafeSDKClient", return_value=FakeCtx()):
+        with patch(
+            "leashd.agents.runtimes.claude_code._SafeSDKClient", return_value=FakeCtx()
+        ):
             resp = await agent._run_with_resume("prompt", session, opts)
 
         assert resp.content == "Retried OK"
         assert call_count == 2
-        assert session.claude_session_id is None
+        assert session.agent_resume_token is None
 
     @pytest.mark.asyncio
     async def test_resume_crash_retries_fresh(self, agent, session):
         """When CLI crashes during resume, clear resume and retry fresh."""
-        session.claude_session_id = "stale-session"
+        session.agent_resume_token = "stale-session"
         opts = agent._build_options(session, None)
         assert opts.resume == "stale-session"
 
@@ -1241,13 +1243,15 @@ class TestRunWithResume:
             async def __aexit__(self, *args):
                 return False
 
-        with patch("leashd.agents.claude_code._SafeSDKClient", return_value=FakeCtx()):
+        with patch(
+            "leashd.agents.runtimes.claude_code._SafeSDKClient", return_value=FakeCtx()
+        ):
             resp = await agent._run_with_resume("prompt", session, opts)
 
         assert resp.content == "Fresh OK"
         assert call_count == 2
         assert opts.resume is None
-        assert session.claude_session_id is None
+        assert session.agent_resume_token is None
 
     @pytest.mark.asyncio
     async def test_exhausted_attempts(self, agent, session):
@@ -1262,7 +1266,9 @@ class TestRunWithResume:
             async def __aexit__(self, *args):
                 return False
 
-        with patch("leashd.agents.claude_code._SafeSDKClient", return_value=FakeCtx()):
+        with patch(
+            "leashd.agents.runtimes.claude_code._SafeSDKClient", return_value=FakeCtx()
+        ):
             resp = await agent._run_with_resume(
                 "prompt", session, agent._build_options(session, None)
             )
@@ -1291,7 +1297,8 @@ class TestRunWithResume:
                 return False
 
         with patch(
-            "leashd.agents.claude_code._SafeSDKClient", return_value=TrackingCtx()
+            "leashd.agents.runtimes.claude_code._SafeSDKClient",
+            return_value=TrackingCtx(),
         ):
             await agent._run_with_resume(
                 "prompt", session, agent._build_options(session, None)
@@ -1310,7 +1317,10 @@ class TestRunWithResume:
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
 
         with (
-            patch("leashd.agents.claude_code._SafeSDKClient", return_value=mock_ctx),
+            patch(
+                "leashd.agents.runtimes.claude_code._SafeSDKClient",
+                return_value=mock_ctx,
+            ),
             pytest.raises(RuntimeError, match="SDK crash"),
         ):
             await agent._run_with_resume(
@@ -1488,7 +1498,7 @@ class TestSafeSDKClient:
 
     @pytest.mark.asyncio
     async def test_skips_unknown_message_types(self):
-        from leashd.agents.claude_code import _SafeSDKClient
+        from leashd.agents.runtimes.claude_code import _SafeSDKClient
 
         raw_messages = [
             {"type": "rate_limit_event", "data": {}},
@@ -1516,7 +1526,7 @@ class TestSafeSDKClient:
 
     @pytest.mark.asyncio
     async def test_valid_messages_pass_through(self):
-        from leashd.agents.claude_code import _SafeSDKClient
+        from leashd.agents.runtimes.claude_code import _SafeSDKClient
 
         raw_messages = [
             {
@@ -1549,7 +1559,7 @@ class TestSafeSDKClient:
 
     @pytest.mark.asyncio
     async def test_logs_skipped_messages(self):
-        from leashd.agents.claude_code import _SafeSDKClient
+        from leashd.agents.runtimes.claude_code import _SafeSDKClient
 
         raw_messages = [{"type": "rate_limit_event", "data": {}}]
 
@@ -1559,7 +1569,7 @@ class TestSafeSDKClient:
             return_value=AsyncIterHelper(raw_messages)
         )
 
-        with patch("leashd.agents.claude_code.logger") as mock_logger:
+        with patch("leashd.agents.runtimes.claude_code.logger") as mock_logger:
             _ = [msg async for msg in client.receive_messages()]
             mock_logger.debug.assert_called_once_with(
                 "skipping_unknown_sdk_message",
@@ -1568,7 +1578,7 @@ class TestSafeSDKClient:
 
     @pytest.mark.asyncio
     async def test_multiple_unknown_types_all_skipped(self):
-        from leashd.agents.claude_code import _SafeSDKClient
+        from leashd.agents.runtimes.claude_code import _SafeSDKClient
 
         raw_messages = [
             {"type": "rate_limit_event", "data": {}},
@@ -1588,7 +1598,7 @@ class TestSafeSDKClient:
     @pytest.mark.asyncio
     async def test_dict_without_type_key_skipped(self):
         """A raw dict missing the 'type' key should be skipped gracefully."""
-        from leashd.agents.claude_code import _SafeSDKClient
+        from leashd.agents.runtimes.claude_code import _SafeSDKClient
 
         raw_messages = [
             {"data": "no type key here"},
@@ -1617,7 +1627,7 @@ class TestSafeSDKClient:
     @pytest.mark.asyncio
     async def test_empty_dict_skipped(self):
         """An empty dict should be skipped without crashing."""
-        from leashd.agents.claude_code import _SafeSDKClient
+        from leashd.agents.runtimes.claude_code import _SafeSDKClient
 
         raw_messages = [{}]
 
@@ -1922,7 +1932,10 @@ class TestRetryableApiErrors:
                 return False
 
         with (
-            patch("leashd.agents.claude_code._SafeSDKClient", return_value=FakeCtx()),
+            patch(
+                "leashd.agents.runtimes.claude_code._SafeSDKClient",
+                return_value=FakeCtx(),
+            ),
             patch("asyncio.sleep", new_callable=AsyncMock),
         ):
             resp = await agent.execute("hello", session)
@@ -1956,7 +1969,9 @@ class TestRetryableApiErrors:
             async def __aexit__(self, *args):
                 return False
 
-        with patch("leashd.agents.claude_code._SafeSDKClient", return_value=FakeCtx()):
+        with patch(
+            "leashd.agents.runtimes.claude_code._SafeSDKClient", return_value=FakeCtx()
+        ):
             resp = await agent.execute("hello", session)
 
         assert resp.content == "authentication_error: invalid API key"
@@ -1987,7 +2002,10 @@ class TestRetryableApiErrors:
                 return False
 
         with (
-            patch("leashd.agents.claude_code._SafeSDKClient", return_value=FakeCtx()),
+            patch(
+                "leashd.agents.runtimes.claude_code._SafeSDKClient",
+                return_value=FakeCtx(),
+            ),
             patch("asyncio.sleep", new_callable=AsyncMock),
         ):
             resp = await agent.execute("hello", session)
@@ -2026,7 +2044,10 @@ class TestExponentialBackoff:
             sleep_delays.append(delay)
 
         with (
-            patch("leashd.agents.claude_code._SafeSDKClient", return_value=FakeCtx()),
+            patch(
+                "leashd.agents.runtimes.claude_code._SafeSDKClient",
+                return_value=FakeCtx(),
+            ),
             patch("asyncio.sleep", side_effect=capture_sleep),
         ):
             await agent._run_with_resume(
@@ -2071,7 +2092,10 @@ class TestBufferOverflowRetry:
                 return False
 
         with (
-            patch("leashd.agents.claude_code._SafeSDKClient", return_value=FakeCtx()),
+            patch(
+                "leashd.agents.runtimes.claude_code._SafeSDKClient",
+                return_value=FakeCtx(),
+            ),
             patch("asyncio.sleep", new_callable=AsyncMock),
         ):
             resp = await agent.execute("hello", session)
@@ -2102,7 +2126,10 @@ class TestBufferOverflowRetry:
                 return False
 
         with (
-            patch("leashd.agents.claude_code._SafeSDKClient", return_value=FakeCtx()),
+            patch(
+                "leashd.agents.runtimes.claude_code._SafeSDKClient",
+                return_value=FakeCtx(),
+            ),
             patch("asyncio.sleep", new_callable=AsyncMock),
         ):
             resp = await agent.execute("hello", session)
@@ -2150,7 +2177,7 @@ class TestFriendlyErrors:
 class TestSystemMessageSessionCapture:
     @pytest.mark.asyncio
     async def test_system_message_sets_session_id(self, agent, session):
-        """SystemMessage with session_id in data eagerly sets session.claude_session_id."""
+        """SystemMessage with session_id in data eagerly sets session.agent_resume_token."""
         messages = [
             _make_system_message(subtype="init", data={"session_id": "sdk-early-id"}),
             _make_assistant_message([_make_text_block("hi")]),
@@ -2159,12 +2186,12 @@ class TestSystemMessageSessionCapture:
         ctx, _ = _patch_sdk_client(messages)
         with ctx:
             await agent.execute("hello", session)
-        assert session.claude_session_id == "sdk-early-id"
+        assert session.agent_resume_token == "sdk-early-id"
 
     @pytest.mark.asyncio
     async def test_system_message_without_session_id_no_change(self, agent, session):
-        """SystemMessage without session_id leaves session.claude_session_id unchanged."""
-        session.claude_session_id = None
+        """SystemMessage without session_id leaves session.agent_resume_token unchanged."""
+        session.agent_resume_token = None
         messages = [
             _make_system_message(subtype="init", data={"version": "1.0"}),
             _make_assistant_message([_make_text_block("hi")]),
@@ -2174,7 +2201,7 @@ class TestSystemMessageSessionCapture:
         with ctx:
             await agent.execute("hello", session)
         # session_id comes from ResultMessage, not SystemMessage
-        assert session.claude_session_id is None
+        assert session.agent_resume_token is None
 
 
 class TestStderrBuffer:
@@ -2240,7 +2267,7 @@ class TestStderrCapture:
             raise RuntimeError("boom")
 
         ctx = patch(
-            "leashd.agents.claude_code._SafeSDKClient",
+            "leashd.agents.runtimes.claude_code._SafeSDKClient",
             side_effect=_raise_on_enter,
         )
         with ctx, pytest.raises(AgentError):
@@ -2271,7 +2298,7 @@ class TestStderrCapture:
                 raise RuntimeError("api_error: overloaded")
 
         with (
-            patch("leashd.agents.claude_code._SafeSDKClient", FakeClient),
+            patch("leashd.agents.runtimes.claude_code._SafeSDKClient", FakeClient),
             patch("asyncio.sleep", new_callable=AsyncMock),
         ):
             result = await agent.execute("hello", session)

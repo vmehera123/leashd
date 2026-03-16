@@ -256,15 +256,14 @@ class TestPlanReviewHandling:
 
     @pytest.mark.asyncio
     async def test_plan_review_times_out(self, mock_connector, config):
-        from claude_agent_sdk.types import PermissionResultDeny
-
+        from leashd.agents.types import PermissionDeny
         from leashd.core.interactions import InteractionCoordinator
 
         config.interaction_timeout_seconds = 0.1
         coord = InteractionCoordinator(mock_connector, config)
 
         result = await coord.handle_plan_review("chat1", {})
-        assert isinstance(result, PermissionResultDeny)
+        assert isinstance(result, PermissionDeny)
         assert "timed out" in result.message
 
     @pytest.mark.asyncio
