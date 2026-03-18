@@ -268,7 +268,14 @@ class CodexAgent:
         on_tool_activity: Callable[[ToolActivity | None], Coroutine[Any, Any, None]]
         | None = None,
         on_retry: Callable[[], Coroutine[Any, Any, None]] | None = None,
+        attachments: list[Any] | None = None,
     ) -> AgentResponse:
+        if attachments:
+            logger.warning(
+                "codex_attachments_not_supported",
+                session_id=session.session_id,
+                attachment_count=len(attachments),
+            )
         self._write_instructions(session)
 
         logger.info(

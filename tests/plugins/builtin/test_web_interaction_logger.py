@@ -53,7 +53,6 @@ def _interaction_event(chat_id: str, question: str, answer: str) -> Event:
 
 
 class TestWebInteractionLogger:
-    @pytest.mark.asyncio
     async def test_checkpoint_written_after_interaction(
         self, plugin, event_bus, tmp_path
     ):
@@ -68,14 +67,12 @@ class TestWebInteractionLogger:
         assert data["comments_drafted"][0]["approved_text"] == "Looks good"
         assert data["comments_drafted"][0]["status"] == "approved"
 
-    @pytest.mark.asyncio
     async def test_ignores_non_web_interactions(self, plugin, event_bus, tmp_path):
         # No WEB_STARTED emitted — interaction should be ignored
         await event_bus.emit(_interaction_event("c1", "question", "answer"))
         cp_path = tmp_path / ".leashd" / "web-checkpoint.json"
         assert not cp_path.exists()
 
-    @pytest.mark.asyncio
     async def test_checkpoint_accumulates(self, plugin, event_bus, tmp_path):
         await event_bus.emit(_web_started_event("c1", str(tmp_path)))
         await event_bus.emit(_interaction_event("c1", "Draft 1", "Approve"))
@@ -85,7 +82,6 @@ class TestWebInteractionLogger:
         data = json.loads(cp_path.read_text())
         assert len(data["comments_drafted"]) == 2
 
-    @pytest.mark.asyncio
     async def test_skip_answer_marks_rejected(self, plugin, event_bus, tmp_path):
         await event_bus.emit(_web_started_event("c1", str(tmp_path)))
         await event_bus.emit(_interaction_event("c1", "Draft", "skip"))
@@ -94,7 +90,6 @@ class TestWebInteractionLogger:
         assert data["comments_drafted"][0]["status"] == "rejected"
         assert data["comments_drafted"][0]["approved_text"] is None
 
-    @pytest.mark.asyncio
     async def test_ignores_plan_review_interactions(self, plugin, event_bus, tmp_path):
         await event_bus.emit(_web_started_event("c1", str(tmp_path)))
         event = Event(
@@ -110,7 +105,6 @@ class TestWebInteractionLogger:
         cp_path = tmp_path / ".leashd" / "web-checkpoint.json"
         assert not cp_path.exists()
 
-    @pytest.mark.asyncio
     async def test_missing_working_directory_ignored(self, plugin, event_bus, tmp_path):
         event = Event(
             name=WEB_STARTED,
@@ -129,7 +123,6 @@ class TestWebInteractionLogger:
         cp_path = tmp_path / ".leashd" / "web-checkpoint.json"
         assert not cp_path.exists()
 
-    @pytest.mark.asyncio
     async def test_missing_question_or_answer_ignored(
         self, plugin, event_bus, tmp_path
     ):
@@ -166,7 +159,6 @@ class TestWebInteractionLogger:
         cp_path = tmp_path / ".leashd" / "web-checkpoint.json"
         assert not cp_path.exists()
 
-    @pytest.mark.asyncio
     async def test_stop_clears_sessions(self, plugin, event_bus, tmp_path):
         await event_bus.emit(_web_started_event("c1", str(tmp_path)))
         assert len(plugin._sessions) == 1
@@ -174,7 +166,6 @@ class TestWebInteractionLogger:
         await plugin.stop()
         assert len(plugin._sessions) == 0
 
-    @pytest.mark.asyncio
     async def test_existing_fields_preserved(self, plugin, event_bus, tmp_path):
         """Existing checkpoint fields like platform, auth_status, comment_phase must not be clobbered."""
         from leashd.plugins.builtin.web_checkpoint import (

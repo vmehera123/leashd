@@ -168,6 +168,10 @@ The system follows a three-layer safety pipeline: **Sandbox → Policy → Appro
 
 **Connector protocol** (`connectors/base.py`): Abstract interface for I/O transports (Telegram, Slack, etc.). Handles message delivery, typing indicators, approval requests, and file sending.
 
+**WebUI connector** (`connectors/web.py` + `web/`): Browser-based interface via FastAPI + WebSocket. `WebConnector` implements `BaseConnector`, delegates to `WebSocketHandler` for real-time communication. Auth uses API key with constant-time comparison (`web/auth.py`) and per-IP rate limiting (5 failures → 60s lockout). WebSocket protocol uses typed Pydantic models (`web/models.py`): `ClientMessage` (auth, message, approval/interaction/interrupt responses, ping) and `ServerMessage` (auth_ok, message, stream_token, approval_request, question, etc.). REST routes (`web/routes.py`) provide `/api/health`, `/api/status`, `/api/auth`, `/api/history`. `create_app()` (`web/app.py`) assembles the FastAPI instance with CORS middleware and optional static file serving from `leashd/data/webui/`. Sessions use `chat_id="web:{uuid}"`. Config: `LEASHD_WEB_ENABLED`, `LEASHD_WEB_HOST`, `LEASHD_WEB_PORT`, `LEASHD_WEB_API_KEY`, `LEASHD_WEB_CORS_ORIGINS`.
+
+**MultiConnector** (`connectors/multi.py`): Adapter that wraps multiple `BaseConnector` instances and routes outbound messages by `chat_id`. Routes are registered dynamically (WebSocket connect/disconnect callbacks). Fallback: prefix-based detection, then first connector. All `set_*_handler()` calls propagate to every child. `start()`/`stop()` use `asyncio.gather()` for concurrent lifecycle. Enables simultaneous Telegram + WebUI operation.
+
 **Policies** (`policies/`): Five built-in YAML policies — `default.yaml` (balanced), `strict.yaml` (maximum restrictions, shorter timeout), `permissive.yaml` (maximum freedom for trusted environments), `dev-tools.yaml` (overlay that auto-allows common dev commands like package managers, linters, test runners — meant to be combined with other policies), `autonomous.yaml` (purpose-built for autonomous mode — hard blocks on dangerous operations, auto-allows dev tools and file writes, AI approval for git push and network operations). All deny credential file access and destructive patterns.
 
 **Configuration** (`core/config.py` + `config_store.py`): `LeashdConfig` uses pydantic-settings, loaded from environment variables prefixed with `LEASHD_`. `config_store.py` manages the persistent `~/.leashd/config.yaml` and bridges it to env vars via `inject_global_config_as_env()`. Layer order: `~/.leashd/config.yaml` → `.env` → environment variables (highest priority). Required: `LEASHD_APPROVED_DIRECTORIES`. `build_directory_names()` derives short names from basenames for the `/dir` command.
@@ -211,15 +215,14 @@ leashd integrates with Playwright MCP for browser automation. The `.mcp.json` at
 
 ## Logging & Observability
 
-leashd produces three data surfaces per project, all under `{project}/.leashd/`:
+leashd produces three data surfaces. App logs and audit are per-project under `{project}/.leashd/`; message and session stores are global:
 
 | Surface | Path | Format | Purpose |
 |---------|------|--------|---------|
-| App logs | `logs/app.log` | JSON lines (rotating, 10 MB × 5 backups) | Structured application events from structlog |
-| Audit log | `audit.jsonl` | JSON lines (append-only) | Tool-gating decisions, approvals, security violations |
-| Message store | `messages.db` | SQLite | Conversation history (user/assistant messages, cost, duration) |
-
-Session metadata lives in a separate fixed-location store at `{leashd_root}/.leashd/sessions.db`.
+| App logs | `{project}/.leashd/logs/app.log` | JSON lines (rotating, 10 MB × 5 backups) | Structured application events from structlog |
+| Audit log | `{project}/.leashd/audit.jsonl` | JSON lines (append-only) | Tool-gating decisions, approvals, security violations |
+| Message store | `~/.leashd/messages.db` | SQLite | Conversation history (user/assistant messages, cost, duration) |
+| Session store | `~/.leashd/sessions.db` | SQLite | Session metadata (user, chat, working directory, resume token) |
 
 **Context variable auto-propagation** (`core/engine.py`): The engine binds `request_id`, `chat_id`, and `session_id` to structlog contextvars at the start of each turn. These fields automatically appear in every log entry during that turn without explicit passing. `request_id` is ephemeral (8-char hex, fresh per turn); `session_id` persists across the conversation.
 

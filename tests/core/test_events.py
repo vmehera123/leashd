@@ -13,7 +13,6 @@ def bus():
 
 
 class TestEventBus:
-    @pytest.mark.asyncio
     async def test_emit_calls_subscribed_handler(self, bus):
         received = []
 
@@ -26,7 +25,6 @@ class TestEventBus:
         assert len(received) == 1
         assert received[0].data["key"] == "value"
 
-    @pytest.mark.asyncio
     async def test_emit_ignores_unsubscribed_events(self, bus):
         received = []
 
@@ -38,7 +36,6 @@ class TestEventBus:
 
         assert len(received) == 0
 
-    @pytest.mark.asyncio
     async def test_multiple_handlers(self, bus):
         calls = []
 
@@ -54,7 +51,6 @@ class TestEventBus:
 
         assert calls == ["h1", "h2"]
 
-    @pytest.mark.asyncio
     async def test_unsubscribe(self, bus):
         received = []
 
@@ -67,7 +63,6 @@ class TestEventBus:
 
         assert len(received) == 0
 
-    @pytest.mark.asyncio
     async def test_handler_error_does_not_break_pipeline(self, bus):
         results = []
 
@@ -83,12 +78,10 @@ class TestEventBus:
 
         assert results == ["ok"]
 
-    @pytest.mark.asyncio
     async def test_emit_no_handlers(self, bus):
         # Should not raise
         await bus.emit(Event(name="nobody_listening"))
 
-    @pytest.mark.asyncio
     async def test_unsubscribe_nonexistent_handler(self, bus):
         async def handler(event):
             pass
@@ -100,7 +93,6 @@ class TestEventBus:
         event = Event(name="x")
         assert event.data == {}
 
-    @pytest.mark.asyncio
     async def test_duplicate_handler_called_twice(self, bus):
         count = []
 
@@ -112,7 +104,6 @@ class TestEventBus:
         await bus.emit(Event(name="test"))
         assert len(count) == 2
 
-    @pytest.mark.asyncio
     async def test_all_handlers_fail_no_propagation(self, bus):
         async def bad1(event):
             raise RuntimeError("fail1")
@@ -125,7 +116,6 @@ class TestEventBus:
         # Should not raise
         await bus.emit(Event(name="test"))
 
-    @pytest.mark.asyncio
     async def test_handler_on_multiple_events(self, bus):
         received = []
 
@@ -142,7 +132,6 @@ class TestEventBus:
 class TestEventBusRobustness:
     """Robustness and edge case tests."""
 
-    @pytest.mark.asyncio
     async def test_unsubscribe_during_emit_is_safe(self, bus):
         """Unsubscribing a handler during emit doesn't crash."""
         calls = []
@@ -161,7 +150,6 @@ class TestEventBusRobustness:
         await bus.emit(Event(name="test"))
         assert "h1" in calls
 
-    @pytest.mark.asyncio
     async def test_100_handlers_all_called(self, bus):
         count = []
 
@@ -173,7 +161,6 @@ class TestEventBusRobustness:
         await bus.emit(Event(name="mass"))
         assert len(count) == 100
 
-    @pytest.mark.asyncio
     async def test_subscribe_during_emit_is_safe(self, bus):
         """Subscribing a new handler during emit must not crash.
 

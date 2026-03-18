@@ -109,6 +109,39 @@ If a connector implements `send_message_with_id()` to return a message ID (not `
 
 If `send_message_with_id()` returns `None`, streaming is disabled and the full response is sent as a single message via `send_message()`.
 
+## WebUI Connector
+
+`WebConnector` (`connectors/web.py`) implements `BaseConnector` using a FastAPI + WebSocket server. It provides full feature parity with the Telegram connector: streaming, approvals, questions, plan reviews, interrupts, tool activity, and task updates.
+
+### Architecture
+
+```
+Browser  ──WebSocket──▶  WebSocketHandler  ──▶  WebConnector  ──▶  Engine
+                              │
+Browser  ──REST/HTTP──▶  FastAPI routes
+```
+
+- **`WebSocketHandler`** (`web/ws_handler.py`) manages per-connection state and auth handshake
+- **`WebConnector`** wraps the handler and exposes it as a `BaseConnector`
+- **REST routes** (`web/routes.py`) provide `/api/health`, `/api/status`, `/api/auth`, `/api/history`
+
+### Auth Handshake
+
+1. Client opens WebSocket to `/ws`
+2. Client sends `{ type: "auth", payload: { api_key, session_id? } }`
+3. Server validates key with constant-time comparison + per-IP rate limiting
+4. Server responds with `auth_ok` (assigns `chat_id = "web:{uuid}"`) or `auth_error`
+
+### Session Management
+
+WebUI sessions use `chat_id = "web:{session_id}"` to distinguish them from Telegram sessions. The `session_id` is generated server-side on first connection and reused on reconnection (client sends it back in the auth payload).
+
+### MultiConnector
+
+When both Telegram and WebUI are enabled, `MultiConnector` wraps both and routes outbound messages by `chat_id` prefix. WebSocket connect/disconnect callbacks dynamically register/unregister routes. Inbound handlers (`set_message_handler`, etc.) propagate to all child connectors.
+
+See [WebUI](webui.md) for the full user guide.
+
 ## Building a Connector
 
 ### Step 1: Implement the ABC

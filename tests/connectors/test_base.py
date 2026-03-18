@@ -144,58 +144,49 @@ class TestBaseConnectorDefaults:
     def conn(self):
         return _PartialConnector()
 
-    @pytest.mark.asyncio
     async def test_send_message_with_id_returns_none(self, conn):
         result = await conn.send_message_with_id("123", "text")
         assert result is None
 
-    @pytest.mark.asyncio
     async def test_edit_message_is_noop(self, conn):
         await conn.edit_message("123", "456", "new text")
 
-    @pytest.mark.asyncio
     async def test_delete_message_is_noop(self, conn):
         await conn.delete_message("123", "456")
 
     def test_schedule_message_cleanup_is_noop(self, conn):
         conn.schedule_message_cleanup("123", "456")
 
-    @pytest.mark.asyncio
     async def test_send_question_is_noop(self, conn):
         await conn.send_question("123", "int-1", "Question?", "Header", [])
 
-    @pytest.mark.asyncio
     async def test_send_activity_returns_none(self, conn):
         result = await conn.send_activity("123", "Bash", "ls")
         assert result is None
 
-    @pytest.mark.asyncio
     async def test_clear_activity_is_noop(self, conn):
         await conn.clear_activity("123")
 
-    @pytest.mark.asyncio
+    async def test_close_agent_group_is_noop(self, conn):
+        await conn.close_agent_group("123")
+
     async def test_send_plan_messages_returns_empty_list(self, conn):
         result = await conn.send_plan_messages("123", "plan text")
         assert result == []
 
-    @pytest.mark.asyncio
     async def test_delete_messages_is_noop(self, conn):
         await conn.delete_messages("123", ["1", "2", "3"])
 
-    @pytest.mark.asyncio
     async def test_clear_plan_messages_is_noop(self, conn):
         await conn.clear_plan_messages("123")
 
-    @pytest.mark.asyncio
     async def test_clear_question_message_is_noop(self, conn):
         await conn.clear_question_message("123")
 
-    @pytest.mark.asyncio
     async def test_send_interrupt_prompt_returns_none(self, conn):
         result = await conn.send_interrupt_prompt("123", "int-1", "preview")
         assert result is None
 
-    @pytest.mark.asyncio
     async def test_send_plan_review_is_noop(self, conn):
         await conn.send_plan_review("123", "int-1", "description")
 
@@ -249,7 +240,6 @@ class TestMockConnectorFidelity:
         mc = MockConnector()
         assert isinstance(mc, BaseConnector)
 
-    @pytest.mark.asyncio
     async def test_send_message_records_correctly(self):
         mc = MockConnector()
         await mc.send_message("42", "hello", buttons=None)
@@ -260,7 +250,6 @@ class TestMockConnectorFidelity:
             "buttons": None,
         }
 
-    @pytest.mark.asyncio
     async def test_request_approval_returns_incrementing_ids(self):
         mc = MockConnector()
         id1 = await mc.request_approval("42", "ap-1", "desc1", "Write")
@@ -269,19 +258,16 @@ class TestMockConnectorFidelity:
         assert id2 == "2"
         assert len(mc.approval_requests) == 2
 
-    @pytest.mark.asyncio
     async def test_send_typing_records_chat_id(self):
         mc = MockConnector()
         await mc.send_typing_indicator("42")
         assert mc.typing_indicators == ["42"]
 
-    @pytest.mark.asyncio
     async def test_send_file_records_path(self):
         mc = MockConnector()
         await mc.send_file("42", "/tmp/test.txt")
         assert mc.sent_messages[0]["file_path"] == "/tmp/test.txt"
 
-    @pytest.mark.asyncio
     async def test_simulate_approval_calls_resolver(self):
         mc = MockConnector()
         results = []
@@ -295,13 +281,11 @@ class TestMockConnectorFidelity:
         assert ok is True
         assert results == [("ap-1", True)]
 
-    @pytest.mark.asyncio
     async def test_simulate_approval_without_resolver_returns_false(self):
         mc = MockConnector()
         ok = await mc.simulate_approval("ap-1", True)
         assert ok is False
 
-    @pytest.mark.asyncio
     async def test_simulate_interaction_calls_resolver(self):
         mc = MockConnector()
         results = []
@@ -315,12 +299,11 @@ class TestMockConnectorFidelity:
         assert ok is True
         assert results == [("int-1", "option_a")]
 
-    @pytest.mark.asyncio
     async def test_simulate_message_calls_handler(self):
         mc = MockConnector()
         calls = []
 
-        async def handler(user_id, text, chat_id):
+        async def handler(user_id, text, chat_id, _attachments):
             calls.append((user_id, text, chat_id))
             return "ok"
 
@@ -328,24 +311,21 @@ class TestMockConnectorFidelity:
         await mc.simulate_message("u1", "hello", "c1")
         assert calls == [("u1", "hello", "c1")]
 
-    @pytest.mark.asyncio
     async def test_simulate_command_calls_handler(self):
         mc = MockConnector()
 
-        async def handler(user_id, command, args, chat_id):
+        async def handler(user_id, command, args, chat_id, _attachments):
             return f"handled {command}"
 
         mc.set_command_handler(handler)
         result = await mc.simulate_command("u1", "status", "", "c1")
         assert result == "handled status"
 
-    @pytest.mark.asyncio
     async def test_streaming_disabled_by_default(self):
         mc = MockConnector()
         result = await mc.send_message_with_id("42", "text")
         assert result is None
 
-    @pytest.mark.asyncio
     async def test_streaming_enabled_returns_ids(self):
         mc = MockConnector(support_streaming=True)
         result = await mc.send_message_with_id("42", "text")

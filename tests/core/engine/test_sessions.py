@@ -16,7 +16,6 @@ from tests.core.engine.conftest import FakeAgent
 
 
 class TestEngineSessionManagement:
-    @pytest.mark.asyncio
     async def test_session_reuse_across_messages(self, engine):
         await engine.handle_message("user1", "hello", "chat1")
         await engine.handle_message("user1", "world", "chat1")
@@ -24,7 +23,6 @@ class TestEngineSessionManagement:
         assert session.message_count == 2
         assert session.total_cost == pytest.approx(0.02)
 
-    @pytest.mark.asyncio
     async def test_session_isolation_between_users(self, engine):
         await engine.handle_message("user1", "hello", "chat1")
         await engine.handle_message("user2", "world", "chat2")
@@ -34,7 +32,6 @@ class TestEngineSessionManagement:
         assert s1.message_count == 1
         assert s2.message_count == 1
 
-    @pytest.mark.asyncio
     async def test_connector_receives_response(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -51,12 +48,10 @@ class TestEngineSessionManagement:
         assert len(mock_connector.sent_messages) == 1
         assert "Echo: hello" in mock_connector.sent_messages[0]["text"]
 
-    @pytest.mark.asyncio
     async def test_no_connector_no_crash(self, engine):
         result = await engine.handle_message("user1", "hello", "chat1")
         assert "Echo: hello" in result
 
-    @pytest.mark.asyncio
     async def test_agent_error_does_not_crash_engine(self, config, audit_logger):
         failing_agent = FakeAgent(fail=True)
         eng = Engine(
@@ -72,7 +67,6 @@ class TestEngineSessionManagement:
         result2 = await eng.handle_message("user1", "hello2", "chat1")
         assert "Error:" in result2
 
-    @pytest.mark.asyncio
     async def test_multiple_tool_calls_in_sequence(self, engine, fake_agent, tmp_dir):
         await engine.handle_message("user1", "hello", "chat1")
         hook = fake_agent.last_can_use_tool
@@ -84,7 +78,6 @@ class TestEngineSessionManagement:
 
 
 class TestEngineWithMiddleware:
-    @pytest.mark.asyncio
     async def test_middleware_chain_runs(self, config, fake_agent, audit_logger):
         from leashd.middleware.auth import AuthMiddleware
 
@@ -104,7 +97,6 @@ class TestEngineWithMiddleware:
         result = await chain.run(ctx, eng.handle_message_ctx)
         assert "Echo: hi" in result
 
-    @pytest.mark.asyncio
     async def test_middleware_rejects_unauthorized(
         self, config, fake_agent, audit_logger
     ):
@@ -126,7 +118,6 @@ class TestEngineWithMiddleware:
         result = await chain.run(ctx, eng.handle_message_ctx)
         assert "Unauthorized" in result
 
-    @pytest.mark.asyncio
     async def test_connector_handler_enforces_middleware(
         self, config, fake_agent, audit_logger, mock_connector
     ):
@@ -150,7 +141,6 @@ class TestEngineWithMiddleware:
         assert len(mock_connector.sent_messages) == 0
         assert fake_agent.last_can_use_tool is None
 
-    @pytest.mark.asyncio
     async def test_connector_handler_authorized_user_through_middleware(
         self, config, fake_agent, audit_logger, mock_connector
     ):
@@ -350,7 +340,6 @@ class HangingAgent(BaseAgent):
 class TestErrorPathSessionPersistence:
     """Regression tests: stale agent_resume_token cleared on both error and timeout paths."""
 
-    @pytest.mark.asyncio
     async def test_save_captures_cleared_agent_resume_token(
         self, audit_logger, policy_engine, tmp_path
     ):
@@ -394,7 +383,6 @@ class TestErrorPathSessionPersistence:
         error_saves = [s for s in save_snapshots if s["agent_resume_token"] is None]
         assert len(error_saves) >= 1
 
-    @pytest.mark.asyncio
     async def test_sqlite_round_trip_stale_id_cleared(
         self, audit_logger, policy_engine, tmp_path
     ):
@@ -439,7 +427,6 @@ class TestErrorPathSessionPersistence:
         finally:
             await store.teardown()
 
-    @pytest.mark.asyncio
     async def test_stale_id_cleared_survives_restart(
         self, audit_logger, policy_engine, tmp_path
     ):
@@ -498,7 +485,6 @@ class TestErrorPathSessionPersistence:
         assert session2.agent_resume_token == "new-fresh-id"
         await store2.teardown()
 
-    @pytest.mark.asyncio
     async def test_timeout_with_stale_id_clears_it(
         self, audit_logger, policy_engine, tmp_path
     ):
@@ -530,7 +516,6 @@ class TestErrorPathSessionPersistence:
 
         assert session.agent_resume_token is None
 
-    @pytest.mark.asyncio
     async def test_timeout_with_new_session_id_preserves_it(
         self, audit_logger, policy_engine, tmp_path
     ):
@@ -565,7 +550,6 @@ class TestErrorPathSessionPersistence:
         session = sm.get("user1", "chat1")
         assert session.agent_resume_token == "new-during-exec"
 
-    @pytest.mark.asyncio
     async def test_second_message_after_error_works_fresh(
         self, audit_logger, policy_engine, tmp_path
     ):
@@ -616,7 +600,6 @@ class TestErrorPathSessionPersistence:
         finally:
             await store.teardown()
 
-    @pytest.mark.asyncio
     async def test_connect_failure_clears_stale_id(
         self, audit_logger, policy_engine, tmp_path
     ):
@@ -668,7 +651,6 @@ class TestErrorPathSessionPersistence:
 class TestleashdDirCreatedOnSessionInit:
     """Verify .leashd/ is created on first message and on commands."""
 
-    @pytest.mark.asyncio
     async def test_leashd_dir_created_on_first_message(
         self, policy_engine, mock_connector, tmp_path
     ):
@@ -694,7 +676,6 @@ class TestleashdDirCreatedOnSessionInit:
         assert (d1 / ".leashd").is_dir()
         assert (d1 / ".leashd" / ".gitignore").is_file()
 
-    @pytest.mark.asyncio
     async def test_leashd_dir_created_on_command(
         self, policy_engine, mock_connector, tmp_path
     ):
@@ -724,7 +705,6 @@ class TestleashdDirCreatedOnSessionInit:
 class TestSessionPersistenceOnDirSwitch:
     """Bug 2 regression: session state persisted after /dir and _exit_plan_mode."""
 
-    @pytest.mark.asyncio
     async def test_dir_switch_persists_to_store(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
@@ -761,7 +741,6 @@ class TestSessionPersistenceOnDirSwitch:
         assert saved_session.working_directory == str(d2.resolve())
         assert saved_session.agent_resume_token is None
 
-    @pytest.mark.asyncio
     async def test_exit_plan_mode_persists_to_store(
         self, policy_engine, audit_logger, mock_connector, tmp_path, monkeypatch
     ):
@@ -835,7 +814,6 @@ class TestSessionPersistenceOnDirSwitch:
         assert len(exit_saves) >= 1
         assert exit_saves[0]["mode"] == "edit"
 
-    @pytest.mark.asyncio
     async def test_dir_switch_persists_to_sqlite(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
@@ -879,7 +857,6 @@ class TestSessionPersistenceOnDirSwitch:
 class TestDirectoryPersistenceAcrossRestart:
     """Verify /dir selection survives engine restart via two-tier storage."""
 
-    @pytest.mark.asyncio
     async def test_dir_survives_restart(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
@@ -941,8 +918,7 @@ class TestDirectoryPersistenceAcrossRestart:
         await session_store_2.teardown()
         await message_store_2.teardown()
 
-    @pytest.mark.asyncio
-    async def test_session_restore_realigns_message_store(
+    async def test_session_restore_does_not_realign_centralized_message_store(
         self, audit_logger, policy_engine, tmp_path
     ):
         from leashd.storage.sqlite import SqliteSessionStore
@@ -986,18 +962,16 @@ class TestDirectoryPersistenceAcrossRestart:
             store=session_store,
             message_store=message_store,
             path_config=PathConfig(
-                storage_pinned=False, storage_path=config.storage_path
+                storage_pinned=True, storage_path=config.storage_path
             ),
         )
         await eng.handle_message("user1", "hello", "chat1")
 
-        # Message store should have been realigned to api's messages.db
-        expected_path = str(d2.resolve() / ".leashd" / "messages.db")
-        assert message_store._db_path == expected_path
+        # Centralized message store stays at original location
+        assert message_store._db_path == str(msg_db)
         await session_store.teardown()
         await message_store.teardown()
 
-    @pytest.mark.asyncio
     async def test_dir_switch_saves_to_session_store_not_message_store(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
@@ -1044,7 +1018,6 @@ class TestDirectoryPersistenceAcrossRestart:
 class TestRealisticSessionScenarios:
     """Tests targeting real-world session mutation scenarios."""
 
-    @pytest.mark.asyncio
     async def test_new_id_acquired_mid_stream_then_error_preserves_new_id(
         self, audit_logger, policy_engine, tmp_path
     ):
@@ -1082,7 +1055,6 @@ class TestRealisticSessionScenarios:
         ]
         assert len(saved) >= 1
 
-    @pytest.mark.asyncio
     async def test_new_id_over_stale_id_then_error_preserves_new_id(
         self, audit_logger, policy_engine, tmp_path
     ):
@@ -1112,7 +1084,6 @@ class TestRealisticSessionScenarios:
         assert "Error:" in result
         assert session.agent_resume_token == "new-acquired-id"
 
-    @pytest.mark.asyncio
     async def test_null_response_session_id_does_not_overwrite_existing(
         self, audit_logger, policy_engine, tmp_path
     ):
@@ -1144,7 +1115,6 @@ class TestRealisticSessionScenarios:
         assert session.message_count == 1
         assert session.total_cost == pytest.approx(0.005)
 
-    @pytest.mark.asyncio
     async def test_null_response_session_id_with_no_existing_stays_none(
         self, audit_logger, policy_engine, tmp_path
     ):
@@ -1173,7 +1143,6 @@ class TestRealisticSessionScenarios:
         assert session.agent_resume_token is None
         assert session.message_count == 1
 
-    @pytest.mark.asyncio
     async def test_interrupted_execution_skips_session_update(
         self, audit_logger, policy_engine, tmp_path
     ):
@@ -1223,7 +1192,6 @@ class TestRealisticSessionScenarios:
         assert session.total_cost == 0.0
         assert session.agent_resume_token is None
 
-    @pytest.mark.asyncio
     async def test_two_consecutive_errors_then_recovery_sqlite(
         self, audit_logger, policy_engine, tmp_path
     ):
@@ -1278,7 +1246,6 @@ class TestRealisticSessionScenarios:
         finally:
             await store.teardown()
 
-    @pytest.mark.asyncio
     async def test_storage_save_failure_in_error_handler_propagates(
         self, audit_logger, policy_engine, tmp_path
     ):
@@ -1308,7 +1275,6 @@ class TestRealisticSessionScenarios:
         assert "error" in result.lower()
         assert session.agent_resume_token is None
 
-    @pytest.mark.asyncio
     async def test_update_from_result_save_failure_leaves_memory_ahead_of_storage(
         self, audit_logger, policy_engine, tmp_path
     ):
@@ -1339,7 +1305,6 @@ class TestRealisticSessionScenarios:
         assert session.total_cost == pytest.approx(0.01)
         assert session.agent_resume_token == "test-session-123"
 
-    @pytest.mark.asyncio
     async def test_cost_accumulation_across_four_messages(
         self, audit_logger, policy_engine, tmp_path
     ):
@@ -1366,7 +1331,6 @@ class TestRealisticSessionScenarios:
         assert session.total_cost == pytest.approx(0.10)
         assert session.agent_resume_token == "session-4"
 
-    @pytest.mark.asyncio
     async def test_error_after_success_preserves_previous_cost_and_count(
         self, audit_logger, policy_engine, tmp_path
     ):
@@ -1413,7 +1377,6 @@ class TestRealisticSessionScenarios:
 
 
 class TestWorkspacePersistence:
-    @pytest.mark.asyncio
     async def test_workspace_survives_restart(
         self, tmp_path, policy_engine, audit_logger
     ):
@@ -1485,7 +1448,6 @@ class TestWorkspacePersistence:
         finally:
             await store2.teardown()
 
-    @pytest.mark.asyncio
     async def test_workspace_removed_from_yaml_clears_stale_name(
         self, tmp_path, policy_engine, audit_logger
     ):
@@ -1551,7 +1513,6 @@ class TestWorkspacePersistence:
 class TestSessionManagerDeactivateAndCleanup:
     """Tests for SessionManager.deactivate() and cleanup_expired()."""
 
-    @pytest.mark.asyncio
     async def test_deactivate_marks_inactive_and_deletes_from_store(self):
         from unittest.mock import AsyncMock
 
@@ -1566,7 +1527,6 @@ class TestSessionManagerDeactivateAndCleanup:
         assert session.is_active is False
         store.delete.assert_called_once_with("u1", "c1")
 
-    @pytest.mark.asyncio
     async def test_deactivate_nonexistent_no_error(self):
         sm = SessionManager()
         await sm.deactivate("nobody", "nochat")

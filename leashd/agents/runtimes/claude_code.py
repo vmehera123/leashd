@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -32,6 +33,7 @@ from claude_agent_sdk.types import (
 from claude_agent_sdk.types import (
     PermissionResultDeny as SDKDeny,
 )
+from claude_agent_sdk.types import StreamEvent
 
 from leashd.agents.base import AgentResponse, BaseAgent, ToolActivity
 from leashd.agents.types import PermissionAllow, PermissionDeny
@@ -43,6 +45,7 @@ if TYPE_CHECKING:
     from claude_agent_sdk import Message
 
     from leashd.agents.capabilities import AgentCapabilities
+    from leashd.connectors.base import Attachment
     from leashd.core.config import LeashdConfig
     from leashd.core.session import Session
 
@@ -132,6 +135,52 @@ def _prepend_instruction(instruction: str, base: str) -> str:
     return f"{instruction}\n\n{base}" if base else instruction
 
 
+def _build_content_blocks(
+    prompt: str,
+    attachments: list[Attachment],
+    working_directory: str,
+) -> list[dict[str, Any]]:
+    """Build rich content blocks (text + images) for the SDK transport."""
+    import base64
+
+    blocks: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+    pdf_paths: list[str] = []
+
+    for att in attachments:
+        if att.media_type == "application/pdf":
+            uploads_dir = Path(working_directory) / ".leashd" / "uploads"
+            uploads_dir.mkdir(parents=True, exist_ok=True)
+            safe_name = Path(att.filename).name or "upload.pdf"
+            dest = uploads_dir / safe_name
+            dest.write_bytes(att.data)
+            pdf_paths.append(str(dest))
+        else:
+            b64 = base64.b64encode(att.data).decode("ascii")
+            blocks.append(
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": att.media_type,
+                        "data": b64,
+                    },
+                }
+            )
+
+    if pdf_paths:
+        pdf_note = "\n\nPDF files uploaded — read them with the Read tool:\n"
+        for p in pdf_paths:
+            pdf_note += f"  - {p}\n"
+        blocks[0]["text"] += pdf_note
+
+    logger.info(
+        "query_prompt_built_with_attachments",
+        image_count=len(blocks) - 1,
+        pdf_count=len(pdf_paths),
+    )
+    return blocks
+
+
 async def _safe_callback(
     callback: Callable[..., Any], *args: Any, log_event: str
 ) -> None:
@@ -201,6 +250,10 @@ def _describe_tool(name: str, tool_input: dict[str, Any]) -> str:
         return "Asking a question"
     if name == "Skill":
         return str(tool_input.get("skill", ""))
+    if name == "Agent":
+        subagent_type = tool_input.get("subagent_type", "")
+        desc = tool_input.get("description", "")
+        return f"{subagent_type}: {desc}" if subagent_type else desc
     # Unknown tool — show first string value
     for v in tool_input.values():
         if isinstance(v, str) and v:
@@ -277,6 +330,7 @@ class ClaudeCodeAgent(BaseAgent):
         on_tool_activity: Callable[[ToolActivity | None], Coroutine[Any, Any, None]]
         | None = None,
         on_retry: Callable[[], Coroutine[Any, Any, None]] | None = None,
+        attachments: list[Attachment] | None = None,
     ) -> AgentResponse:
         if can_use_tool:
             _original = can_use_tool
@@ -293,6 +347,7 @@ class ClaudeCodeAgent(BaseAgent):
 
             can_use_tool = _sdk_can_use_tool
 
+        os.environ.pop("CLAUDECODE", None)
         options = self._build_options(session, can_use_tool)
 
         logger.info(
@@ -301,6 +356,7 @@ class ClaudeCodeAgent(BaseAgent):
             prompt_length=len(prompt),
             mode=session.mode,
             has_resume=session.agent_resume_token is not None,
+            attachment_count=len(attachments) if attachments else 0,
         )
 
         try:
@@ -311,6 +367,7 @@ class ClaudeCodeAgent(BaseAgent):
                 on_text_chunk=on_text_chunk,
                 on_tool_activity=on_tool_activity,
                 on_retry=on_retry,
+                attachments=attachments,
             )
             if not response:
                 return AgentResponse(content="No response from agent.", is_error=True)
@@ -352,6 +409,7 @@ class ClaudeCodeAgent(BaseAgent):
             permission_mode=_SESSION_TO_PERMISSION_MODE.get(session.mode, "default"),
             setting_sources=["project", "user"],
             max_buffer_size=_MAX_BUFFER_SIZE,
+            include_partial_messages=True,
         )
         opts.effort = self._config.effort
         system_prompt = self._config.system_prompt or ""
@@ -454,6 +512,12 @@ class ClaudeCodeAgent(BaseAgent):
 
         return opts
 
+    @staticmethod
+    async def _write_raw_message(client: ClaudeSDKClient, msg: dict[str, Any]) -> None:
+        # Private SDK access: claude-agent-sdk ~0.x has no public API for sending
+        # rich content blocks. Replace when a public method becomes available.
+        await client._transport.write(json.dumps(msg) + "\n")  # type: ignore[union-attr]
+
     def _read_local_mcp_servers(self, directory: str) -> dict[str, Any]:
         mcp_path = Path(directory) / ".mcp.json"
         if not mcp_path.is_file():
@@ -474,26 +538,43 @@ class ClaudeCodeAgent(BaseAgent):
         on_text_chunk: Callable[[str], Coroutine[Any, Any, None]] | None,
         on_tool_activity: Callable[[ToolActivity | None], Coroutine[Any, Any, None]]
         | None,
+        agent_stack: list[dict[str, str]] | None = None,
     ) -> None:
+        if agent_stack is None:
+            agent_stack = []
         for block in blocks:
             if isinstance(block, TextBlock):
                 text_parts.append(block.text)
-                if on_text_chunk:
+                if on_text_chunk and not agent_stack:
                     await _safe_callback(
                         on_text_chunk, block.text, log_event="on_text_chunk_error"
                     )
             elif isinstance(block, ToolUseBlock):
                 tools_used.append(block.name)
+                if block.name == "Agent":
+                    tool_input = block.input or {}
+                    agent_label = tool_input.get("subagent_type") or tool_input.get(
+                        "description", ""
+                    )
+                    agent_stack.append({"id": block.id, "name": agent_label})
                 if on_tool_activity:
+                    current_agent = agent_stack[-1]["name"] if agent_stack else None
                     activity = ToolActivity(
                         tool_name=block.name,
                         description=_describe_tool(block.name, block.input or {}),
+                        agent_name=current_agent,
                     )
                     await _safe_callback(
                         on_tool_activity, activity, log_event="on_tool_activity_error"
                     )
             elif isinstance(block, ToolResultBlock):
-                if on_tool_activity:
+                is_agent_result = False
+                for i in range(len(agent_stack) - 1, -1, -1):
+                    if agent_stack[i]["id"] == block.tool_use_id:
+                        agent_stack.pop(i)
+                        is_agent_result = True
+                        break
+                if on_tool_activity and is_agent_result and not agent_stack:
                     await _safe_callback(
                         on_tool_activity, None, log_event="on_tool_activity_error"
                     )
@@ -508,6 +589,7 @@ class ClaudeCodeAgent(BaseAgent):
         on_tool_activity: Callable[[ToolActivity | None], Coroutine[Any, Any, None]]
         | None = None,
         on_retry: Callable[[], Coroutine[Any, Any, None]] | None = None,
+        attachments: list[Attachment] | None = None,
     ) -> AgentResponse:
         stderr_buf = _StderrBuffer()
         self._stderr_buffers[session.session_id] = stderr_buf
@@ -521,21 +603,67 @@ class ClaudeCodeAgent(BaseAgent):
             stderr_buf.clear()
             tools_used: list[str] = []
             text_parts: list[str] = []
+            agent_stack: list[dict[str, str]] = []
 
             try:
                 async with _SafeSDKClient(options) as client:
                     self._active_clients[session.session_id] = client
                     try:
-                        await client.query(prompt)
+                        if attachments:
+                            content_blocks = _build_content_blocks(
+                                prompt, attachments, session.working_directory
+                            )
+                            user_msg = {
+                                "type": "user",
+                                "message": {
+                                    "role": "user",
+                                    "content": content_blocks,
+                                },
+                                "parent_tool_use_id": None,
+                                "session_id": "default",
+                            }
+                            await self._write_raw_message(client, user_msg)
+                        else:
+                            await client.query(prompt)
+                        streamed_text_in_turn = False
                         async for message in client.receive_response():
-                            if isinstance(message, AssistantMessage):
+                            if isinstance(message, StreamEvent):
+                                if (
+                                    getattr(message, "parent_tool_use_id", None)
+                                    is not None
+                                ):
+                                    continue
+                                try:
+                                    event_data = message.event
+                                    if event_data.get("type") == "content_block_delta":
+                                        delta = event_data.get("delta", {})
+                                        if (
+                                            delta.get("type") == "text_delta"
+                                            and on_text_chunk
+                                        ):
+                                            if not agent_stack:
+                                                await _safe_callback(
+                                                    on_text_chunk,
+                                                    delta.get("text", ""),
+                                                    log_event="on_stream_text_delta_error",
+                                                )
+                                            streamed_text_in_turn = True
+                                except Exception:
+                                    logger.debug("stream_event_parse_error")
+
+                            elif isinstance(message, AssistantMessage):
+                                chunk_cb = (
+                                    None if streamed_text_in_turn else on_text_chunk
+                                )
                                 await self._process_content_blocks(
                                     message.content,
                                     text_parts,
                                     tools_used,
-                                    on_text_chunk,
+                                    chunk_cb,
                                     on_tool_activity,
+                                    agent_stack,
                                 )
+                                streamed_text_in_turn = False
 
                             elif isinstance(message, SystemMessage):
                                 sid = message.data.get("session_id")

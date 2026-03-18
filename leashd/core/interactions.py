@@ -32,6 +32,12 @@ class PlanReviewDecision(BaseModel):
 
 PlanDecision = Literal["clean_edit", "edit", "default", "adjust"]
 _PLAN_DECISIONS: frozenset[str] = frozenset({"clean_edit", "edit", "default", "adjust"})
+_PLAN_ANSWER_MAP: dict[str, PlanDecision] = {
+    "yes": "clean_edit",
+    "accept": "clean_edit",
+    "no": "adjust",
+    "reject": "adjust",
+}
 
 
 class PendingInteraction(BaseModel):
@@ -311,6 +317,17 @@ class InteractionCoordinator:
             return False
 
         if pending.kind == "plan_review":
+            if answer not in _PLAN_DECISIONS:
+                mapped = _PLAN_ANSWER_MAP.get(answer.lower())
+                if mapped:
+                    answer = mapped
+                else:
+                    logger.warning(
+                        "invalid_plan_decision",
+                        answer=answer,
+                        interaction_id=interaction_id,
+                    )
+                    return False
             if answer == "adjust":
                 pending.decision = "adjust"
                 pending.awaiting_feedback = True
@@ -323,13 +340,6 @@ class InteractionCoordinator:
                     pending.chat_id, "What changes would you like?"
                 )
                 return True
-            if answer not in _PLAN_DECISIONS:
-                logger.warning(
-                    "invalid_plan_decision",
-                    answer=answer,
-                    interaction_id=interaction_id,
-                )
-                return False
             pending.decision = cast(PlanDecision, answer)
             pending.event.set()
             return True

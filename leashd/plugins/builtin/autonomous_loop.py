@@ -48,11 +48,16 @@ if TYPE_CHECKING:
 
     class _EngineProtocol(Protocol):
         async def handle_message(
-            self, user_id: str, text: str, chat_id: str
+            self, user_id: str, text: str, chat_id: str, attachments: Any = None
         ) -> str: ...
 
         async def handle_command(
-            self, user_id: str, command: str, args: str, chat_id: str
+            self,
+            user_id: str,
+            command: str,
+            args: str,
+            chat_id: str,
+            attachments: Any = None,
         ) -> str: ...
 
 

@@ -1,6 +1,12 @@
 """Tests for bash command and path analyzers."""
 
-from leashd.core.safety.analyzer import analyze_bash, analyze_path, strip_cd_prefix
+from leashd.core.safety.analyzer import (
+    analyze_bash,
+    analyze_path,
+    strip_benign_prefixes,
+    strip_cd_prefix,
+    strip_sleep_prefix,
+)
 
 
 class TestCommandAnalyzer:
@@ -273,6 +279,73 @@ class TestStripCdPrefix:
 
     def test_cd_no_path_with_chain(self):
         assert strip_cd_prefix("cd && ls") == "ls"
+
+
+class TestStripSleepPrefix:
+    def test_bare_sleep_unchanged(self):
+        assert strip_sleep_prefix("sleep 5") == "sleep 5"
+
+    def test_sleep_and_then(self):
+        assert (
+            strip_sleep_prefix("sleep 2 && agent-browser snapshot -i")
+            == "agent-browser snapshot -i"
+        )
+
+    def test_sleep_semicolon(self):
+        assert strip_sleep_prefix("sleep 1 ; npm test") == "npm test"
+
+    def test_sleep_or(self):
+        assert strip_sleep_prefix("sleep 3 || echo fail") == "echo fail"
+
+    def test_chained_sleeps(self):
+        assert strip_sleep_prefix("sleep 1 && sleep 2 && npm test") == "npm test"
+
+    def test_fractional_duration(self):
+        assert strip_sleep_prefix("sleep 0.5 && curl localhost") == "curl localhost"
+
+    def test_duration_with_suffix(self):
+        assert strip_sleep_prefix("sleep 1s && make test") == "make test"
+
+    def test_dangerous_subshell_not_stripped(self):
+        assert strip_sleep_prefix("sleep$(rm -rf /) && ls") == "sleep$(rm -rf /) && ls"
+
+    def test_dangerous_backtick_not_stripped(self):
+        assert (
+            strip_sleep_prefix("sleep `cat /etc/passwd` && ls")
+            == "sleep `cat /etc/passwd` && ls"
+        )
+
+    def test_dangerous_pipe_not_stripped(self):
+        assert strip_sleep_prefix("sleep 1|2 && ls") == "sleep 1|2 && ls"
+
+    def test_empty_string(self):
+        assert strip_sleep_prefix("") == ""
+
+    def test_no_sleep_prefix(self):
+        assert strip_sleep_prefix("uv run pytest tests/") == "uv run pytest tests/"
+
+    def test_sleep_no_arg_with_chain(self):
+        assert strip_sleep_prefix("sleep && ls") == "ls"
+
+
+class TestStripBenignPrefixes:
+    def test_cd_then_sleep(self):
+        assert strip_benign_prefixes("cd /project && sleep 2 && npm test") == "npm test"
+
+    def test_sleep_then_cd(self):
+        assert strip_benign_prefixes("sleep 1 && cd /project && npm test") == "npm test"
+
+    def test_cd_only(self):
+        assert strip_benign_prefixes("cd /project && ls") == "ls"
+
+    def test_sleep_only(self):
+        assert (
+            strip_benign_prefixes("sleep 2 && agent-browser snapshot")
+            == "agent-browser snapshot"
+        )
+
+    def test_no_prefix(self):
+        assert strip_benign_prefixes("uv run pytest") == "uv run pytest"
 
 
 class TestRedirectDetection:

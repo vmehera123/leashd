@@ -70,7 +70,7 @@ if TYPE_CHECKING:
         agent: Any
 
         async def handle_message(
-            self, user_id: str, text: str, chat_id: str
+            self, user_id: str, text: str, chat_id: str, attachments: Any = None
         ) -> str: ...
 
         def enable_tool_auto_approve(self, chat_id: str, tool_name: str) -> None: ...

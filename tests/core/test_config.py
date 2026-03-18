@@ -100,7 +100,7 @@ class TestLeashdConfig:
     def test_streaming_defaults(self, tmp_path):
         config = LeashdConfig(approved_directories=[tmp_path])
         assert config.streaming_enabled is True
-        assert config.streaming_throttle_seconds == 1.5
+        assert config.streaming_throttle_seconds == 0.15
 
     def test_streaming_custom_values(self, tmp_path):
         config = LeashdConfig(
@@ -367,3 +367,28 @@ class TestBrowserBackendConfig:
     def test_invalid_backend_rejected(self, tmp_path):
         with pytest.raises(ValidationError):
             LeashdConfig(approved_directories=[tmp_path], browser_backend="selenium")
+
+
+class TestWebConfig:
+    def test_defaults(self, tmp_path):
+        config = LeashdConfig(approved_directories=[tmp_path])
+        assert config.web_enabled is False
+        assert config.web_host == "0.0.0.0"  # noqa: S104
+        assert config.web_port == 8080
+        assert config.web_api_key is None
+        assert config.web_cors_origins == "*"
+
+    def test_custom_values(self, tmp_path):
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            web_enabled=True,
+            web_host="127.0.0.1",
+            web_port=3000,
+            web_api_key="secret",
+            web_cors_origins="http://localhost:3000",
+        )
+        assert config.web_enabled is True
+        assert config.web_host == "127.0.0.1"
+        assert config.web_port == 3000
+        assert config.web_api_key == "secret"
+        assert config.web_cors_origins == "http://localhost:3000"

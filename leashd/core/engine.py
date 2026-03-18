@@ -15,7 +15,7 @@ import structlog
 from pydantic import BaseModel, ConfigDict
 
 from leashd.agents.types import PermissionAllow, PermissionDeny
-from leashd.connectors.base import InlineButton
+from leashd.connectors.base import Attachment, InlineButton
 from leashd.core.config import build_directory_names, ensure_leashd_dir
 from leashd.core.events import (
     COMMAND_TEST,
@@ -103,6 +103,7 @@ class _ToolCallbackState:
         "clean_proceed",
         "plan_adjustment_feedback",
         "plan_approved",
+        "plan_attachments",
         "plan_file_content",
         "plan_file_path",
         "plan_review_shown",
@@ -115,6 +116,7 @@ class _ToolCallbackState:
         self.clean_proceed = False
         self.plan_adjustment_feedback: str | None = None
         self.plan_approved = False
+        self.plan_attachments: list[Attachment] | None = None
         self.plan_review_shown = False
         self.proceed_in_context = False
         self.plan_file_content: str | None = None
@@ -226,13 +228,17 @@ class _StreamingResponder:
             if self._has_activity:
                 await self._connector.clear_activity(self._chat_id)
                 self._has_activity = False
+            await self._connector.close_agent_group(self._chat_id)
             return
 
         self._tool_counts[activity.tool_name] = (
             self._tool_counts.get(activity.tool_name, 0) + 1
         )
         await self._connector.send_activity(
-            self._chat_id, activity.tool_name, activity.description
+            self._chat_id,
+            activity.tool_name,
+            activity.description,
+            agent_name=activity.agent_name or "",
         )
         self._has_activity = True
 
@@ -250,6 +256,23 @@ class _StreamingResponder:
         self._active = False
         self._has_activity = False
         await self._connector.clear_activity(self._chat_id)
+        await self._connector.close_agent_group(self._chat_id)
+
+    async def cleanup(self) -> None:
+        """Remove the streaming cursor and deactivate. Used on error paths."""
+        if self._message_id is not None:
+            tail = self._buffer[self._display_offset :] if self._buffer else ""
+            if tail:
+                with contextlib.suppress(Exception):
+                    await self._connector.edit_message(
+                        self._chat_id, self._message_id, tail
+                    )
+            else:
+                with contextlib.suppress(Exception):
+                    await self._connector.delete_message(
+                        self._chat_id, self._message_id
+                    )
+        await self.deactivate()
 
     async def finalize(self, final_text: str) -> bool:
         if not self._active or self._message_id is None:
@@ -258,23 +281,37 @@ class _StreamingResponder:
         if self._has_activity:
             await self._connector.clear_activity(self._chat_id)
             self._has_activity = False
-        tail = self._buffer[self._display_offset :] if self._buffer else final_text
+        await self._connector.close_agent_group(self._chat_id)
+        source = final_text if len(final_text) > len(self._buffer) else self._buffer
+        tail = (
+            source[self._display_offset :]
+            if self._display_offset < len(source)
+            else source
+        )
 
         summary = self._build_tools_summary()
         if summary:
             tail = tail + "\n\n" + summary
 
-        if len(tail) <= _MAX_STREAMING_DISPLAY:
-            await self._connector.edit_message(self._chat_id, self._message_id, tail)
-        else:
-            first_chunk = tail[:_MAX_STREAMING_DISPLAY]
-            await self._connector.edit_message(
-                self._chat_id, self._message_id, first_chunk
-            )
-            remainder = tail[_MAX_STREAMING_DISPLAY:]
-            await self._connector.send_message(self._chat_id, remainder)
+        try:
+            if len(tail) <= _MAX_STREAMING_DISPLAY:
+                await self._connector.edit_message(
+                    self._chat_id, self._message_id, tail
+                )
+            else:
+                first_chunk = tail[:_MAX_STREAMING_DISPLAY]
+                await self._connector.edit_message(
+                    self._chat_id, self._message_id, first_chunk
+                )
+                remainder = tail[_MAX_STREAMING_DISPLAY:]
+                await self._connector.send_message(self._chat_id, remainder)
 
-        return True
+            await self._connector.complete_stream(self._chat_id, self._message_id)
+            return True
+        except Exception:
+            logger.debug("streaming_finalize_edit_failed", chat_id=self._chat_id)
+            await self.deactivate()
+            return False
 
 
 class PathConfig(BaseModel):
@@ -357,7 +394,9 @@ class Engine:
 
         self._git_handler = git_handler
         self._executing_chats: set[str] = set()
-        self._pending_messages: dict[str, list[tuple[str, str]]] = {}
+        self._pending_messages: dict[
+            str, list[tuple[str, str, list[Attachment] | None]]
+        ] = {}
         self._recent_failures: dict[str, list[float]] = {}
         self._pending_interrupts: dict[str, str] = {}  # chat_id -> interrupt_id
         self._interrupt_to_chat: dict[str, str] = {}  # interrupt_id -> chat_id
@@ -505,21 +544,29 @@ class Engine:
         except Exception:
             logger.debug("browser_shutdown_failed", exc_info=True)
 
-    async def _kill_playwright_mcp(self) -> None:
+    async def _pgrep_and_kill(self, pattern: str, sig: int = signal.SIGTERM) -> bool:
+        """Find processes matching *pattern* via pgrep and send *sig*."""
         proc = await asyncio.create_subprocess_exec(
             "pgrep",
             "-f",
-            "@playwright/mcp",
+            pattern,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
         stdout, _ = await proc.communicate()
         if not stdout:
-            return
+            return False
         for line in stdout.decode().strip().splitlines():
             pid = int(line.strip())
             with contextlib.suppress(ProcessLookupError):
-                os.kill(pid, signal.SIGTERM)
+                os.kill(pid, sig)
+        return True
+
+    async def _kill_playwright_mcp(self) -> None:
+        found = await self._pgrep_and_kill("@playwright/mcp")
+        if found:
+            await asyncio.sleep(0.5)
+        await self._pgrep_and_kill("ms-playwright")
 
     async def reload_config(self) -> None:
         """Re-read config from disk and rebuild caches.
@@ -565,6 +612,7 @@ class Engine:
         user_id: str,
         text: str,
         chat_id: str,
+        attachments: list[Attachment] | None = None,
     ) -> str:
         if self.approval_coordinator and self.approval_coordinator.has_pending(chat_id):
             resolved = await self.approval_coordinator.reject_with_reason(chat_id, text)
@@ -595,7 +643,9 @@ class Engine:
                 return ""
 
         if chat_id in self._executing_chats:
-            self._pending_messages.setdefault(chat_id, []).append((user_id, text))
+            self._pending_messages.setdefault(chat_id, []).append(
+                (user_id, text, attachments)
+            )
             logger.info(
                 "message_queued",
                 user_id=user_id,
@@ -637,11 +687,13 @@ class Engine:
 
         self._executing_chats.add(chat_id)
         try:
-            result = await self._execute_turn(user_id, text, chat_id)
+            result = await self._execute_turn(
+                user_id, text, chat_id, attachments=attachments
+            )
 
             while self._pending_messages.get(chat_id):
                 queued = self._pending_messages.pop(chat_id)
-                for q_user_id, q_text in queued:
+                for q_user_id, q_text, _q_att in queued:
                     await self._message_logger.log(
                         user_id=q_user_id,
                         chat_id=chat_id,
@@ -649,7 +701,13 @@ class Engine:
                         content=q_text,
                     )
                 combined = self._combine_queued_messages(queued)
-                result = await self._execute_turn(queued[0][0], combined, chat_id)
+                q_attachments = self._collect_queued_attachments(queued)
+                result = await self._execute_turn(
+                    queued[0][0],
+                    combined,
+                    chat_id,
+                    attachments=q_attachments or None,
+                )
 
             return result
         except AgentError as e:
@@ -688,11 +746,21 @@ class Engine:
 
     @staticmethod
     def _combine_queued_messages(
-        messages: list[tuple[str, str]],
+        messages: list[tuple[str, str, list[Attachment] | None]],
     ) -> str:
         if len(messages) == 1:
             return messages[0][1]
-        return "\n\n".join(text for _, text in messages)
+        return "\n\n".join(text for _, text, _ in messages)
+
+    @staticmethod
+    def _collect_queued_attachments(
+        messages: list[tuple[str, str, list[Attachment] | None]],
+    ) -> list[Attachment]:
+        result: list[Attachment] = []
+        for _, _, atts in messages:
+            if atts:
+                result.extend(atts)
+        return result
 
     async def _execute_turn(
         self,
@@ -701,6 +769,7 @@ class Engine:
         chat_id: str,
         *,
         _skip_auto_plan: bool = False,
+        attachments: list[Attachment] | None = None,
     ) -> str:
         structlog.contextvars.clear_contextvars()
         structlog.contextvars.bind_contextvars(
@@ -769,6 +838,8 @@ class Engine:
         can_use_tool, tool_state = self._build_can_use_tool(
             session, chat_id, responder, task_description=text, deadline=deadline
         )
+        if attachments:
+            tool_state.plan_attachments = attachments
         pre_exec_resume_token = session.agent_resume_token
 
         async def _handle_agent_retry() -> None:
@@ -787,6 +858,7 @@ class Engine:
                 chat_id,
                 deadline=deadline,
                 on_retry=_handle_agent_retry,
+                attachments=attachments,
             )
 
             if response.is_error and self._is_retryable_response(response):
@@ -812,6 +884,7 @@ class Engine:
                     chat_id,
                     deadline=deadline,
                     on_retry=_handle_agent_retry,
+                    attachments=attachments,
                 )
 
             # Check interrupt BEFORE persisting session — /clear may have
@@ -945,6 +1018,7 @@ class Engine:
                     else "proceed_in_context",
                     clear_context=tool_state.clean_proceed,
                     target_mode=tool_state.target_mode,
+                    attachments=tool_state.plan_attachments,
                 )
 
             if (
@@ -986,6 +1060,7 @@ class Engine:
                         ),
                         clear_context=review.clear_context,
                         target_mode=review.target_mode,
+                        attachments=tool_state.plan_attachments,
                     )
                 if isinstance(review, PermissionDeny):
                     return await self._execute_turn(
@@ -1024,6 +1099,7 @@ class Engine:
                     else "proceed_in_context",
                     clear_context=tool_state.clean_proceed,
                     target_mode=tool_state.target_mode,
+                    attachments=tool_state.plan_attachments,
                 )
             duration_ms = round((time.monotonic() - start) * 1000)
             logger.error(
@@ -1033,6 +1109,9 @@ class Engine:
                 chat_id=chat_id,
                 duration_ms=duration_ms,
             )
+            if responder:
+                with contextlib.suppress(Exception):
+                    await responder.cleanup()
             if self.approval_coordinator:
                 await self.approval_coordinator.cancel_pending(chat_id)
             if self.interaction_coordinator:
@@ -1066,6 +1145,7 @@ class Engine:
         chat_id: str,
         deadline: AgentDeadline | None = None,
         on_retry: Any = None,
+        attachments: list[Attachment] | None = None,
     ) -> AgentResponse:
         pre_exec_resume_token = session.agent_resume_token
         if deadline is None:
@@ -1078,6 +1158,7 @@ class Engine:
                 on_text_chunk=on_text_chunk,
                 on_tool_activity=on_tool_activity,
                 on_retry=on_retry,
+                attachments=attachments,
             )
         )
         try:
@@ -1154,14 +1235,28 @@ class Engine:
         return 0
 
     async def _handle_with_middleware(
-        self, user_id: str, text: str, chat_id: str
+        self,
+        user_id: str,
+        text: str,
+        chat_id: str,
+        attachments: list[Attachment] | None = None,
     ) -> str:
-        ctx = MessageContext(user_id=user_id, chat_id=chat_id, text=text)
+        ctx = MessageContext(
+            user_id=user_id,
+            chat_id=chat_id,
+            text=text,
+            attachments=attachments or [],
+        )
         return await self.middleware_chain.run(ctx, self.handle_message_ctx)  # type: ignore[union-attr]
 
     async def handle_message_ctx(self, ctx: MessageContext) -> str:
         """Adapter for middleware chain — delegates to handle_message."""
-        return await self.handle_message(ctx.user_id, ctx.text, ctx.chat_id)
+        return await self.handle_message(
+            ctx.user_id,
+            ctx.text,
+            ctx.chat_id,
+            attachments=ctx.attachments or None,
+        )
 
     async def handle_command(
         self,
@@ -1169,6 +1264,7 @@ class Engine:
         command: str,
         args: str,
         chat_id: str,
+        attachments: list[Attachment] | None = None,
     ) -> str:
         logger.info(
             "command_received", user_id=user_id, chat_id=chat_id, command=command
@@ -1214,7 +1310,9 @@ class Engine:
                     chat_id,
                     "Switched to plan mode. I'll create a plan before implementing.",
                 )
-                await self.handle_message(user_id, args.strip(), chat_id)
+                await self.handle_message(
+                    user_id, args.strip(), chat_id, attachments=attachments
+                )
                 return ""
             return "Switched to plan mode. I'll create a plan before implementing."
 
@@ -1341,7 +1439,9 @@ class Engine:
                     chat_id,
                     "Accept edits on. I'll implement directly and auto-approve file edits.",
                 )
-                await self.handle_message(user_id, args.strip(), chat_id)
+                await self.handle_message(
+                    user_id, args.strip(), chat_id, attachments=attachments
+                )
                 return ""
             return (
                 "Accept edits on. I'll implement directly and auto-approve file edits."
@@ -1763,6 +1863,7 @@ class Engine:
         *,
         clear_context: bool = False,
         target_mode: str = "edit",
+        attachments: list[Attachment] | None = None,
     ) -> str:
         logger.info("plan_mode_exit", chat_id=chat_id, trigger=trigger)
         if clear_context:
@@ -1782,6 +1883,7 @@ class Engine:
             self._build_implementation_prompt(plan_content),
             chat_id,
             _skip_auto_plan=True,
+            attachments=attachments,
         )
 
     def _build_implementation_prompt(self, plan_content: str) -> str:

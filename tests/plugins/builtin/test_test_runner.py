@@ -334,7 +334,6 @@ class TestBuildTestPrompt:
 
 
 class TestTestRunnerPlugin:
-    @pytest.mark.asyncio
     async def test_plugin_sets_mode_and_instruction(
         self, initialized_plugin, event_bus, session, gatekeeper
     ):
@@ -354,7 +353,6 @@ class TestTestRunnerPlugin:
         assert "TEST MODE" in session.mode_instruction
         assert "PHASE 1" in session.mode_instruction
 
-    @pytest.mark.asyncio
     async def test_plugin_auto_approves_browser_tools(
         self, initialized_plugin, event_bus, session, gatekeeper
     ):
@@ -375,7 +373,6 @@ class TestTestRunnerPlugin:
         for tool in BROWSER_READONLY_TOOLS:
             gatekeeper.enable_tool_auto_approve.assert_any_call("chat1", tool)
 
-    @pytest.mark.asyncio
     async def test_plugin_builds_prompt_from_args(
         self, initialized_plugin, event_bus, session, gatekeeper
     ):
@@ -393,7 +390,6 @@ class TestTestRunnerPlugin:
 
         assert "verify login flow" in event.data["prompt"]
 
-    @pytest.mark.asyncio
     async def test_plugin_builds_default_prompt(
         self, initialized_plugin, event_bus, session, gatekeeper
     ):
@@ -413,17 +409,14 @@ class TestTestRunnerPlugin:
             "Run comprehensive tests for the current codebase." in event.data["prompt"]
         )
 
-    @pytest.mark.asyncio
     async def test_plugin_meta(self, plugin):
         assert plugin.meta.name == "test_runner"
         assert plugin.meta.version == "0.2.0"
 
-    @pytest.mark.asyncio
     async def test_plugin_lifecycle(self, plugin):
         await plugin.start()
         await plugin.stop()
 
-    @pytest.mark.asyncio
     async def test_plugin_auto_approves_bash_commands(
         self, initialized_plugin, event_bus, session, gatekeeper
     ):
@@ -442,7 +435,6 @@ class TestTestRunnerPlugin:
         for key in TEST_BASH_AUTO_APPROVE:
             gatekeeper.enable_tool_auto_approve.assert_any_call("chat1", key)
 
-    @pytest.mark.asyncio
     async def test_plugin_auto_approves_write_edit(
         self, initialized_plugin, event_bus, session, gatekeeper
     ):
@@ -461,7 +453,6 @@ class TestTestRunnerPlugin:
         gatekeeper.enable_tool_auto_approve.assert_any_call("chat1", "Write")
         gatekeeper.enable_tool_auto_approve.assert_any_call("chat1", "Edit")
 
-    @pytest.mark.asyncio
     async def test_plugin_parses_url_from_args(
         self, initialized_plugin, event_bus, session, gatekeeper
     ):
@@ -481,7 +472,6 @@ class TestTestRunnerPlugin:
         assert "verify checkout" in event.data["prompt"]
         assert "http://localhost:3000" in session.mode_instruction
 
-    @pytest.mark.asyncio
     async def test_plugin_emits_test_started(self, plugin, config, session, gatekeeper):
         event_bus = EventBus()
         ctx = PluginContext(event_bus=event_bus, config=config)
@@ -511,7 +501,6 @@ class TestTestRunnerPlugin:
         assert received[0].data["chat_id"] == "chat1"
         assert received[0].data["config"]["app_url"] == "http://localhost:3000"
 
-    @pytest.mark.asyncio
     async def test_plugin_instruction_uses_config(
         self, initialized_plugin, event_bus, session, gatekeeper
     ):
@@ -666,7 +655,6 @@ class TestAutoApproveTotalCount:
         await p.initialize(ctx)
         return p
 
-    @pytest.mark.asyncio
     async def test_auto_approve_total_call_count(
         self, initialized_plugin, event_bus, session, gatekeeper
     ):
@@ -696,7 +684,6 @@ class TestAutoApproveTotalCount:
 class TestTestStartedEventData:
     """Verify TEST_STARTED event contains complete config data."""
 
-    @pytest.mark.asyncio
     async def test_full_config_in_event(self):
         from leashd.core.config import LeashdConfig
 
@@ -941,7 +928,6 @@ class TestProjectConfigInInstruction:
 class TestProjectConfigMergeInPlugin:
     """Verify plugin loads and merges project config."""
 
-    @pytest.mark.asyncio
     async def test_plugin_loads_project_config(self, tmp_path):
         from leashd.core.config import LeashdConfig
 
@@ -989,7 +975,6 @@ class TestProjectConfigMergeInPlugin:
         assert "PROJECT CONFIG" in session.mode_instruction
         assert "token" in session.mode_instruction
 
-    @pytest.mark.asyncio
     async def test_plugin_cli_overrides_project(self, tmp_path):
         from leashd.core.config import LeashdConfig
 

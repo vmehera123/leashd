@@ -44,7 +44,6 @@ class SlowAgent(BaseAgent):
 
 
 class TestClearDuringExecution:
-    @pytest.mark.asyncio
     async def test_clear_marks_interrupted_when_agent_active(
         self, config, audit_logger, policy_engine
     ):
@@ -77,7 +76,6 @@ class TestClearDuringExecution:
         assert session.message_count == 0
         assert session.total_cost == 0.0
 
-    @pytest.mark.asyncio
     async def test_clear_prevents_old_result_from_overwriting_session(
         self, config, audit_logger, policy_engine
     ):
@@ -108,7 +106,6 @@ class TestClearDuringExecution:
         # The old agent's session_id ("old-agent-session-id") must NOT be persisted
         assert session.agent_resume_token is None
 
-    @pytest.mark.asyncio
     async def test_interrupt_then_clear_then_new_message(
         self, config, audit_logger, policy_engine
     ):
@@ -146,7 +143,6 @@ class TestClearDuringExecution:
         assert session.message_count == 1
         assert session.total_cost == pytest.approx(0.05)
 
-    @pytest.mark.asyncio
     async def test_clear_cleans_up_executing_state(
         self, config, audit_logger, policy_engine
     ):
@@ -171,7 +167,6 @@ class TestClearDuringExecution:
         assert "chat1" not in eng._interrupted_chats
         assert "chat1" not in eng._executing_sessions
 
-    @pytest.mark.asyncio
     async def test_clear_discards_queued_messages(
         self, config, audit_logger, policy_engine
     ):
@@ -201,7 +196,6 @@ class TestClearDuringExecution:
 
 
 class TestClearWithConnector:
-    @pytest.mark.asyncio
     async def test_clear_during_execution_sends_interrupt_message(
         self, config, audit_logger, policy_engine, mock_connector
     ):

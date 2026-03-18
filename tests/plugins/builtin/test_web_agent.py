@@ -404,17 +404,14 @@ class TestReadWebSessionContext:
 
 
 class TestWebAgentPlugin:
-    @pytest.mark.asyncio
     async def test_plugin_meta(self, plugin):
         assert plugin.meta.name == "web_agent"
         assert plugin.meta.version == "0.1.0"
 
-    @pytest.mark.asyncio
     async def test_plugin_lifecycle(self, plugin):
         await plugin.start()
         await plugin.stop()
 
-    @pytest.mark.asyncio
     async def test_plugin_sets_mode_and_instruction(
         self, initialized_plugin, event_bus, session, gatekeeper
     ):
@@ -434,7 +431,6 @@ class TestWebAgentPlugin:
         assert "WEB MODE" in session.mode_instruction
         assert "CONTENT REVIEW RULE" in session.mode_instruction
 
-    @pytest.mark.asyncio
     async def test_plugin_auto_approves_all_browser_tools(
         self, initialized_plugin, event_bus, session, gatekeeper
     ):
@@ -453,7 +449,6 @@ class TestWebAgentPlugin:
         for tool in ALL_BROWSER_TOOLS:
             gatekeeper.enable_tool_auto_approve.assert_any_call("chat1", tool)
 
-    @pytest.mark.asyncio
     async def test_plugin_auto_approves_write_edit(
         self, initialized_plugin, event_bus, session, gatekeeper
     ):
@@ -471,7 +466,6 @@ class TestWebAgentPlugin:
 
         gatekeeper.enable_tool_auto_approve.assert_any_call("chat1", "Write")
 
-    @pytest.mark.asyncio
     async def test_plugin_auto_approves_skill_with_linkedin_recipe(
         self, initialized_plugin, event_bus, session, gatekeeper
     ):
@@ -495,7 +489,6 @@ class TestWebAgentPlugin:
         assert "Skill" in approved_tools
         gatekeeper.enable_tool_auto_approve.assert_any_call("chat1", "Edit")
 
-    @pytest.mark.asyncio
     async def test_plugin_builds_prompt_with_recipe(
         self, initialized_plugin, event_bus, session, gatekeeper
     ):
@@ -514,7 +507,6 @@ class TestWebAgentPlugin:
         assert "LinkedIn" in event.data["prompt"]
         assert "machine learning" in event.data["prompt"]
 
-    @pytest.mark.asyncio
     async def test_plugin_builds_prompt_freeform(
         self, initialized_plugin, event_bus, session, gatekeeper
     ):
@@ -532,7 +524,6 @@ class TestWebAgentPlugin:
 
         assert "browse twitter for AI posts" in event.data["prompt"]
 
-    @pytest.mark.asyncio
     async def test_plugin_emits_web_started(self, plugin, config, session, gatekeeper):
         event_bus = EventBus()
         ctx = PluginContext(event_bus=event_bus, config=config)
@@ -562,7 +553,6 @@ class TestWebAgentPlugin:
         assert received[0].data["recipe"] == "linkedin_comment"
         assert received[0].data["topic"] == "AI"
 
-    @pytest.mark.asyncio
     async def test_plugin_uses_linkedin_recipe(
         self, initialized_plugin, event_bus, session, gatekeeper
     ):
@@ -581,7 +571,6 @@ class TestWebAgentPlugin:
         assert "LinkedIn" in session.mode_instruction
         assert "Navigate to LinkedIn" in session.mode_instruction
 
-    @pytest.mark.asyncio
     async def test_plugin_resumes_from_session_context(
         self, initialized_plugin, event_bus, session, gatekeeper, tmp_path
     ):
@@ -606,7 +595,6 @@ class TestWebAgentPlugin:
         assert "PREVIOUS WEB SESSION CONTEXT" in event.data["prompt"]
         assert "3 posts" in event.data["prompt"]
 
-    @pytest.mark.asyncio
     async def test_plugin_no_recipe_generic_instruction(
         self, initialized_plugin, event_bus, session, gatekeeper
     ):
@@ -626,7 +614,6 @@ class TestWebAgentPlugin:
         assert "log in manually" in session.mode_instruction
         assert "https://example.com" in event.data["prompt"]
 
-    @pytest.mark.asyncio
     async def test_plugin_sets_browser_fresh_when_fresh_flag(
         self, initialized_plugin, event_bus, session, gatekeeper
     ):
@@ -644,7 +631,6 @@ class TestWebAgentPlugin:
 
         assert session.browser_fresh is True
 
-    @pytest.mark.asyncio
     async def test_plugin_browser_fresh_false_by_default(
         self, initialized_plugin, event_bus, session, gatekeeper
     ):
@@ -662,7 +648,6 @@ class TestWebAgentPlugin:
 
         assert session.browser_fresh is False
 
-    @pytest.mark.asyncio
     async def test_non_resume_clears_agent_resume_token(
         self, initialized_plugin, event_bus, session, gatekeeper
     ):
@@ -681,7 +666,6 @@ class TestWebAgentPlugin:
 
         assert session.agent_resume_token is None
 
-    @pytest.mark.asyncio
     async def test_resume_preserves_agent_resume_token(
         self, initialized_plugin, event_bus, session, gatekeeper, tmp_path
     ):
@@ -706,7 +690,6 @@ class TestWebAgentPlugin:
 
 
 class TestGatekeeperNegativeAutoApproval:
-    @pytest.mark.asyncio
     async def test_auto_approved_without_inline_guidance(
         self, initialized_plugin, event_bus, session, gatekeeper
     ):
@@ -732,7 +715,6 @@ class TestGatekeeperNegativeAutoApproval:
         assert approved_tools == expected
         assert "Read" not in approved_tools
 
-    @pytest.mark.asyncio
     async def test_auto_approved_with_linkedin_recipe_includes_skill(
         self, initialized_plugin, event_bus, session, gatekeeper
     ):
@@ -759,7 +741,6 @@ class TestGatekeeperNegativeAutoApproval:
         assert approved_tools == expected
         assert "Read" not in approved_tools
 
-    @pytest.mark.asyncio
     async def test_plugin_sets_session_browser_backend(
         self, initialized_plugin, event_bus, session, gatekeeper
     ):
@@ -776,7 +757,6 @@ class TestGatekeeperNegativeAutoApproval:
         await event_bus.emit(event)
         assert session.browser_backend == "playwright"
 
-    @pytest.mark.asyncio
     async def test_config_reload_updates_backend(self, config, event_bus):
         plugin = WebAgentPlugin()
         ctx = PluginContext(event_bus=event_bus, config=config)
@@ -793,7 +773,6 @@ class TestGatekeeperNegativeAutoApproval:
         )
         assert plugin._browser_backend == "agent-browser"
 
-    @pytest.mark.asyncio
     async def test_config_reload_noop_for_same_backend(self, config, event_bus):
         plugin = WebAgentPlugin()
         ctx = PluginContext(event_bus=event_bus, config=config)
@@ -816,7 +795,6 @@ class TestRecipeNotFound:
         assert c.recipe_name is None
         assert "nonexistent" in c.description
 
-    @pytest.mark.asyncio
     async def test_plugin_unknown_recipe_falls_back(
         self, initialized_plugin, event_bus, session, gatekeeper
     ):
@@ -1143,7 +1121,6 @@ class TestWebRecipeTaskInstruction:
 
 
 class TestPluginLoadsPlaybook:
-    @pytest.mark.asyncio
     async def test_plugin_loads_bundled_playbook(
         self, initialized_plugin, event_bus, session, gatekeeper
     ):
@@ -1162,7 +1139,6 @@ class TestPluginLoadsPlaybook:
         assert "NAVIGATION GUIDE" in session.mode_instruction
         assert "AI safety" in session.mode_instruction
 
-    @pytest.mark.asyncio
     async def test_plugin_no_playbook_for_freeform(
         self, initialized_plugin, event_bus, session, gatekeeper
     ):
@@ -1254,7 +1230,6 @@ class TestResumeFlag:
         c = parse_web_args("linkedin_comment")
         assert c.resume is False
 
-    @pytest.mark.asyncio
     async def test_default_no_session_resume(
         self, initialized_plugin, event_bus, session, gatekeeper, tmp_path
     ):
@@ -1280,7 +1255,6 @@ class TestResumeFlag:
 
 
 class TestTopicValidation:
-    @pytest.mark.asyncio
     async def test_recipe_missing_topic_returns_error(
         self, initialized_plugin, event_bus, session, gatekeeper
     ):
@@ -1300,7 +1274,6 @@ class TestTopicValidation:
         assert "error" in event.data
         assert "requires a topic" in event.data["error"]
 
-    @pytest.mark.asyncio
     async def test_recipe_with_topic_no_error(
         self, initialized_plugin, event_bus, session, gatekeeper
     ):
@@ -1481,7 +1454,6 @@ class TestCheckpointIntegration:
         assert "web-checkpoint.json" in instruction
         assert "fall back to" in instruction.lower()
 
-    @pytest.mark.asyncio
     async def test_resume_with_checkpoint_json_takes_precedence(
         self, initialized_plugin, event_bus, session, gatekeeper, tmp_path
     ):
@@ -1514,7 +1486,6 @@ class TestCheckpointIntegration:
         assert "PREVIOUS WEB SESSION STATE" in event.data["prompt"]
         assert "cp-resume" in event.data["prompt"]
 
-    @pytest.mark.asyncio
     async def test_resume_with_only_legacy_markdown_still_works(
         self, initialized_plugin, event_bus, session, gatekeeper, tmp_path
     ):

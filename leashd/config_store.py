@@ -145,6 +145,7 @@ def inject_global_config_as_env(*, force: bool = False) -> None:
 
     _inject_autonomous_config(data, force=force)
     _inject_browser_config(data, force=force)
+    _inject_web_config(data, force=force)
 
 
 # --- Autonomous config bridging ---
@@ -254,6 +255,45 @@ def _inject_browser_config(data: dict[str, Any], *, force: bool = False) -> None
             os.environ[key] = str(headless).lower()
 
 
+# --- WebUI config bridging ---
+
+
+def get_web_config(data: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Read the ``web`` section from global config.
+
+    Returns an empty dict when the section is missing or not a dict.
+    """
+    if data is None:
+        data = load_global_config()
+    web = data.get("web", {})
+    if not isinstance(web, dict):
+        return {}
+    return web
+
+
+def _inject_web_config(data: dict[str, Any], *, force: bool = False) -> None:
+    """Bridge web YAML config → LEASHD_WEB_* env vars."""
+    web = data.get("web", {})
+    if not isinstance(web, dict):
+        return
+    web_field_map: dict[str, str] = {
+        "enabled": "LEASHD_WEB_ENABLED",
+        "host": "LEASHD_WEB_HOST",
+        "port": "LEASHD_WEB_PORT",
+        "api_key": "LEASHD_WEB_API_KEY",
+        "cors_origins": "LEASHD_WEB_CORS_ORIGINS",
+    }
+    for yaml_key, env_key in web_field_map.items():
+        value = web.get(yaml_key)
+        if value is None:
+            continue
+        if force or env_key not in os.environ:
+            if isinstance(value, bool):
+                os.environ[env_key] = str(value).lower()
+            else:
+                os.environ[env_key] = str(value)
+
+
 # --- Workspace config at ~/.leashd/workspaces.yaml ---
 
 
@@ -347,6 +387,76 @@ def merge_workspace_dirs(
     data["workspaces"] = workspaces
     save_workspaces_config(data)
     return (newly_added, already_present)
+
+
+_CONFIG_SECTION_MAP: dict[str, dict[str, str]] = {
+    "agent": {
+        "effort": "effort",
+        "runtime": "agent_runtime",
+        "default_mode": "default_mode",
+    },
+    "browser": {
+        "backend": "browser.backend",
+        "headless": "browser.headless",
+    },
+}
+
+_AUTONOMOUS_KEYS = {
+    "enabled",
+    "auto_approver",
+    "auto_plan",
+    "auto_pr",
+    "auto_pr_base_branch",
+    "autonomous_loop",
+    "max_retries",
+}
+
+
+def update_config_sections(updates: dict[str, Any]) -> None:
+    """Deep-merge section updates into the global config and save atomically.
+
+    Handles the mapping between API section keys and the flat/nested
+    config.yaml structure.
+    """
+    data = load_global_config()
+
+    if "agent" in updates:
+        agent = updates["agent"]
+        if isinstance(agent, dict):
+            for key, value in agent.items():
+                if key == "effort":
+                    data["effort"] = value
+                elif key == "runtime":
+                    data["agent_runtime"] = value
+                elif key == "default_mode":
+                    data["default_mode"] = value
+
+    if "autonomous" in updates:
+        auto_update = updates["autonomous"]
+        if isinstance(auto_update, dict):
+            autonomous = data.get("autonomous", {})
+            if not isinstance(autonomous, dict):
+                autonomous = {}
+            for key, value in auto_update.items():
+                if key in _AUTONOMOUS_KEYS:
+                    if key == "max_retries":
+                        autonomous["task_max_retries"] = value
+                    else:
+                        autonomous[key] = value
+            data["autonomous"] = autonomous
+
+    if "browser" in updates:
+        browser_update = updates["browser"]
+        if isinstance(browser_update, dict):
+            browser = data.get("browser", {})
+            if not isinstance(browser, dict):
+                browser = {}
+            for key, value in browser_update.items():
+                if key in {"backend", "headless"}:
+                    browser[key] = value
+            data["browser"] = browser
+
+    save_global_config(data)
 
 
 def get_skills_config(data: dict[str, Any] | None = None) -> dict[str, Any]:

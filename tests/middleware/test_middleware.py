@@ -18,13 +18,11 @@ async def _echo_handler(ctx: MessageContext) -> str:
 
 
 class TestMiddlewareChain:
-    @pytest.mark.asyncio
     async def test_empty_chain_calls_handler(self):
         chain = MiddlewareChain()
         result = await chain.run(_make_ctx(), _echo_handler)
         assert result == "Echo: hello"
 
-    @pytest.mark.asyncio
     async def test_single_middleware_passthrough(self):
         class PassThrough:
             async def process(self, ctx, call_next):
@@ -38,7 +36,6 @@ class TestMiddlewareChain:
         assert result == "Echo: hello"
         assert ctx.metadata["touched"] is True
 
-    @pytest.mark.asyncio
     async def test_middleware_can_short_circuit(self):
         class Blocker:
             async def process(self, ctx, call_next):
@@ -49,7 +46,6 @@ class TestMiddlewareChain:
         result = await chain.run(_make_ctx(), _echo_handler)
         assert result == "blocked"
 
-    @pytest.mark.asyncio
     async def test_middleware_order(self):
         calls = []
 
@@ -76,25 +72,21 @@ class TestMiddlewareChain:
 
 
 class TestAuthMiddleware:
-    @pytest.mark.asyncio
     async def test_allowed_user_passes(self):
         mw = AuthMiddleware({"user1"})
         result = await mw.process(_make_ctx(user_id="user1"), _echo_handler)
         assert result == "Echo: hello"
 
-    @pytest.mark.asyncio
     async def test_unauthorized_user_rejected(self):
         mw = AuthMiddleware({"user1"})
         result = await mw.process(_make_ctx(user_id="stranger"), _echo_handler)
         assert "Unauthorized" in result
 
-    @pytest.mark.asyncio
     async def test_allow_all_bypasses_check(self):
         mw = AuthMiddleware(set(), allow_all=True)
         result = await mw.process(_make_ctx(user_id="anyone"), _echo_handler)
         assert result == "Echo: hello"
 
-    @pytest.mark.asyncio
     async def test_empty_whitelist_rejects_all(self):
         mw = AuthMiddleware(set())
         result = await mw.process(_make_ctx(user_id="anyone"), _echo_handler)
@@ -119,13 +111,11 @@ class TestTokenBucket:
 
 
 class TestRateLimitMiddleware:
-    @pytest.mark.asyncio
     async def test_within_limit_passes(self):
         mw = RateLimitMiddleware(requests_per_minute=60, burst=5)
         result = await mw.process(_make_ctx(), _echo_handler)
         assert result == "Echo: hello"
 
-    @pytest.mark.asyncio
     async def test_exceeds_burst_rejected(self):
         mw = RateLimitMiddleware(requests_per_minute=60, burst=2)
         await mw.process(_make_ctx(), _echo_handler)
@@ -133,7 +123,6 @@ class TestRateLimitMiddleware:
         result = await mw.process(_make_ctx(), _echo_handler)
         assert "Rate limited" in result
 
-    @pytest.mark.asyncio
     async def test_per_user_buckets(self):
         mw = RateLimitMiddleware(requests_per_minute=60, burst=1)
         await mw.process(_make_ctx(user_id="u1"), _echo_handler)
@@ -158,7 +147,6 @@ class TestTokenBucketEdgeCases:
 
 
 class TestAuthEdgeCases:
-    @pytest.mark.asyncio
     async def test_auth_with_multiple_users(self):
         mw = AuthMiddleware({"alice", "bob", "charlie"})
         for user in ("alice", "bob", "charlie"):
@@ -169,7 +157,6 @@ class TestAuthEdgeCases:
 
 
 class TestMiddlewareChainEdgeCases:
-    @pytest.mark.asyncio
     async def test_middleware_exception_propagates(self):
         class Exploder:
             async def process(self, ctx, call_next):
@@ -182,7 +169,6 @@ class TestMiddlewareChainEdgeCases:
 
 
 class TestRateLimitRecovery:
-    @pytest.mark.asyncio
     async def test_rate_limit_recovery_after_wait(self):
         mw = RateLimitMiddleware(requests_per_minute=60, burst=1)
         await mw.process(_make_ctx(), _echo_handler)
@@ -199,26 +185,22 @@ class TestRateLimitRecovery:
 class TestAuthBypass:
     """Security bypass attempt vectors for auth middleware."""
 
-    @pytest.mark.asyncio
     async def test_auth_empty_string_user_id(self):
         mw = AuthMiddleware({"user1"})
         result = await mw.process(_make_ctx(user_id=""), _echo_handler)
         assert "Unauthorized" in result
 
-    @pytest.mark.asyncio
     async def test_auth_none_string_user_id(self):
         """Literal string 'None' should not be treated as special."""
         mw = AuthMiddleware({"user1"})
         result = await mw.process(_make_ctx(user_id="None"), _echo_handler)
         assert "Unauthorized" in result
 
-    @pytest.mark.asyncio
     async def test_auth_special_chars_user_id(self):
         mw = AuthMiddleware({"user1"})
         result = await mw.process(_make_ctx(user_id="user;DROP TABLE"), _echo_handler)
         assert "Unauthorized" in result
 
-    @pytest.mark.asyncio
     async def test_auth_numeric_string_user_id(self):
         """Telegram-style numeric IDs should work when allowlisted."""
         mw = AuthMiddleware({"12345"})
@@ -229,7 +211,6 @@ class TestAuthBypass:
 class TestRateLimitEdgeCases:
     """Edge cases for rate limiter."""
 
-    @pytest.mark.asyncio
     async def test_rate_limit_zero_rpm(self):
         """rpm=0 → rate=0 tokens/sec; burst tokens work then blocks."""
         mw = RateLimitMiddleware(requests_per_minute=0, burst=1)
@@ -240,7 +221,6 @@ class TestRateLimitEdgeCases:
         result = await mw.process(_make_ctx(), _echo_handler)
         assert "Rate limited" in result
 
-    @pytest.mark.asyncio
     async def test_rate_limit_high_burst(self):
         """High burst allows many initial requests."""
         mw = RateLimitMiddleware(requests_per_minute=60, burst=100)
@@ -250,7 +230,6 @@ class TestRateLimitEdgeCases:
             results.append(r)
         assert all(r == "Echo: hello" for r in results)
 
-    @pytest.mark.asyncio
     async def test_rate_limit_isolated_buckets(self):
         """3 distinct user_ids get independent buckets."""
         mw = RateLimitMiddleware(requests_per_minute=60, burst=1)

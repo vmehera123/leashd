@@ -2,8 +2,6 @@
 
 import asyncio
 
-import pytest
-
 from leashd.agents.base import AgentResponse, BaseAgent
 from leashd.core.engine import Engine
 from leashd.core.interactions import InteractionCoordinator
@@ -12,7 +10,6 @@ from tests.core.engine.conftest import FakeAgent, _make_git_handler_mock
 
 
 class TestStreamingResponderReset:
-    @pytest.mark.asyncio
     async def test_reset_clears_state_and_new_chunk_creates_new_message(
         self, config, policy_engine, audit_logger
     ):
@@ -42,7 +39,6 @@ class TestStreamingResponderReset:
 
 
 class TestStreamingResponderMessageTracking:
-    @pytest.mark.asyncio
     async def test_all_message_ids_tracks_initial_message(self):
         from leashd.core.engine import _StreamingResponder
         from tests.conftest import MockConnector
@@ -53,7 +49,6 @@ class TestStreamingResponderMessageTracking:
         await responder.on_chunk("hello")
         assert responder.all_message_ids == ["1"]
 
-    @pytest.mark.asyncio
     async def test_all_message_ids_tracks_overflow_messages(self):
         from leashd.core.engine import _MAX_STREAMING_DISPLAY, _StreamingResponder
         from tests.conftest import MockConnector
@@ -69,7 +64,6 @@ class TestStreamingResponderMessageTracking:
         assert len(responder.all_message_ids) == 2
         assert responder.all_message_ids == ["1", "2"]
 
-    @pytest.mark.asyncio
     async def test_reset_clears_all_message_ids(self):
         from leashd.core.engine import _StreamingResponder
         from tests.conftest import MockConnector
@@ -82,7 +76,6 @@ class TestStreamingResponderMessageTracking:
         responder.reset()
         assert responder.all_message_ids == []
 
-    @pytest.mark.asyncio
     async def test_delete_all_messages_deletes_and_clears(self):
         from leashd.core.engine import _StreamingResponder
         from tests.conftest import MockConnector
@@ -100,7 +93,6 @@ class TestStreamingResponderMessageTracking:
 
 
 class TestActivityCleanup:
-    @pytest.mark.asyncio
     async def test_on_activity_none_clears_when_has_activity(self):
         from leashd.agents.base import ToolActivity
         from leashd.core.engine import _StreamingResponder
@@ -121,7 +113,6 @@ class TestActivityCleanup:
         assert responder._has_activity is False
         assert len(connector.cleared_activities) == 1
 
-    @pytest.mark.asyncio
     async def test_on_activity_none_noop_when_no_activity(self):
         from leashd.core.engine import _StreamingResponder
         from tests.conftest import MockConnector
@@ -136,7 +127,6 @@ class TestActivityCleanup:
         assert responder._has_activity is False
         assert len(connector.cleared_activities) == 0
 
-    @pytest.mark.asyncio
     async def test_finalize_clears_activity_before_editing(self):
         from leashd.agents.base import ToolActivity
         from leashd.core.engine import _StreamingResponder
@@ -156,7 +146,6 @@ class TestActivityCleanup:
         # Activity cleared before edit — clear should come before the final edit
         assert len(connector.edited_messages) >= 1
 
-    @pytest.mark.asyncio
     async def test_multi_tool_sequence_clears_each_time(self):
         from leashd.agents.base import ToolActivity
         from leashd.core.engine import _StreamingResponder
@@ -192,7 +181,6 @@ class TestActivityCleanup:
         assert responder._has_activity is False
         assert len(connector.cleared_activities) == 2
 
-    @pytest.mark.asyncio
     async def test_deactivate_then_on_activity_none_no_error(self):
         from leashd.agents.base import ToolActivity
         from leashd.core.engine import _StreamingResponder
@@ -215,7 +203,6 @@ class TestActivityCleanup:
         # No additional clear — still just 1
         assert len(connector.cleared_activities) == 1
 
-    @pytest.mark.asyncio
     async def test_deactivate_without_prior_activity_no_error(self):
         from leashd.core.engine import _StreamingResponder
         from tests.conftest import MockConnector
@@ -234,7 +221,6 @@ class TestActivityCleanup:
 
 
 class TestTransientMessages:
-    @pytest.mark.asyncio
     async def test_context_cleared_message_scheduled_for_cleanup(
         self, config, policy_engine, audit_logger
     ):
@@ -282,7 +268,6 @@ class TestTransientMessages:
         cleanups = [c for c in connector.scheduled_cleanups if c["delay"] == 5.0]
         assert len(cleanups) >= 1
 
-    @pytest.mark.asyncio
     async def test_context_cleared_fallback_when_no_id(
         self, config, policy_engine, audit_logger, mock_connector
     ):
@@ -333,7 +318,6 @@ class TestTransientMessages:
         ]
         assert len(context_msgs) >= 1
 
-    @pytest.mark.asyncio
     async def test_smart_commit_ack_scheduled_for_cleanup(
         self, config, audit_logger, policy_engine
     ):
@@ -363,7 +347,6 @@ class TestTransientMessages:
         assert len(analyzing_msgs) == 1
         assert "message_id" in analyzing_msgs[0]
 
-    @pytest.mark.asyncio
     async def test_smart_commit_ack_fallback_when_no_id(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -387,7 +370,6 @@ class TestTransientMessages:
         assert len(analyzing_msgs) == 1
         assert mock_connector.scheduled_cleanups == []
 
-    @pytest.mark.asyncio
     async def test_plan_inline_ack_scheduled_for_cleanup(
         self, config, audit_logger, policy_engine
     ):
@@ -417,7 +399,6 @@ class TestTransientMessages:
         assert len(plan_msgs) == 1
         assert "message_id" in plan_msgs[0]
 
-    @pytest.mark.asyncio
     async def test_edit_inline_ack_scheduled_for_cleanup(
         self, config, audit_logger, policy_engine
     ):
@@ -447,7 +428,6 @@ class TestTransientMessages:
         assert len(edit_msgs) == 1
         assert "message_id" in edit_msgs[0]
 
-    @pytest.mark.asyncio
     async def test_send_transient_without_connector(
         self, config, audit_logger, policy_engine
     ):
@@ -463,3 +443,95 @@ class TestTransientMessages:
 
         # Should be a no-op, no error raised
         await eng._send_transient("chat1", "some status message")
+
+
+class TestStreamingResponderCleanup:
+    async def test_cleanup_edits_away_cursor_with_buffered_text(self):
+        from leashd.core.engine import _StreamingResponder
+        from tests.conftest import MockConnector
+
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
+
+        await responder.on_chunk("partial output")
+        assert responder._message_id is not None
+
+        await responder.cleanup()
+        assert responder._active is False
+        last_edit = connector.edited_messages[-1]
+        assert last_edit["text"] == "partial output"
+        assert "\u258d" not in last_edit["text"]
+
+    async def test_cleanup_deletes_message_when_buffer_empty(self):
+        from leashd.core.engine import _StreamingResponder
+        from tests.conftest import MockConnector
+
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
+
+        await responder.on_chunk("x")
+        msg_id = responder._message_id
+        # Simulate buffer fully consumed by overflow
+        responder._buffer = ""
+
+        await responder.cleanup()
+        assert responder._active is False
+        assert any(d["message_id"] == msg_id for d in connector.deleted_messages)
+
+    async def test_cleanup_noop_when_no_message_id(self):
+        from leashd.core.engine import _StreamingResponder
+        from tests.conftest import MockConnector
+
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
+
+        # No chunks sent — no message_id
+        await responder.cleanup()
+        assert responder._active is False
+        assert connector.edited_messages == []
+        assert connector.deleted_messages == []
+
+    async def test_cleanup_suppresses_connector_errors(self):
+        from unittest.mock import AsyncMock
+
+        from leashd.core.engine import _StreamingResponder
+        from tests.conftest import MockConnector
+
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
+
+        await responder.on_chunk("text")
+        connector.edit_message = AsyncMock(side_effect=RuntimeError("network"))
+
+        # Should not raise
+        await responder.cleanup()
+        assert responder._active is False
+
+
+class TestFinalizeRobustness:
+    async def test_finalize_returns_false_on_edit_failure(self):
+        from unittest.mock import AsyncMock
+
+        from leashd.core.engine import _StreamingResponder
+        from tests.conftest import MockConnector
+
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
+
+        await responder.on_chunk("hello")
+        connector.edit_message = AsyncMock(side_effect=RuntimeError("API error"))
+
+        result = await responder.finalize("hello")
+        assert result is False
+        assert responder._active is False
+
+    async def test_finalize_returns_true_on_success(self):
+        from leashd.core.engine import _StreamingResponder
+        from tests.conftest import MockConnector
+
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
+
+        await responder.on_chunk("hello")
+        result = await responder.finalize("hello")
+        assert result is True

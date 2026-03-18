@@ -67,20 +67,22 @@ class TestPromptOptional:
 
 class TestRunSetup:
     def test_adds_cwd(self, fake_config_dir, tmp_path):
-        inputs = iter(["y", "", "n", ""])
+        # y=add dir, ""=skip telegram, n=skip autonomous, n=skip webui, ""=skip browser
+        inputs = iter(["y", "", "n", "n", ""])
         result = run_setup(tmp_path, input_fn=lambda _prompt: next(inputs))
 
         dirs = result.get("approved_directories", [])
         assert str(tmp_path.resolve()) in dirs
 
     def test_skips_telegram(self, fake_config_dir, tmp_path):
-        inputs = iter(["y", "", "n", ""])
+        inputs = iter(["y", "", "n", "n", ""])
         result = run_setup(tmp_path, input_fn=lambda _prompt: next(inputs))
 
         telegram = result.get("telegram", {})
         assert not telegram.get("bot_token")
 
     def test_saves_telegram(self, fake_config_dir, tmp_path):
+        # When telegram token is set, WebUI prompt is skipped
         inputs = iter(["y", "123:abc-token", "987654321", "n", ""])
         result = run_setup(tmp_path, input_fn=lambda _prompt: next(inputs))
 
@@ -103,11 +105,14 @@ class TestRunSetup:
             call_count += 1
             if call_count == 1:
                 return "y"  # add dir
+            if call_count == 4:
+                return "n"  # skip webui
             return ""
 
         result = run_setup(tmp_path, input_fn=counting_input)
         assert "allowed_user_ids" not in result.get("telegram", {})
-        assert call_count == 4
+        # +1 for the WebUI yes/no prompt
+        assert call_count == 5
 
     def test_rerun_skips_existing_dir(self, fake_config_dir, tmp_path):
         """When cwd already in approved dirs, dir prompt is skipped."""
@@ -117,10 +122,13 @@ class TestRunSetup:
         def counting_input(_prompt):
             nonlocal call_count
             call_count += 1
+            if call_count == 3:
+                return "n"  # skip webui
             return ""
 
         run_setup(tmp_path, input_fn=counting_input)
-        assert call_count == 3
+        # telegram(1) + autonomous(1) + webui(1) + browser(1) = 4
+        assert call_count == 4
 
     def test_rerun_skips_existing_token(self, fake_config_dir, tmp_path):
         """When dir and token already set, user-id + autonomous + browser prompts shown."""
@@ -138,6 +146,7 @@ class TestRunSetup:
             return ""
 
         run_setup(tmp_path, input_fn=counting_input)
+        # WebUI prompt skipped because telegram token exists
         assert call_count == 3
 
     def test_eof_during_prompt_no_corruption(self, fake_config_dir, tmp_path):
@@ -161,6 +170,7 @@ class TestRunSetup:
 
     def test_invalid_user_id_non_numeric_skipped(self, fake_config_dir, tmp_path):
         """Non-numeric user ID 'abc123' is skipped via ValueError from int()."""
+        # Telegram token set → WebUI skipped
         inputs = iter(["y", "123:abc-token", "abc123", "n", ""])
         result = run_setup(tmp_path, input_fn=lambda _prompt: next(inputs))
         telegram = result.get("telegram", {})
@@ -190,7 +200,8 @@ class TestRunSetup:
     def test_browser_profile_saved(self, fake_config_dir, tmp_path):
         """Browser profile path is saved to config."""
         profile_dir = str(tmp_path / "browser-profile")
-        inputs = iter(["y", "", "n", profile_dir])
+        # y=add dir, ""=skip telegram, n=skip autonomous, n=skip webui, profile_dir
+        inputs = iter(["y", "", "n", "n", profile_dir])
         result = run_setup(tmp_path, input_fn=lambda _prompt: next(inputs))
 
         browser = result.get("browser", {})
@@ -199,7 +210,7 @@ class TestRunSetup:
 
     def test_browser_profile_skipped(self, fake_config_dir, tmp_path):
         """Empty input skips browser profile."""
-        inputs = iter(["y", "", "n", ""])
+        inputs = iter(["y", "", "n", "n", ""])
         result = run_setup(tmp_path, input_fn=lambda _prompt: next(inputs))
 
         browser = result.get("browser", {})
@@ -218,7 +229,10 @@ class TestRunSetup:
         def counting_input(_prompt):
             nonlocal call_count
             call_count += 1
+            if call_count == 3:
+                return "n"  # skip webui
             return ""
 
         run_setup(tmp_path, input_fn=counting_input)
-        assert call_count == 2
+        # telegram(1) + autonomous(1) + webui(1) = 3 (browser skipped)
+        assert call_count == 3

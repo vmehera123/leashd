@@ -2,8 +2,6 @@
 
 import asyncio
 
-import pytest
-
 from leashd.agents.base import AgentResponse, BaseAgent
 from leashd.core.engine import Engine
 from leashd.core.interactions import InteractionCoordinator
@@ -13,12 +11,10 @@ from tests.core.engine.conftest import FakeAgent
 
 
 class TestSafetyHookWiring:
-    @pytest.mark.asyncio
     async def test_can_use_tool_callback_provided(self, engine, fake_agent):
         await engine.handle_message("user1", "hello", "chat1")
         assert fake_agent.last_can_use_tool is not None
 
-    @pytest.mark.asyncio
     async def test_read_tool_allowed(self, engine, fake_agent, tmp_dir):
         await engine.handle_message("user1", "hello", "chat1")
         hook = fake_agent.last_can_use_tool
@@ -26,7 +22,6 @@ class TestSafetyHookWiring:
         result = await hook("Read", {"file_path": str(tmp_dir / "foo.py")}, None)
         assert result.behavior == "allow"
 
-    @pytest.mark.asyncio
     async def test_sandbox_violation_denied(self, engine, fake_agent):
         await engine.handle_message("user1", "hello", "chat1")
         hook = fake_agent.last_can_use_tool
@@ -35,7 +30,6 @@ class TestSafetyHookWiring:
         assert result.behavior == "deny"
         assert "outside allowed" in result.message
 
-    @pytest.mark.asyncio
     async def test_destructive_bash_denied(self, engine, fake_agent):
         await engine.handle_message("user1", "hello", "chat1")
         hook = fake_agent.last_can_use_tool
@@ -43,7 +37,6 @@ class TestSafetyHookWiring:
         result = await hook("Bash", {"command": "rm -rf /"}, None)
         assert result.behavior == "deny"
 
-    @pytest.mark.asyncio
     async def test_credential_read_denied(self, engine, fake_agent, tmp_dir):
         await engine.handle_message("user1", "hello", "chat1")
         hook = fake_agent.last_can_use_tool
@@ -55,7 +48,6 @@ class TestSafetyHookWiring:
         )
         assert result.behavior == "deny"
 
-    @pytest.mark.asyncio
     async def test_file_write_requires_approval_denied_without_coordinator(
         self, engine, fake_agent, tmp_dir
     ):
@@ -71,7 +63,6 @@ class TestSafetyHookWiring:
         assert result.behavior == "deny"
         assert "approval" in result.message.lower()
 
-    @pytest.mark.asyncio
     async def test_git_status_bash_allowed(self, engine, fake_agent):
         await engine.handle_message("user1", "hello", "chat1")
         hook = fake_agent.last_can_use_tool
@@ -79,7 +70,6 @@ class TestSafetyHookWiring:
         result = await hook("Bash", {"command": "git status"}, None)
         assert result.behavior == "allow"
 
-    @pytest.mark.asyncio
     async def test_audit_log_written(self, engine, fake_agent, tmp_dir):
         await engine.handle_message("user1", "hello", "chat1")
         hook = fake_agent.last_can_use_tool
@@ -93,7 +83,6 @@ class TestSafetyHookWiring:
 
 
 class TestEngineApprovalFlow:
-    @pytest.mark.asyncio
     async def test_approval_granted_allows_tool(
         self, config, fake_agent, policy_engine, audit_logger, mock_connector, tmp_dir
     ):
@@ -120,7 +109,6 @@ class TestEngineApprovalFlow:
         await task
         assert result.behavior == "allow"
 
-    @pytest.mark.asyncio
     async def test_approval_denied_blocks_tool(
         self, config, fake_agent, policy_engine, audit_logger, mock_connector, tmp_dir
     ):
@@ -149,7 +137,6 @@ class TestEngineApprovalFlow:
 
 
 class TestAutoApproveWritesAfterProceed:
-    @pytest.mark.asyncio
     async def test_auto_approve_writes_after_plan_proceed(
         self, config, fake_agent, policy_engine, audit_logger, mock_connector
     ):
@@ -185,7 +172,6 @@ class TestAutoApproveWritesAfterProceed:
         assert "Edit" not in auto
         assert "chat1" not in eng._gatekeeper._auto_approved_chats
 
-    @pytest.mark.asyncio
     async def test_auto_approve_writes_after_fallback_proceed(
         self, config, policy_engine, audit_logger, mock_connector
     ):
@@ -252,7 +238,6 @@ class TestAutoApproveWritesAfterProceed:
 
 
 class TestDefaultButtonNoAutoApprove:
-    @pytest.mark.asyncio
     async def test_default_button_does_not_auto_approve_writes(
         self, config, fake_agent, policy_engine, audit_logger, mock_connector
     ):
@@ -288,7 +273,6 @@ class TestDefaultButtonNoAutoApprove:
 
 
 class TestEditModeSecurityRegression:
-    @pytest.mark.asyncio
     async def test_edit_mode_does_not_blanket_auto_approve(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -314,7 +298,6 @@ class TestEditModeSecurityRegression:
 class TestDefaultButtonSessionMode:
     """Verify _exit_plan_mode sets session.mode correctly for different target_modes."""
 
-    @pytest.mark.asyncio
     async def test_fallback_default_sets_session_mode_to_default(
         self, config, policy_engine, audit_logger, mock_connector
     ):
@@ -369,7 +352,6 @@ class TestDefaultButtonSessionMode:
 
         assert session.mode == "default"
 
-    @pytest.mark.asyncio
     async def test_clean_edit_sets_session_mode_to_edit(
         self, config, policy_engine, audit_logger, mock_connector
     ):

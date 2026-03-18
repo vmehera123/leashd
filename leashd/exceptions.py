@@ -47,3 +47,7 @@ class DaemonError(LeashdError):
 
 class TaskError(LeashdError):
     """Task orchestration error."""
+
+
+class TunnelError(LeashdError):
+    """Tunnel process error."""

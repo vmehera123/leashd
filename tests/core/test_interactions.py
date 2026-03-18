@@ -2,13 +2,10 @@
 
 import asyncio
 
-import pytest
-
 from leashd.core.config import LeashdConfig
 
 
 class TestQuestionHandling:
-    @pytest.mark.asyncio
     async def test_button_answer(self, interaction_coordinator, mock_connector):
         tool_input = {
             "questions": [
@@ -38,7 +35,6 @@ class TestQuestionHandling:
         assert result.behavior == "allow"
         assert result.updated_input["answers"]["Which framework?"] == "FastAPI"
 
-    @pytest.mark.asyncio
     async def test_text_answer(self, interaction_coordinator, mock_connector):
         tool_input = {
             "questions": [
@@ -66,7 +62,6 @@ class TestQuestionHandling:
         assert result.updated_input["answers"]["Project name?"] == "my-cool-project"
         assert "chat1" in mock_connector.cleared_question_chats
 
-    @pytest.mark.asyncio
     async def test_timeout_denies(self, mock_connector, config):
         from leashd.core.interactions import InteractionCoordinator
 
@@ -87,7 +82,6 @@ class TestQuestionHandling:
         assert result.behavior == "deny"
         assert "No response" in result.message
 
-    @pytest.mark.asyncio
     async def test_default_none_timeout_waits_for_answer(self, mock_connector, config):
         from leashd.core.interactions import InteractionCoordinator
 
@@ -116,7 +110,6 @@ class TestQuestionHandling:
         assert result.behavior == "allow"
         assert result.updated_input["answers"]["Pick one?"] == "A"
 
-    @pytest.mark.asyncio
     async def test_multiple_questions_sequential(
         self, interaction_coordinator, mock_connector
     ):
@@ -154,12 +147,10 @@ class TestQuestionHandling:
         assert result.behavior == "allow"
         assert result.updated_input["answers"] == {"Q1?": "A", "Q2?": "B"}
 
-    @pytest.mark.asyncio
     async def test_unknown_id_returns_false(self, interaction_coordinator):
         result = await interaction_coordinator.resolve_option("nonexistent", "answer")
         assert result is False
 
-    @pytest.mark.asyncio
     async def test_cancel_unblocks(self, interaction_coordinator, mock_connector):
         tool_input = {
             "questions": [
@@ -184,7 +175,6 @@ class TestQuestionHandling:
         # Cancel sets the event but no answer → deny
         assert result.behavior == "deny"
 
-    @pytest.mark.asyncio
     async def test_empty_questions_allows(self, interaction_coordinator):
         result = await interaction_coordinator.handle_question(
             "chat1", {"questions": []}
@@ -193,7 +183,6 @@ class TestQuestionHandling:
 
 
 class TestPlanReviewHandling:
-    @pytest.mark.asyncio
     async def test_proceed_allows(self, interaction_coordinator, mock_connector):
         from leashd.core.interactions import PlanReviewDecision
 
@@ -211,7 +200,6 @@ class TestPlanReviewHandling:
         assert result.target_mode == "edit"
         assert result.clear_context is False
 
-    @pytest.mark.asyncio
     async def test_adjust_denies_with_feedback(
         self, interaction_coordinator, mock_connector
     ):
@@ -232,7 +220,6 @@ class TestPlanReviewHandling:
         assert result.behavior == "deny"
         assert result.message == "Add error handling"
 
-    @pytest.mark.asyncio
     async def test_clean_proceed_allows_with_flag(
         self, interaction_coordinator, mock_connector
     ):
@@ -254,7 +241,6 @@ class TestPlanReviewHandling:
         assert result.clear_context is True
         assert result.target_mode == "edit"
 
-    @pytest.mark.asyncio
     async def test_plan_review_times_out(self, mock_connector, config):
         from leashd.agents.types import PermissionDeny
         from leashd.core.interactions import InteractionCoordinator
@@ -266,7 +252,6 @@ class TestPlanReviewHandling:
         assert isinstance(result, PermissionDeny)
         assert "timed out" in result.message
 
-    @pytest.mark.asyncio
     async def test_default_none_timeout_waits_for_decision(
         self, mock_connector, config
     ):
@@ -288,7 +273,6 @@ class TestPlanReviewHandling:
         assert result.permission.behavior == "allow"
         assert result.target_mode == "edit"
 
-    @pytest.mark.asyncio
     async def test_default_allows_without_auto_approve(
         self, interaction_coordinator, mock_connector
     ):
@@ -310,7 +294,6 @@ class TestPlanReviewHandling:
         assert result.target_mode == "default"
         assert result.clear_context is False
 
-    @pytest.mark.asyncio
     async def test_text_during_plan_review_treated_as_adjustment(
         self, mock_connector, config, event_bus
     ):
@@ -330,7 +313,6 @@ class TestPlanReviewHandling:
         assert result.message == "Add more error handling"
         assert "chat1" in mock_connector.cleared_plan_chats
 
-    @pytest.mark.asyncio
     async def test_text_during_plan_review_sends_activity(self, config, event_bus):
         from leashd.core.interactions import InteractionCoordinator
         from tests.conftest import MockConnector
@@ -354,7 +336,6 @@ class TestPlanReviewHandling:
         ]
         assert len(activity) == 1
 
-    @pytest.mark.asyncio
     async def test_connector_receives_plan_review(
         self, interaction_coordinator, mock_connector
     ):
@@ -370,9 +351,55 @@ class TestPlanReviewHandling:
         assert len(mock_connector.plan_review_requests) == 1
         assert mock_connector.plan_review_requests[0]["chat_id"] == "chat1"
 
+    async def test_yes_maps_to_clean_edit(
+        self, interaction_coordinator, mock_connector
+    ):
+        from leashd.core.interactions import PlanReviewDecision
+
+        async def click_yes():
+            await asyncio.sleep(0.05)
+            req = mock_connector.plan_review_requests[0]
+            await interaction_coordinator.resolve_option(req["interaction_id"], "yes")
+
+        task = asyncio.create_task(click_yes())
+        result = await interaction_coordinator.handle_plan_review("chat1", {})
+        await task
+
+        assert isinstance(result, PlanReviewDecision)
+        assert result.permission.behavior == "allow"
+        assert result.clear_context is True
+
+    async def test_no_maps_to_adjust(self, interaction_coordinator, mock_connector):
+        async def click_no():
+            await asyncio.sleep(0.05)
+            req = mock_connector.plan_review_requests[0]
+            await interaction_coordinator.resolve_option(req["interaction_id"], "no")
+            await asyncio.sleep(0.05)
+            await interaction_coordinator.resolve_text("chat1", "Fix it")
+
+        task = asyncio.create_task(click_no())
+        result = await interaction_coordinator.handle_plan_review("chat1", {})
+        await task
+
+        assert result.behavior == "deny"
+        assert result.message == "Fix it"
+
+    async def test_invalid_plan_decision_returns_false(
+        self, interaction_coordinator, mock_connector
+    ):
+        from leashd.core.interactions import PendingInteraction
+
+        pending = PendingInteraction(
+            interaction_id="test-id",
+            chat_id="chat1",
+            kind="plan_review",
+        )
+        interaction_coordinator.pending["test-id"] = pending
+        result = await interaction_coordinator.resolve_option("test-id", "bogus")
+        assert result is False
+
 
 class TestTextRouting:
-    @pytest.mark.asyncio
     async def test_has_pending_true(self, interaction_coordinator, mock_connector):
         tool_input = {
             "questions": [
@@ -396,18 +423,15 @@ class TestTextRouting:
         await interaction_coordinator.handle_question("chat1", tool_input)
         await task
 
-    @pytest.mark.asyncio
     async def test_no_pending_returns_false(self, interaction_coordinator):
         result = await interaction_coordinator.resolve_text("chat1", "hello")
         assert result is False
 
-    @pytest.mark.asyncio
     async def test_has_pending_false_when_empty(self, interaction_coordinator):
         assert interaction_coordinator.has_pending("chat1") is False
 
 
 class TestPlanContentPassthrough:
-    @pytest.mark.asyncio
     async def test_plan_content_sent_to_connector(
         self, interaction_coordinator, mock_connector
     ):
@@ -426,7 +450,6 @@ class TestPlanContentPassthrough:
             "Here is the full plan."
         )
 
-    @pytest.mark.asyncio
     async def test_no_plan_content_uses_default(
         self, interaction_coordinator, mock_connector
     ):
@@ -443,7 +466,6 @@ class TestPlanContentPassthrough:
             "Plan is ready for review."
         )
 
-    @pytest.mark.asyncio
     async def test_empty_plan_content_uses_default(
         self, interaction_coordinator, mock_connector
     ):
@@ -481,7 +503,6 @@ class TestInteractionTimeoutBehavior:
             ]
         }
 
-    @pytest.mark.asyncio
     async def test_question_timeout_cleans_state(self, mock_connector, config):
         config.interaction_timeout_seconds = 0.1
         coord = self._make_coord(mock_connector, config)
@@ -493,7 +514,6 @@ class TestInteractionTimeoutBehavior:
         assert coord._chat_index == {}
         assert coord.has_pending("chat1") is False
 
-    @pytest.mark.asyncio
     async def test_plan_review_timeout_cleans_state(self, mock_connector, config):
         config.interaction_timeout_seconds = 0.1
         coord = self._make_coord(mock_connector, config)
@@ -506,7 +526,6 @@ class TestInteractionTimeoutBehavior:
         assert coord._chat_index == {}
         assert coord.has_pending("chat1") is False
 
-    @pytest.mark.asyncio
     async def test_cancel_escapes_indefinite_question_wait(
         self, mock_connector, config
     ):
@@ -527,7 +546,6 @@ class TestInteractionTimeoutBehavior:
         assert coord.pending == {}
         assert coord._chat_index == {}
 
-    @pytest.mark.asyncio
     async def test_cancel_escapes_indefinite_plan_review_wait(
         self, mock_connector, config
     ):
@@ -549,7 +567,6 @@ class TestInteractionTimeoutBehavior:
         assert coord.pending == {}
         assert coord._chat_index == {}
 
-    @pytest.mark.asyncio
     async def test_multi_question_first_answered_second_times_out(
         self, mock_connector, config
     ):
@@ -587,7 +604,6 @@ class TestInteractionTimeoutBehavior:
         assert coord.pending == {}
         assert coord._chat_index == {}
 
-    @pytest.mark.asyncio
     async def test_resolve_after_timeout_returns_false(self, mock_connector, config):
         config.interaction_timeout_seconds = 0.1
         coord = self._make_coord(mock_connector, config)
@@ -606,7 +622,6 @@ class TestInteractionTimeoutBehavior:
 class TestHandlePlanReviewAuto:
     """Tests for handle_plan_review_auto — AI-powered plan review pathway."""
 
-    @pytest.mark.asyncio
     async def test_approved_returns_plan_review_decision(self, mock_connector, config):
         from unittest.mock import AsyncMock, MagicMock
 
@@ -634,7 +649,6 @@ class TestHandlePlanReviewAuto:
         assert result.clear_context is True
         assert result.target_mode == "edit"
 
-    @pytest.mark.asyncio
     async def test_revision_requested_returns_deny_with_feedback(
         self, mock_connector, config
     ):
@@ -662,7 +676,6 @@ class TestHandlePlanReviewAuto:
         assert result.behavior == "deny"
         assert "Add error handling step" in result.message
 
-    @pytest.mark.asyncio
     async def test_no_reviewer_returns_deny(self, mock_connector, config):
         from leashd.core.interactions import InteractionCoordinator
 
@@ -678,7 +691,6 @@ class TestHandlePlanReviewAuto:
         assert result.behavior == "deny"
         assert "not configured" in result.message.lower()
 
-    @pytest.mark.asyncio
     async def test_empty_feedback_uses_default_message(self, mock_connector, config):
         from unittest.mock import AsyncMock, MagicMock
 
@@ -727,7 +739,6 @@ class TestInteractionTimeoutExtended:
             ]
         }
 
-    @pytest.mark.asyncio
     async def test_invalid_plan_decision_blocks_then_times_out(
         self, mock_connector, config
     ):
@@ -750,7 +761,6 @@ class TestInteractionTimeoutExtended:
         assert coord.pending == {}
         assert coord._chat_index == {}
 
-    @pytest.mark.asyncio
     async def test_explicit_integer_timeout_allows_fast_answer(
         self, mock_connector, config
     ):
@@ -771,7 +781,6 @@ class TestInteractionTimeoutExtended:
         assert coord.pending == {}
         assert coord._chat_index == {}
 
-    @pytest.mark.asyncio
     async def test_interaction_and_approval_timeouts_are_independent(
         self, mock_connector, config
     ):
@@ -787,7 +796,6 @@ class TestInteractionTimeoutExtended:
         assert config2.interaction_timeout_seconds is None
         assert config2.approval_timeout_seconds == 10
 
-    @pytest.mark.asyncio
     async def test_zero_timeout_immediate_denial(self, mock_connector, config):
         config.interaction_timeout_seconds = 0
         coord = self._make_coord(mock_connector, config)
@@ -802,7 +810,6 @@ class TestInteractionTimeoutExtended:
         assert coord.pending == {}
         assert coord._chat_index == {}
 
-    @pytest.mark.asyncio
     async def test_no_event_bus_still_works(self, mock_connector, config):
         coord = self._make_coord(mock_connector, config, event_bus=None)
 
@@ -821,7 +828,6 @@ class TestInteractionTimeoutExtended:
 
 
 class TestInteractionEdgeCases:
-    @pytest.mark.asyncio
     async def test_concurrent_interactions_different_chats(
         self, interaction_coordinator, mock_connector
     ):
@@ -851,12 +857,10 @@ class TestInteractionEdgeCases:
         assert r1.behavior == "allow"
         assert r2.behavior == "allow"
 
-    @pytest.mark.asyncio
     async def test_cancel_no_pending_returns_empty(self, interaction_coordinator):
         cancelled = interaction_coordinator.cancel_pending("nonexistent")
         assert cancelled == []
 
-    @pytest.mark.asyncio
     async def test_adjust_sends_feedback_prompt(
         self, interaction_coordinator, mock_connector
     ):
@@ -883,7 +887,6 @@ class TestInteractionEdgeCases:
         assert result.behavior == "deny"
         assert result.message == "Fix the tests"
 
-    @pytest.mark.asyncio
     async def test_events_emitted(
         self, interaction_coordinator, mock_connector, event_bus
     ):
@@ -921,7 +924,6 @@ class TestInteractionEdgeCases:
         assert events[0].name == INTERACTION_REQUESTED
         assert events[1].name == INTERACTION_RESOLVED
 
-    @pytest.mark.asyncio
     async def test_resolved_event_includes_question_context(
         self, interaction_coordinator, mock_connector, event_bus
     ):
@@ -962,7 +964,6 @@ class TestInteractionEdgeCases:
         assert data["kind"] == "question"
         assert data["answer"] == "Post1"
 
-    @pytest.mark.asyncio
     async def test_interaction_messages_logged(self, mock_connector, config, event_bus):
         from unittest.mock import AsyncMock
 
@@ -1002,7 +1003,6 @@ class TestInteractionEdgeCases:
         assert calls[1].kwargs["role"] == "user"
         assert calls[1].kwargs["content"] == "Yes"
 
-    @pytest.mark.asyncio
     async def test_interaction_logged_with_correct_user_id(
         self, mock_connector, config, event_bus
     ):
@@ -1044,7 +1044,6 @@ class TestInteractionEdgeCases:
         assert calls[0].kwargs["user_id"] == "real-user-42"
         assert calls[1].kwargs["user_id"] == "real-user-42"
 
-    @pytest.mark.asyncio
     async def test_interaction_logged_with_session_id(
         self, mock_connector, config, event_bus
     ):
@@ -1085,7 +1084,6 @@ class TestInteractionEdgeCases:
         assert calls[0].kwargs["session_id"] == "sess-abc"
         assert calls[1].kwargs["session_id"] == "sess-abc"
 
-    @pytest.mark.asyncio
     async def test_text_answer_logged(self, mock_connector, config, event_bus):
         from unittest.mock import AsyncMock
 
@@ -1122,7 +1120,6 @@ class TestInteractionEdgeCases:
         assert calls[0].kwargs["content"] == "Project name?"
         assert calls[1].kwargs["content"] == "my-project"
 
-    @pytest.mark.asyncio
     async def test_multiple_questions_all_logged(
         self, mock_connector, config, event_bus
     ):
@@ -1173,7 +1170,6 @@ class TestInteractionEdgeCases:
         assert calls[2].kwargs["content"] == "Q2?"
         assert calls[3].kwargs["content"] == "B"
 
-    @pytest.mark.asyncio
     async def test_timeout_does_not_log(self, mock_connector, config, event_bus):
         from unittest.mock import AsyncMock
 
@@ -1202,7 +1198,6 @@ class TestInteractionEdgeCases:
         assert result.behavior == "deny"
         store.save_message.assert_not_awaited()
 
-    @pytest.mark.asyncio
     async def test_no_message_logger_skips_logging(
         self, mock_connector, config, event_bus
     ):

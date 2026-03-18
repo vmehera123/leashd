@@ -1,6 +1,6 @@
 [project]
 name = "leashd"
-version = "0.8.0"
+version = "0.9.0"
 description = "Safety-first agentic coding framework with pluggable runtimes. Run Claude Code or Codex as a governed daemon — sandbox, YAML policies, human-in-the-loop approval"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -78,6 +78,8 @@ dependencies = [
     "python-dotenv>=1.2.1",
     "aiosqlite>=0.20.0",
     "python-telegram-bot>=22.6",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.34.0",
 ]
 
 [project.scripts]
@@ -110,6 +112,9 @@ exclude = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["leashd"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"webui/dist" = "leashd/data/webui"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -165,6 +170,10 @@ module = "codex_sdk.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
+module = "uvicorn.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
 module = "tests.*"
 disallow_untyped_defs = false
 
@@ -190,4 +199,6 @@ dev = [
     "ruff>=0.15.2",
     "mypy>=1.15",
     "types-pyyaml>=6.0.12.20250915",
+    "httpx>=0.28.0",
+    "httpx-ws>=0.7.0",
 ]

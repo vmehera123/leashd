@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.9.0] - 2026-03-17
+- **added**: `leashd webui tunnel` command — expose WebUI via ngrok/cloudflare/tailscale with optional Telegram notification
+- **added**: WebUI — full browser-based interface via FastAPI + WebSocket with real-time streaming, inline approvals and interactions, conversation history sidebar, directory and workspace tabs, settings page, dark/light mode, markdown rendering with syntax-highlighted code blocks, and mobile-responsive layout
+- **added**: MultiConnector — simultaneous Telegram + WebUI operation with chat_id-based routing and shared Engine
+- **added**: File attachments — photos, screenshots, and PDFs via Telegram or WebUI threaded through to Claude with vision support
+- **added**: `leashd webui show/enable/disable/url` CLI commands and setup wizard integration
+- **changed**: Message database centralized to `~/.leashd/messages.db` — eliminates race conditions with concurrent sessions
+- **fixed**: Strip `CLAUDECODE` env var at startup to prevent nested Claude Code session errors
+- **fixed**: Orphaned Playwright browser processes cleaned up after `/clear` or `/stop`
+- **fixed**: WebUI history returning empty messages — shared `message_store` passed from `main.py` through `WebConnector` and `build_engine`, replacing UUID-only session_id validation with a lightweight sanitizer to accept composite IDs from the frontend
+
 ## [0.8.0] - 2026-03-16
 - **added**: Multi-runtime agent architecture — pluggable backends via registry pattern, agent capabilities model, `leashd runtime show/set/list` CLI, and subprocess agent base class for CLI-driven runtimes
 - **added**: Codex runtime — full `codex-sdk-python` integration with dual-mode communication (interactive approval bridge + autonomous streaming), session resume via thread IDs, and safety pipeline parity with Claude Code

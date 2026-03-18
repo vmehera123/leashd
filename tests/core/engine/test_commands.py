@@ -1,9 +1,8 @@
 """Engine tests — /test, /dir, /commit, /plan, /edit, /clear, /task, /cancel, /tasks commands."""
 
 import asyncio
+import signal
 from unittest.mock import AsyncMock, MagicMock, create_autospec, patch
-
-import pytest
 
 from leashd.core.config import LeashdConfig
 from leashd.core.engine import Engine, PathConfig
@@ -16,7 +15,6 @@ from tests.core.engine.conftest import FakeAgent, _make_git_handler_mock
 
 
 class TestHandleCommand:
-    @pytest.mark.asyncio
     async def test_plan_command_sets_mode(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -37,7 +35,6 @@ class TestHandleCommand:
         assert session.mode == "plan"
         assert "chat1" not in eng._gatekeeper._auto_approved_chats
 
-    @pytest.mark.asyncio
     async def test_accept_command_sets_mode_and_auto_approve(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -60,7 +57,6 @@ class TestHandleCommand:
         assert auto_tools == {"Write", "Edit", "NotebookEdit"}
         assert "chat1" not in eng._gatekeeper._auto_approved_chats
 
-    @pytest.mark.asyncio
     async def test_status_command_shows_info(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -84,7 +80,6 @@ class TestHandleCommand:
         assert "Total cost:" in result
         assert "Auto-approve:" in result
 
-    @pytest.mark.asyncio
     async def test_status_shows_per_tool_auto_approve(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -106,7 +101,6 @@ class TestHandleCommand:
 
         assert "Auto-approve: Edit, Write" in result
 
-    @pytest.mark.asyncio
     async def test_status_shows_blanket_auto_approve(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -127,7 +121,6 @@ class TestHandleCommand:
 
         assert "Auto-approve: on (all tools)" in result
 
-    @pytest.mark.asyncio
     async def test_default_command_sets_mode(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -149,7 +142,6 @@ class TestHandleCommand:
         assert "chat1" not in eng._gatekeeper._auto_approved_chats
         assert "chat1" not in eng._gatekeeper._auto_approved_tools
 
-    @pytest.mark.asyncio
     async def test_default_disables_auto_approve(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -175,7 +167,6 @@ class TestHandleCommand:
         await eng.handle_command("user1", "default", "", "chat1")
         assert "chat1" not in eng._gatekeeper._auto_approved_tools
 
-    @pytest.mark.asyncio
     async def test_unknown_command_returns_error(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -192,7 +183,6 @@ class TestHandleCommand:
         result = await eng.handle_command("user1", "foo", "", "chat1")
         assert "Unknown command" in result
 
-    @pytest.mark.asyncio
     async def test_plan_disables_auto_approve(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -219,7 +209,6 @@ class TestHandleCommand:
         assert "chat1" not in eng._gatekeeper._auto_approved_chats
         assert "chat1" not in eng._gatekeeper._auto_approved_tools
 
-    @pytest.mark.asyncio
     async def test_command_handler_wired_to_connector(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -236,7 +225,6 @@ class TestHandleCommand:
         assert mock_connector._command_handler is not None
         assert mock_connector._auto_approve_handler is not None
 
-    @pytest.mark.asyncio
     async def test_simulate_command_via_connector(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -253,7 +241,6 @@ class TestHandleCommand:
         result = await mock_connector.simulate_command("user1", "status", "", "chat1")
         assert "Mode:" in result
 
-    @pytest.mark.asyncio
     async def test_clear_command_resets_session(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -289,7 +276,6 @@ class TestHandleCommand:
         assert session.total_cost == 0.0
         assert "chat1" not in eng._gatekeeper._auto_approved_chats
 
-    @pytest.mark.asyncio
     async def test_clear_preserves_working_directory(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
@@ -323,7 +309,6 @@ class TestHandleCommand:
         session = eng.session_manager.get("user1", "chat1")
         assert session.working_directory == str(d2.resolve())
 
-    @pytest.mark.asyncio
     async def test_clear_preserves_directory_with_sqlite(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
@@ -361,7 +346,6 @@ class TestHandleCommand:
         finally:
             await store.teardown()
 
-    @pytest.mark.asyncio
     async def test_clear_preserves_directory_across_multiple_clears(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
@@ -420,7 +404,6 @@ class TestTestCommand:
 
         return eng, agent
 
-    @pytest.mark.asyncio
     async def test_test_command_sets_mode(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -434,7 +417,6 @@ class TestTestCommand:
         assert session.mode == "test"
         assert session.mode_instruction is not None
 
-    @pytest.mark.asyncio
     async def test_test_command_auto_approves_browser_tools(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -450,7 +432,6 @@ class TestTestCommand:
         for tool in BROWSER_MUTATION_TOOLS:
             assert tool in auto_tools
 
-    @pytest.mark.asyncio
     async def test_test_command_routes_args_to_agent(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -464,7 +445,6 @@ class TestTestCommand:
         assert "Test mode activated" in mock_connector.sent_messages[0]["text"]
         assert "verify login" in mock_connector.sent_messages[1]["text"]
 
-    @pytest.mark.asyncio
     async def test_test_command_routes_default_prompt(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -478,7 +458,6 @@ class TestTestCommand:
         assert "Test mode activated" in mock_connector.sent_messages[0]["text"]
         assert "comprehensive tests" in mock_connector.sent_messages[1]["text"].lower()
 
-    @pytest.mark.asyncio
     async def test_test_command_returns_empty(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -490,7 +469,6 @@ class TestTestCommand:
 
         assert result == ""
 
-    @pytest.mark.asyncio
     async def test_default_command_clears_test_mode(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -512,7 +490,6 @@ class TestTestCommand:
         assert session.mode_instruction is None
         assert "chat1" not in eng._gatekeeper._auto_approved_tools
 
-    @pytest.mark.asyncio
     async def test_no_plugin_sends_no_messages(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -532,7 +509,6 @@ class TestTestCommand:
         assert result == ""
         assert len(mock_connector.sent_messages) == 0
 
-    @pytest.mark.asyncio
     async def test_auto_approves_browser_readonly_tools(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -548,7 +524,6 @@ class TestTestCommand:
         for tool in BROWSER_READONLY_TOOLS:
             assert tool in auto_tools
 
-    @pytest.mark.asyncio
     async def test_auto_approves_write_edit(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -562,7 +537,6 @@ class TestTestCommand:
         assert "Write" in auto_tools
         assert "Edit" in auto_tools
 
-    @pytest.mark.asyncio
     async def test_no_plugin_no_transient_sent(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -583,7 +557,6 @@ class TestTestCommand:
 
 
 class TestDirCommand:
-    @pytest.mark.asyncio
     async def test_dir_lists_directories(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
@@ -616,7 +589,6 @@ class TestDirCommand:
         assert any("api" in t for t in button_texts)
         assert any("✅" in t for t in button_texts)
 
-    @pytest.mark.asyncio
     async def test_dir_switches_directory(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
@@ -649,7 +621,6 @@ class TestDirCommand:
         assert session.working_directory == str(d2.resolve())
         assert session.agent_resume_token is None
 
-    @pytest.mark.asyncio
     async def test_dir_unknown_name_returns_error(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
@@ -673,7 +644,6 @@ class TestDirCommand:
         assert "Unknown directory" in result
         assert "Available:" in result
 
-    @pytest.mark.asyncio
     async def test_dir_already_active(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
@@ -698,7 +668,6 @@ class TestDirCommand:
 
         assert "Already in" in result
 
-    @pytest.mark.asyncio
     async def test_status_shows_directory(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
@@ -723,7 +692,6 @@ class TestDirCommand:
         assert "Directory:" in result
         assert "leashd" in result
 
-    @pytest.mark.asyncio
     async def test_dir_switch_disables_auto_approve(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
@@ -755,7 +723,6 @@ class TestDirCommand:
 class TestDirSessionCleanup:
     """Verify /dir switch performs full session cleanup (like /clear)."""
 
-    @pytest.mark.asyncio
     async def test_dir_switch_resets_session(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
@@ -790,7 +757,6 @@ class TestDirSessionCleanup:
         assert session.total_cost == 0.0
         assert session.working_directory == str(d2.resolve())
 
-    @pytest.mark.asyncio
     async def test_dir_switch_cancels_pending_approvals(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
@@ -827,7 +793,6 @@ class TestDirSessionCleanup:
         assert pending.decision is False
         assert pending.event.is_set()
 
-    @pytest.mark.asyncio
     async def test_dir_switch_cancels_pending_interactions(
         self, audit_logger, policy_engine, mock_connector, tmp_path, event_bus
     ):
@@ -863,7 +828,6 @@ class TestDirSessionCleanup:
         assert "chat1" not in ic._chat_index
         assert pending.event.is_set()
 
-    @pytest.mark.asyncio
     async def test_dir_switch_cancels_running_agent(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
@@ -891,7 +855,6 @@ class TestDirSessionCleanup:
 
         agent.cancel.assert_awaited_once_with("sess-42")
 
-    @pytest.mark.asyncio
     async def test_dir_switch_clears_pending_messages(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
@@ -921,7 +884,6 @@ class TestDirSessionCleanup:
 class TestWorkspaceSessionCleanup:
     """Verify /ws and /ws exit perform full session cleanup."""
 
-    @pytest.mark.asyncio
     async def test_ws_activate_resets_session(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
@@ -960,7 +922,6 @@ class TestWorkspaceSessionCleanup:
         assert session.message_count == 0
         assert session.workspace_name == "myws"
 
-    @pytest.mark.asyncio
     async def test_ws_activate_cancels_pending_approvals(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
@@ -1002,7 +963,6 @@ class TestWorkspaceSessionCleanup:
         assert pending.decision is False
         assert pending.event.is_set()
 
-    @pytest.mark.asyncio
     async def test_ws_exit_resets_session(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
@@ -1043,7 +1003,6 @@ class TestWorkspaceSessionCleanup:
         assert session.workspace_directories == []
         assert session.message_count == 0
 
-    @pytest.mark.asyncio
     async def test_ws_exit_cancels_running_agent(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
@@ -1084,7 +1043,6 @@ class TestWorkspaceSessionCleanup:
 class TestDirSwitchDataPaths:
     """Verify /dir switch moves audit and storage paths for unpinned configs."""
 
-    @pytest.mark.asyncio
     async def test_audit_path_switches_on_dir_change(
         self, policy_engine, mock_connector, tmp_path
     ):
@@ -1114,8 +1072,7 @@ class TestDirSwitchDataPaths:
         expected = d2 / ".leashd" / "audit.jsonl"
         assert eng.audit._path == expected
 
-    @pytest.mark.asyncio
-    async def test_sqlite_switches_on_dir_change(
+    async def test_centralized_message_store_not_switched_on_dir_change(
         self, policy_engine, mock_connector, tmp_path
     ):
         d1 = tmp_path / "proj1"
@@ -1136,17 +1093,16 @@ class TestDirSwitchDataPaths:
             session_manager=SessionManager(),
             policy_engine=policy_engine,
             store=store,
-            path_config=PathConfig(storage_pinned=False, audit_pinned=True),
+            path_config=PathConfig(storage_pinned=True, audit_pinned=True),
         )
 
         await eng.handle_message("user1", "hello", "chat1")
         await eng.handle_command("user1", "dir", "proj2", "chat1")
 
-        expected = str(d2 / ".leashd" / "messages.db")
-        assert eng._message_store._db_path == expected
+        # Centralized message store should NOT change on /dir switch
+        assert eng._message_store._db_path == str(db_path)
         await store.teardown()
 
-    @pytest.mark.asyncio
     async def test_pinned_audit_path_not_switched(
         self, policy_engine, mock_connector, tmp_path
     ):
@@ -1177,7 +1133,6 @@ class TestDirSwitchDataPaths:
 
         assert eng.audit._path == pinned_path
 
-    @pytest.mark.asyncio
     async def test_dir_switch_creates_leashd_dir(
         self, policy_engine, mock_connector, tmp_path
     ):
@@ -1208,7 +1163,6 @@ class TestDirSwitchDataPaths:
 
 
 class TestDirButtons:
-    @pytest.mark.asyncio
     async def test_dir_sends_buttons_with_connector(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
@@ -1240,7 +1194,6 @@ class TestDirButtons:
         assert any("leashd" in t for t in button_texts)
         assert any("api" in t for t in button_texts)
 
-    @pytest.mark.asyncio
     async def test_dir_shows_active_marker_on_button(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
@@ -1268,7 +1221,6 @@ class TestDirButtons:
         active_buttons = [row[0].text for row in msg["buttons"] if "✅" in row[0].text]
         assert len(active_buttons) == 1
 
-    @pytest.mark.asyncio
     async def test_dir_callback_data_uses_prefix(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
@@ -1295,7 +1247,6 @@ class TestDirButtons:
         callback_datas = [row[0].callback_data for row in msg["buttons"]]
         assert all(cd.startswith("dir:") for cd in callback_datas)
 
-    @pytest.mark.asyncio
     async def test_dir_falls_back_to_text_without_connector(
         self, audit_logger, policy_engine, tmp_path
     ):
@@ -1322,7 +1273,6 @@ class TestDirButtons:
         assert "leashd" in result
         assert "api" in result
 
-    @pytest.mark.asyncio
     async def test_dir_single_directory_falls_back_to_text(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
@@ -1350,7 +1300,6 @@ class TestDirButtons:
 class TestGitCommandWithoutHandler:
     """Verify /git returns friendly message when no git handler is configured."""
 
-    @pytest.mark.asyncio
     async def test_git_command_without_handler_returns_not_available(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -1367,7 +1316,6 @@ class TestGitCommandWithoutHandler:
         result = await eng.handle_command("user1", "git", "status", "chat1")
         assert result == "Git commands not available."
 
-    @pytest.mark.asyncio
     async def test_git_command_without_handler_no_args(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -1388,7 +1336,6 @@ class TestGitCommandWithoutHandler:
 class TestActiveDirNameFallback:
     """Verify _active_dir_name falls back to basename when no match."""
 
-    @pytest.mark.asyncio
     async def test_active_dir_name_returns_known_name(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
@@ -1413,7 +1360,6 @@ class TestActiveDirNameFallback:
         name = eng._active_dir_name(session)
         assert name == "myproject"
 
-    @pytest.mark.asyncio
     async def test_active_dir_name_unknown_dir_shows_basename(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
@@ -1442,7 +1388,6 @@ class TestActiveDirNameFallback:
 
 
 class TestSmartCommit:
-    @pytest.mark.asyncio
     async def test_bare_git_commit_triggers_smart_flow(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -1469,7 +1414,6 @@ class TestSmartCommit:
         assert len(analyzing_msgs) == 1
         git_handler.handle_command.assert_not_awaited()
 
-    @pytest.mark.asyncio
     async def test_git_commit_with_message_goes_through_handler(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -1491,7 +1435,6 @@ class TestSmartCommit:
         assert result == "committed"
         git_handler.handle_command.assert_awaited_once()
 
-    @pytest.mark.asyncio
     async def test_smart_commit_auto_approves_git_commands(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -1514,7 +1457,6 @@ class TestSmartCommit:
         assert "Bash::git status" in auto_tools
         assert "Bash::git commit" in auto_tools
 
-    @pytest.mark.asyncio
     async def test_smart_commit_without_git_handler(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -1532,7 +1474,6 @@ class TestSmartCommit:
 
         assert result == "Git commands not available."
 
-    @pytest.mark.asyncio
     async def test_smart_commit_sends_prompt_to_agent(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -1559,7 +1500,6 @@ class TestSmartCommit:
         ]
         assert len(agent_msgs) >= 1
 
-    @pytest.mark.asyncio
     async def test_smart_commit_prompt_forbids_coauthor_attribution(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -1589,7 +1529,6 @@ class TestSmartCommit:
 
 
 class TestGitCallbackRouting:
-    @pytest.mark.asyncio
     async def test_git_callback_commit_prompt_routes_to_smart_commit(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -1612,7 +1551,6 @@ class TestGitCallbackRouting:
         assert "Bash::git commit" in auto_tools
         git_handler.handle_callback.assert_not_awaited()
 
-    @pytest.mark.asyncio
     async def test_git_callback_other_actions_route_to_handler(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -1635,7 +1573,6 @@ class TestGitCallbackRouting:
 
 
 class TestPlanWithArgs:
-    @pytest.mark.asyncio
     async def test_plan_with_args_forwards_to_agent(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -1669,7 +1606,6 @@ class TestPlanWithArgs:
         ]
         assert len(agent_msgs) >= 1
 
-    @pytest.mark.asyncio
     async def test_plan_without_args_returns_confirmation(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -1689,7 +1625,6 @@ class TestPlanWithArgs:
         session = eng.session_manager.get("user1", "chat1")
         assert session.mode == "plan"
 
-    @pytest.mark.asyncio
     async def test_plan_with_whitespace_only_args_returns_confirmation(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -1707,7 +1642,6 @@ class TestPlanWithArgs:
 
         assert "plan mode" in result.lower()
 
-    @pytest.mark.asyncio
     async def test_plan_with_args_no_connector(
         self, config, audit_logger, policy_engine
     ):
@@ -1727,7 +1661,6 @@ class TestPlanWithArgs:
 
 
 class TestEditWithArgs:
-    @pytest.mark.asyncio
     async def test_edit_with_args_forwards_to_agent(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -1759,7 +1692,6 @@ class TestEditWithArgs:
         ]
         assert len(agent_msgs) >= 1
 
-    @pytest.mark.asyncio
     async def test_edit_without_args_returns_confirmation(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -1779,7 +1711,6 @@ class TestEditWithArgs:
         session = eng.session_manager.get("user1", "chat1")
         assert session.mode == "edit"
 
-    @pytest.mark.asyncio
     async def test_edit_with_args_auto_approves_tools(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -1800,7 +1731,6 @@ class TestEditWithArgs:
         assert "Edit" in auto_tools
         assert "NotebookEdit" in auto_tools
 
-    @pytest.mark.asyncio
     async def test_edit_with_whitespace_only_args_returns_confirmation(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -1818,7 +1748,6 @@ class TestEditWithArgs:
 
         assert "accept edits" in result.lower() or "auto-approve" in result.lower()
 
-    @pytest.mark.asyncio
     async def test_edit_sets_plan_origin(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -1837,7 +1766,6 @@ class TestEditWithArgs:
         session = eng.session_manager.get("user1", "chat1")
         assert session.plan_origin == "edit"
 
-    @pytest.mark.asyncio
     async def test_edit_with_args_skips_auto_plan(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
@@ -1863,7 +1791,6 @@ class TestEditWithArgs:
         assert session.mode == "edit"
         assert session.plan_origin == "edit"
 
-    @pytest.mark.asyncio
     async def test_edit_no_args_follow_up_skips_auto_plan(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
@@ -1889,7 +1816,6 @@ class TestEditWithArgs:
         session = eng.session_manager.get("user1", "chat1")
         assert session.mode == "edit"
 
-    @pytest.mark.asyncio
     async def test_edit_resumed_session_with_auto_plan(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
@@ -1919,7 +1845,6 @@ class TestEditWithArgs:
         session = sm.get("user1", "chat1")
         assert session.mode == "edit"
 
-    @pytest.mark.asyncio
     async def test_edit_from_plan_mode(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -1943,7 +1868,6 @@ class TestEditWithArgs:
         assert session.mode == "edit"
         assert session.plan_origin == "edit"
 
-    @pytest.mark.asyncio
     async def test_edit_from_test_mode(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -1968,7 +1892,6 @@ class TestEditWithArgs:
         assert session.mode == "edit"
         assert session.plan_origin == "edit"
 
-    @pytest.mark.asyncio
     async def test_edit_from_task_mode(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -1993,7 +1916,6 @@ class TestEditWithArgs:
         assert session.mode == "edit"
         assert session.plan_origin == "edit"
 
-    @pytest.mark.asyncio
     async def test_two_sequential_edit_commands(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -2015,7 +1937,6 @@ class TestEditWithArgs:
         assert session.mode == "edit"
         assert session.plan_origin == "edit"
 
-    @pytest.mark.asyncio
     async def test_default_after_edit_resets_state(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -2040,7 +1961,6 @@ class TestEditWithArgs:
         assert session.plan_origin is None
         assert "chat1" not in eng._gatekeeper._auto_approved_tools
 
-    @pytest.mark.asyncio
     async def test_edit_only_approves_file_tools(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -2062,7 +1982,6 @@ class TestEditWithArgs:
         assert "NotebookEdit" in auto_tools
         assert "Bash" not in auto_tools
 
-    @pytest.mark.asyncio
     async def test_edit_auto_approve_isolated_to_chat(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -2083,7 +2002,6 @@ class TestEditWithArgs:
         assert "Write" in chat1_tools
         assert "Write" not in chat2_tools
 
-    @pytest.mark.asyncio
     async def test_edit_preserves_agent_resume_token(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -2110,7 +2028,6 @@ class TestEditWithArgs:
         assert session.mode == "edit"
         assert session.plan_origin == "edit"
 
-    @pytest.mark.asyncio
     async def test_edit_plan_origin_persists_across_messages(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -2133,7 +2050,6 @@ class TestEditWithArgs:
             assert session.mode == "edit"
             assert session.plan_origin == "edit"
 
-    @pytest.mark.asyncio
     async def test_clear_resets_plan_origin(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -2156,7 +2072,6 @@ class TestEditWithArgs:
         session = sm.get("user1", "chat1")
         assert session.plan_origin is None
 
-    @pytest.mark.asyncio
     async def test_edit_agent_error_preserves_mode(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -2179,7 +2094,6 @@ class TestEditWithArgs:
 
     # --- /clear cancellation tests ---
 
-    @pytest.mark.asyncio
     async def test_clear_cancels_pending_approvals(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -2209,7 +2123,6 @@ class TestEditWithArgs:
         assert pending.decision is False
         assert pending.event.is_set()
 
-    @pytest.mark.asyncio
     async def test_clear_cancels_pending_interactions(
         self, config, audit_logger, policy_engine, mock_connector, event_bus
     ):
@@ -2237,7 +2150,6 @@ class TestEditWithArgs:
         assert "chat1" not in ic._chat_index
         assert pending.event.is_set()
 
-    @pytest.mark.asyncio
     async def test_clear_cancels_running_agent(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -2258,7 +2170,6 @@ class TestEditWithArgs:
 
         agent.cancel.assert_awaited_once_with("sess-42")
 
-    @pytest.mark.asyncio
     async def test_clear_cleans_up_interrupt_ui(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -2286,7 +2197,6 @@ class TestEditWithArgs:
             for d in mock_connector.deleted_messages
         )
 
-    @pytest.mark.asyncio
     async def test_clear_does_not_affect_other_chats(
         self, config, audit_logger, policy_engine, mock_connector, event_bus
     ):
@@ -2329,7 +2239,6 @@ class TestEditWithArgs:
         assert "chat2" in ic._chat_index
         assert "chat2" in eng._pending_interrupts
 
-    @pytest.mark.asyncio
     async def test_clear_without_coordinators(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -2351,7 +2260,6 @@ class TestEditWithArgs:
 
 
 class TestTasksCommand:
-    @pytest.mark.asyncio
     async def test_tasks_no_plugin_registry(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -2370,7 +2278,6 @@ class TestTasksCommand:
 
         assert result == "Task orchestrator is not enabled."
 
-    @pytest.mark.asyncio
     async def test_tasks_empty_plugin_registry(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -2389,7 +2296,6 @@ class TestTasksCommand:
 
         assert result == "Task orchestrator is not enabled."
 
-    @pytest.mark.asyncio
     async def test_tasks_no_tasks_found(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -2418,7 +2324,6 @@ class TestTasksCommand:
 
         assert result == "No tasks found for this chat."
 
-    @pytest.mark.asyncio
     async def test_tasks_returns_formatted_list(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -2465,7 +2370,6 @@ class TestTasksCommand:
 
 
 class TestTaskCommand:
-    @pytest.mark.asyncio
     async def test_task_no_args_returns_usage(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -2483,7 +2387,6 @@ class TestTaskCommand:
 
         assert result == "Usage: /task <description of the task>"
 
-    @pytest.mark.asyncio
     async def test_task_emits_event_and_sets_mode(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -2519,7 +2422,6 @@ class TestTaskCommand:
 
 
 class TestCancelCommand:
-    @pytest.mark.asyncio
     async def test_cancel_emits_event_and_returns_confirmation(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -2553,7 +2455,6 @@ class TestCancelCommand:
 
 
 class TestStopCommand:
-    @pytest.mark.asyncio
     async def test_stop_returns_confirmation_and_emits_event(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -2585,7 +2486,6 @@ class TestStopCommand:
         assert captured_events[0].data["text"] == "/stop"
         assert captured_events[0].data["chat_id"] == "chat1"
 
-    @pytest.mark.asyncio
     async def test_stop_cancels_running_agent(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -2606,7 +2506,6 @@ class TestStopCommand:
 
         agent.cancel.assert_awaited_once_with("sess-42")
 
-    @pytest.mark.asyncio
     async def test_stop_cancels_pending_approvals(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -2636,7 +2535,6 @@ class TestStopCommand:
         assert pending.decision is False
         assert pending.event.is_set()
 
-    @pytest.mark.asyncio
     async def test_stop_clears_agent_resume_token(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -2664,7 +2562,6 @@ class TestStopCommand:
 
 
 class TestClearEmitsEvent:
-    @pytest.mark.asyncio
     async def test_clear_emits_message_in_event(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -2713,7 +2610,6 @@ class TestBrowserShutdown:
         session.mode = mode
         return session
 
-    @pytest.mark.asyncio
     async def test_shutdown_browser_noop_for_non_web_mode(
         self, config, audit_logger, policy_engine
     ):
@@ -2724,7 +2620,6 @@ class TestBrowserShutdown:
             await eng._shutdown_browser(session)
             mock_exec.assert_not_called()
 
-    @pytest.mark.asyncio
     async def test_shutdown_browser_agent_browser_backend(
         self, tmp_path, audit_logger, policy_engine
     ):
@@ -2752,7 +2647,6 @@ class TestBrowserShutdown:
                 stderr=asyncio.subprocess.DEVNULL,
             )
 
-    @pytest.mark.asyncio
     async def test_shutdown_browser_playwright_backend(
         self, config, audit_logger, policy_engine
     ):
@@ -2766,7 +2660,6 @@ class TestBrowserShutdown:
             await eng._shutdown_browser(session)
             mock_kill.assert_awaited_once()
 
-    @pytest.mark.asyncio
     async def test_shutdown_browser_uses_session_backend_over_config(
         self, config, audit_logger, policy_engine
     ):
@@ -2789,7 +2682,6 @@ class TestBrowserShutdown:
                 stderr=asyncio.subprocess.DEVNULL,
             )
 
-    @pytest.mark.asyncio
     async def test_shutdown_browser_handles_exceptions(
         self, config, audit_logger, policy_engine
     ):
@@ -2805,7 +2697,6 @@ class TestBrowserShutdown:
         ):
             await eng._shutdown_browser(session)
 
-    @pytest.mark.asyncio
     async def test_stop_calls_browser_shutdown_for_web_session(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -2820,7 +2711,6 @@ class TestBrowserShutdown:
             await eng.handle_command("user1", "stop", "", "chat1")
             mock_shutdown.assert_awaited_once_with(session)
 
-    @pytest.mark.asyncio
     async def test_clear_calls_browser_shutdown_before_reset(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -2856,7 +2746,6 @@ class TestBrowserShutdown:
 
         assert call_order == ["browser_shutdown", "reset"]
 
-    @pytest.mark.asyncio
     async def test_default_closes_browser_when_leaving_web_mode(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -2872,7 +2761,6 @@ class TestBrowserShutdown:
             mock_shutdown.assert_awaited_once_with(session)
         assert "Default mode" in result
 
-    @pytest.mark.asyncio
     async def test_default_skips_browser_shutdown_for_non_web_mode(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -2887,7 +2775,6 @@ class TestBrowserShutdown:
             await eng.handle_command("user1", "default", "", "chat1")
             mock_shutdown.assert_not_awaited()
 
-    @pytest.mark.asyncio
     async def test_kill_playwright_mcp_no_processes(
         self, config, audit_logger, policy_engine
     ):
@@ -2896,8 +2783,79 @@ class TestBrowserShutdown:
         mock_proc = AsyncMock()
         mock_proc.communicate = AsyncMock(return_value=(b"", b""))
 
-        with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+        with (
+            patch("asyncio.create_subprocess_exec", return_value=mock_proc),
+            patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+        ):
             await eng._kill_playwright_mcp()
+            mock_sleep.assert_not_awaited()
+
+    async def test_kill_playwright_mcp_kills_chromium(
+        self, config, audit_logger, policy_engine
+    ):
+        eng = self._make_engine(config, audit_logger, policy_engine)
+
+        mcp_proc = AsyncMock()
+        mcp_proc.communicate = AsyncMock(return_value=(b"1234\n", b""))
+        chromium_proc = AsyncMock()
+        chromium_proc.communicate = AsyncMock(return_value=(b"5678\n", b""))
+
+        with (
+            patch(
+                "asyncio.create_subprocess_exec",
+                side_effect=[mcp_proc, chromium_proc],
+            ),
+            patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+            patch("os.kill") as mock_kill,
+        ):
+            await eng._kill_playwright_mcp()
+            mock_kill.assert_any_call(1234, signal.SIGTERM)
+            mock_kill.assert_any_call(5678, signal.SIGTERM)
+            mock_sleep.assert_awaited_once_with(0.5)
+
+    async def test_kill_playwright_mcp_skips_sleep_when_no_mcp(
+        self, config, audit_logger, policy_engine
+    ):
+        eng = self._make_engine(config, audit_logger, policy_engine)
+
+        empty_proc = AsyncMock()
+        empty_proc.communicate = AsyncMock(return_value=(b"", b""))
+        chromium_proc = AsyncMock()
+        chromium_proc.communicate = AsyncMock(return_value=(b"9999\n", b""))
+
+        with (
+            patch(
+                "asyncio.create_subprocess_exec",
+                side_effect=[empty_proc, chromium_proc],
+            ),
+            patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+            patch("os.kill") as mock_kill,
+        ):
+            await eng._kill_playwright_mcp()
+            mock_sleep.assert_not_awaited()
+            mock_kill.assert_called_once_with(9999, signal.SIGTERM)
+
+    async def test_kill_playwright_mcp_no_orphaned_chromium(
+        self, config, audit_logger, policy_engine
+    ):
+        eng = self._make_engine(config, audit_logger, policy_engine)
+
+        mcp_proc = AsyncMock()
+        mcp_proc.communicate = AsyncMock(return_value=(b"1234\n", b""))
+        empty_proc = AsyncMock()
+        empty_proc.communicate = AsyncMock(return_value=(b"", b""))
+
+        with (
+            patch(
+                "asyncio.create_subprocess_exec",
+                side_effect=[mcp_proc, empty_proc],
+            ),
+            patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+            patch("os.kill") as mock_kill,
+        ):
+            await eng._kill_playwright_mcp()
+            mock_kill.assert_called_once_with(1234, signal.SIGTERM)
+            mock_sleep.assert_awaited_once_with(0.5)
 
 
 class TestCleanupSession:
@@ -2924,7 +2882,6 @@ class TestCleanupSession:
         session = eng.session_manager.get("user1", "chat1")
         return eng, ac, ic, agent, session
 
-    @pytest.mark.asyncio
     async def test_cleanup_cancels_approvals(
         self, config, audit_logger, policy_engine, mock_connector, event_bus
     ):
@@ -2944,7 +2901,6 @@ class TestCleanupSession:
         assert pending.decision is False
         assert pending.event.is_set()
 
-    @pytest.mark.asyncio
     async def test_cleanup_cancels_interactions(
         self, config, audit_logger, policy_engine, mock_connector, event_bus
     ):
@@ -2963,7 +2919,6 @@ class TestCleanupSession:
         assert "chat1" not in ic._chat_index
         assert pending.event.is_set()
 
-    @pytest.mark.asyncio
     async def test_cleanup_cancels_running_agent(
         self, config, audit_logger, policy_engine, mock_connector, event_bus
     ):
@@ -2976,7 +2931,6 @@ class TestCleanupSession:
 
         agent.cancel.assert_awaited_once_with("sess-42")
 
-    @pytest.mark.asyncio
     async def test_cleanup_shuts_down_browser(
         self, config, audit_logger, policy_engine, mock_connector, event_bus
     ):
@@ -2991,7 +2945,6 @@ class TestCleanupSession:
             await eng._cleanup_session(session, "chat1")
             mock_browser.assert_awaited_once_with(session)
 
-    @pytest.mark.asyncio
     async def test_cleanup_cleans_interrupt_ui(
         self, config, audit_logger, policy_engine, mock_connector, event_bus
     ):
@@ -3012,7 +2965,6 @@ class TestCleanupSession:
             for d in mock_connector.deleted_messages
         )
 
-    @pytest.mark.asyncio
     async def test_cleanup_disables_auto_approve(
         self, config, audit_logger, policy_engine, mock_connector, event_bus
     ):
@@ -3027,7 +2979,6 @@ class TestCleanupSession:
         assert "chat1" not in eng._gatekeeper._auto_approved_chats
         assert "chat1" not in eng._gatekeeper._auto_approved_tools
 
-    @pytest.mark.asyncio
     async def test_cleanup_clears_pending_messages(
         self, config, audit_logger, policy_engine, mock_connector, event_bus
     ):
@@ -3040,7 +2991,6 @@ class TestCleanupSession:
 
         assert "chat1" not in eng._pending_messages
 
-    @pytest.mark.asyncio
     async def test_cleanup_without_coordinators(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -3060,7 +3010,6 @@ class TestCleanupSession:
 
         await eng._cleanup_session(session, "chat1")
 
-    @pytest.mark.asyncio
     async def test_cleanup_does_not_affect_other_chats(
         self, config, audit_logger, policy_engine, mock_connector, event_bus
     ):
@@ -3101,7 +3050,6 @@ class TestCleanupSession:
 class TestStopFullCleanup:
     """Additional /stop cleanup tests."""
 
-    @pytest.mark.asyncio
     async def test_stop_cancels_pending_interactions(
         self, config, audit_logger, policy_engine, mock_connector, event_bus
     ):
@@ -3128,7 +3076,6 @@ class TestStopFullCleanup:
         assert "chat1" not in ic._chat_index
         assert pending.event.is_set()
 
-    @pytest.mark.asyncio
     async def test_stop_cleans_up_interrupt_ui(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -3151,7 +3098,6 @@ class TestStopFullCleanup:
         assert "irpt-1" not in eng._interrupt_to_chat
         assert "chat1" not in eng._interrupt_message_ids
 
-    @pytest.mark.asyncio
     async def test_stop_disables_auto_approve(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -3170,7 +3116,6 @@ class TestStopFullCleanup:
 
         assert "chat1" not in eng._gatekeeper._auto_approved_chats
 
-    @pytest.mark.asyncio
     async def test_stop_clears_pending_messages(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -3189,7 +3134,6 @@ class TestStopFullCleanup:
 
         assert "chat1" not in eng._pending_messages
 
-    @pytest.mark.asyncio
     async def test_stop_full_cleanup(
         self, config, audit_logger, policy_engine, mock_connector, event_bus
     ):
@@ -3248,7 +3192,6 @@ class TestStopFullCleanup:
 class TestDirSwitchFullCleanup:
     """Additional /dir cleanup tests."""
 
-    @pytest.mark.asyncio
     async def test_dir_switch_shuts_down_browser(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
@@ -3279,7 +3222,6 @@ class TestDirSwitchFullCleanup:
             await eng.handle_command("user1", "dir", "api", "chat1")
             mock_browser.assert_awaited_once()
 
-    @pytest.mark.asyncio
     async def test_dir_switch_cleans_interrupt_ui(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
@@ -3311,7 +3253,6 @@ class TestDirSwitchFullCleanup:
         assert "irpt-1" not in eng._interrupt_to_chat
         assert "chat1" not in eng._interrupt_message_ids
 
-    @pytest.mark.asyncio
     async def test_dir_switch_does_not_affect_other_chats(
         self, audit_logger, policy_engine, mock_connector, tmp_path, event_bus
     ):
@@ -3354,7 +3295,6 @@ class TestDirSwitchFullCleanup:
         assert "chat2" in eng._gatekeeper._auto_approved_chats
         assert "chat2" in eng._pending_messages
 
-    @pytest.mark.asyncio
     async def test_dir_switch_full_cleanup(
         self, audit_logger, policy_engine, mock_connector, tmp_path, event_bus
     ):
@@ -3464,7 +3404,6 @@ class TestWorkspaceFullCleanup:
         }
         return eng, config
 
-    @pytest.mark.asyncio
     async def test_ws_activate_cancels_interactions(
         self, audit_logger, policy_engine, mock_connector, tmp_path, event_bus
     ):
@@ -3489,7 +3428,6 @@ class TestWorkspaceFullCleanup:
         assert "int-1" not in ic.pending
         assert pending.event.is_set()
 
-    @pytest.mark.asyncio
     async def test_ws_activate_cancels_running_agent(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
@@ -3505,7 +3443,6 @@ class TestWorkspaceFullCleanup:
 
         agent.cancel.assert_awaited_once_with("sess-42")
 
-    @pytest.mark.asyncio
     async def test_ws_activate_clears_pending_messages(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
@@ -3519,7 +3456,6 @@ class TestWorkspaceFullCleanup:
 
         assert "chat1" not in eng._pending_messages
 
-    @pytest.mark.asyncio
     async def test_ws_activate_shuts_down_browser(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
@@ -3537,7 +3473,6 @@ class TestWorkspaceFullCleanup:
             await eng.handle_command("user1", "workspace", "myws", "chat1")
             mock_browser.assert_awaited_once()
 
-    @pytest.mark.asyncio
     async def test_ws_activate_full_cleanup(
         self, audit_logger, policy_engine, mock_connector, tmp_path, event_bus
     ):
@@ -3598,7 +3533,6 @@ class TestWorkspaceFullCleanup:
         assert session.message_count == 0
         assert session.workspace_name == "myws"
 
-    @pytest.mark.asyncio
     async def test_ws_exit_cancels_pending_approvals(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
@@ -3626,7 +3560,6 @@ class TestWorkspaceFullCleanup:
         assert pending.decision is False
         assert pending.event.is_set()
 
-    @pytest.mark.asyncio
     async def test_ws_exit_cancels_pending_interactions(
         self, audit_logger, policy_engine, mock_connector, tmp_path, event_bus
     ):
@@ -3652,7 +3585,6 @@ class TestWorkspaceFullCleanup:
         assert "int-1" not in ic.pending
         assert pending.event.is_set()
 
-    @pytest.mark.asyncio
     async def test_ws_exit_clears_pending_messages(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
@@ -3667,7 +3599,6 @@ class TestWorkspaceFullCleanup:
 
         assert "chat1" not in eng._pending_messages
 
-    @pytest.mark.asyncio
     async def test_ws_exit_shuts_down_browser(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
@@ -3685,7 +3616,6 @@ class TestWorkspaceFullCleanup:
             await eng.handle_command("user1", "ws", "exit", "chat1")
             mock_browser.assert_awaited_once()
 
-    @pytest.mark.asyncio
     async def test_ws_exit_disables_auto_approve(
         self, audit_logger, policy_engine, mock_connector, tmp_path
     ):
@@ -3700,7 +3630,6 @@ class TestWorkspaceFullCleanup:
 
         assert "chat1" not in eng._gatekeeper._auto_approved_chats
 
-    @pytest.mark.asyncio
     async def test_ws_exit_full_cleanup(
         self, audit_logger, policy_engine, mock_connector, tmp_path, event_bus
     ):
@@ -3765,7 +3694,6 @@ class TestWorkspaceFullCleanup:
 class TestClearFullCleanup:
     """Additional /clear cleanup tests."""
 
-    @pytest.mark.asyncio
     async def test_clear_clears_pending_messages(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -3784,7 +3712,6 @@ class TestClearFullCleanup:
 
         assert "chat1" not in eng._pending_messages
 
-    @pytest.mark.asyncio
     async def test_clear_full_cleanup(
         self, config, audit_logger, policy_engine, mock_connector, event_bus
     ):

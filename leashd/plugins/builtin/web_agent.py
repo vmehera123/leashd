@@ -373,6 +373,9 @@ def build_web_instruction(
         "- Never attempt to bypass CAPTCHAs, bot detection, or anti-automation "
         "measures — ask the user for help",
         f"- Prefer {tools.snap_tool} over {tools.screenshot_tool} for state verification",
+        f"- When saving screenshots, always use .leashd/ as the target directory "
+        f"(e.g. `{tools.screenshot_tool} .leashd/screenshot.png`). "
+        "Never save image files in the project root or other directories",
         "- Keep interactions professional and appropriate for the platform",
     ]
 

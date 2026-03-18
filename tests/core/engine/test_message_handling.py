@@ -18,19 +18,16 @@ from tests.core.engine.conftest import FakeAgent
 
 
 class TestEngineMessageHandling:
-    @pytest.mark.asyncio
     async def test_handle_message_returns_response(self, engine):
         result = await engine.handle_message("user1", "hello", "chat1")
         assert "Echo: hello" in result
 
-    @pytest.mark.asyncio
     async def test_handle_message_creates_session(self, engine):
         await engine.handle_message("user1", "hello", "chat1")
         session = engine.session_manager.get("user1", "chat1")
         assert session is not None
         assert session.message_count == 1
 
-    @pytest.mark.asyncio
     async def test_handle_message_updates_session_cost(self, engine):
         await engine.handle_message("user1", "hello", "chat1")
         session = engine.session_manager.get("user1", "chat1")
@@ -38,7 +35,6 @@ class TestEngineMessageHandling:
 
 
 class TestEngineErrorHandling:
-    @pytest.mark.asyncio
     async def test_agent_error_returns_error_message(self, config, audit_logger):
         failing_agent = FakeAgent(fail=True)
         eng = Engine(
@@ -52,7 +48,6 @@ class TestEngineErrorHandling:
         assert "Error:" in result
         assert "Agent crashed" in result
 
-    @pytest.mark.asyncio
     async def test_agent_error_sent_to_connector(
         self, config, audit_logger, mock_connector
     ):
@@ -70,7 +65,6 @@ class TestEngineErrorHandling:
 
 
 class TestEngineMessageCtx:
-    @pytest.mark.asyncio
     async def test_handle_message_ctx_delegates(self, engine):
         ctx = MessageContext(user_id="user1", chat_id="chat1", text="hello ctx")
         result = await engine.handle_message_ctx(ctx)
@@ -78,7 +72,6 @@ class TestEngineMessageCtx:
 
 
 class TestEngineMessageLogging:
-    @pytest.mark.asyncio
     async def test_messages_logged_when_sqlite_store(
         self, config, fake_agent, audit_logger, tmp_path
     ):
@@ -108,7 +101,6 @@ class TestEngineMessageLogging:
         finally:
             await store.teardown()
 
-    @pytest.mark.asyncio
     async def test_message_log_failure_does_not_break_handling(
         self, config, fake_agent, audit_logger, tmp_path
     ):
@@ -134,7 +126,6 @@ class TestEngineMessageLogging:
         finally:
             await store.teardown()
 
-    @pytest.mark.asyncio
     async def test_agent_error_only_logs_user_message(
         self, config, audit_logger, tmp_path
     ):
@@ -160,7 +151,6 @@ class TestEngineMessageLogging:
 
 
 class TestEngineUsesMessageLogger:
-    @pytest.mark.asyncio
     async def test_uses_message_logger(self, config, audit_logger):
         from unittest.mock import AsyncMock
 
@@ -205,7 +195,6 @@ class TestBuildImplementationPrompt:
 class TestEngineResilience:
     """Tests for engine-level retry, message preservation, timeout, and backoff."""
 
-    @pytest.mark.asyncio
     async def test_engine_retries_transient_error(
         self, config, audit_logger, policy_engine
     ):
@@ -249,7 +238,6 @@ class TestEngineResilience:
         assert "success" in result
         assert call_count == 2
 
-    @pytest.mark.asyncio
     async def test_engine_no_retry_permanent_error(
         self, config, audit_logger, policy_engine
     ):
@@ -285,7 +273,6 @@ class TestEngineResilience:
         assert "authentication_error" in result
         assert call_count == 1
 
-    @pytest.mark.asyncio
     async def test_pending_messages_preserved_on_transient_error(
         self, config, audit_logger, policy_engine
     ):
@@ -316,7 +303,6 @@ class TestEngineResilience:
         assert "Error:" in result
         assert eng._pending_messages.get("c1") == [("u1", "queued msg")]
 
-    @pytest.mark.asyncio
     async def test_pending_messages_dropped_on_permanent_error(
         self, config, audit_logger, policy_engine
     ):
@@ -345,7 +331,6 @@ class TestEngineResilience:
         assert "Error:" in result
         assert "c1" not in eng._pending_messages
 
-    @pytest.mark.asyncio
     async def test_agent_timeout_cancels_and_raises(
         self, config, audit_logger, policy_engine
     ):
@@ -382,7 +367,6 @@ class TestEngineResilience:
         assert "timed out" in result.lower()
         assert cancel_called
 
-    @pytest.mark.asyncio
     async def test_agent_timeout_persists_session_id(
         self, config, audit_logger, policy_engine
     ):
@@ -424,7 +408,6 @@ class TestEngineResilience:
         )
         assert session.agent_resume_token == "sdk-timeout-id"
 
-    @pytest.mark.asyncio
     async def test_agent_timeout_without_session_id(
         self, config, audit_logger, policy_engine
     ):
@@ -465,7 +448,6 @@ class TestEngineResilience:
         )
         assert session.agent_resume_token is None
 
-    @pytest.mark.asyncio
     async def test_sustained_degradation_backoff(
         self, config, audit_logger, policy_engine
     ):
@@ -508,7 +490,6 @@ class TestEngineResilience:
         )
         assert Engine._is_retryable_response(resp) is True
 
-    @pytest.mark.asyncio
     async def test_pending_messages_preserved_on_buffer_overflow(
         self, config, audit_logger, policy_engine
     ):
@@ -543,7 +524,6 @@ class TestEngineResilience:
 class TestContextVarBinding:
     """Verify structlog contextvars include session_id during a turn."""
 
-    @pytest.mark.asyncio
     async def test_session_id_bound_to_contextvars_during_turn(
         self, config, audit_logger, policy_engine
     ):
@@ -586,7 +566,6 @@ class TestContextVarBinding:
 class TestAutoPlanActivation:
     """Tests for auto-plan mode: switches new auto-mode sessions to plan mode."""
 
-    @pytest.mark.asyncio
     async def test_auto_plan_activates_plan_mode_on_first_message(
         self, audit_logger, policy_engine, tmp_path
     ):
@@ -616,7 +595,6 @@ class TestAutoPlanActivation:
         session = eng.session_manager.get("u1", "c1")
         assert session.mode == "plan"
 
-    @pytest.mark.asyncio
     async def test_auto_plan_does_not_reactivate_on_resume(
         self, audit_logger, policy_engine, tmp_path
     ):
@@ -648,7 +626,6 @@ class TestAutoPlanActivation:
         # Mode should stay auto since this is a resumed session
         assert session.mode == "auto"
 
-    @pytest.mark.asyncio
     async def test_auto_plan_only_affects_auto_mode(
         self, audit_logger, policy_engine, tmp_path
     ):
@@ -673,7 +650,6 @@ class TestAutoPlanActivation:
         session = eng.session_manager.get("u1", "c1")
         assert session.mode == "default"
 
-    @pytest.mark.asyncio
     async def test_exit_plan_mode_skips_auto_plan_reentry(
         self, audit_logger, policy_engine, tmp_path
     ):
@@ -735,7 +711,6 @@ class TestAutoPlanActivation:
 class TestAutoPlanGuardWithPlanOrigin:
     """Tests for plan_origin-based auto_plan guard."""
 
-    @pytest.mark.asyncio
     async def test_auto_plan_blocked_when_plan_origin_set(
         self, audit_logger, policy_engine, tmp_path
     ):
@@ -766,7 +741,6 @@ class TestAutoPlanGuardWithPlanOrigin:
         session = sm.get("u1", "c1")
         assert session.mode == "auto"
 
-    @pytest.mark.asyncio
     async def test_auto_plan_triggers_when_plan_origin_none(
         self, audit_logger, policy_engine, tmp_path
     ):
@@ -797,7 +771,6 @@ class TestAutoPlanGuardWithPlanOrigin:
         session = sm.get("u1", "c1")
         assert session.mode == "plan"
 
-    @pytest.mark.asyncio
     async def test_exit_plan_mode_clears_plan_origin(
         self, audit_logger, policy_engine, tmp_path
     ):
@@ -874,7 +847,6 @@ class TestRetryableResponsePatterns:
 
 
 class TestInteractionCoordinatorReceivesIds:
-    @pytest.mark.asyncio
     async def test_message_logger_receives_user_id_and_session_id(
         self, config, policy_engine, audit_logger
     ):
@@ -943,7 +915,6 @@ class TestInteractionCoordinatorReceivesIds:
 
 
 class TestAgentDeadlinePauseDuringQuestion:
-    @pytest.mark.asyncio
     async def test_agent_timeout_pauses_during_question(
         self, config, policy_engine, audit_logger
     ):

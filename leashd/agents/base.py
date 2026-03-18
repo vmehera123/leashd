@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
 
     from leashd.agents.capabilities import AgentCapabilities
+    from leashd.connectors.base import Attachment
     from leashd.core.session import Session
 
 
@@ -18,6 +19,7 @@ class ToolActivity(BaseModel):
 
     tool_name: str
     description: str
+    agent_name: str | None = None
 
 
 class AgentResponse(BaseModel):
@@ -44,6 +46,7 @@ class BaseAgent(Protocol):
         on_tool_activity: Callable[[ToolActivity | None], Coroutine[Any, Any, None]]
         | None = None,
         on_retry: Callable[[], Coroutine[Any, Any, None]] | None = None,
+        attachments: list[Attachment] | None = None,
     ) -> AgentResponse: ...
 
     @property

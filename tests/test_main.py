@@ -24,11 +24,11 @@ def mock_config(tmp_path):
     cfg = MagicMock()
     cfg.approved_directories = [tmp_path]
     cfg.telegram_bot_token = None
+    cfg.web_enabled = False
     return cfg
 
 
 class TestMain:
-    @pytest.mark.asyncio
     async def test_config_error_exits(self):
         with (
             patch("leashd.main.inject_global_config_as_env"),
@@ -38,7 +38,6 @@ class TestMain:
                 await main()
             assert exc_info.value.code == 1
 
-    @pytest.mark.asyncio
     async def test_successful_startup(self, mock_engine, mock_config):
         with (
             patch("leashd.main.inject_global_config_as_env"),
@@ -50,7 +49,6 @@ class TestMain:
 
         mock_engine.startup.assert_called_once()
 
-    @pytest.mark.asyncio
     async def test_eof_triggers_shutdown(self, mock_engine, mock_config):
         with (
             patch("leashd.main.inject_global_config_as_env"),
@@ -62,7 +60,6 @@ class TestMain:
 
         mock_engine.shutdown.assert_called_once()
 
-    @pytest.mark.asyncio
     async def test_keyboard_interrupt_shutdown(self, mock_engine, mock_config):
         with (
             patch("leashd.main.inject_global_config_as_env"),
@@ -74,7 +71,6 @@ class TestMain:
 
         mock_engine.shutdown.assert_called_once()
 
-    @pytest.mark.asyncio
     async def test_empty_input_skipped(self, mock_engine, mock_config):
         with (
             patch("leashd.main.inject_global_config_as_env"),
@@ -86,7 +82,6 @@ class TestMain:
 
         mock_engine.handle_message.assert_not_called()
 
-    @pytest.mark.asyncio
     async def test_valid_input_dispatched(self, mock_engine, mock_config):
         with (
             patch("leashd.main.inject_global_config_as_env"),
@@ -102,7 +97,6 @@ class TestMain:
             chat_id="cli",
         )
 
-    @pytest.mark.asyncio
     async def test_response_printed(self, mock_engine, mock_config, capsys):
         with (
             patch("leashd.main.inject_global_config_as_env"),
@@ -115,7 +109,6 @@ class TestMain:
         captured = capsys.readouterr()
         assert "response text" in captured.out
 
-    @pytest.mark.asyncio
     async def test_multiple_messages_dispatched(self, mock_engine, mock_config):
         with (
             patch("leashd.main.inject_global_config_as_env"),
@@ -130,7 +123,6 @@ class TestMain:
         assert calls[0].kwargs["text"] == "first"
         assert calls[1].kwargs["text"] == "second"
 
-    @pytest.mark.asyncio
     async def test_config_error_catches_leashd_error(self):
         """LeashdError caught by narrowed except → exit code 1."""
         from leashd.exceptions import LeashdError
@@ -143,7 +135,6 @@ class TestMain:
             await main()
         assert exc_info.value.code == 1
 
-    @pytest.mark.asyncio
     async def test_config_error_catches_config_error(self, capsys):
         """ConfigError caught → exit code 1, 'Configuration error' in stderr."""
         from leashd.exceptions import ConfigError
@@ -158,7 +149,6 @@ class TestMain:
         captured = capsys.readouterr()
         assert "Configuration error" in captured.err
 
-    @pytest.mark.asyncio
     async def test_unexpected_exception_not_caught(self):
         """TypeError from LeashdConfig() NOT caught — propagates."""
         with (
@@ -175,7 +165,6 @@ class TestMain:
 
 
 class TestDaemonCleanup:
-    @pytest.mark.asyncio
     async def test_daemon_cleanup_called_on_success(self, mock_engine, mock_config):
         """daemon_cleanup() called in finally block on normal CLI exit."""
         with (
@@ -189,7 +178,6 @@ class TestDaemonCleanup:
 
         mock_cleanup.assert_called_once()
 
-    @pytest.mark.asyncio
     async def test_daemon_cleanup_called_on_connector_error(
         self, mock_engine, mock_config
     ):
@@ -217,11 +205,11 @@ class TestDaemonCleanup:
 
 
 class TestTelegramMode:
-    @pytest.mark.asyncio
     async def test_telegram_mode_starts_connector(self, mock_engine):
         cfg = MagicMock()
         cfg.approved_directories = ["/tmp"]
         cfg.telegram_bot_token = "fake:token"
+        cfg.web_enabled = False
 
         mock_connector = AsyncMock()
 
@@ -248,11 +236,11 @@ class TestTelegramMode:
         mock_engine.startup.assert_awaited_once()
         mock_engine.shutdown.assert_awaited_once()
 
-    @pytest.mark.asyncio
     async def test_connector_start_failure_calls_engine_shutdown(self, mock_engine):
         cfg = MagicMock()
         cfg.approved_directories = ["/tmp"]
         cfg.telegram_bot_token = "fake:token"
+        cfg.web_enabled = False
 
         mock_connector = AsyncMock()
         mock_connector.start.side_effect = ConnectorError("network down")
@@ -273,11 +261,11 @@ class TestTelegramMode:
         mock_engine.startup.assert_awaited_once()
         mock_engine.shutdown.assert_awaited_once()
 
-    @pytest.mark.asyncio
     async def test_connector_error_clean_exit(self, mock_engine, capsys):
         cfg = MagicMock()
         cfg.approved_directories = ["/tmp"]
         cfg.telegram_bot_token = "fake:token"
+        cfg.web_enabled = False
 
         mock_connector = AsyncMock()
         mock_connector.start.side_effect = ConnectorError(
@@ -299,3 +287,41 @@ class TestTelegramMode:
 
         captured = capsys.readouterr()
         assert "Connector failed" in captured.err
+
+
+class TestWebMode:
+    async def test_web_mode_dispatched(self, mock_engine):
+        """When web_enabled=True and no Telegram token, _run_web is used."""
+        cfg = MagicMock()
+        cfg.approved_directories = ["/tmp"]
+        cfg.telegram_bot_token = None
+        cfg.web_enabled = True
+        cfg.web_host = "0.0.0.0"  # noqa: S104
+        cfg.web_port = 8080
+        cfg.web_api_key = "test"
+        cfg.web_cors_origins = "*"
+
+        with (
+            patch("leashd.main.inject_global_config_as_env"),
+            patch("leashd.main.LeashdConfig", return_value=cfg),
+            patch("leashd.main._run_web", new_callable=AsyncMock) as mock_run,
+        ):
+            await main()
+
+        mock_run.assert_awaited_once_with(cfg)
+
+    async def test_multi_mode_dispatched(self, mock_engine):
+        """When both Telegram and WebUI configured, _run_multi is used."""
+        cfg = MagicMock()
+        cfg.approved_directories = ["/tmp"]
+        cfg.telegram_bot_token = "fake:token"
+        cfg.web_enabled = True
+
+        with (
+            patch("leashd.main.inject_global_config_as_env"),
+            patch("leashd.main.LeashdConfig", return_value=cfg),
+            patch("leashd.main._run_multi", new_callable=AsyncMock) as mock_run,
+        ):
+            await main()
+
+        mock_run.assert_awaited_once_with(cfg)

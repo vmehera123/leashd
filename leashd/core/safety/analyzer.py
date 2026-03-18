@@ -73,6 +73,37 @@ def strip_cd_prefix(command: str) -> str:
     return command
 
 
+_SLEEP_PREFIX_RE = re.compile(r"^sleep(\s+[^$`|<>&;]*)?\s*(&&|;|\|\|)\s*")
+
+
+def strip_sleep_prefix(command: str) -> str:
+    """Strip leading ``sleep <duration> &&`` segments from a shell command.
+
+    Loops to handle chained sleeps: ``sleep 1 && sleep 2 && npm test`` → ``npm test``.
+    Arguments containing dangerous characters (``$`|<>&;``) are NOT stripped
+    so that ``sleep$(rm -rf /) && ls`` passes through unchanged.
+    A bare ``sleep 5`` with no chain operator is returned as-is.
+    """
+    prev = None
+    while command != prev:
+        prev = command
+        command = _SLEEP_PREFIX_RE.sub("", command)
+    return command
+
+
+def strip_benign_prefixes(command: str) -> str:
+    """Strip leading ``cd`` and ``sleep`` prefix segments.
+
+    Handles arbitrary ordering: ``sleep 1 && cd /a && npm test`` → ``npm test``.
+    """
+    prev = None
+    while command != prev:
+        prev = command
+        command = strip_cd_prefix(command)
+        command = strip_sleep_prefix(command)
+    return command
+
+
 def analyze_bash(command: str) -> CommandAnalysis:
     """Analyze a bash command for structural features and risk factors."""
     risk_factors: list[str] = []

@@ -1,7 +1,5 @@
 """Engine tests — /workspace and /ws commands."""
 
-import pytest
-
 from leashd.core.config import LeashdConfig, build_directory_names
 from leashd.core.engine import Engine
 from leashd.core.session import SessionManager
@@ -31,7 +29,6 @@ def _make_engine(
 
 
 class TestWorkspaceCommand:
-    @pytest.mark.asyncio
     async def test_no_workspaces_defined(
         self, config, mock_connector, policy_engine, audit_logger
     ):
@@ -39,7 +36,6 @@ class TestWorkspaceCommand:
         result = await eng.handle_command("user1", "workspace", "", "chat1")
         assert "no workspaces" in result.lower()
 
-    @pytest.mark.asyncio
     async def test_ws_alias_works(
         self, config, mock_connector, policy_engine, audit_logger
     ):
@@ -47,7 +43,6 @@ class TestWorkspaceCommand:
         result = await eng.handle_command("user1", "ws", "", "chat1")
         assert "no workspaces" in result.lower()
 
-    @pytest.mark.asyncio
     async def test_list_workspaces_buttons(
         self, tmp_path, mock_connector, policy_engine, audit_logger
     ):
@@ -80,7 +75,6 @@ class TestWorkspaceCommand:
         assert "\u2514 fe" in msg["text"]
         assert "\u2514 be" in msg["text"]
 
-    @pytest.mark.asyncio
     async def test_list_single_workspace_text(
         self, tmp_path, policy_engine, audit_logger
     ):
@@ -100,7 +94,6 @@ class TestWorkspaceCommand:
         assert "solo" in result
         assert "\u2514 repo" in result
 
-    @pytest.mark.asyncio
     async def test_single_workspace_shows_buttons(
         self, tmp_path, mock_connector, policy_engine, audit_logger
     ):
@@ -125,7 +118,6 @@ class TestWorkspaceCommand:
         assert len(msg["buttons"]) == 1
         assert msg["buttons"][0][0].callback_data == "ws:solo"
 
-    @pytest.mark.asyncio
     async def test_workspace_tree_multiple_directories(
         self, tmp_path, mock_connector, policy_engine, audit_logger
     ):
@@ -155,7 +147,6 @@ class TestWorkspaceCommand:
         assert "\u251c be" in text
         assert "\u2514 api" in text
 
-    @pytest.mark.asyncio
     async def test_activate_workspace(
         self, tmp_path, mock_connector, policy_engine, audit_logger
     ):
@@ -188,7 +179,6 @@ class TestWorkspaceCommand:
         assert session.workspace_directories == [str(dir_a), str(dir_b)]
         assert session.working_directory == str(dir_a)
 
-    @pytest.mark.asyncio
     async def test_activate_resets_claude_session(
         self, tmp_path, mock_connector, policy_engine, audit_logger
     ):
@@ -216,7 +206,6 @@ class TestWorkspaceCommand:
         session = eng.session_manager.get("user1", "chat1")
         assert session.agent_resume_token is None
 
-    @pytest.mark.asyncio
     async def test_exit_workspace(
         self, tmp_path, mock_connector, policy_engine, audit_logger
     ):
@@ -245,7 +234,6 @@ class TestWorkspaceCommand:
         assert session.workspace_name is None
         assert session.workspace_directories == []
 
-    @pytest.mark.asyncio
     async def test_exit_no_active_workspace(
         self, tmp_path, mock_connector, policy_engine, audit_logger
     ):
@@ -265,7 +253,6 @@ class TestWorkspaceCommand:
         result = await eng.handle_command("user1", "workspace", "exit", "chat1")
         assert "no workspace active" in result.lower()
 
-    @pytest.mark.asyncio
     async def test_unknown_workspace(
         self, tmp_path, mock_connector, policy_engine, audit_logger
     ):
@@ -286,7 +273,6 @@ class TestWorkspaceCommand:
         assert "unknown workspace" in result.lower()
         assert "ws" in result
 
-    @pytest.mark.asyncio
     async def test_status_shows_workspace(
         self, tmp_path, mock_connector, policy_engine, audit_logger
     ):
@@ -307,7 +293,6 @@ class TestWorkspaceCommand:
         result = await eng.handle_command("user1", "status", "", "chat1")
         assert "Workspace: ws" in result
 
-    @pytest.mark.asyncio
     async def test_status_no_workspace(
         self, config, mock_connector, policy_engine, audit_logger
     ):
@@ -315,7 +300,6 @@ class TestWorkspaceCommand:
         result = await eng.handle_command("user1", "status", "", "chat1")
         assert "Workspace" not in result
 
-    @pytest.mark.asyncio
     async def test_active_workspace_marked_in_list(
         self, tmp_path, mock_connector, policy_engine, audit_logger
     ):
@@ -350,7 +334,6 @@ class TestWorkspaceCommand:
 
 
 class TestDirDeactivatesWorkspace:
-    @pytest.mark.asyncio
     async def test_dir_deactivates_workspace(
         self, tmp_path, mock_connector, policy_engine, audit_logger
     ):
@@ -388,7 +371,6 @@ class TestDirDeactivatesWorkspace:
         assert session.workspace_directories == []
         assert session.working_directory == str(eng._dir_names[target_name])
 
-    @pytest.mark.asyncio
     async def test_dir_deactivation_message(
         self, tmp_path, mock_connector, policy_engine, audit_logger
     ):
@@ -422,7 +404,6 @@ class TestDirDeactivatesWorkspace:
         result = await eng.handle_command("user1", "dir", target_name, "chat1")
         assert "workspace 'myws' deactivated" in result
 
-    @pytest.mark.asyncio
     async def test_dir_without_workspace_no_suffix(
         self, tmp_path, mock_connector, policy_engine, audit_logger
     ):

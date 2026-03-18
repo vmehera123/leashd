@@ -15,7 +15,7 @@ from leashd.core.events import (
     TOOL_GATED,
     Event,
 )
-from leashd.core.safety.analyzer import strip_cd_prefix
+from leashd.core.safety.analyzer import strip_benign_prefixes
 from leashd.core.safety.policy import PolicyDecision
 
 if TYPE_CHECKING:
@@ -57,7 +57,7 @@ def _approval_key(tool_name: str, tool_input: dict[str, Any]) -> str:
     normalized = normalize_tool_name(tool_name)
     if normalized != "Bash":
         return normalized
-    command = strip_cd_prefix(tool_input.get("command", "").strip())
+    command = strip_benign_prefixes(tool_input.get("command", "").strip())
     tokens = command.split()
     if not tokens:
         return "Bash"

@@ -2,8 +2,6 @@
 
 import asyncio
 
-import pytest
-
 from leashd.agents.base import AgentResponse, BaseAgent
 from leashd.core.engine import Engine
 from leashd.core.interactions import InteractionCoordinator
@@ -13,7 +11,6 @@ from tests.core.engine.conftest import FakeAgent
 
 
 class TestEngineInteractionRouting:
-    @pytest.mark.asyncio
     async def test_ask_user_question_intercepted(
         self, config, fake_agent, policy_engine, audit_logger, mock_connector
     ):
@@ -53,7 +50,6 @@ class TestEngineInteractionRouting:
         assert result.behavior == "allow"
         assert result.updated_input["answers"]["Pick?"] == "A"
 
-    @pytest.mark.asyncio
     async def test_exit_plan_mode_intercepted(
         self, config, fake_agent, policy_engine, audit_logger, mock_connector
     ):
@@ -85,7 +81,6 @@ class TestEngineInteractionRouting:
         # Auto-approve for Write/Edit is deferred to _exit_plan_mode (not set here);
         # this prevents premature auto-approve while session is still in plan mode
 
-    @pytest.mark.asyncio
     async def test_regular_tool_still_hits_gatekeeper(
         self, config, fake_agent, policy_engine, audit_logger, mock_connector, tmp_dir
     ):
@@ -110,7 +105,6 @@ class TestEngineInteractionRouting:
         result = await hook("Read", {"file_path": "/etc/passwd"}, None)
         assert result.behavior == "deny"
 
-    @pytest.mark.asyncio
     async def test_text_routed_to_pending_interaction(
         self, config, fake_agent, policy_engine, audit_logger, mock_connector
     ):
@@ -149,7 +143,6 @@ class TestEngineInteractionRouting:
         assert result.behavior == "allow"
         assert result.updated_input["answers"]["Q?"] == "custom answer"
 
-    @pytest.mark.asyncio
     async def test_agent_crash_cancels_interactions(
         self, config, policy_engine, audit_logger, mock_connector
     ):
@@ -172,7 +165,6 @@ class TestEngineInteractionRouting:
 
         coordinator.cancel_pending.assert_called_once_with("chat1")
 
-    @pytest.mark.asyncio
     async def test_exit_plan_mode_clean_proceed_resets_session(
         self, config, fake_agent, policy_engine, audit_logger, mock_connector
     ):
@@ -207,7 +199,6 @@ class TestEngineInteractionRouting:
 
 
 class TestCleanProceedAutoImplementation:
-    @pytest.mark.asyncio
     async def test_clean_proceed_triggers_fresh_execution(
         self, config, policy_engine, audit_logger, mock_connector
     ):
@@ -274,7 +265,6 @@ class TestCleanProceedAutoImplementation:
         ]
         assert len(cleared_msgs) >= 1
 
-    @pytest.mark.asyncio
     async def test_clean_proceed_state_not_set_for_normal_proceed(
         self, config, fake_agent, policy_engine, audit_logger, mock_connector
     ):
@@ -304,7 +294,6 @@ class TestCleanProceedAutoImplementation:
 
         assert result.behavior == "allow"
 
-    @pytest.mark.asyncio
     async def test_clean_proceed_deactivates_streaming(
         self, config, policy_engine, audit_logger
     ):
@@ -372,7 +361,6 @@ class TestCleanProceedAutoImplementation:
         ]
         assert streaming_msgs == []
 
-    @pytest.mark.asyncio
     async def test_clean_proceed_cancels_agent(
         self, config, policy_engine, audit_logger, mock_connector
     ):
@@ -425,7 +413,6 @@ class TestCleanProceedAutoImplementation:
 
         assert len(cancel_calls) == 1
 
-    @pytest.mark.asyncio
     async def test_clean_proceed_suppresses_plan_agent_response(
         self, config, policy_engine, audit_logger, mock_connector
     ):
@@ -486,7 +473,6 @@ class TestCleanProceedAutoImplementation:
         ]
         assert narration_msgs == []
 
-    @pytest.mark.asyncio
     async def test_clean_proceed_suppresses_message_out_event(
         self, config, policy_engine, audit_logger, mock_connector
     ):
@@ -555,7 +541,6 @@ class TestCleanProceedAutoImplementation:
 
 
 class TestEngineApprovalTextRouting:
-    @pytest.mark.asyncio
     async def test_text_message_rejects_pending_approval(
         self, config, fake_agent, policy_engine, audit_logger, mock_connector
     ):
@@ -590,7 +575,6 @@ class TestEngineApprovalTextRouting:
             mock_connector.deleted_messages
         )
 
-    @pytest.mark.asyncio
     async def test_approval_routing_before_interaction_routing(
         self, config, fake_agent, policy_engine, audit_logger, mock_connector
     ):
@@ -635,7 +619,6 @@ class TestEngineApprovalTextRouting:
         # Interaction should NOT have been resolved
         assert interaction.answer is None
 
-    @pytest.mark.asyncio
     async def test_no_pending_approval_routes_normally(
         self, config, fake_agent, policy_engine, audit_logger, mock_connector
     ):

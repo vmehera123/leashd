@@ -68,6 +68,16 @@ Each layer overrides the one before it: `~/.leashd/config.yaml` → `.env` → e
 |---|---|---|---|
 | `LEASHD_TELEGRAM_BOT_TOKEN` | `str \| None` | `None` | Telegram bot API token. If set, runs with Telegram connector. If unset, runs CLI REPL. |
 
+### WebUI
+
+| Variable | Type | Default | Description |
+|---|---|---|---|
+| `LEASHD_WEB_ENABLED` | `bool` | `false` | Enable the WebUI connector (browser-based interface) |
+| `LEASHD_WEB_HOST` | `str` | `"0.0.0.0"` | Host to bind the WebUI HTTP/WebSocket server |
+| `LEASHD_WEB_PORT` | `int` | `8080` | Port for the WebUI server |
+| `LEASHD_WEB_API_KEY` | `str \| None` | `None` | API key for WebUI authentication. Required when WebUI is enabled. |
+| `LEASHD_WEB_CORS_ORIGINS` | `list[str]` | `[]` | Comma-separated list of allowed CORS origins for cross-origin WebUI access |
+
 ### Storage
 
 | Variable | Type | Default | Description |

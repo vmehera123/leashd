@@ -252,15 +252,12 @@ class TestClaudeCodeAgent:
         opts = agent._build_options(session, can_use_tool=my_hook)
         assert opts.can_use_tool is my_hook
 
-    @pytest.mark.asyncio
     async def test_cancel_no_active_client(self, agent):
         await agent.cancel("nonexistent")
 
-    @pytest.mark.asyncio
     async def test_shutdown_no_clients(self, agent):
         await agent.shutdown()
 
-    @pytest.mark.asyncio
     async def test_execute_calls_run_with_resume(self, agent, session):
         expected = AgentResponse(content="test response", session_id="s1")
         with patch.object(
@@ -275,7 +272,6 @@ class TestClaudeCodeAgent:
             assert result.content == "test response"
             assert result.session_id == "s1"
 
-    @pytest.mark.asyncio
     async def test_execute_wraps_exception_as_agent_error(self, agent, session):
         with patch.object(
             agent, "_run_with_resume", new_callable=AsyncMock
@@ -284,7 +280,6 @@ class TestClaudeCodeAgent:
             with pytest.raises(AgentError, match="SDK failure"):
                 await agent.execute("hello", session)
 
-    @pytest.mark.asyncio
     async def test_execute_returns_error_on_none_response(self, agent, session):
         with patch.object(
             agent, "_run_with_resume", new_callable=AsyncMock
@@ -294,7 +289,6 @@ class TestClaudeCodeAgent:
             assert result.is_error is True
             assert "No response" in result.content
 
-    @pytest.mark.asyncio
     async def test_cancel_with_active_client(self, agent):
         mock_client = AsyncMock()
         agent._active_clients["s1"] = mock_client
@@ -302,7 +296,6 @@ class TestClaudeCodeAgent:
         mock_client.interrupt.assert_called_once()
         agent._active_clients.clear()
 
-    @pytest.mark.asyncio
     async def test_shutdown_disconnects_clients(self, agent):
         mock_client1 = AsyncMock()
         mock_client2 = AsyncMock()
@@ -1090,7 +1083,6 @@ class TestClaudeCodeAgent:
         opts = none_agent._build_options(session, can_use_tool=None)
         assert opts.effort is None
 
-    @pytest.mark.asyncio
     async def test_shutdown_suppresses_disconnect_errors(self, agent):
         mock_client = AsyncMock()
         mock_client.disconnect.side_effect = RuntimeError("disconnect failed")
@@ -1099,7 +1091,6 @@ class TestClaudeCodeAgent:
         await agent.shutdown()
         assert len(agent._active_clients) == 0
 
-    @pytest.mark.asyncio
     async def test_shutdown_clears_active_clients(self, agent):
         mock_client = AsyncMock()
         agent._active_clients["s1"] = mock_client
@@ -1111,7 +1102,6 @@ class TestClaudeCodeAgent:
 class TestRunWithResume:
     """Tests for the _run_with_resume method (lines 85-126)."""
 
-    @pytest.mark.asyncio
     async def test_text_response(self, agent, session):
         text_block = _make_text_block("Hello world")
         assistant = _make_assistant_message([text_block])
@@ -1129,7 +1119,6 @@ class TestRunWithResume:
         assert resp.num_turns == 3
         assert resp.is_error is False
 
-    @pytest.mark.asyncio
     async def test_tool_use_tracking(self, agent, session):
         tool1 = _make_tool_use_block("Read")
         tool2 = _make_tool_use_block("Write")
@@ -1144,7 +1133,6 @@ class TestRunWithResume:
 
         assert resp.tools_used == ["Read", "Write"]
 
-    @pytest.mark.asyncio
     async def test_text_fallback_no_result(self, agent, session):
         text1 = _make_text_block("Part 1")
         text2 = _make_text_block("Part 2")
@@ -1159,7 +1147,6 @@ class TestRunWithResume:
 
         assert resp.content == "Part 1\nPart 2"
 
-    @pytest.mark.asyncio
     async def test_mixed_blocks(self, agent, session):
         text_block = _make_text_block("I'll help you")
         tool_block = _make_tool_use_block("Bash")
@@ -1175,7 +1162,6 @@ class TestRunWithResume:
         assert resp.content == "All done"
         assert resp.tools_used == ["Bash"]
 
-    @pytest.mark.asyncio
     async def test_zero_turns_retry(self, agent, session):
         session.agent_resume_token = "stale-session"
         opts = agent._build_options(session, None)
@@ -1216,7 +1202,6 @@ class TestRunWithResume:
         assert call_count == 2
         assert session.agent_resume_token is None
 
-    @pytest.mark.asyncio
     async def test_resume_crash_retries_fresh(self, agent, session):
         """When CLI crashes during resume, clear resume and retry fresh."""
         session.agent_resume_token = "stale-session"
@@ -1253,7 +1238,6 @@ class TestRunWithResume:
         assert opts.resume is None
         assert session.agent_resume_token is None
 
-    @pytest.mark.asyncio
     async def test_exhausted_attempts(self, agent, session):
         # Both attempts yield no messages at all → "No response received."
         class FakeCtx:
@@ -1276,7 +1260,6 @@ class TestRunWithResume:
         assert resp.content == "No response received."
         assert resp.is_error is True
 
-    @pytest.mark.asyncio
     async def test_active_client_tracked(self, agent, session):
         tracked_during = []
 
@@ -1307,7 +1290,6 @@ class TestRunWithResume:
         assert tracked_during == [True]
         assert session.session_id not in agent._active_clients
 
-    @pytest.mark.asyncio
     async def test_cleanup_on_exception(self, agent, session):
         mock_client = MagicMock()
         mock_client.query = AsyncMock(side_effect=RuntimeError("SDK crash"))
@@ -1329,7 +1311,6 @@ class TestRunWithResume:
 
         assert session.session_id not in agent._active_clients
 
-    @pytest.mark.asyncio
     async def test_duration_calculated(self, agent, session):
         result_msg = _make_result_message()
 
@@ -1341,7 +1322,6 @@ class TestRunWithResume:
 
         assert resp.duration_ms >= 0
 
-    @pytest.mark.asyncio
     async def test_is_error_propagated(self, agent, session):
         result_msg = _make_result_message(is_error=True, result="Something failed")
 
@@ -1354,7 +1334,6 @@ class TestRunWithResume:
         assert resp.is_error is True
         assert resp.content == "Something failed"
 
-    @pytest.mark.asyncio
     async def test_no_messages(self, agent, session):
         patcher, _ = _patch_sdk_client([])
         with patcher:
@@ -1365,7 +1344,6 @@ class TestRunWithResume:
         assert resp.content == "No response received."
         assert resp.is_error is True
 
-    @pytest.mark.asyncio
     async def test_query_and_receive_response_called(self, agent, session):
         result_msg = _make_result_message()
         patcher, mock_client = _patch_sdk_client([result_msg])
@@ -1376,7 +1354,6 @@ class TestRunWithResume:
         mock_client.query.assert_awaited_once_with("hello world")
         mock_client.receive_response.assert_called_once()
 
-    @pytest.mark.asyncio
     async def test_execute_e2e_through_run_with_resume(self, agent, session):
         text_block = _make_text_block("Done!")
         assistant = _make_assistant_message([text_block])
@@ -1393,7 +1370,6 @@ class TestRunWithResume:
 class TestOnTextChunkCallback:
     """Tests for on_text_chunk callback in _run_with_resume."""
 
-    @pytest.mark.asyncio
     async def test_callback_called_per_text_block(self, agent, session):
         text1 = _make_text_block("Hello")
         text2 = _make_text_block(" World")
@@ -1416,7 +1392,6 @@ class TestOnTextChunkCallback:
 
         assert chunks == ["Hello", " World"]
 
-    @pytest.mark.asyncio
     async def test_callback_error_does_not_crash_agent(self, agent, session):
         text_block = _make_text_block("Hello")
         assistant = _make_assistant_message([text_block])
@@ -1437,7 +1412,6 @@ class TestOnTextChunkCallback:
         assert resp.content == "Hello"
         assert resp.is_error is False
 
-    @pytest.mark.asyncio
     async def test_callback_not_called_for_tool_blocks(self, agent, session):
         tool_block = _make_tool_use_block("Bash")
         assistant = _make_assistant_message([tool_block])
@@ -1459,7 +1433,6 @@ class TestOnTextChunkCallback:
 
         assert chunks == []
 
-    @pytest.mark.asyncio
     async def test_callback_passed_through_execute(self, agent, session):
         chunks = []
 
@@ -1476,7 +1449,6 @@ class TestOnTextChunkCallback:
 
         assert chunks == ["Hi"]
 
-    @pytest.mark.asyncio
     async def test_no_callback_works_fine(self, agent, session):
         text_block = _make_text_block("Hello")
         assistant = _make_assistant_message([text_block])
@@ -1493,10 +1465,220 @@ class TestOnTextChunkCallback:
         assert resp.content == "Hello"
 
 
+class TestStreamEventStreaming:
+    """Tests for token-level streaming via StreamEvent (include_partial_messages)."""
+
+    @staticmethod
+    def _make_stream_event(event_data):
+        from claude_agent_sdk.types import StreamEvent
+
+        return StreamEvent(
+            uuid="evt-1",
+            session_id="sid",
+            event=event_data,
+        )
+
+    async def test_stream_events_invoke_text_chunk_callback(self, agent, session):
+        """StreamEvent text_delta should call on_text_chunk with delta text."""
+        evt1 = self._make_stream_event(
+            {
+                "type": "content_block_delta",
+                "delta": {"type": "text_delta", "text": "Hello"},
+            }
+        )
+        evt2 = self._make_stream_event(
+            {
+                "type": "content_block_delta",
+                "delta": {"type": "text_delta", "text": " world"},
+            }
+        )
+        assistant = _make_assistant_message([_make_text_block("Hello world")])
+        result_msg = _make_result_message(result="Hello world")
+
+        chunks = []
+
+        async def on_chunk(text):
+            chunks.append(text)
+
+        patcher, _ = _patch_sdk_client([evt1, evt2, assistant, result_msg])
+        with patcher:
+            resp = await agent._run_with_resume(
+                "prompt",
+                session,
+                agent._build_options(session, None),
+                on_text_chunk=on_chunk,
+            )
+
+        assert chunks == ["Hello", " world"]
+        assert resp.content == "Hello world"
+
+    async def test_stream_events_suppress_duplicate_text_chunk(self, agent, session):
+        """After streaming via StreamEvent, AssistantMessage should NOT re-trigger on_text_chunk."""
+        evt = self._make_stream_event(
+            {
+                "type": "content_block_delta",
+                "delta": {"type": "text_delta", "text": "Hi"},
+            }
+        )
+        assistant = _make_assistant_message([_make_text_block("Hi")])
+        result_msg = _make_result_message(result="Hi")
+
+        chunks = []
+
+        async def on_chunk(text):
+            chunks.append(text)
+
+        patcher, _ = _patch_sdk_client([evt, assistant, result_msg])
+        with patcher:
+            await agent._run_with_resume(
+                "prompt",
+                session,
+                agent._build_options(session, None),
+                on_text_chunk=on_chunk,
+            )
+
+        # "Hi" should appear once (from StreamEvent), not twice
+        assert chunks == ["Hi"]
+
+    async def test_stream_events_non_text_delta_ignored(self, agent, session):
+        """Non-text deltas (e.g. input_json_delta) should be silently skipped."""
+        evt = self._make_stream_event(
+            {
+                "type": "content_block_delta",
+                "delta": {"type": "input_json_delta", "partial_json": "{}"},
+            }
+        )
+        assistant = _make_assistant_message([_make_text_block("Done")])
+        result_msg = _make_result_message(result="Done")
+
+        chunks = []
+
+        async def on_chunk(text):
+            chunks.append(text)
+
+        patcher, _ = _patch_sdk_client([evt, assistant, result_msg])
+        with patcher:
+            await agent._run_with_resume(
+                "prompt",
+                session,
+                agent._build_options(session, None),
+                on_text_chunk=on_chunk,
+            )
+
+        # "Done" comes from AssistantMessage because no text was streamed
+        assert chunks == ["Done"]
+
+    async def test_stream_flag_resets_between_turns(self, agent, session):
+        """After processing an AssistantMessage, the stream flag resets for the next turn."""
+        # Turn 1: stream event + assistant
+        evt1 = self._make_stream_event(
+            {
+                "type": "content_block_delta",
+                "delta": {"type": "text_delta", "text": "A"},
+            }
+        )
+        assistant1 = _make_assistant_message([_make_text_block("A")])
+        # Turn 2: assistant only (no stream events)
+        assistant2 = _make_assistant_message([_make_text_block("B")])
+        result_msg = _make_result_message(result="B")
+
+        chunks = []
+
+        async def on_chunk(text):
+            chunks.append(text)
+
+        patcher, _ = _patch_sdk_client([evt1, assistant1, assistant2, result_msg])
+        with patcher:
+            await agent._run_with_resume(
+                "prompt",
+                session,
+                agent._build_options(session, None),
+                on_text_chunk=on_chunk,
+            )
+
+        # Turn 1: "A" from stream event (assistant suppressed)
+        # Turn 2: "B" from assistant (no stream events → flag reset)
+        assert chunks == ["A", "B"]
+
+    def test_partial_messages_option_enabled(self, agent, session):
+        """include_partial_messages should be True in built options."""
+        opts = agent._build_options(session, None)
+        assert opts.include_partial_messages is True
+
+    async def test_tool_activity_still_fires_with_stream_events(self, agent, session):
+        """Tool activity callback should still fire from AssistantMessage even when text was streamed."""
+        evt = self._make_stream_event(
+            {
+                "type": "content_block_delta",
+                "delta": {"type": "text_delta", "text": "Let me check"},
+            }
+        )
+        assistant = _make_assistant_message(
+            [_make_text_block("Let me check"), _make_tool_use_block_with_input("Bash")]
+        )
+        result_msg = _make_result_message(result="done")
+
+        activities = []
+
+        async def on_activity(act):
+            activities.append(act)
+
+        patcher, _ = _patch_sdk_client([evt, assistant, result_msg])
+        with patcher:
+            await agent._run_with_resume(
+                "prompt",
+                session,
+                agent._build_options(session, None),
+                on_text_chunk=AsyncMock(),
+                on_tool_activity=on_activity,
+            )
+
+        assert len(activities) == 1
+        assert activities[0].tool_name == "Bash"
+
+    async def test_malformed_stream_event_does_not_crash_loop(self, agent, session):
+        """A StreamEvent with missing 'text' key should not crash the agent loop."""
+        malformed_evt = self._make_stream_event(
+            {
+                "type": "content_block_delta",
+                "delta": {"type": "text_delta"},  # no "text" key
+            }
+        )
+        none_delta_evt = self._make_stream_event(
+            {"type": "content_block_delta", "delta": None}
+        )
+        no_delta_evt = self._make_stream_event({"type": "content_block_delta"})
+        assistant = _make_assistant_message([_make_text_block("ok")])
+        result_msg = _make_result_message(result="ok")
+
+        chunks = []
+
+        async def on_chunk(text):
+            chunks.append(text)
+
+        patcher, _ = _patch_sdk_client(
+            [malformed_evt, none_delta_evt, no_delta_evt, assistant, result_msg]
+        )
+        with patcher:
+            resp = await agent._run_with_resume(
+                "prompt",
+                session,
+                agent._build_options(session, None),
+                on_text_chunk=on_chunk,
+            )
+
+        assert not resp.is_error
+        assert resp.content == "ok"
+        # Malformed events should have called on_chunk with empty string for the
+        # first one (text_delta with missing text), while the others are ignored
+        # The assistant message text "ok" is not re-sent because streamed_text_in_turn
+        # may or may not be set depending on whether the empty-string callback counts.
+        # The key assertion is that the loop didn't crash.
+
+
 class TestSafeSDKClient:
     """Tests for _SafeSDKClient that skips unknown message types."""
 
-    @pytest.mark.asyncio
     async def test_skips_unknown_message_types(self):
         from leashd.agents.runtimes.claude_code import _SafeSDKClient
 
@@ -1524,7 +1706,6 @@ class TestSafeSDKClient:
 
         assert isinstance(messages[0], AssistantMessage)
 
-    @pytest.mark.asyncio
     async def test_valid_messages_pass_through(self):
         from leashd.agents.runtimes.claude_code import _SafeSDKClient
 
@@ -1557,7 +1738,6 @@ class TestSafeSDKClient:
         assert messages[0].session_id == "sess-123"
         assert messages[0].result == "All done"
 
-    @pytest.mark.asyncio
     async def test_logs_skipped_messages(self):
         from leashd.agents.runtimes.claude_code import _SafeSDKClient
 
@@ -1576,7 +1756,6 @@ class TestSafeSDKClient:
                 message_type="rate_limit_event",
             )
 
-    @pytest.mark.asyncio
     async def test_multiple_unknown_types_all_skipped(self):
         from leashd.agents.runtimes.claude_code import _SafeSDKClient
 
@@ -1595,7 +1774,6 @@ class TestSafeSDKClient:
         messages = [msg async for msg in client.receive_messages()]
         assert len(messages) == 0
 
-    @pytest.mark.asyncio
     async def test_dict_without_type_key_skipped(self):
         """A raw dict missing the 'type' key should be skipped gracefully."""
         from leashd.agents.runtimes.claude_code import _SafeSDKClient
@@ -1624,7 +1802,6 @@ class TestSafeSDKClient:
 
         assert isinstance(messages[0], AssistantMessage)
 
-    @pytest.mark.asyncio
     async def test_empty_dict_skipped(self):
         """An empty dict should be skipped without crashing."""
         from leashd.agents.runtimes.claude_code import _SafeSDKClient
@@ -1757,7 +1934,6 @@ class TestTruncate:
 
 
 class TestOnToolActivityCallback:
-    @pytest.mark.asyncio
     async def test_callback_called_per_tool_use_block(self, agent, session):
         tool_block = _make_tool_use_block_with_input(
             "Read", {"file_path": "/src/main.py"}
@@ -1784,8 +1960,11 @@ class TestOnToolActivityCallback:
         assert activities[0].tool_name == "Read"
         assert activities[0].description == "/src/main.py"
 
-    @pytest.mark.asyncio
     async def test_none_sent_for_tool_result_block(self, agent, session):
+        """Non-Agent tool results no longer emit on_tool_activity(None).
+
+        Only Agent tool results signal completion (when agent_stack empties).
+        """
         tool_use = _make_tool_use_block_with_input("Bash", {"command": "ls"})
         tool_result = _make_tool_result_block("tool-1")
         assistant = _make_assistant_message([tool_use, tool_result])
@@ -1805,11 +1984,9 @@ class TestOnToolActivityCallback:
                 on_tool_activity=on_activity,
             )
 
-        assert len(activities) == 2
+        assert len(activities) == 1
         assert isinstance(activities[0], ToolActivity)
-        assert activities[1] is None
 
-    @pytest.mark.asyncio
     async def test_callback_error_does_not_crash(self, agent, session):
         tool_block = _make_tool_use_block_with_input("Bash", {"command": "ls"})
         assistant = _make_assistant_message([tool_block])
@@ -1830,7 +2007,6 @@ class TestOnToolActivityCallback:
         assert resp.content == "done"
         assert resp.is_error is False
 
-    @pytest.mark.asyncio
     async def test_not_called_for_text_blocks(self, agent, session):
         text_block = _make_text_block("Hello")
         assistant = _make_assistant_message([text_block])
@@ -1852,7 +2028,6 @@ class TestOnToolActivityCallback:
 
         assert activities == []
 
-    @pytest.mark.asyncio
     async def test_flows_through_execute(self, agent, session):
         tool_block = _make_tool_use_block_with_input("Glob", {"pattern": "*.py"})
         assistant = _make_assistant_message([tool_block])
@@ -1900,7 +2075,6 @@ class TestIsRetryableError:
 
 
 class TestRetryableApiErrors:
-    @pytest.mark.asyncio
     async def test_retryable_api_error_retries_and_succeeds(self, agent, session):
         """First attempt returns retryable API error, second succeeds."""
         error_result = _make_result_message(
@@ -1944,7 +2118,6 @@ class TestRetryableApiErrors:
         assert resp.is_error is False
         assert call_count == 2
 
-    @pytest.mark.asyncio
     async def test_non_retryable_error_not_retried(self, agent, session):
         """Non-retryable error is returned immediately without retry."""
         error_result = _make_result_message(
@@ -1978,7 +2151,6 @@ class TestRetryableApiErrors:
         assert resp.is_error is True
         assert call_count == 1
 
-    @pytest.mark.asyncio
     async def test_retryable_error_exhausted_shows_friendly_message(
         self, agent, session
     ):
@@ -2017,7 +2189,6 @@ class TestRetryableApiErrors:
 
 
 class TestExponentialBackoff:
-    @pytest.mark.asyncio
     async def test_exponential_backoff_delays(self, agent, session):
         """Retry sleep durations increase: 2, 4, 8."""
         error_result = _make_result_message(
@@ -2060,7 +2231,6 @@ class TestExponentialBackoff:
 class TestBufferOverflowRetry:
     """Tests for exception-level retry on buffer overflow during streaming."""
 
-    @pytest.mark.asyncio
     async def test_buffer_overflow_retried_in_stream(self, agent, session):
         """Exception in receive_response() triggers retry, 2nd attempt succeeds."""
         success_result = _make_result_message(result="Recovered!", num_turns=2)
@@ -2104,7 +2274,6 @@ class TestBufferOverflowRetry:
         assert resp.is_error is False
         assert call_count == 2
 
-    @pytest.mark.asyncio
     async def test_buffer_overflow_exhausted_friendly(self, agent, session):
         """All 3 retries fail with buffer overflow → is_error=True, friendly message."""
 
@@ -2164,7 +2333,6 @@ class TestFriendlyErrors:
         assert msg.startswith("Agent error: ")
         assert len(msg) <= 215  # "Agent error: " + 200 chars
 
-    @pytest.mark.asyncio
     async def test_execute_raises_friendly_on_exception(self, agent, session):
         with patch.object(
             agent, "_run_with_resume", new_callable=AsyncMock
@@ -2175,7 +2343,6 @@ class TestFriendlyErrors:
 
 
 class TestSystemMessageSessionCapture:
-    @pytest.mark.asyncio
     async def test_system_message_sets_session_id(self, agent, session):
         """SystemMessage with session_id in data eagerly sets session.agent_resume_token."""
         messages = [
@@ -2188,7 +2355,6 @@ class TestSystemMessageSessionCapture:
             await agent.execute("hello", session)
         assert session.agent_resume_token == "sdk-early-id"
 
-    @pytest.mark.asyncio
     async def test_system_message_without_session_id_no_change(self, agent, session):
         """SystemMessage without session_id leaves session.agent_resume_token unchanged."""
         session.agent_resume_token = None
@@ -2247,7 +2413,6 @@ class TestStderrCapture:
             working_directory=str(tmp_path),
         )
 
-    @pytest.mark.asyncio
     async def test_buffer_cleaned_up_on_success(self, agent, session):
         """Stderr buffer is removed from _stderr_buffers after successful execute."""
         messages = [
@@ -2259,7 +2424,6 @@ class TestStderrCapture:
             await agent.execute("hello", session)
         assert session.session_id not in agent._stderr_buffers
 
-    @pytest.mark.asyncio
     async def test_buffer_cleaned_up_on_failure(self, agent, session):
         """Stderr buffer is removed from _stderr_buffers even after failure."""
 
@@ -2274,7 +2438,6 @@ class TestStderrCapture:
             await agent.execute("hello", session)
         assert session.session_id not in agent._stderr_buffers
 
-    @pytest.mark.asyncio
     async def test_stderr_buffer_cleared_between_retries(self, agent, session):
         """Stderr buffer is cleared at the start of each retry iteration."""
         call_count = 0

@@ -57,14 +57,12 @@ class TestPluginRegistry:
         registry.register(p1)
         assert registry.plugins == [p1]
 
-    @pytest.mark.asyncio
     async def test_init_all(self, registry, plugin_context):
         plugin = StubPlugin()
         registry.register(plugin)
         await registry.init_all(plugin_context)
         assert plugin.initialized
 
-    @pytest.mark.asyncio
     async def test_start_all(self, registry, plugin_context):
         plugin = StubPlugin()
         registry.register(plugin)
@@ -72,7 +70,6 @@ class TestPluginRegistry:
         await registry.start_all()
         assert plugin.started
 
-    @pytest.mark.asyncio
     async def test_stop_all(self, registry, plugin_context):
         plugin = StubPlugin()
         registry.register(plugin)
@@ -81,7 +78,6 @@ class TestPluginRegistry:
         await registry.stop_all()
         assert plugin.stopped
 
-    @pytest.mark.asyncio
     async def test_init_failure_raises_plugin_error(self, registry, plugin_context):
         class BadPlugin(LeashdPlugin):
             meta = PluginMeta(name="bad", version="0.0.1")
@@ -93,7 +89,6 @@ class TestPluginRegistry:
         with pytest.raises(PluginError, match="failed to initialize"):
             await registry.init_all(plugin_context)
 
-    @pytest.mark.asyncio
     async def test_stop_all_reverse_order(self, registry, plugin_context):
         stop_order = []
 
@@ -131,7 +126,6 @@ class TestPluginRegistry:
         await registry.stop_all()
         assert stop_order == ["C", "B", "A"]
 
-    @pytest.mark.asyncio
     async def test_stop_all_continues_on_error(self, registry, plugin_context):
         class FailStop(LeashdPlugin):
             meta = PluginMeta(name="fail_stop", version="1.0.0")
@@ -151,7 +145,6 @@ class TestPluginRegistry:
         # FailStop stops last (reverse), StubPlugin stops first
         assert stub.stopped is True
 
-    @pytest.mark.asyncio
     async def test_init_failure_skips_remaining(self, registry, plugin_context):
         class BadPlugin(LeashdPlugin):
             meta = PluginMeta(name="bad", version="0.0.1")
@@ -180,7 +173,6 @@ class TestPluginRegistry:
         # Original registry still has the plugin
         assert len(registry.plugins) == 1
 
-    @pytest.mark.asyncio
     async def test_start_all_exception_propagates(self, registry, plugin_context):
         """Exception in start() wraps in PluginError and propagates."""
 
@@ -198,7 +190,6 @@ class TestPluginRegistry:
         with pytest.raises(PluginError, match="failed to start"):
             await registry.start_all()
 
-    @pytest.mark.asyncio
     async def test_correct_context_passed_to_initialize(self, registry, plugin_context):
         received_ctx = []
 
@@ -214,7 +205,6 @@ class TestPluginRegistry:
         assert received_ctx[0].event_bus is plugin_context.event_bus
         assert received_ctx[0].config is plugin_context.config
 
-    @pytest.mark.asyncio
     async def test_multiple_plugins_started(self, registry, plugin_context):
         started = []
 

@@ -65,7 +65,6 @@ def _build_gatekeeper(
 
 
 class TestEventOrdering:
-    @pytest.mark.asyncio
     async def test_gated_fires_before_allowed(
         self, sandbox, audit_logger, event_bus, default_policy
     ):
@@ -87,7 +86,6 @@ class TestEventOrdering:
 
         assert order == ["gated", "allowed"]
 
-    @pytest.mark.asyncio
     async def test_gated_fires_before_denied(
         self, sandbox, audit_logger, event_bus, default_policy
     ):
@@ -111,7 +109,6 @@ class TestEventOrdering:
 
 
 class TestCrossLayerInteraction:
-    @pytest.mark.asyncio
     async def test_sandbox_deny_prevents_policy_evaluation(
         self, sandbox, audit_logger, event_bus
     ):
@@ -124,7 +121,6 @@ class TestCrossLayerInteraction:
         mock_policy.classify_compound.assert_not_called()
         mock_policy.classify.assert_not_called()
 
-    @pytest.mark.asyncio
     async def test_compound_dangerous_command_denied(
         self, sandbox, audit_logger, event_bus, default_policy
     ):
@@ -136,7 +132,6 @@ class TestCrossLayerInteraction:
         )
         assert result.behavior == "deny"
 
-    @pytest.mark.asyncio
     async def test_credential_file_read_denied_end_to_end(
         self, sandbox, audit_logger, event_bus, default_policy, tmp_path
     ):
@@ -151,7 +146,6 @@ class TestCrossLayerInteraction:
         entries = audit_logger.get_recent_entries("s1")
         assert any(e.get("tool_name") == "Read" for e in entries)
 
-    @pytest.mark.asyncio
     async def test_credential_write_denied_end_to_end(
         self, sandbox, audit_logger, event_bus, default_policy, tmp_path
     ):
@@ -163,7 +157,6 @@ class TestCrossLayerInteraction:
         )
         assert result.behavior == "deny"
 
-    @pytest.mark.asyncio
     async def test_full_pipeline_allow_produces_correct_audit(
         self, sandbox, audit_logger, event_bus, default_policy
     ):
@@ -183,7 +176,6 @@ class TestCrossLayerInteraction:
 
 
 class TestBrowserToolPipeline:
-    @pytest.mark.asyncio
     async def test_mcp_browser_readonly_tool_allowed(
         self, sandbox, audit_logger, event_bus, default_policy
     ):
@@ -193,7 +185,6 @@ class TestBrowserToolPipeline:
         result = await gk.check("mcp__playwright__browser_snapshot", {}, "s1", "c1")
         assert result.behavior == "allow"
 
-    @pytest.mark.asyncio
     async def test_mcp_browser_mutation_denied_without_coordinator(
         self, sandbox, audit_logger, event_bus, default_policy
     ):
@@ -211,7 +202,6 @@ class TestBrowserToolPipeline:
 
 
 class TestAutonomousPolicyPipeline:
-    @pytest.mark.asyncio
     async def test_autonomous_policy_allows_file_writes(
         self, sandbox, audit_logger, event_bus, autonomous_policy, tmp_path
     ):
@@ -223,7 +213,6 @@ class TestAutonomousPolicyPipeline:
         )
         assert result.behavior == "allow"
 
-    @pytest.mark.asyncio
     async def test_autonomous_policy_hard_blocks_rm_rf(
         self, sandbox, audit_logger, event_bus, autonomous_policy
     ):
@@ -233,7 +222,6 @@ class TestAutonomousPolicyPipeline:
         result = await gk.check("Bash", {"command": "rm -rf /"}, "s1", "c1")
         assert result.behavior == "deny"
 
-    @pytest.mark.asyncio
     async def test_autonomous_credential_denied_despite_file_write_allow(
         self, sandbox, audit_logger, event_bus, autonomous_policy, tmp_path
     ):
@@ -245,7 +233,6 @@ class TestAutonomousPolicyPipeline:
         )
         assert result.behavior == "deny"
 
-    @pytest.mark.asyncio
     async def test_autonomous_audit_entry_has_correct_fields(
         self, sandbox, audit_logger, event_bus, autonomous_policy, tmp_path
     ):

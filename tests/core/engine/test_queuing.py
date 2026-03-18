@@ -2,8 +2,6 @@
 
 import asyncio
 
-import pytest
-
 from leashd.agents.base import AgentResponse, BaseAgent
 from leashd.core.engine import Engine
 from leashd.core.events import EventBus
@@ -41,7 +39,6 @@ class TestMessageQueuing:
 
         return SlowFakeAgent()
 
-    @pytest.mark.asyncio
     async def test_message_queued_during_execution(
         self, config, audit_logger, mock_connector
     ):
@@ -69,7 +66,6 @@ class TestMessageQueuing:
         assert "first" in agent.prompts
         assert "second" in agent.prompts
 
-    @pytest.mark.asyncio
     async def test_queued_message_sends_interrupt_prompt(
         self, config, audit_logger, mock_connector
     ):
@@ -95,7 +91,6 @@ class TestMessageQueuing:
         gate.set()
         await task
 
-    @pytest.mark.asyncio
     async def test_queued_messages_combined(self, config, audit_logger, mock_connector):
         gate = asyncio.Event()
         agent = self._make_slow_agent(gate)
@@ -125,7 +120,6 @@ class TestMessageQueuing:
         assert "msg C" in combined
         assert "\n\n" in combined
 
-    @pytest.mark.asyncio
     async def test_queued_messages_logged_individually(
         self, config, audit_logger, mock_connector, tmp_path
     ):
@@ -163,7 +157,6 @@ class TestMessageQueuing:
 
         await store.teardown()
 
-    @pytest.mark.asyncio
     async def test_approval_bypasses_queue(
         self, config, audit_logger, mock_connector, policy_engine, tmp_dir
     ):
@@ -202,7 +195,6 @@ class TestMessageQueuing:
         gate.set()
         await task
 
-    @pytest.mark.asyncio
     async def test_interaction_bypasses_queue(
         self, config, audit_logger, mock_connector, event_bus
     ):
@@ -239,7 +231,6 @@ class TestMessageQueuing:
         gate.set()
         await task
 
-    @pytest.mark.asyncio
     async def test_agent_error_clears_queue(self, config, audit_logger, mock_connector):
         failing_agent = FakeAgent(fail=True)
         eng = Engine(
@@ -256,7 +247,6 @@ class TestMessageQueuing:
         assert "Error:" in result
         assert "c1" not in eng._pending_messages
 
-    @pytest.mark.asyncio
     async def test_clear_command_clears_queue(
         self, config, audit_logger, mock_connector
     ):
@@ -273,7 +263,6 @@ class TestMessageQueuing:
         await eng.handle_command("u1", "clear", "", "c1")
         assert "c1" not in eng._pending_messages
 
-    @pytest.mark.asyncio
     async def test_message_queued_event_emitted(
         self, config, audit_logger, mock_connector
     ):
@@ -311,7 +300,6 @@ class TestMessageQueuing:
         gate.set()
         await task
 
-    @pytest.mark.asyncio
     async def test_queue_isolated_between_chats(
         self, config, audit_logger, mock_connector
     ):
@@ -374,7 +362,6 @@ class TestMessageInterrupt:
 
         return SlowFakeAgent()
 
-    @pytest.mark.asyncio
     async def test_interrupt_prompt_shown_on_queued_message(
         self, config, audit_logger, mock_connector
     ):
@@ -410,7 +397,6 @@ class TestMessageInterrupt:
         gate.set()
         await task
 
-    @pytest.mark.asyncio
     async def test_interrupt_send_now_cancels_agent(
         self, config, audit_logger, mock_connector
     ):
@@ -446,7 +432,6 @@ class TestMessageInterrupt:
         ]
         assert len(interrupted_msgs) == 1
 
-    @pytest.mark.asyncio
     async def test_interrupt_wait_queues_normally(
         self, config, audit_logger, mock_connector
     ):
@@ -479,7 +464,6 @@ class TestMessageInterrupt:
         assert "Done:" in result
         assert "wait msg" in agent.prompts
 
-    @pytest.mark.asyncio
     async def test_interrupt_prompt_shown_once_per_pending(
         self, config, audit_logger, mock_connector
     ):
@@ -506,7 +490,6 @@ class TestMessageInterrupt:
         gate.set()
         await task
 
-    @pytest.mark.asyncio
     async def test_interrupt_prompt_after_wait_shows_again(
         self, config, audit_logger, mock_connector
     ):
@@ -537,7 +520,6 @@ class TestMessageInterrupt:
         gate.set()
         await task
 
-    @pytest.mark.asyncio
     async def test_interrupt_cleanup_on_natural_completion(
         self, config, audit_logger, mock_connector
     ):
@@ -570,7 +552,6 @@ class TestMessageInterrupt:
         ]
         assert len(completed_edits) == 1
 
-    @pytest.mark.asyncio
     async def test_interrupt_stale_button_returns_false(
         self, config, audit_logger, mock_connector
     ):
@@ -598,7 +579,6 @@ class TestMessageInterrupt:
         result = await mock_connector.simulate_interrupt(interrupt_id, send_now=True)
         assert result is False
 
-    @pytest.mark.asyncio
     async def test_interrupt_event_emitted(self, config, audit_logger, mock_connector):
         from leashd.core.events import EXECUTION_INTERRUPTED
 
@@ -635,7 +615,6 @@ class TestMessageInterrupt:
         assert len(events) == 1
         assert events[0].data["chat_id"] == "c1"
 
-    @pytest.mark.asyncio
     async def test_interrupt_suppresses_partial_response(
         self, config, audit_logger, mock_connector
     ):
@@ -667,7 +646,6 @@ class TestMessageInterrupt:
         ]
         assert len(first_response_msgs) == 0
 
-    @pytest.mark.asyncio
     async def test_interrupt_cleanup_schedules_deletion(
         self, config, audit_logger, mock_connector
     ):
@@ -699,7 +677,6 @@ class TestMessageInterrupt:
         assert cleanups[0]["chat_id"] == "c1"
         assert cleanups[0]["delay"] == 5.0
 
-    @pytest.mark.asyncio
     async def test_interrupt_send_now_schedules_interrupted_msg_cleanup(
         self, config, audit_logger
     ):
@@ -739,7 +716,6 @@ class TestMessageInterrupt:
         assert len(interrupted_cleanups) == 1
         assert interrupted_cleanups[0]["delay"] == 5.0
 
-    @pytest.mark.asyncio
     async def test_fallback_ack_schedules_cleanup(self, config, audit_logger):
         """Fallback ack (when send_interrupt_prompt returns None) schedules cleanup."""
         from tests.conftest import MockConnector
@@ -813,7 +789,6 @@ class TestInterruptIsolation:
 
         return SlowFakeAgent()
 
-    @pytest.mark.asyncio
     async def test_cross_chat_interrupt_isolation(
         self, config, audit_logger, mock_connector
     ):
@@ -880,7 +855,6 @@ class TestInterruptIsolation:
         ]
         assert len(b_prompts) == 0
 
-    @pytest.mark.asyncio
     async def test_message_ordering_after_interrupt(
         self, config, audit_logger, mock_connector
     ):
@@ -913,19 +887,19 @@ class TestCombineQueuedMessages:
     """Verify _combine_queued_messages static method behavior."""
 
     def test_single_message_returns_text_directly(self):
-        result = Engine._combine_queued_messages([("user1", "hello world")])
+        result = Engine._combine_queued_messages([("user1", "hello world", None)])
         assert result == "hello world"
 
     def test_multiple_messages_joined_with_double_newline(self):
         messages = [
-            ("user1", "first message"),
-            ("user2", "second message"),
-            ("user1", "third message"),
+            ("user1", "first message", None),
+            ("user2", "second message", None),
+            ("user1", "third message", None),
         ]
         result = Engine._combine_queued_messages(messages)
         assert result == "first message\n\nsecond message\n\nthird message"
 
     def test_two_messages_joined(self):
-        messages = [("u1", "alpha"), ("u1", "beta")]
+        messages = [("u1", "alpha", None), ("u1", "beta", None)]
         result = Engine._combine_queued_messages(messages)
         assert result == "alpha\n\nbeta"

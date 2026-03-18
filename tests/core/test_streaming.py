@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
 
-import pytest
-
 from leashd.agents.base import AgentResponse, BaseAgent, ToolActivity
 from leashd.core.engine import Engine, _StreamingResponder
 from leashd.core.session import SessionManager
@@ -44,7 +42,6 @@ class FakeStreamingAgent(BaseAgent):
 
 
 class TestStreamingResponderFirstChunk:
-    @pytest.mark.asyncio
     async def test_first_chunk_sends_message_with_id(self):
         connector = MockConnector(support_streaming=True)
         responder = _StreamingResponder(connector, "chat1")
@@ -56,7 +53,6 @@ class TestStreamingResponderFirstChunk:
         assert "Hello" in connector.sent_messages[0]["text"]
         assert connector.sent_messages[0]["text"].endswith("\u258d")
 
-    @pytest.mark.asyncio
     async def test_first_chunk_disables_when_not_supported(self):
         connector = MockConnector(support_streaming=False)
         responder = _StreamingResponder(connector, "chat1")
@@ -69,7 +65,6 @@ class TestStreamingResponderFirstChunk:
 
 
 class TestStreamingResponderThrottling:
-    @pytest.mark.asyncio
     async def test_rapid_chunks_throttled(self):
         connector = MockConnector(support_streaming=True)
         responder = _StreamingResponder(connector, "chat1", throttle_seconds=10.0)
@@ -82,7 +77,6 @@ class TestStreamingResponderThrottling:
         assert len(connector.sent_messages) == 1
         assert len(connector.edited_messages) == 0
 
-    @pytest.mark.asyncio
     async def test_edit_after_throttle_elapsed(self):
         connector = MockConnector(support_streaming=True)
         responder = _StreamingResponder(connector, "chat1", throttle_seconds=0.0)
@@ -94,7 +88,6 @@ class TestStreamingResponderThrottling:
         assert len(connector.edited_messages) == 1
         assert "AB" in connector.edited_messages[0]["text"]
 
-    @pytest.mark.asyncio
     async def test_edit_uses_correct_message_id(self):
         connector = MockConnector(support_streaming=True)
         responder = _StreamingResponder(connector, "chat1", throttle_seconds=0.0)
@@ -106,7 +99,6 @@ class TestStreamingResponderThrottling:
 
 
 class TestStreamingResponderCursor:
-    @pytest.mark.asyncio
     async def test_cursor_appended_during_streaming(self):
         connector = MockConnector(support_streaming=True)
         responder = _StreamingResponder(connector, "chat1", throttle_seconds=0.0)
@@ -115,7 +107,6 @@ class TestStreamingResponderCursor:
 
         assert connector.sent_messages[0]["text"] == "Hello\u258d"
 
-    @pytest.mark.asyncio
     async def test_cursor_on_edits(self):
         connector = MockConnector(support_streaming=True)
         responder = _StreamingResponder(connector, "chat1", throttle_seconds=0.0)
@@ -127,7 +118,6 @@ class TestStreamingResponderCursor:
 
 
 class TestStreamingResponderFinalize:
-    @pytest.mark.asyncio
     async def test_finalize_edits_final_text(self):
         connector = MockConnector(support_streaming=True)
         responder = _StreamingResponder(connector, "chat1")
@@ -137,10 +127,9 @@ class TestStreamingResponderFinalize:
 
         assert result is True
         assert len(connector.edited_messages) == 1
-        assert connector.edited_messages[0]["text"] == "Hello"
+        assert connector.edited_messages[0]["text"] == "Hello World"
         assert "\u258d" not in connector.edited_messages[0]["text"]
 
-    @pytest.mark.asyncio
     async def test_finalize_returns_false_when_disabled(self):
         connector = MockConnector(support_streaming=False)
         responder = _StreamingResponder(connector, "chat1")
@@ -150,7 +139,6 @@ class TestStreamingResponderFinalize:
 
         assert result is False
 
-    @pytest.mark.asyncio
     async def test_finalize_returns_false_when_no_chunks(self):
         connector = MockConnector(support_streaming=True)
         responder = _StreamingResponder(connector, "chat1")
@@ -158,7 +146,6 @@ class TestStreamingResponderFinalize:
         result = await responder.finalize("Hello")
         assert result is False
 
-    @pytest.mark.asyncio
     async def test_finalize_overflow_splits(self):
         connector = MockConnector(support_streaming=True)
         responder = _StreamingResponder(connector, "chat1")
@@ -179,7 +166,6 @@ class TestStreamingResponderFinalize:
 
 
 class TestStreamingResponderInactive:
-    @pytest.mark.asyncio
     async def test_on_chunk_noop_when_inactive(self):
         connector = MockConnector(support_streaming=True)
         responder = _StreamingResponder(connector, "chat1")
@@ -194,7 +180,6 @@ class TestStreamingResponderInactive:
 
 
 class TestEngineStreaming:
-    @pytest.mark.asyncio
     async def test_streaming_sends_and_edits(self, config, audit_logger):
         connector = MockConnector(support_streaming=True)
         agent = FakeStreamingAgent(["Hello", " World"])
@@ -216,7 +201,6 @@ class TestEngineStreaming:
         assert final_edit["text"] == "Hello World"
         assert "\u258d" not in final_edit["text"]
 
-    @pytest.mark.asyncio
     async def test_fallback_when_streaming_not_supported(self, config, audit_logger):
         connector = MockConnector(support_streaming=False)
         agent = FakeStreamingAgent(["Hello", " World"])
@@ -236,7 +220,6 @@ class TestEngineStreaming:
         assert len(plain_msgs) == 1
         assert plain_msgs[0]["text"] == "Hello World"
 
-    @pytest.mark.asyncio
     async def test_streaming_disabled_via_config(self, tmp_path, audit_logger):
         from leashd.core.config import LeashdConfig
 
@@ -262,7 +245,6 @@ class TestEngineStreaming:
         plain_msgs = [m for m in connector.sent_messages if "message_id" not in m]
         assert len(plain_msgs) == 1
 
-    @pytest.mark.asyncio
     async def test_no_connector_no_crash(self, config, audit_logger):
         agent = FakeStreamingAgent(["Hello"])
         eng = Engine(
@@ -276,7 +258,6 @@ class TestEngineStreaming:
         result = await eng.handle_message("user1", "hi", "chat1")
         assert result == "Hello"
 
-    @pytest.mark.asyncio
     async def test_agent_error_with_partial_stream(self, config, audit_logger):
         connector = MockConnector(support_streaming=True)
         agent = FakeStreamingAgent(["partial"], fail=True)
@@ -291,7 +272,6 @@ class TestEngineStreaming:
         result = await eng.handle_message("user1", "hi", "chat1")
         assert "Error:" in result
 
-    @pytest.mark.asyncio
     async def test_no_text_chunks_falls_back(self, config, audit_logger):
         connector = MockConnector(support_streaming=True)
         agent = FakeStreamingAgent([])  # no chunks
@@ -310,7 +290,6 @@ class TestEngineStreaming:
         plain_msgs = [m for m in connector.sent_messages if "message_id" not in m]
         assert len(plain_msgs) == 1
 
-    @pytest.mark.asyncio
     async def test_finalize_exception_falls_back(self, config, audit_logger):
         connector = MockConnector(support_streaming=True)
         agent = FakeStreamingAgent(["Hello"])
@@ -340,7 +319,6 @@ class TestEngineStreaming:
 
 
 class TestStreamingResponderActivity:
-    @pytest.mark.asyncio
     async def test_on_activity_sends_standalone_message(self):
         connector = MockConnector(support_streaming=True)
         responder = _StreamingResponder(connector, "chat1")
@@ -352,7 +330,6 @@ class TestStreamingResponderActivity:
         assert connector.activity_messages[0]["tool_name"] == "Read"
         assert connector.activity_messages[0]["description"] == "/src/main.py"
 
-    @pytest.mark.asyncio
     async def test_on_activity_after_chunk_sends_standalone(self):
         connector = MockConnector(support_streaming=True)
         responder = _StreamingResponder(connector, "chat1", throttle_seconds=0.0)
@@ -364,7 +341,6 @@ class TestStreamingResponderActivity:
         assert len(connector.activity_messages) == 1
         assert connector.activity_messages[0]["tool_name"] == "Bash"
 
-    @pytest.mark.asyncio
     async def test_on_activity_none_clears_active_activity(self):
         connector = MockConnector(support_streaming=True)
         responder = _StreamingResponder(connector, "chat1", throttle_seconds=0.0)
@@ -379,7 +355,6 @@ class TestStreamingResponderActivity:
         assert len(connector.cleared_activities) == 1
         assert responder._has_activity is False
 
-    @pytest.mark.asyncio
     async def test_on_chunk_after_activity_clears_it(self):
         connector = MockConnector(support_streaming=True)
         responder = _StreamingResponder(connector, "chat1", throttle_seconds=0.0)
@@ -391,7 +366,6 @@ class TestStreamingResponderActivity:
         assert len(connector.cleared_activities) == 1
         assert connector.cleared_activities[0] == "chat1"
 
-    @pytest.mark.asyncio
     async def test_build_display_has_no_activity_line(self):
         connector = MockConnector(support_streaming=True)
         responder = _StreamingResponder(connector, "chat1", throttle_seconds=0.0)
@@ -403,7 +377,6 @@ class TestStreamingResponderActivity:
         assert "\U0001f527" not in display
         assert "Hello" in display
 
-    @pytest.mark.asyncio
     async def test_finalize_includes_tools_summary(self):
         connector = MockConnector(support_streaming=True)
         responder = _StreamingResponder(connector, "chat1")
@@ -420,7 +393,6 @@ class TestStreamingResponderActivity:
         assert "Bash x2" in last_edit
         assert "Read" in last_edit
 
-    @pytest.mark.asyncio
     async def test_finalize_no_summary_when_no_tools(self):
         connector = MockConnector(support_streaming=True)
         responder = _StreamingResponder(connector, "chat1")
@@ -447,7 +419,6 @@ class TestStreamingResponderActivity:
 
         assert responder._build_tools_summary() == ""
 
-    @pytest.mark.asyncio
     async def test_activity_uses_send_activity(self):
         connector = MockConnector(support_streaming=True)
         responder = _StreamingResponder(connector, "chat1", throttle_seconds=999.0)
@@ -458,7 +429,6 @@ class TestStreamingResponderActivity:
 
         assert len(connector.activity_messages) == 1
 
-    @pytest.mark.asyncio
     async def test_on_activity_noop_when_inactive(self):
         connector = MockConnector(support_streaming=True)
         responder = _StreamingResponder(connector, "chat1")
@@ -498,7 +468,6 @@ class FakeToolActivityAgent(BaseAgent):
 
 
 class TestEngineToolActivityWiring:
-    @pytest.mark.asyncio
     async def test_tool_activity_wired_to_responder(self, config, audit_logger):
         connector = MockConnector(support_streaming=True)
         activities = [
@@ -523,7 +492,6 @@ class TestEngineToolActivityWiring:
         assert "Bash" in last_edit
         assert "Read" in last_edit
 
-    @pytest.mark.asyncio
     async def test_no_tool_activity_when_streaming_disabled(
         self, tmp_path, audit_logger
     ):
@@ -555,7 +523,6 @@ class TestEngineToolActivityWiring:
 
 
 class TestStreamingResponderOverflow:
-    @pytest.mark.asyncio
     async def test_overflow_creates_new_message(self):
         connector = MockConnector(support_streaming=True)
         responder = _StreamingResponder(connector, "chat1", throttle_seconds=0.0)
@@ -572,7 +539,6 @@ class TestStreamingResponderOverflow:
         # Second message starts with remaining 1000 "b"s + cursor
         assert connector.sent_messages[1]["text"] == "b" * 1000 + "\u258d"
 
-    @pytest.mark.asyncio
     async def test_multiple_overflows_chain_messages(self):
         connector = MockConnector(support_streaming=True)
         responder = _StreamingResponder(connector, "chat1", throttle_seconds=0.0)
@@ -586,7 +552,6 @@ class TestStreamingResponderOverflow:
         # Overflow 2: commit 4000..8000, new msg for 8000..8600
         assert len(connector.sent_messages) == 3  # initial + 2 overflows
 
-    @pytest.mark.asyncio
     async def test_single_huge_chunk_creates_multiple_messages(self):
         connector = MockConnector(support_streaming=True)
         responder = _StreamingResponder(connector, "chat1", throttle_seconds=0.0)
@@ -598,7 +563,6 @@ class TestStreamingResponderOverflow:
         # 4 total messages: initial + 3 overflows (last has 12000..12100)
         assert len(connector.sent_messages) == 4
 
-    @pytest.mark.asyncio
     async def test_finalize_after_overflow_only_handles_tail(self):
         connector = MockConnector(support_streaming=True)
         responder = _StreamingResponder(connector, "chat1", throttle_seconds=0.0)
@@ -615,7 +579,6 @@ class TestStreamingResponderOverflow:
         final_edit = connector.edited_messages[-1]
         assert final_edit["text"] == "b" * 1000
 
-    @pytest.mark.asyncio
     async def test_finalize_after_overflow_with_tools_summary(self):
         connector = MockConnector(support_streaming=True)
         responder = _StreamingResponder(connector, "chat1", throttle_seconds=0.0)
@@ -634,7 +597,6 @@ class TestStreamingResponderOverflow:
         # Tail is 1000 "b"s + summary
         assert final_edit["text"].startswith("b" * 1000)
 
-    @pytest.mark.asyncio
     async def test_overflow_deactivates_on_none_msg_id(self):
         connector = MockConnector(support_streaming=True)
         responder = _StreamingResponder(connector, "chat1", throttle_seconds=0.0)
@@ -647,7 +609,6 @@ class TestStreamingResponderOverflow:
         # Overflow tried to send new message, got None → deactivated
         assert responder._active is False
 
-    @pytest.mark.asyncio
     async def test_exact_boundary_no_overflow(self):
         connector = MockConnector(support_streaming=True)
         responder = _StreamingResponder(connector, "chat1", throttle_seconds=0.0)
@@ -656,7 +617,6 @@ class TestStreamingResponderOverflow:
         assert len(connector.sent_messages) == 1
         assert responder._display_offset == 0
 
-    @pytest.mark.asyncio
     async def test_first_chunk_exceeds_max_defers_overflow(self):
         connector = MockConnector(support_streaming=True)
         responder = _StreamingResponder(connector, "chat1", throttle_seconds=0.0)
@@ -669,7 +629,6 @@ class TestStreamingResponderOverflow:
         assert responder._display_offset == 4000
         assert len(connector.sent_messages) == 2
 
-    @pytest.mark.asyncio
     async def test_reset_clears_display_offset(self):
         connector = MockConnector(support_streaming=True)
         responder = _StreamingResponder(connector, "chat1", throttle_seconds=0.0)
@@ -683,7 +642,6 @@ class TestStreamingResponderOverflow:
         assert responder._display_offset == 0
         assert responder._buffer == ""
 
-    @pytest.mark.asyncio
     async def test_short_response_unchanged(self):
         """Regression guard: short responses behave identically to before."""
         connector = MockConnector(support_streaming=True)
@@ -704,7 +662,6 @@ class TestStreamingResponderOverflow:
 
 
 class TestEngineStreamingOverflow:
-    @pytest.mark.asyncio
     async def test_long_response_creates_multiple_messages(self, config, audit_logger):
         connector = MockConnector(support_streaming=True)
         # Create chunks totaling >4000 chars

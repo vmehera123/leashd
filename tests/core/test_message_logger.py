@@ -2,13 +2,10 @@
 
 from unittest.mock import AsyncMock
 
-import pytest
-
 from leashd.core.message_logger import MessageLogger
 
 
 class TestMessageLogger:
-    @pytest.mark.asyncio
     async def test_log_calls_store(self):
         store = AsyncMock()
         ml = MessageLogger(store)
@@ -33,7 +30,6 @@ class TestMessageLogger:
             session_id="s1",
         )
 
-    @pytest.mark.asyncio
     async def test_log_no_store(self):
         ml = MessageLogger(None)
         # Should not raise
@@ -44,7 +40,6 @@ class TestMessageLogger:
             content="hello",
         )
 
-    @pytest.mark.asyncio
     async def test_log_defaults_optional_fields(self):
         store = AsyncMock()
         ml = MessageLogger(store)
@@ -66,7 +61,6 @@ class TestMessageLogger:
             session_id=None,
         )
 
-    @pytest.mark.asyncio
     async def test_log_with_all_fields(self):
         store = AsyncMock()
         ml = MessageLogger(store)
@@ -91,7 +85,6 @@ class TestMessageLogger:
             session_id="sess-abc",
         )
 
-    @pytest.mark.asyncio
     async def test_log_exception_suppressed(self):
         store = AsyncMock()
         store.save_message.side_effect = RuntimeError("db error")

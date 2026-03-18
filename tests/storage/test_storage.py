@@ -32,7 +32,6 @@ def _make_session(**kwargs) -> Session:
 
 
 class TestMemorySessionStore:
-    @pytest.mark.asyncio
     async def test_save_and_load(self):
         store = MemorySessionStore()
         session = _make_session()
@@ -41,19 +40,16 @@ class TestMemorySessionStore:
         assert loaded is not None
         assert loaded.session_id == "s1"
 
-    @pytest.mark.asyncio
     async def test_load_nonexistent(self):
         store = MemorySessionStore()
         assert await store.load("u1", "c1") is None
 
-    @pytest.mark.asyncio
     async def test_load_inactive_returns_none(self):
         store = MemorySessionStore()
         session = _make_session(is_active=False)
         await store.save(session)
         assert await store.load("u1", "c1") is None
 
-    @pytest.mark.asyncio
     async def test_delete(self):
         store = MemorySessionStore()
         await store.save(_make_session())
@@ -62,7 +58,6 @@ class TestMemorySessionStore:
 
 
 class TestSqliteSessionStore:
-    @pytest.mark.asyncio
     async def test_save_and_load(self, tmp_path):
         store = SqliteSessionStore(tmp_path / "test.db")
         await store.setup()
@@ -76,7 +71,6 @@ class TestSqliteSessionStore:
         finally:
             await store.teardown()
 
-    @pytest.mark.asyncio
     async def test_load_nonexistent(self, tmp_path):
         store = SqliteSessionStore(tmp_path / "test.db")
         await store.setup()
@@ -85,7 +79,6 @@ class TestSqliteSessionStore:
         finally:
             await store.teardown()
 
-    @pytest.mark.asyncio
     async def test_update_existing(self, tmp_path):
         store = SqliteSessionStore(tmp_path / "test.db")
         await store.setup()
@@ -101,7 +94,6 @@ class TestSqliteSessionStore:
         finally:
             await store.teardown()
 
-    @pytest.mark.asyncio
     async def test_delete_soft_deletes(self, tmp_path):
         store = SqliteSessionStore(tmp_path / "test.db")
         await store.setup()
@@ -112,7 +104,6 @@ class TestSqliteSessionStore:
         finally:
             await store.teardown()
 
-    @pytest.mark.asyncio
     async def test_agent_resume_token_persists(self, tmp_path):
         store = SqliteSessionStore(tmp_path / "test.db")
         await store.setup()
@@ -126,13 +117,11 @@ class TestSqliteSessionStore:
 
 
 class TestSessionManagerWithStore:
-    @pytest.mark.asyncio
     async def test_get_or_create_without_store(self):
         mgr = SessionManager()
         session = await mgr.get_or_create("u1", "c1", "/tmp")
         assert session.user_id == "u1"
 
-    @pytest.mark.asyncio
     async def test_update_from_result_without_store(self):
         mgr = SessionManager()
         session = await mgr.get_or_create("u1", "c1", "/tmp")
@@ -140,7 +129,6 @@ class TestSessionManagerWithStore:
         assert session.message_count == 1
         assert session.total_cost == 0.5
 
-    @pytest.mark.asyncio
     async def test_get_or_create_loads_from_store(self):
         store = MemorySessionStore()
         await store.save(_make_session(user_id="u1", chat_id="c1"))
@@ -149,7 +137,6 @@ class TestSessionManagerWithStore:
         session = await mgr.get_or_create("u1", "c1", "/tmp")
         assert session.session_id == "s1"
 
-    @pytest.mark.asyncio
     async def test_update_from_result_persists_to_store(self):
         store = MemorySessionStore()
         mgr = SessionManager(store=store)
@@ -160,7 +147,6 @@ class TestSessionManagerWithStore:
         assert loaded is not None
         assert loaded.message_count == 1
 
-    @pytest.mark.asyncio
     async def test_cleanup_expired(self):
         mgr = SessionManager()
         session = await mgr.get_or_create("u1", "c1", "/tmp")
@@ -172,7 +158,6 @@ class TestSessionManagerWithStore:
         assert removed == 1
         assert mgr.get("u1", "c1") is None
 
-    @pytest.mark.asyncio
     async def test_cleanup_expired_keeps_recent(self):
         mgr = SessionManager()
         await mgr.get_or_create("u1", "c1", "/tmp")
@@ -180,7 +165,6 @@ class TestSessionManagerWithStore:
         assert removed == 0
         assert mgr.get("u1", "c1") is not None
 
-    @pytest.mark.asyncio
     async def test_session_overwrite_on_same_key(self):
         store = MemorySessionStore()
         await store.save(_make_session(session_id="s1", user_id="u1", chat_id="c1"))
@@ -197,26 +181,22 @@ class TestSessionManagerWithStore:
 
 
 class TestMemoryEdgeCases:
-    @pytest.mark.asyncio
     async def test_memory_delete_nonexistent_no_error(self):
         store = MemorySessionStore()
         await store.delete("x", "y")  # Should not raise
 
 
 class TestSqliteEdgeCases:
-    @pytest.mark.asyncio
     async def test_sqlite_save_without_setup_raises(self, tmp_path):
         store = SqliteSessionStore(tmp_path / "test.db")
         with pytest.raises(StorageError, match="not initialized"):
             await store.save(_make_session())
 
-    @pytest.mark.asyncio
     async def test_sqlite_load_without_setup_raises(self, tmp_path):
         store = SqliteSessionStore(tmp_path / "test.db")
         with pytest.raises(StorageError, match="not initialized"):
             await store.load("u1", "c1")
 
-    @pytest.mark.asyncio
     async def test_sqlite_special_chars_in_ids(self, tmp_path):
         store = SqliteSessionStore(tmp_path / "test.db")
         await store.setup()
@@ -232,7 +212,6 @@ class TestSqliteEdgeCases:
         finally:
             await store.teardown()
 
-    @pytest.mark.asyncio
     async def test_sqlite_full_field_round_trip(self, tmp_path):
         store = SqliteSessionStore(tmp_path / "test.db")
         await store.setup()
@@ -263,7 +242,6 @@ class TestSqliteEdgeCases:
 
 
 class TestSqliteSessionFieldsPersistence:
-    @pytest.mark.asyncio
     async def test_mode_round_trip(self, tmp_path):
         store = SqliteSessionStore(tmp_path / "test.db")
         await store.setup()
@@ -275,7 +253,6 @@ class TestSqliteSessionFieldsPersistence:
         finally:
             await store.teardown()
 
-    @pytest.mark.asyncio
     async def test_mode_instruction_round_trip(self, tmp_path):
         store = SqliteSessionStore(tmp_path / "test.db")
         await store.setup()
@@ -287,7 +264,6 @@ class TestSqliteSessionFieldsPersistence:
         finally:
             await store.teardown()
 
-    @pytest.mark.asyncio
     async def test_task_run_id_round_trip(self, tmp_path):
         store = SqliteSessionStore(tmp_path / "test.db")
         await store.setup()
@@ -299,7 +275,6 @@ class TestSqliteSessionFieldsPersistence:
         finally:
             await store.teardown()
 
-    @pytest.mark.asyncio
     async def test_mode_defaults_to_default(self, tmp_path):
         store = SqliteSessionStore(tmp_path / "test.db")
         await store.setup()
@@ -315,7 +290,6 @@ class TestSqliteSessionFieldsPersistence:
 
 
 class TestSqliteWorkspacePersistence:
-    @pytest.mark.asyncio
     async def test_workspace_name_round_trip(self, tmp_path):
         store = SqliteSessionStore(tmp_path / "test.db")
         await store.setup()
@@ -328,7 +302,6 @@ class TestSqliteWorkspacePersistence:
         finally:
             await store.teardown()
 
-    @pytest.mark.asyncio
     async def test_workspace_name_defaults_to_none(self, tmp_path):
         store = SqliteSessionStore(tmp_path / "test.db")
         await store.setup()
@@ -343,7 +316,6 @@ class TestSqliteWorkspacePersistence:
 
 
 class TestSqliteExtraEdgeCases:
-    @pytest.mark.asyncio
     async def test_sqlite_setup_exception_wraps_storage_error(self, tmp_path):
         # Use a path that will cause aiosqlite to fail (directory as DB file)
         bad_dir = tmp_path / "baddb"
@@ -352,13 +324,11 @@ class TestSqliteExtraEdgeCases:
         with pytest.raises(StorageError, match="Failed to initialize"):
             await store.setup()
 
-    @pytest.mark.asyncio
     async def test_sqlite_delete_without_setup_raises(self, tmp_path):
         store = SqliteSessionStore(tmp_path / "test.db")
         with pytest.raises(StorageError, match="not initialized"):
             await store.delete("u1", "c1")
 
-    @pytest.mark.asyncio
     async def test_sqlite_load_inactive_returns_none(self, tmp_path):
         store = SqliteSessionStore(tmp_path / "test.db")
         await store.setup()
@@ -373,7 +343,6 @@ class TestSqliteExtraEdgeCases:
 
 
 class TestSqliteMessageStorage:
-    @pytest.mark.asyncio
     async def test_save_and_get_user_message(self, tmp_path):
         store = SqliteSessionStore(tmp_path / "test.db")
         await store.setup()
@@ -394,7 +363,6 @@ class TestSqliteMessageStorage:
         finally:
             await store.teardown()
 
-    @pytest.mark.asyncio
     async def test_save_and_get_assistant_message_with_metadata(self, tmp_path):
         store = SqliteSessionStore(tmp_path / "test.db")
         await store.setup()
@@ -417,7 +385,6 @@ class TestSqliteMessageStorage:
         finally:
             await store.teardown()
 
-    @pytest.mark.asyncio
     async def test_messages_ordered_chronologically(self, tmp_path):
         store = SqliteSessionStore(tmp_path / "test.db")
         await store.setup()
@@ -434,7 +401,6 @@ class TestSqliteMessageStorage:
         finally:
             await store.teardown()
 
-    @pytest.mark.asyncio
     async def test_messages_isolated_by_chat(self, tmp_path):
         store = SqliteSessionStore(tmp_path / "test.db")
         await store.setup()
@@ -457,7 +423,6 @@ class TestSqliteMessageStorage:
         finally:
             await store.teardown()
 
-    @pytest.mark.asyncio
     async def test_get_messages_limit_and_offset(self, tmp_path):
         store = SqliteSessionStore(tmp_path / "test.db")
         await store.setup()
@@ -475,7 +440,6 @@ class TestSqliteMessageStorage:
         finally:
             await store.teardown()
 
-    @pytest.mark.asyncio
     async def test_get_messages_empty(self, tmp_path):
         store = SqliteSessionStore(tmp_path / "test.db")
         await store.setup()
@@ -485,7 +449,6 @@ class TestSqliteMessageStorage:
         finally:
             await store.teardown()
 
-    @pytest.mark.asyncio
     async def test_save_message_without_setup_raises(self, tmp_path):
         store = SqliteSessionStore(tmp_path / "test.db")
         with pytest.raises(StorageError, match="not initialized"):
@@ -496,7 +459,6 @@ class TestSqliteMessageStorage:
                 content="x",
             )
 
-    @pytest.mark.asyncio
     async def test_get_messages_without_setup_raises(self, tmp_path):
         store = SqliteSessionStore(tmp_path / "test.db")
         with pytest.raises(StorageError, match="not initialized"):
@@ -504,13 +466,11 @@ class TestSqliteMessageStorage:
 
 
 class TestSessionManagerCleanupEdgeCases:
-    @pytest.mark.asyncio
     async def test_cleanup_expired_with_no_sessions(self):
         mgr = SessionManager()
         removed = mgr.cleanup_expired(max_age_hours=24)
         assert removed == 0
 
-    @pytest.mark.asyncio
     async def test_concurrent_get_or_create_same_user(self):
         """Concurrent get_or_create for same user returns same session."""
         import asyncio
@@ -523,7 +483,6 @@ class TestSessionManagerCleanupEdgeCases:
         # First call creates, second returns existing
         assert s1.session_id == s2.session_id
 
-    @pytest.mark.asyncio
     async def test_large_float_cost(self):
         mgr = SessionManager()
         session = await mgr.get_or_create("u1", "c1", "/tmp")
@@ -532,7 +491,6 @@ class TestSessionManagerCleanupEdgeCases:
 
 
 class TestSessionManagerReset:
-    @pytest.mark.asyncio
     async def test_session_manager_reset_preserves_directory(self):
         mgr = SessionManager()
         session = await mgr.get_or_create("u1", "c1", "/tmp/project")
@@ -552,7 +510,6 @@ class TestSessionManagerReset:
         assert session.mode == "default"
         assert session.is_active is True
 
-    @pytest.mark.asyncio
     async def test_session_manager_reset_clears_browser_fresh(self):
         mgr = SessionManager()
         session = await mgr.get_or_create("u1", "c1", "/tmp/project")
@@ -562,13 +519,11 @@ class TestSessionManagerReset:
 
         assert session.browser_fresh is False
 
-    @pytest.mark.asyncio
     async def test_session_browser_fresh_defaults_false(self):
         mgr = SessionManager()
         session = await mgr.get_or_create("u1", "c1", "/tmp/project")
         assert session.browser_fresh is False
 
-    @pytest.mark.asyncio
     async def test_session_manager_reset_noop_when_no_session(self):
         mgr = SessionManager()
         await mgr.reset("nonexistent", "nope")  # Should not raise
@@ -577,7 +532,6 @@ class TestSessionManagerReset:
 class TestSqliteConcurrentAccess:
     """Verify SQLite handles concurrent operations without corruption."""
 
-    @pytest.mark.asyncio
     async def test_concurrent_save_and_load_different_keys(self, tmp_path):
         import asyncio
 
@@ -602,7 +556,6 @@ class TestSqliteConcurrentAccess:
         finally:
             await store.teardown()
 
-    @pytest.mark.asyncio
     async def test_concurrent_save_same_key_last_write_wins(self, tmp_path):
         import asyncio
 
@@ -622,7 +575,6 @@ class TestSqliteConcurrentAccess:
         finally:
             await store.teardown()
 
-    @pytest.mark.asyncio
     async def test_concurrent_save_and_load_interleaved(self, tmp_path):
         import asyncio
 
@@ -650,7 +602,6 @@ class TestSqliteConcurrentAccess:
 
 
 class TestSqliteSwitchDb:
-    @pytest.mark.asyncio
     async def test_switch_db_opens_new_database(self, tmp_path):
         db1 = tmp_path / "db1" / "messages.db"
         db2 = tmp_path / "db2" / "messages.db"
@@ -671,7 +622,6 @@ class TestSqliteSwitchDb:
         finally:
             await store.teardown()
 
-    @pytest.mark.asyncio
     async def test_switch_db_noop_for_same_path(self, tmp_path):
         db = tmp_path / "messages.db"
         store = SqliteSessionStore(db)
@@ -684,7 +634,6 @@ class TestSqliteSwitchDb:
         finally:
             await store.teardown()
 
-    @pytest.mark.asyncio
     async def test_switch_db_creates_parent_dirs(self, tmp_path):
         db1 = tmp_path / "messages.db"
         db2 = tmp_path / "deep" / "nested" / "messages.db"
@@ -698,7 +647,6 @@ class TestSqliteSwitchDb:
 
 
 class TestSeparateStores:
-    @pytest.mark.asyncio
     async def test_separate_stores_independent_after_switch(self, tmp_path):
         """Two SqliteSessionStore instances stay independent after switch_db on one."""
         db_session = tmp_path / "sessions.db"
@@ -733,7 +681,6 @@ class TestSeparateStores:
 
 
 class TestSessionManagerEdgeCases:
-    @pytest.mark.asyncio
     async def test_session_manager_deactivate_then_recreate(self):
         mgr = SessionManager()
         session = await mgr.get_or_create("u1", "c1", "/tmp")
@@ -744,12 +691,10 @@ class TestSessionManagerEdgeCases:
         assert new_session.session_id != original_id
         assert new_session.is_active is True
 
-    @pytest.mark.asyncio
     async def test_session_manager_get_unknown_returns_none(self):
         mgr = SessionManager()
         assert mgr.get("unknown", "unknown") is None
 
-    @pytest.mark.asyncio
     async def test_session_key_collision_documented(self):
         mgr = SessionManager()
         s1 = await mgr.get_or_create("a:b", "c", "/tmp")

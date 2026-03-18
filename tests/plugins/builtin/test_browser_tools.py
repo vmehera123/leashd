@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-import pytest
-
 from leashd.core.events import (
     TOOL_ALLOWED,
     TOOL_DENIED,
@@ -71,7 +69,6 @@ class TestBrowserToolConstants:
 
 
 class TestBrowserToolsPlugin:
-    @pytest.mark.asyncio
     async def test_subscribes_to_events(self, config):
         bus = EventBus()
         ctx = PluginContext(event_bus=bus, config=config)
@@ -82,7 +79,6 @@ class TestBrowserToolsPlugin:
         assert len(bus._handlers.get(TOOL_ALLOWED, [])) == 1
         assert len(bus._handlers.get(TOOL_DENIED, [])) == 1
 
-    @pytest.mark.asyncio
     async def test_gated_handler_fires_for_browser_tool(self, config):
         bus = EventBus()
         ctx = PluginContext(event_bus=bus, config=config)
@@ -100,7 +96,6 @@ class TestBrowserToolsPlugin:
             )
             m.assert_awaited_once()
 
-    @pytest.mark.asyncio
     async def test_gated_handler_skips_non_browser_tool(self, config, capsys):
         bus = EventBus()
         ctx = PluginContext(event_bus=bus, config=config)
@@ -117,7 +112,6 @@ class TestBrowserToolsPlugin:
         captured = capsys.readouterr()
         assert "browser_tool_gated" not in captured.out
 
-    @pytest.mark.asyncio
     async def test_gated_mutation_flag(self, config, capsys):
         bus = EventBus()
         ctx = PluginContext(event_bus=bus, config=config)
@@ -135,7 +129,6 @@ class TestBrowserToolsPlugin:
         assert "browser_tool_gated" in captured.out
         assert "is_mutation=True" in captured.out
 
-    @pytest.mark.asyncio
     async def test_gated_readonly_flag(self, config, capsys):
         bus = EventBus()
         ctx = PluginContext(event_bus=bus, config=config)
@@ -153,7 +146,6 @@ class TestBrowserToolsPlugin:
         assert "browser_tool_gated" in captured.out
         assert "is_mutation=False" in captured.out
 
-    @pytest.mark.asyncio
     async def test_allowed_handler_fires_for_browser_tool(self, config, capsys):
         bus = EventBus()
         ctx = PluginContext(event_bus=bus, config=config)
@@ -170,7 +162,6 @@ class TestBrowserToolsPlugin:
         captured = capsys.readouterr()
         assert "browser_tool_allowed" in captured.out
 
-    @pytest.mark.asyncio
     async def test_allowed_handler_skips_non_browser_tool(self, config, capsys):
         bus = EventBus()
         ctx = PluginContext(event_bus=bus, config=config)
@@ -187,7 +178,6 @@ class TestBrowserToolsPlugin:
         captured = capsys.readouterr()
         assert "browser_tool_allowed" not in captured.out
 
-    @pytest.mark.asyncio
     async def test_denied_handler_fires_for_browser_tool(self, config, capsys):
         bus = EventBus()
         ctx = PluginContext(event_bus=bus, config=config)
@@ -208,7 +198,6 @@ class TestBrowserToolsPlugin:
         captured = capsys.readouterr()
         assert "browser_tool_denied" in captured.out
 
-    @pytest.mark.asyncio
     async def test_denied_handler_skips_non_browser_tool(self, config, capsys):
         bus = EventBus()
         ctx = PluginContext(event_bus=bus, config=config)
@@ -225,12 +214,10 @@ class TestBrowserToolsPlugin:
         captured = capsys.readouterr()
         assert "browser_tool_denied" not in captured.out
 
-    @pytest.mark.asyncio
     async def test_start_completes(self):
         plugin = BrowserToolsPlugin()
         await plugin.start()
 
-    @pytest.mark.asyncio
     async def test_stop_completes(self):
         plugin = BrowserToolsPlugin()
         await plugin.stop()
@@ -242,7 +229,6 @@ class TestBrowserToolsPlugin:
 
 
 class TestMissingEventData:
-    @pytest.mark.asyncio
     async def test_gated_handler_missing_tool_name(self, config):
         bus = EventBus()
         ctx = PluginContext(event_bus=bus, config=config)
@@ -251,7 +237,6 @@ class TestMissingEventData:
 
         await bus.emit(Event(name=TOOL_GATED, data={}))
 
-    @pytest.mark.asyncio
     async def test_gated_handler_empty_data(self, config):
         bus = EventBus()
         ctx = PluginContext(event_bus=bus, config=config)
@@ -260,7 +245,6 @@ class TestMissingEventData:
 
         await bus.emit(Event(name=TOOL_GATED, data={}))
 
-    @pytest.mark.asyncio
     async def test_allowed_handler_missing_tool_name(self, config):
         bus = EventBus()
         ctx = PluginContext(event_bus=bus, config=config)
@@ -269,7 +253,6 @@ class TestMissingEventData:
 
         await bus.emit(Event(name=TOOL_ALLOWED, data={}))
 
-    @pytest.mark.asyncio
     async def test_denied_handler_missing_tool_name(self, config):
         bus = EventBus()
         ctx = PluginContext(event_bus=bus, config=config)
@@ -393,7 +376,6 @@ class TestIsAgentBrowserCommand:
 
 
 class TestBrowserToolsPluginAgentBrowser:
-    @pytest.mark.asyncio
     async def test_gated_detects_agent_browser(self, config, capsys):
         bus = EventBus()
         ctx = PluginContext(event_bus=bus, config=config)
@@ -416,7 +398,6 @@ class TestBrowserToolsPluginAgentBrowser:
         assert "agent-browser" in captured.out
         assert "is_mutation=True" in captured.out
 
-    @pytest.mark.asyncio
     async def test_gated_detects_agent_browser_readonly(self, config, capsys):
         bus = EventBus()
         ctx = PluginContext(event_bus=bus, config=config)
@@ -438,7 +419,6 @@ class TestBrowserToolsPluginAgentBrowser:
         assert "browser_tool_gated" in captured.out
         assert "is_mutation=False" in captured.out
 
-    @pytest.mark.asyncio
     async def test_allowed_detects_agent_browser(self, config, capsys):
         bus = EventBus()
         ctx = PluginContext(event_bus=bus, config=config)
@@ -459,7 +439,6 @@ class TestBrowserToolsPluginAgentBrowser:
         captured = capsys.readouterr()
         assert "browser_tool_allowed" in captured.out
 
-    @pytest.mark.asyncio
     async def test_non_agent_browser_bash_skipped(self, config, capsys):
         bus = EventBus()
         ctx = PluginContext(event_bus=bus, config=config)

@@ -19,6 +19,7 @@ from leashd.config_store import (
     get_autonomous_config,
     get_browser_config,
     get_skills_config,
+    get_web_config,
     get_workspaces,
     inject_global_config_as_env,
     load_global_config,
@@ -454,6 +455,190 @@ def _handle_browser_set_backend(backend: str) -> None:
     _notify_daemon_reload()
 
 
+def _handle_webui(args: argparse.Namespace) -> None:
+    """Route webui subcommands."""
+    sub = getattr(args, "webui_command", None)
+    if sub is None or sub == "show":
+        _handle_webui_show()
+    elif sub == "enable":
+        _handle_webui_enable()
+    elif sub == "disable":
+        _handle_webui_disable()
+    elif sub == "url":
+        _handle_webui_url()
+    elif sub == "tunnel":
+        _handle_webui_tunnel(
+            provider=args.provider, notify_telegram=args.notify_telegram
+        )
+
+
+def _handle_webui_show() -> None:
+    """Display WebUI settings."""
+    data = load_global_config()
+    web = get_web_config(data)
+
+    enabled = web.get("enabled", False)
+    host = web.get("host", "0.0.0.0")  # noqa: S104
+    port = web.get("port", 8080)
+    has_key = bool(web.get("api_key"))
+
+    print(f"WebUI: {'ENABLED' if enabled else 'disabled'}")
+    print(f"  URL: http://{host}:{port}")
+    print(f"  API key: {'configured' if has_key else 'not set'}")
+    if not enabled:
+        print("  Run 'leashd webui enable' to activate.")
+
+
+def _handle_webui_enable() -> None:
+    """Enable the WebUI connector."""
+    data = load_global_config()
+    web = get_web_config(data)
+
+    if web.get("enabled"):
+        print("\u2713 WebUI already enabled")
+        _handle_webui_show()
+        return
+
+    if not web.get("api_key"):
+        try:
+            key = input("  Set an API key/password for WebUI access: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            key = ""
+        if not key:
+            print("  API key is required for security. Aborted.", file=sys.stderr)
+            return
+        web["api_key"] = key
+
+    try:
+        port_input = input(f"  Port [{web.get('port', 8080)}]: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        port_input = ""
+    if port_input:
+        try:
+            web["port"] = int(port_input)
+        except ValueError:
+            print(f"  Invalid port '{port_input}', using default.", file=sys.stderr)
+
+    web["enabled"] = True
+    data["web"] = web
+    save_global_config(data)
+    inject_global_config_as_env(force=True)
+
+    host = web.get("host", "0.0.0.0")  # noqa: S104
+    port = web.get("port", 8080)
+    print(f"\u2713 WebUI enabled at http://{host}:{port}")
+    print("  Restart the daemon for changes to take effect.")
+    _notify_daemon_reload()
+
+
+def _handle_webui_disable() -> None:
+    """Disable the WebUI connector."""
+    data = load_global_config()
+    web = get_web_config(data)
+
+    if not web.get("enabled"):
+        print("\u2713 WebUI already disabled")
+        return
+
+    web["enabled"] = False
+    data["web"] = web
+    save_global_config(data)
+    inject_global_config_as_env(force=True)
+    print("\u2713 WebUI disabled")
+    _notify_daemon_reload()
+
+
+def _handle_webui_url() -> None:
+    """Print the WebUI URL."""
+    data = load_global_config()
+    web = get_web_config(data)
+    host = web.get("host", "0.0.0.0")  # noqa: S104
+    port = web.get("port", 8080)
+    print(f"http://{host}:{port}")
+
+
+def _handle_webui_tunnel(*, provider: str, notify_telegram: bool) -> None:
+    """Start a tunnel to expose the WebUI publicly."""
+    import signal as _signal
+
+    from leashd.tunnel import TunnelProcess
+    from leashd.tunnel import notify_telegram as _notify_tg
+
+    data = load_global_config()
+    web = get_web_config(data)
+
+    if not web.get("enabled"):
+        print(
+            "Error: WebUI is not enabled. Run 'leashd webui enable' first.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if not web.get("api_key"):
+        print(
+            "Error: WebUI API key is not set. Run 'leashd webui enable' first.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    port = web.get("port", 8080)
+
+    try:
+        tunnel = TunnelProcess(provider=provider, port=port)
+        url = tunnel.start()
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"\n  Tunnel active: {url}")
+    print(f"  Provider: {provider}")
+    print(f"  Local port: {port}")
+    print("\n  Press Ctrl+C to stop the tunnel.\n")
+
+    if notify_telegram:
+        telegram = data.get("telegram", {})
+        token = telegram.get("bot_token") if isinstance(telegram, dict) else None
+        user_ids = (
+            telegram.get("allowed_user_ids", []) if isinstance(telegram, dict) else []
+        )
+        if not token or not user_ids:
+            print(
+                "  Warning: Telegram not configured, skipping notification.",
+                file=sys.stderr,
+            )
+        else:
+            for uid in user_ids:
+                if _notify_tg(token, str(uid), f"WebUI tunnel active:\n{url}"):
+                    print(f"  Sent URL to Telegram user {uid}")
+                else:
+                    print(
+                        f"  Failed to notify Telegram user {uid}",
+                        file=sys.stderr,
+                    )
+
+    stop = False
+
+    def _on_signal(signum: int, frame: object) -> None:  # noqa: ARG001
+        nonlocal stop
+        stop = True
+
+    _signal.signal(_signal.SIGINT, _on_signal)
+    _signal.signal(_signal.SIGTERM, _on_signal)
+
+    try:
+        while not stop and tunnel.is_alive:
+            try:
+                _signal.pause()
+            except AttributeError:
+                import time
+
+                time.sleep(1)
+    finally:
+        print("\nStopping tunnel...")
+        tunnel.stop()
+        print("Tunnel stopped.")
+
+
 _VALID_EFFORT_LEVELS = {"low", "medium", "high", "max"}
 
 
@@ -580,7 +765,7 @@ def _handle_clean() -> None:
 
     # Clean global ~/.leashd/ artifacts
     home_leashd = Path.home() / ".leashd"
-    for name in ("sessions.db", "leashd.pid", "daemon.log"):
+    for name in ("sessions.db", "messages.db", "leashd.pid", "daemon.log"):
         artifact = home_leashd / name
         if artifact.is_file():
             artifact.unlink()
@@ -1049,6 +1234,29 @@ def main() -> None:
     subparsers.add_parser("clean", help="Remove all logs, databases, and audit files")
     subparsers.add_parser("reload", help="Reload config in running daemon")
 
+    # WebUI
+    webui_parser = subparsers.add_parser("webui", help="Manage WebUI settings")
+    webui_sub = webui_parser.add_subparsers(dest="webui_command")
+    webui_sub.add_parser("show", help="Show WebUI settings (default)")
+    webui_sub.add_parser("enable", help="Enable the WebUI connector")
+    webui_sub.add_parser("disable", help="Disable the WebUI connector")
+    webui_sub.add_parser("url", help="Print the WebUI URL")
+    tunnel_parser = webui_sub.add_parser(
+        "tunnel", help="Start a tunnel to expose WebUI publicly"
+    )
+    tunnel_parser.add_argument(
+        "--provider",
+        choices=["ngrok", "cloudflare", "tailscale"],
+        default="ngrok",
+        help="Tunnel provider (default: ngrok)",
+    )
+    tunnel_parser.add_argument(
+        "--notify-telegram",
+        action="store_true",
+        default=False,
+        help="Send the public URL to your Telegram chat",
+    )
+
     # Autonomous mode
     auto_parser = subparsers.add_parser(
         "autonomous", help="Manage autonomous mode settings"
@@ -1187,6 +1395,8 @@ def main() -> None:
         from leashd import __version__
 
         print(f"leashd {__version__}")
+    elif args.command == "webui":
+        _handle_webui(args)
     elif args.command == "autonomous":
         _handle_autonomous(args)
     elif args.command == "browser":

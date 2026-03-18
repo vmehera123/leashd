@@ -16,7 +16,6 @@ from tests.core.engine.conftest import FakeAgent
 
 
 class TestPlanContentInEngine:
-    @pytest.mark.asyncio
     async def test_plan_content_from_responder_passed_to_coordinator(
         self, config, policy_engine, audit_logger
     ):
@@ -97,7 +96,6 @@ class TestPlanContentInEngine:
         assert "database schema" in desc
         assert "I'll start by exploring" not in desc
 
-    @pytest.mark.asyncio
     async def test_plan_file_content_preferred_over_streaming_buffer(
         self, config, policy_engine, audit_logger
     ):
@@ -166,7 +164,6 @@ class TestPlanContentInEngine:
         assert "Fix the bug" in desc
         assert "Narration" not in desc
 
-    @pytest.mark.asyncio
     async def test_streaming_buffer_used_when_no_plan_file(
         self, config, policy_engine, audit_logger, monkeypatch
     ):
@@ -229,7 +226,6 @@ class TestPlanContentInEngine:
         desc = streaming_connector.plan_review_requests[0]["description"]
         assert "streamed plan content" in desc
 
-    @pytest.mark.asyncio
     async def test_plan_file_content_used_in_implementation_prompt(
         self, config, policy_engine, audit_logger, mock_connector
     ):
@@ -300,7 +296,6 @@ class TestPlanContentInEngine:
 
 
 class TestFallbackPlanReview:
-    @pytest.mark.asyncio
     async def test_fallback_shown_when_agent_skips_exit_plan_mode(
         self, config, policy_engine, audit_logger, mock_connector
     ):
@@ -365,7 +360,6 @@ class TestFallbackPlanReview:
         desc = mock_connector.plan_review_requests[0]["description"]
         assert "Here is my plan" in desc
 
-    @pytest.mark.asyncio
     async def test_fallback_not_shown_when_exit_plan_mode_called(
         self, config, policy_engine, audit_logger, mock_connector
     ):
@@ -417,7 +411,6 @@ class TestFallbackPlanReview:
         # Only one plan review (from ExitPlanMode), not a fallback one
         assert len(mock_connector.plan_review_requests) == 1
 
-    @pytest.mark.asyncio
     async def test_fallback_adjust_sends_feedback(
         self, config, policy_engine, audit_logger, mock_connector
     ):
@@ -486,7 +479,6 @@ class TestFallbackPlanReview:
 
 
 class TestPlanFileDiskRead:
-    @pytest.mark.asyncio
     async def test_plan_file_read_from_disk_on_exit_plan_mode(
         self, config, policy_engine, audit_logger, mock_connector, tmp_path
     ):
@@ -563,7 +555,6 @@ class TestPlanFileDiskRead:
 
 
 class TestRelativePlanPathDetection:
-    @pytest.mark.asyncio
     async def test_relative_plan_path_detected(
         self, config, fake_agent, policy_engine, audit_logger, mock_connector
     ):
@@ -596,7 +587,6 @@ class TestRelativePlanPathDetection:
         assert tool_state.plan_file_path == ".claude/plans/my-plan.md"
         assert tool_state.plan_file_content == "# My Plan\n\n1. Step one"
 
-    @pytest.mark.asyncio
     async def test_absolute_plan_path_still_detected(
         self, config, fake_agent, policy_engine, audit_logger, mock_connector
     ):
@@ -627,7 +617,6 @@ class TestRelativePlanPathDetection:
 
         assert tool_state.plan_file_path == "/home/user/.claude/plans/fix.md"
 
-    @pytest.mark.asyncio
     async def test_dot_plan_extension_detected(
         self, config, fake_agent, policy_engine, audit_logger, mock_connector
     ):
@@ -663,7 +652,6 @@ class TestRelativePlanPathDetection:
 
 
 class TestPlanContentSourceTracking:
-    @pytest.mark.asyncio
     async def test_disk_file_source_used_when_file_exists(
         self, config, policy_engine, audit_logger, mock_connector, tmp_path
     ):
@@ -726,7 +714,6 @@ class TestPlanContentSourceTracking:
         assert "Disk Plan" in desc
         assert "Stale cached" not in desc
 
-    @pytest.mark.asyncio
     async def test_cached_write_used_when_disk_read_fails(
         self, config, policy_engine, audit_logger, mock_connector
     ):
@@ -788,7 +775,6 @@ class TestPlanFileDiscoveryFromDisk:
     """Bug 1 regression: when SDK bypasses can_use_tool for plan file writes,
     _discover_plan_file finds the plan from ~/.claude/plans/ on disk."""
 
-    @pytest.mark.asyncio
     async def test_discover_plan_file_finds_recent_md(self, tmp_path, monkeypatch):
         plans_dir = tmp_path / ".claude" / "plans"
         plans_dir.mkdir(parents=True)
@@ -799,7 +785,6 @@ class TestPlanFileDiscoveryFromDisk:
         result = Engine._discover_plan_file()
         assert result == str(plan_file)
 
-    @pytest.mark.asyncio
     async def test_discover_plan_file_ignores_old_files(self, tmp_path, monkeypatch):
         import os
 
@@ -815,7 +800,6 @@ class TestPlanFileDiscoveryFromDisk:
         result = Engine._discover_plan_file()
         assert result is None
 
-    @pytest.mark.asyncio
     async def test_discover_plan_file_returns_none_when_no_dir(
         self, tmp_path, monkeypatch
     ):
@@ -823,7 +807,6 @@ class TestPlanFileDiscoveryFromDisk:
         result = Engine._discover_plan_file()
         assert result is None
 
-    @pytest.mark.asyncio
     async def test_exit_plan_mode_uses_discovered_file(
         self, config, policy_engine, audit_logger, mock_connector, tmp_path, monkeypatch
     ):
@@ -880,7 +863,6 @@ class TestPlanFileDiscoveryFromDisk:
         assert "Discovered Plan" in desc
         assert "Step one" in desc
 
-    @pytest.mark.asyncio
     async def test_resolve_plan_content_uses_discovered_file(
         self, config, policy_engine, audit_logger, mock_connector, tmp_path, monkeypatch
     ):
@@ -952,7 +934,6 @@ class TestPlanFileDiscoveryFromDisk:
 class TestLocalPlanFileDiscovery:
     """Plan discovery should also check project-local .claude/plans/ directory."""
 
-    @pytest.mark.asyncio
     async def test_discover_plan_file_finds_local_plan(self, tmp_path, monkeypatch):
         """Plan file in project-local .claude/plans/ is discovered."""
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "fake_home")
@@ -964,7 +945,6 @@ class TestLocalPlanFileDiscovery:
         result = Engine._discover_plan_file(str(tmp_path / "project"))
         assert result == str(plan_file)
 
-    @pytest.mark.asyncio
     async def test_discover_prefers_newest_across_both_dirs(
         self, tmp_path, monkeypatch
     ):
@@ -988,7 +968,6 @@ class TestLocalPlanFileDiscovery:
         result = Engine._discover_plan_file(str(tmp_path / "project"))
         assert result == str(local_plan)
 
-    @pytest.mark.asyncio
     async def test_discover_prefers_newest_home_over_old_local(
         self, tmp_path, monkeypatch
     ):
@@ -1012,7 +991,6 @@ class TestLocalPlanFileDiscovery:
         result = Engine._discover_plan_file(str(tmp_path / "project"))
         assert result == str(home_plan)
 
-    @pytest.mark.asyncio
     async def test_discover_without_working_directory_only_checks_home(
         self, tmp_path, monkeypatch
     ):
@@ -1030,7 +1008,6 @@ class TestLocalPlanFileDiscovery:
 class TestDirectoryPersistenceThroughPlanMode:
     """Directory should survive all plan mode transitions (edit, clean_edit, fallback)."""
 
-    @pytest.mark.asyncio
     async def test_dir_persists_through_clean_edit_proceed(
         self, audit_logger, policy_engine, mock_connector, tmp_path, monkeypatch
     ):
@@ -1105,7 +1082,6 @@ class TestDirectoryPersistenceThroughPlanMode:
         # clean_edit nulls session_id before implementation call
         assert agent.session_ids[2] is None
 
-    @pytest.mark.asyncio
     async def test_dir_persists_through_edit_proceed(
         self, audit_logger, policy_engine, mock_connector, tmp_path, monkeypatch
     ):
@@ -1178,7 +1154,6 @@ class TestDirectoryPersistenceThroughPlanMode:
         # proceed_in_context preserves session_id (not cleared like clean_proceed)
         assert agent.session_ids[2] is not None
 
-    @pytest.mark.asyncio
     async def test_dir_persists_through_fallback_review_edit(
         self, audit_logger, policy_engine, mock_connector, tmp_path, monkeypatch
     ):
@@ -1256,7 +1231,6 @@ class TestDirectoryPersistenceThroughPlanMode:
         assert all(d == d2_resolved for d in agent.working_dirs[1:])
         assert agent.prompts[2].startswith("Implement")
 
-    @pytest.mark.asyncio
     async def test_dir_persists_through_fallback_review_default(
         self, audit_logger, policy_engine, mock_connector, tmp_path, monkeypatch
     ):
@@ -1332,7 +1306,6 @@ class TestDirectoryPersistenceThroughPlanMode:
         assert len(agent.working_dirs) == 3
         assert all(d == d2_resolved for d in agent.working_dirs[1:])
 
-    @pytest.mark.asyncio
     async def test_dir_persists_through_multiple_plan_cycles(
         self, audit_logger, policy_engine, mock_connector, tmp_path, monkeypatch
     ):
@@ -1408,7 +1381,6 @@ class TestDirectoryPersistenceThroughPlanMode:
         assert len(agent.working_dirs) == 5
         assert all(d == d2_resolved for d in agent.working_dirs[1:])
 
-    @pytest.mark.asyncio
     async def test_dir_persists_through_plan_mode_sqlite(
         self, audit_logger, policy_engine, mock_connector, tmp_path, monkeypatch
     ):
@@ -1490,7 +1462,6 @@ class TestDirectoryPersistenceThroughPlanMode:
 class TestPlanModeRegression:
     """Verify /plan clears session context and blocks non-plan edits."""
 
-    @pytest.mark.asyncio
     async def test_plan_command_preserves_agent_resume_token(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -1516,7 +1487,6 @@ class TestPlanModeRegression:
         assert session.agent_resume_token == "test-session-123"
         assert session.mode == "plan"
 
-    @pytest.mark.asyncio
     async def test_plan_command_persists_session(
         self, tmp_path, audit_logger, policy_engine, mock_connector
     ):
@@ -1550,7 +1520,6 @@ class TestPlanModeRegression:
         finally:
             await store.teardown()
 
-    @pytest.mark.asyncio
     async def test_write_to_source_file_denied_in_plan_mode(
         self, config, audit_logger, policy_engine
     ):
@@ -1577,7 +1546,6 @@ class TestPlanModeRegression:
         assert isinstance(result, PermissionDeny)
         assert "plan mode" in result.message.lower()
 
-    @pytest.mark.asyncio
     async def test_edit_to_source_file_denied_in_plan_mode(
         self, config, audit_logger, policy_engine
     ):
@@ -1609,7 +1577,6 @@ class TestPlanModeRegression:
 
         assert isinstance(result, PermissionDeny)
 
-    @pytest.mark.asyncio
     async def test_write_to_plan_file_allowed_in_plan_mode(
         self, config, audit_logger, policy_engine
     ):
@@ -1639,7 +1606,6 @@ class TestPlanModeRegression:
             isinstance(result, PermissionDeny) and "plan mode" in result.message.lower()
         )
 
-    @pytest.mark.asyncio
     async def test_dot_plan_file_allowed_in_plan_mode(
         self, config, audit_logger, policy_engine
     ):
@@ -1668,7 +1634,6 @@ class TestPlanModeRegression:
             isinstance(result, PermissionDeny) and "plan mode" in result.message.lower()
         )
 
-    @pytest.mark.asyncio
     async def test_write_allowed_outside_plan_mode(
         self, config, audit_logger, policy_engine, tmp_dir
     ):
@@ -1701,7 +1666,6 @@ class TestPlanModeRegression:
 class TestModeGuards:
     """Deny ExitPlanMode/EnterPlanMode when session mode makes them invalid."""
 
-    @pytest.mark.asyncio
     async def test_exit_plan_mode_denied_in_auto_mode(
         self, config, audit_logger, policy_engine
     ):
@@ -1732,7 +1696,6 @@ class TestModeGuards:
         assert "implementation mode" in result.message.lower()
         assert len(connector.plan_review_requests) == 0
 
-    @pytest.mark.asyncio
     async def test_exit_plan_mode_denied_in_edit_mode(
         self, config, audit_logger, policy_engine
     ):
@@ -1762,7 +1725,6 @@ class TestModeGuards:
         assert isinstance(result, PermissionDeny)
         assert "implementation mode" in result.message.lower()
 
-    @pytest.mark.asyncio
     async def test_enter_plan_mode_denied_in_auto_mode(
         self, config, audit_logger, policy_engine
     ):
@@ -1786,7 +1748,6 @@ class TestModeGuards:
         assert isinstance(result, PermissionDeny)
         assert "accept-edits mode" in result.message.lower()
 
-    @pytest.mark.asyncio
     async def test_exit_plan_mode_denied_in_default_mode(
         self, config, audit_logger, policy_engine
     ):
@@ -1816,7 +1777,6 @@ class TestModeGuards:
         assert isinstance(result, PermissionDeny)
         assert "implementation mode" in result.message.lower()
 
-    @pytest.mark.asyncio
     async def test_enter_plan_mode_allowed_in_default_mode(
         self, config, audit_logger, policy_engine
     ):
@@ -1951,7 +1911,6 @@ class TestResolvePlanContentFallbacks:
 
 
 class TestExitPlanModeClearsActivity:
-    @pytest.mark.asyncio
     async def test_exit_plan_mode_clears_activity_before_plan_review(
         self, config, policy_engine, audit_logger
     ):
@@ -2021,7 +1980,6 @@ class TestExitPlanModeClearsActivity:
 
 
 class TestExitPlanModeDeniedAfterApproval:
-    @pytest.mark.asyncio
     async def test_exit_plan_mode_denied_after_approval_in_same_turn(
         self, config, policy_engine, audit_logger
     ):
@@ -2097,7 +2055,6 @@ class TestExitPlanModeDeniedAfterApproval:
         # Only one plan review should have been shown
         assert len(streaming_connector.plan_review_requests) == 1
 
-    @pytest.mark.asyncio
     async def test_clean_edit_cancels_agent_and_sets_clean_proceed(
         self, config, policy_engine, audit_logger
     ):
@@ -2172,7 +2129,6 @@ class TestExitPlanModeDeniedAfterApproval:
 
         assert cancel_called.is_set()
 
-    @pytest.mark.asyncio
     async def test_edit_approval_switches_session_mode(
         self, config, policy_engine, audit_logger
     ):
@@ -2257,7 +2213,6 @@ class TestPlanApprovalBehavior:
     each approval type and that cancel fires when it should.  These close the
     coverage gap that let the _cancel_agent() deletion slip through."""
 
-    @pytest.mark.asyncio
     async def test_clean_edit_implementation_turn_write_allowed(
         self, config, policy_engine, audit_logger
     ):
@@ -2349,7 +2304,6 @@ class TestPlanApprovalBehavior:
         assert len(write_results) == 1
         assert isinstance(write_results[0], PermissionAllow)
 
-    @pytest.mark.asyncio
     async def test_edit_approval_write_allowed_in_implementation_turn(
         self, config, policy_engine, audit_logger
     ):
@@ -2431,7 +2385,6 @@ class TestPlanApprovalBehavior:
         assert len(write_results) == 1
         assert isinstance(write_results[0], PermissionAllow)
 
-    @pytest.mark.asyncio
     async def test_edit_approval_cancels_agent(
         self, config, policy_engine, audit_logger
     ):
@@ -2501,7 +2454,6 @@ class TestPlanApprovalBehavior:
 
         assert cancel_called.is_set()
 
-    @pytest.mark.asyncio
     async def test_proceed_in_context_preserves_session_id(
         self, config, policy_engine, audit_logger
     ):
@@ -2571,7 +2523,6 @@ class TestPlanApprovalBehavior:
         # (not None — that's the clean_proceed behavior)
         assert session_ids_seen[1] is not None
 
-    @pytest.mark.asyncio
     async def test_default_approval_mode_switch_no_auto_approve(
         self, config, policy_engine, audit_logger
     ):
@@ -2649,7 +2600,6 @@ class TestPlanApprovalBehavior:
         assert "Write" not in auto_tools
         assert "Edit" not in auto_tools
 
-    @pytest.mark.asyncio
     async def test_bash_still_gated_after_edit_approval(
         self, config, policy_engine, audit_logger
     ):
@@ -2744,7 +2694,6 @@ class TestPlanApprovalBehavior:
 class TestPlanOriginRouting:
     """Fix 1: /plan command must always route to human review, even with auto_plan=True."""
 
-    @pytest.mark.asyncio
     async def test_user_plan_routes_to_human_review(
         self, config, policy_engine, audit_logger
     ):
@@ -2809,7 +2758,6 @@ class TestPlanOriginRouting:
         # AI reviewer was NOT called
         coordinator._auto_plan_reviewer.review_plan.assert_not_called()
 
-    @pytest.mark.asyncio
     async def test_auto_plan_routes_to_ai_review(
         self, config, policy_engine, audit_logger
     ):
@@ -2875,7 +2823,6 @@ class TestPlanOriginRouting:
 class TestNoAutoApproveBeforePlanExit:
     """Fix 2: Write/Edit auto-approve must NOT be enabled before plan_mode_exit."""
 
-    @pytest.mark.asyncio
     async def test_auto_approve_not_enabled_during_plan_review(
         self, config, policy_engine, audit_logger
     ):
@@ -2956,7 +2903,6 @@ class TestNoAutoApproveBeforePlanExit:
 class TestExitPlanModeDeniedForTaskSessions:
     """Fix 3: ExitPlanMode should be denied for task-orchestrated sessions."""
 
-    @pytest.mark.asyncio
     async def test_exit_plan_mode_denied_for_task_session(
         self, config, policy_engine, audit_logger, mock_connector
     ):
@@ -2986,7 +2932,6 @@ class TestExitPlanModeDeniedForTaskSessions:
 
 
 class TestPlanReviewDeadlinePause:
-    @pytest.mark.asyncio
     async def test_plan_review_does_not_timeout(
         self, config, policy_engine, audit_logger
     ):
@@ -3046,7 +2991,6 @@ class TestPlanReviewDeadlinePause:
         result = await eng.handle_message("user1", "Plan something", "chat1")
         assert "timed out" not in result.lower()
 
-    @pytest.mark.asyncio
     async def test_plan_adjustment_restarts_with_fresh_timeout(
         self, config, policy_engine, audit_logger, mock_connector
     ):

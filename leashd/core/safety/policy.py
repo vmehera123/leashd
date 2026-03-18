@@ -9,7 +9,7 @@ import structlog
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
-from leashd.core.safety.analyzer import RiskLevel, analyze_bash, strip_cd_prefix
+from leashd.core.safety.analyzer import RiskLevel, analyze_bash, strip_benign_prefixes
 
 logger = structlog.get_logger()
 
@@ -155,7 +155,7 @@ class PolicyEngine:
         if rule.command_patterns:
             if tool_name != "Bash":
                 return False
-            command = strip_cd_prefix(tool_input.get("command", ""))
+            command = strip_benign_prefixes(tool_input.get("command", ""))
             if not any(p.search(command) for p in rule.command_patterns):
                 return False
 

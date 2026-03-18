@@ -1,0 +1,124 @@
+url: http://localhost:8080
+server: uv run -m leashd start -f
+framework: fastapi
+
+credentials:
+  api_key: qwer1234
+
+preconditions:
+  - leashd must be installed (uv sync)
+  - LEASHD_WEB_ENABLED=true and LEASHD_WEB_API_KEY=qwer1234 must be set
+  - LEASHD_APPROVED_DIRECTORIES must include the project directory
+  - Node.js 18+ installed (for Playwright MCP browser tools)
+  - Chromium installed (npx playwright install chromium)
+
+environment:
+  LEASHD_WEB_ENABLED: "true"
+  LEASHD_WEB_API_KEY: qwer1234
+  LEASHD_WEB_HOST: "127.0.0.1"
+  LEASHD_WEB_PORT: "8080"
+  LEASHD_WEB_DEV_MODE: "true"
+
+focus_areas:
+  # --- Auth & Security ---
+  - "API key authentication via WebSocket: valid key returns auth_ok with session_id and chat_id, invalid key returns auth_error"
+  - "Per-IP rate limiting: 5 consecutive failed auth attempts trigger 60s lockout"
+  - "REST POST /api/auth endpoint validates API key and returns { success: true/false }"
+  - "Constant-time HMAC key comparison prevents timing-based key extraction"
+
+  # --- Core Messaging (parity with Telegram connector) ---
+  - "Send a text message via WebSocket client type=message and verify agent responds with type=message containing text"
+  - "Streaming response: agent sends stream_token frames with message_id, client accumulates tokens into final message"
+  - "Message completion: agent sends message_complete frame with message_id after streaming finishes"
+  - "Tool activity tracking: tool_start frame shows tool name and command in activity bar, tool_end clears it"
+  - "Typing indicator: status frame with typing=true while agent processes, typing=false when idle"
+
+  # --- Approval Flow (parity with Telegram connector) ---
+  - "Trigger a tool requiring approval (e.g. bash rm command) and verify approval_request modal appears with tool name and description"
+  - "Approve the action via approval_response with approved=true and verify tool executes, then approval_resolved is sent"
+  - "Deny the action via approval_response with approved=false and verify tool is blocked, then approval_resolved is sent"
+  - "Approval modal must be non-dismissible: Escape key does not close it, only Deny/Approve buttons work"
+
+  # --- Interactive Responses (parity with Telegram connector) ---
+  - "AskUserQuestion triggers question modal with interaction_id, question text, optional header, and quick-select option buttons"
+  - "User responds via interaction_response with interaction_id and answer text, agent receives the answer"
+  - "Plan review triggers plan_review modal with interaction_id and description, user can accept or reject with optional feedback"
+  - "Interrupt prompt triggers interrupt_prompt modal when user sends message while agent is running, with Send Now / Wait options"
+
+  # --- Session & Reconnection ---
+  - "WebSocket disconnect and reconnect with same session_id reuses existing session without re-authentication"
+  - "GET /api/history with session_id returns previous message history for the session"
+  - "Chat ID format is web:{session_id} and MultiConnector routes messages by this prefix"
+  - "New WebSocket connection without session_id creates a fresh session"
+
+  # --- Frontend UI Behavior ---
+  - "Markdown rendering: code blocks with syntax highlighting, bold, italic, and clickable links render correctly"
+  - "Modal queue: rapid successive modals (approval then question) queue and display one at a time"
+  - "Focus trap: Tab and Shift+Tab cycle within modal elements only, not the background page"
+  - "Connection status dot: green when connected, red on disconnect, yellow during reconnection attempt"
+  - "Ping/pong keepalive: client sends ping every 25s, server responds with pong, connection drops after 50s silence"
+  - "Input area: Shift+Enter inserts newline, Enter sends message, send button works via click"
+
+  # --- REST API Endpoints ---
+  - "GET /api/health returns HTTP 200 with { status: ok }"
+  - "GET /api/status returns working_directory and approved_directories"
+  - "POST /api/auth with valid api_key returns { success: true }"
+  - "POST /api/auth with invalid api_key returns { success: false, reason: ... }"
+  - "GET /api/history requires session_id query param and returns messages array with role, content, timestamp"
+
+  # --- Edge Cases ---
+  - "Oversized WebSocket message (>1MB) is rejected gracefully without crashing the server"
+  - "Concurrent modal queue: multiple approval_request in rapid succession queue properly, no overlay collision"
+  - "Dev mode live reload: when static files change, server broadcasts reload message to all connected clients"
+  - "File send: WebUI shows notification instead of actual document transfer (unlike Telegram)"
+  - "Clear chat button resets messages display but does not affect server-side session or message store"
+
+  # --- MultiConnector Routing ---
+  - "WebConnector registers route on WebSocket connect, deregisters on disconnect"
+  - "Messages with chat_id starting with 'web:' route to WebConnector, not Telegram"
+  - "Fallback routing when no prefix match selects first registered connector"
+
+  # --- Application Startup & Static Serving ---
+  - "FastAPI app starts on configured host:port and GET / serves index.html from leashd/data/webui/"
+  - "Static assets (app.js, style.css) are served with correct MIME types (application/javascript, text/css)"
+  - "SPA fallback: non-API routes that don't match a static file still return index.html (client-side routing)"
+  - "CORS middleware adds correct headers based on LEASHD_WEB_CORS_ORIGINS config"
+  - "Dev mode enables no-cache middleware (Cache-Control: no-store on all responses)"
+  - "App refuses to start when LEASHD_WEB_API_KEY is not configured"
+
+  # --- Full Message Round-Trip (end-to-end) ---
+  - "Connect via WebSocket, authenticate, send a simple message, receive streaming tokens, and final message_complete — full lifecycle"
+  - "Send a message that triggers a tool call: observe tool_start frame, safety pipeline evaluation, tool_end frame, then assistant response"
+  - "Send a message that triggers require_approval tool: observe approval_request, approve it, observe tool execution and approval_resolved, then assistant response"
+  - "Send a message that triggers require_approval tool, deny it: observe approval_request, deny, tool is blocked, approval_resolved with denied, assistant acknowledges denial"
+  - "Slash command round-trip: send /status via WebSocket, receive formatted system response with working directory and session info"
+  - "Send /dir <name> to switch working directory mid-session, verify subsequent agent messages reference the new directory"
+
+  # --- Session Persistence & Reconnection (end-to-end) ---
+  - "Send messages, disconnect WebSocket, reconnect with same session_id, call GET /api/history — previous messages appear in order"
+  - "After reconnect with same session_id, send a new message — agent has conversation context from before disconnect"
+  - "Two different session_ids produce isolated conversations: messages in session A are not visible in session B"
+  - "Session survives server restart: stop and restart the app, reconnect with old session_id, history is preserved from SQLite"
+
+  # --- Multi-Tab / Concurrent Connections ---
+  - "Open two WebSocket connections with different session_ids simultaneously — both receive independent responses"
+  - "Tab switch: connect tab A, send message, switch to tab B (new session), send message — each tab's messages route to the correct session"
+  - "Broadcast: dev mode file change triggers reload message to ALL connected WebSocket clients, not just one"
+
+  # --- Settings & Config Management (end-to-end) ---
+  - "GET /api/config returns current runtime settings (effort, runtime, autonomous, browser)"
+  - "PUT /api/config with valid effort level change applies immediately — subsequent GET /api/config reflects the new value"
+  - "PUT /api/config with invalid field returns 422 validation error and config remains unchanged"
+  - "Config change triggers config_updated WebSocket message to connected clients"
+
+  # --- Graceful Shutdown & Error Recovery ---
+  - "Server shutdown (SIGTERM) sends WebSocket close frames to all connected clients before stopping"
+  - "Agent crash mid-stream: client receives error frame and can send new messages without reconnecting"
+  - "WebSocket drops mid-approval (client disconnects while approval_request is pending): approval times out, tool is denied, server recovers cleanly"
+  - "Sending a message while agent is already processing triggers interrupt_prompt flow — choosing 'Wait' queues the message, choosing 'Send Now' interrupts"
+
+  # --- Activity & Status Indicators (end-to-end) ---
+  - "While agent processes a multi-tool response, client receives tool_start/tool_end pairs for each tool in sequence"
+  - "Status typing=true arrives before first stream_token, typing=false arrives after message_complete"
+  - "Ping sent by client every 25s receives pong response — connection stays alive across idle periods"
+  - "No pong received within 50s: client detects stale connection and initiates reconnect with exponential backoff"

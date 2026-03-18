@@ -1,18 +1,23 @@
 """Middleware chain — each middleware can pass through or short-circuit."""
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from leashd.connectors.base import Attachment
+
 
 class MessageContext(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
     user_id: str
     chat_id: str
     text: str
+    attachments: list[Attachment] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

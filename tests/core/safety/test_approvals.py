@@ -19,7 +19,6 @@ def classification():
 
 
 class TestApprovalCoordinator:
-    @pytest.mark.asyncio
     async def test_approval_granted(
         self, approval_coordinator, mock_connector, classification
     ):
@@ -45,7 +44,6 @@ class TestApprovalCoordinator:
         assert result.reason is None
         assert approval_coordinator.pending_count == 0
 
-    @pytest.mark.asyncio
     async def test_approval_denied(
         self, approval_coordinator, mock_connector, classification
     ):
@@ -69,7 +67,6 @@ class TestApprovalCoordinator:
         assert result.approved is False
         assert result.reason is None
 
-    @pytest.mark.asyncio
     async def test_approval_timeout_denies(
         self, approval_coordinator, mock_connector, classification
     ):
@@ -89,12 +86,10 @@ class TestApprovalCoordinator:
             mock_connector.deleted_messages
         )
 
-    @pytest.mark.asyncio
     async def test_resolve_unknown_approval(self, approval_coordinator):
         result = await approval_coordinator.resolve_approval("nonexistent-id", True)
         assert result is False
 
-    @pytest.mark.asyncio
     async def test_approval_request_sent_to_connector(
         self, approval_coordinator, mock_connector, classification
     ):
@@ -119,7 +114,6 @@ class TestApprovalCoordinator:
         assert "Write" in req["description"]
         assert req["tool_name"] == "Write"
 
-    @pytest.mark.asyncio
     async def test_format_description_bash(self, approval_coordinator, classification):
         desc = approval_coordinator._format_description(
             "Bash",
@@ -129,7 +123,6 @@ class TestApprovalCoordinator:
         assert "Bash" in desc
         assert "git push" in desc
 
-    @pytest.mark.asyncio
     async def test_format_description_write(self, approval_coordinator, classification):
         desc = approval_coordinator._format_description(
             "Write",
@@ -139,7 +132,6 @@ class TestApprovalCoordinator:
         assert "Write" in desc
         assert "/project/main.py" in desc
 
-    @pytest.mark.asyncio
     async def test_format_description_edit(self, approval_coordinator, classification):
         desc = approval_coordinator._format_description(
             "Edit",
@@ -149,7 +141,6 @@ class TestApprovalCoordinator:
         assert "Edit" in desc
         assert "Path:" in desc
 
-    @pytest.mark.asyncio
     async def test_format_description_glob(self, approval_coordinator, classification):
         desc = approval_coordinator._format_description(
             "Glob",
@@ -159,7 +150,6 @@ class TestApprovalCoordinator:
         assert "Glob" in desc
         assert "**/*.py" in desc
 
-    @pytest.mark.asyncio
     async def test_concurrent_approval_requests(
         self, approval_coordinator, mock_connector, classification
     ):
@@ -189,7 +179,6 @@ class TestApprovalCoordinator:
         assert r1.approved is True
         assert r2.approved is True
 
-    @pytest.mark.asyncio
     async def test_approval_different_chat_ids(
         self, approval_coordinator, mock_connector, classification
     ):
@@ -210,7 +199,6 @@ class TestApprovalCoordinator:
         assert result.approved is True
         assert mock_connector.approval_requests[0]["chat_id"] == "unique_chat_999"
 
-    @pytest.mark.asyncio
     async def test_pending_count_during_active(
         self, approval_coordinator, mock_connector, classification
     ):
@@ -233,7 +221,6 @@ class TestApprovalCoordinator:
         await task
         assert approval_coordinator.pending_count == 0
 
-    @pytest.mark.asyncio
     async def test_pending_cleanup_after_resolve(
         self, approval_coordinator, mock_connector, classification
     ):
@@ -256,7 +243,6 @@ class TestApprovalCoordinator:
         await task
         assert approval_coordinator.pending_count == 0
 
-    @pytest.mark.asyncio
     async def test_approval_id_is_uuid(
         self, approval_coordinator, mock_connector, classification
     ):
@@ -279,7 +265,6 @@ class TestApprovalCoordinator:
         )
         await task
 
-    @pytest.mark.asyncio
     async def test_double_resolve_returns_false(
         self, approval_coordinator, mock_connector, classification
     ):
@@ -305,7 +290,6 @@ class TestApprovalCoordinator:
         second = await approval_coordinator.resolve_approval(approval_id, True)
         assert second is False
 
-    @pytest.mark.asyncio
     async def test_format_description_unknown_tool(
         self, approval_coordinator, classification
     ):
@@ -319,7 +303,6 @@ class TestApprovalCoordinator:
         assert "Command:" not in desc
         assert "Path:" not in desc
 
-    @pytest.mark.asyncio
     async def test_format_description_long_command_truncated(
         self, approval_coordinator, classification
     ):
@@ -334,7 +317,6 @@ class TestApprovalCoordinator:
         assert long_cmd not in desc
         assert len(desc) < 500
 
-    @pytest.mark.asyncio
     async def test_format_description_empty_input(
         self, approval_coordinator, classification
     ):
@@ -346,7 +328,6 @@ class TestApprovalCoordinator:
         assert "Tool: Bash" in desc
         assert "(details unavailable)" in desc
 
-    @pytest.mark.asyncio
     async def test_format_description_empty_command_string(
         self, approval_coordinator, classification
     ):
@@ -357,7 +338,6 @@ class TestApprovalCoordinator:
         )
         assert "Command: (details unavailable)" in desc
 
-    @pytest.mark.asyncio
     async def test_very_short_timeout_denies(
         self, approval_coordinator, classification
     ):
@@ -372,7 +352,6 @@ class TestApprovalCoordinator:
 
 
 class TestApprovalCancellation:
-    @pytest.mark.asyncio
     async def test_cancel_pending_sets_decision_false(
         self, approval_coordinator, mock_connector, classification
     ):
@@ -397,7 +376,6 @@ class TestApprovalCancellation:
             mock_connector.deleted_messages
         )
 
-    @pytest.mark.asyncio
     async def test_cancel_pending_only_affects_matching_chat(
         self, approval_coordinator, mock_connector, classification
     ):
@@ -433,7 +411,6 @@ class TestApprovalCancellation:
         assert r1.approved is False
         assert r2.approved is True
 
-    @pytest.mark.asyncio
     async def test_cancel_no_pending_returns_empty(self, approval_coordinator):
         cancelled = await approval_coordinator.cancel_pending("nonexistent")
         assert cancelled == []
@@ -442,7 +419,6 @@ class TestApprovalCancellation:
 class TestApprovalBypass:
     """Security bypass attempt vectors for the approval coordinator."""
 
-    @pytest.mark.asyncio
     async def test_concurrent_resolve_same_id(
         self, approval_coordinator, mock_connector, classification
     ):
@@ -469,7 +445,6 @@ class TestApprovalBypass:
         second = await approval_coordinator.resolve_approval(approval_id, True)
         assert second is False
 
-    @pytest.mark.asyncio
     async def test_resolve_after_timeout(self, approval_coordinator, classification):
         """Resolution after timeout — pending already cleaned up."""
         result = await approval_coordinator.request_approval(
@@ -483,7 +458,6 @@ class TestApprovalBypass:
         # All pending cleaned up — any resolve should fail
         assert approval_coordinator.pending_count == 0
 
-    @pytest.mark.asyncio
     async def test_near_zero_timeout_denies(self, approval_coordinator, classification):
         """Near-zero timeout triggers TimeoutError → deny."""
         result = await approval_coordinator.request_approval(
@@ -495,7 +469,6 @@ class TestApprovalBypass:
         )
         assert result.approved is False
 
-    @pytest.mark.asyncio
     async def test_connector_request_approval_raises(self, config, classification):
         """RuntimeError from connector.request_approval propagates."""
         from unittest.mock import AsyncMock
@@ -516,7 +489,6 @@ class TestApprovalBypass:
 
 
 class TestRejectWithReason:
-    @pytest.mark.asyncio
     async def test_reject_with_reason_resolves_pending(
         self, approval_coordinator, mock_connector, classification
     ):
@@ -539,7 +511,6 @@ class TestRejectWithReason:
         assert result.approved is False
         assert result.reason == "use uv add instead"
 
-    @pytest.mark.asyncio
     async def test_reject_with_reason_no_pending_returns_false(
         self, approval_coordinator
     ):
@@ -548,7 +519,6 @@ class TestRejectWithReason:
         )
         assert resolved is False
 
-    @pytest.mark.asyncio
     async def test_has_pending_true_when_active(
         self, approval_coordinator, mock_connector, classification
     ):
@@ -569,11 +539,9 @@ class TestRejectWithReason:
         )
         await task
 
-    @pytest.mark.asyncio
     async def test_has_pending_false_when_empty(self, approval_coordinator):
         assert approval_coordinator.has_pending("chat1") is False
 
-    @pytest.mark.asyncio
     async def test_button_rejection_has_no_reason(
         self, approval_coordinator, mock_connector, classification
     ):
@@ -594,7 +562,6 @@ class TestRejectWithReason:
         assert result.approved is False
         assert result.reason is None
 
-    @pytest.mark.asyncio
     async def test_reject_with_reason_deletes_approval_message(
         self, approval_coordinator, mock_connector, classification
     ):
@@ -621,7 +588,6 @@ class TestRejectWithReason:
             mock_connector.deleted_messages
         )
 
-    @pytest.mark.asyncio
     async def test_button_rejection_does_not_delete_via_coordinator(
         self, approval_coordinator, mock_connector, classification
     ):
@@ -643,7 +609,6 @@ class TestRejectWithReason:
         # resolve_approval does NOT delete messages — that's the connector's job
         assert mock_connector.deleted_messages == []
 
-    @pytest.mark.asyncio
     async def test_format_description_includes_hint(
         self, approval_coordinator, classification
     ):
@@ -654,7 +619,6 @@ class TestRejectWithReason:
         )
         assert "Reply with a message to reject" in desc
 
-    @pytest.mark.asyncio
     async def test_format_description_scoped_bash_key(
         self, approval_coordinator, classification
     ):
@@ -666,7 +630,6 @@ class TestRejectWithReason:
         assert "Bash::uv run" in desc
         assert "Command: uv run pytest" in desc
 
-    @pytest.mark.asyncio
     async def test_format_description_with_ai_denial_reason(
         self, approval_coordinator, classification
     ):
@@ -679,7 +642,6 @@ class TestRejectWithReason:
         assert "\u26a0\ufe0f AI reviewer denied:" in desc
         assert "npm ci modifies node_modules" in desc
 
-    @pytest.mark.asyncio
     async def test_format_description_without_ai_denial_reason(
         self, approval_coordinator, classification
     ):
@@ -693,7 +655,6 @@ class TestRejectWithReason:
 
 
 class TestApprovalCancellationExtended:
-    @pytest.mark.asyncio
     async def test_concurrent_cancel_and_resolve_no_crash(
         self, approval_coordinator, mock_connector, classification
     ):
@@ -719,7 +680,6 @@ class TestApprovalCancellationExtended:
         await task
         assert isinstance(result.approved, bool)
 
-    @pytest.mark.asyncio
     async def test_cancel_during_multiple_chats_only_affects_target(
         self, approval_coordinator, mock_connector, classification
     ):

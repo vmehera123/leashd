@@ -92,6 +92,14 @@ class LeashdConfig(BaseSettings):
     # Connector
     telegram_bot_token: str | None = None
 
+    # WebUI
+    web_enabled: bool = False
+    web_host: str = "0.0.0.0"  # noqa: S104
+    web_port: int = 8080
+    web_api_key: str | None = None
+    web_cors_origins: str = "*"
+    web_dev_mode: bool = False
+
     # Workspaces
     workspace_config_root: Path | None = None
 
@@ -125,7 +133,7 @@ class LeashdConfig(BaseSettings):
 
     # Streaming
     streaming_enabled: bool = True
-    streaming_throttle_seconds: float = 1.5
+    streaming_throttle_seconds: float = 0.15
 
     # Logging
     log_level: str = "INFO"

@@ -27,7 +27,13 @@ from telegram.ext import (
     filters,
 )
 
-from leashd.connectors.base import BaseConnector, InlineButton
+from leashd.connectors.base import (
+    ATTACHMENT_MAX_BYTES,
+    ATTACHMENT_SUPPORTED_TYPES,
+    Attachment,
+    BaseConnector,
+    InlineButton,
+)
 from leashd.exceptions import ConnectorError
 
 if TYPE_CHECKING:
@@ -207,6 +213,12 @@ class TelegramConnector(BaseConnector):
         self._app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_message)
         )
+        self._app.add_handler(
+            MessageHandler(filters.PHOTO & ~filters.COMMAND, self._on_photo)
+        )
+        self._app.add_handler(
+            MessageHandler(filters.Document.ALL & ~filters.COMMAND, self._on_document)
+        )
         self._app.add_handler(CallbackQueryHandler(self._on_callback_query))
         self._app.add_error_handler(self._on_error)
         await _retry_on_network_error(
@@ -352,6 +364,8 @@ class TelegramConnector(BaseConnector):
         chat_id: str,
         tool_name: str,
         description: str,
+        *,
+        agent_name: str = "",  # noqa: ARG002
     ) -> str | None:
         if self._app is None:
             return None
@@ -721,7 +735,7 @@ class TelegramConnector(BaseConnector):
         args = raw[len(first_token) :].strip()
 
         try:
-            response = await self._command_handler(user_id, command, args, chat_id)
+            response = await self._command_handler(user_id, command, args, chat_id, [])
             if response:
                 await self.send_message(chat_id, response)
         except Exception:
@@ -751,7 +765,7 @@ class TelegramConnector(BaseConnector):
 
         await self.send_typing_indicator(chat_id)
         try:
-            result = await self._message_handler(user_id, text, chat_id)
+            result = await self._message_handler(user_id, text, chat_id, [])
             if result == "":
                 await self.delete_message(chat_id, message_id)
         except Exception:
@@ -759,6 +773,154 @@ class TelegramConnector(BaseConnector):
             await self.send_message(
                 chat_id, "An error occurred while processing your message."
             )
+
+    async def _on_photo(
+        self, update: Update, _context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        if not update.message or not update.message.from_user:
+            return
+        if not update.message.photo:
+            return
+
+        user_id = str(update.message.from_user.id)
+        chat_id = str(update.message.chat_id)
+        caption = update.message.caption or ""
+
+        # Download largest photo variant
+        photo = update.message.photo[-1]
+        try:
+            tg_file = await photo.get_file()
+            data = bytes(await tg_file.download_as_bytearray())
+        except Exception:
+            logger.exception("telegram_photo_download_failed", chat_id=chat_id)
+            await self.send_message(chat_id, "Failed to download photo.")
+            return
+
+        if len(data) > ATTACHMENT_MAX_BYTES:
+            size_mb = len(data) / (1024 * 1024)
+            await self.send_message(
+                chat_id,
+                f"Photo too large ({size_mb:.1f} MB). Maximum is "
+                f"{ATTACHMENT_MAX_BYTES // (1024 * 1024)} MB.",
+            )
+            return
+
+        filename = f"photo_{photo.file_unique_id}.jpg"
+        attachment = Attachment(filename=filename, media_type="image/jpeg", data=data)
+
+        logger.info(
+            "telegram_photo_received",
+            user_id=user_id,
+            chat_id=chat_id,
+            file_size=len(data),
+            has_caption=bool(caption),
+        )
+
+        message_id = str(update.message.message_id)
+        await self.send_typing_indicator(chat_id)
+        await self._route_attachment_message(
+            user_id, chat_id, caption, [attachment], message_id
+        )
+
+    async def _on_document(
+        self, update: Update, _context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        if not update.message or not update.message.from_user:
+            return
+        doc = update.message.document
+        if not doc:
+            return
+
+        user_id = str(update.message.from_user.id)
+        chat_id = str(update.message.chat_id)
+        caption = update.message.caption or ""
+        mime_type = doc.mime_type or ""
+
+        if mime_type not in ATTACHMENT_SUPPORTED_TYPES:
+            supported = ", ".join(sorted(ATTACHMENT_SUPPORTED_TYPES))
+            await self.send_message(
+                chat_id,
+                f"Unsupported file type: {mime_type}\nSupported: {supported}",
+            )
+            return
+
+        if doc.file_size and doc.file_size > ATTACHMENT_MAX_BYTES:
+            size_mb = doc.file_size / (1024 * 1024)
+            await self.send_message(
+                chat_id,
+                f"File too large ({size_mb:.1f} MB). Maximum is "
+                f"{ATTACHMENT_MAX_BYTES // (1024 * 1024)} MB.",
+            )
+            return
+
+        try:
+            tg_file = await doc.get_file()
+            data = bytes(await tg_file.download_as_bytearray())
+        except Exception:
+            logger.exception("telegram_document_download_failed", chat_id=chat_id)
+            await self.send_message(chat_id, "Failed to download document.")
+            return
+
+        filename = doc.file_name or f"document_{doc.file_unique_id}"
+        attachment = Attachment(filename=filename, media_type=mime_type, data=data)
+
+        logger.info(
+            "telegram_document_received",
+            user_id=user_id,
+            chat_id=chat_id,
+            mime_type=mime_type,
+            file_size=len(data),
+            has_caption=bool(caption),
+        )
+
+        message_id = str(update.message.message_id)
+        await self.send_typing_indicator(chat_id)
+        await self._route_attachment_message(
+            user_id, chat_id, caption, [attachment], message_id
+        )
+
+    async def _route_attachment_message(
+        self,
+        user_id: str,
+        chat_id: str,
+        caption: str,
+        attachments: list[Attachment],
+        message_id: str,
+    ) -> None:
+        """Route a message with attachments to the correct handler.
+
+        If the caption starts with a slash command (e.g. /plan), route to the
+        command handler. Otherwise route to the message handler.
+        """
+        text = caption.strip() if caption else "Describe this image."
+
+        if text.startswith("/") and self._command_handler:
+            parts = text.split(maxsplit=1)
+            first_token = parts[0]
+            command = first_token.lstrip("/").split("@")[0]
+            args = parts[1] if len(parts) > 1 else ""
+            try:
+                response = await self._command_handler(
+                    user_id, command, args, chat_id, attachments
+                )
+                if response:
+                    await self.send_message(chat_id, response)
+            except Exception:
+                logger.exception("telegram_attachment_command_error", chat_id=chat_id)
+            return
+
+        if self._message_handler:
+            try:
+                result = await self._message_handler(
+                    user_id, text, chat_id, attachments
+                )
+                if result == "":
+                    await self.delete_message(chat_id, message_id)
+            except Exception:
+                logger.exception("telegram_attachment_message_error", chat_id=chat_id)
+                await self.send_message(
+                    chat_id, "An error occurred while processing your attachment."
+                )
 
     async def _on_callback_query(
         self, update: Update, _context: ContextTypes.DEFAULT_TYPE
@@ -1019,7 +1181,7 @@ class TelegramConnector(BaseConnector):
             return
 
         try:
-            result = await self._command_handler(user_id, "dir", dir_name, chat_id)
+            result = await self._command_handler(user_id, "dir", dir_name, chat_id, [])
             if isinstance(query.message, Message) and result:
                 await query.edit_message_text(result)
         except Exception:
@@ -1040,7 +1202,9 @@ class TelegramConnector(BaseConnector):
             return
 
         try:
-            result = await self._command_handler(user_id, "workspace", ws_name, chat_id)
+            result = await self._command_handler(
+                user_id, "workspace", ws_name, chat_id, []
+            )
             if isinstance(query.message, Message) and result:
                 await query.edit_message_text(result)
         except Exception:

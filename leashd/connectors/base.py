@@ -4,7 +4,47 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Coroutine
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
+
+ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024  # 10 MB per file
+ATTACHMENT_MAX_COUNT = 5
+ATTACHMENT_SUPPORTED_TYPES = frozenset(
+    {
+        "image/jpeg",
+        "image/png",
+        "image/gif",
+        "image/webp",
+        "application/pdf",
+    }
+)
+
+
+class Attachment(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    filename: str
+    media_type: str
+    data: bytes
+
+    @field_validator("media_type")
+    @classmethod
+    def _validate_media_type(cls, v: str) -> str:
+        if v not in ATTACHMENT_SUPPORTED_TYPES:
+            raise ValueError(
+                f"Unsupported media type: {v}. "
+                f"Supported: {', '.join(sorted(ATTACHMENT_SUPPORTED_TYPES))}"
+            )
+        return v
+
+    @field_validator("data")
+    @classmethod
+    def _validate_size(cls, v: bytes) -> bytes:
+        if len(v) > ATTACHMENT_MAX_BYTES:
+            size_mb = len(v) / (1024 * 1024)
+            raise ValueError(
+                f"Attachment too large: {size_mb:.1f} MB (max {ATTACHMENT_MAX_BYTES // (1024 * 1024)} MB)"
+            )
+        return v
 
 
 class InlineButton(BaseModel):
@@ -14,11 +54,15 @@ class InlineButton(BaseModel):
     callback_data: str
 
 
+MessageHandler = Callable[[str, str, str, list[Attachment]], Coroutine[Any, Any, str]]
+CommandHandler = Callable[
+    [str, str, str, str, list[Attachment]], Coroutine[Any, Any, str]
+]
+
+
 class BaseConnector(ABC):
     def __init__(self) -> None:
-        self._message_handler: (
-            Callable[[str, str, str], Coroutine[Any, Any, str]] | None
-        ) = None
+        self._message_handler: MessageHandler | None = None
         self._approval_resolver: (
             Callable[[str, bool], Coroutine[Any, Any, bool]] | None
         ) = None
@@ -26,9 +70,7 @@ class BaseConnector(ABC):
             Callable[[str, str], Coroutine[Any, Any, bool]] | None
         ) = None
         self._auto_approve_handler: Callable[[str, str], None] | None = None
-        self._command_handler: (
-            Callable[[str, str, str, str], Coroutine[Any, Any, str]] | None
-        ) = None
+        self._command_handler: CommandHandler | None = None
         self._git_handler: (
             Callable[[str, str, str, str], Coroutine[Any, Any, None]] | None
         ) = None
@@ -77,6 +119,11 @@ class BaseConnector(ABC):
     ) -> None:
         """Edit an existing message. Default: no-op."""
 
+    async def complete_stream(  # noqa: B027
+        self, chat_id: str, message_id: str
+    ) -> None:
+        """Signal that a streamed message is finalized. Default: no-op."""
+
     async def delete_message(  # noqa: B027
         self, chat_id: str, message_id: str
     ) -> None:
@@ -93,9 +140,9 @@ class BaseConnector(ABC):
 
     def set_message_handler(
         self,
-        handler: Callable[[str, str, str], Coroutine[Any, Any, str]],
+        handler: MessageHandler,
     ) -> None:
-        """Register handler(user_id, text, chat_id) for incoming messages."""
+        """Register handler(user_id, text, chat_id, attachments) for incoming messages."""
         self._message_handler = handler
 
     def set_approval_resolver(
@@ -121,9 +168,9 @@ class BaseConnector(ABC):
 
     def set_command_handler(
         self,
-        handler: Callable[[str, str, str, str], Coroutine[Any, Any, str]],
+        handler: CommandHandler,
     ) -> None:
-        """Register handler(user_id, command, args, chat_id) for slash commands."""
+        """Register handler(user_id, command, args, chat_id, attachments) for slash commands."""
         self._command_handler = handler
 
     def set_git_handler(
@@ -155,6 +202,8 @@ class BaseConnector(ABC):
         chat_id: str,  # noqa: ARG002
         tool_name: str,  # noqa: ARG002
         description: str,  # noqa: ARG002
+        *,
+        agent_name: str = "",  # noqa: ARG002
     ) -> str | None:
         """Create/update a standalone activity indicator. Returns message ID."""
         return None
@@ -163,6 +212,9 @@ class BaseConnector(ABC):
         self, chat_id: str
     ) -> None:
         """Delete the current activity indicator for a chat."""
+
+    async def close_agent_group(self, chat_id: str) -> None:  # noqa: B027
+        """Close the current agent group in the UI. Default: no-op."""
 
     async def send_plan_messages(
         self,
@@ -201,3 +253,12 @@ class BaseConnector(ABC):
         description: str,
     ) -> None:
         """Send plan review prompt with proceed/adjust/clean options. Default: no-op."""
+
+    async def send_task_update(  # noqa: B027
+        self,
+        chat_id: str,
+        phase: str,
+        status: str,
+        description: str,
+    ) -> None:
+        """Send a task progress update to the client. Default: no-op."""

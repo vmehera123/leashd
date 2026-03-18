@@ -28,6 +28,11 @@ leashd is controlled entirely from the command line. The `leashd` command manage
 | `leashd runtime show` | Show current agent runtime |
 | `leashd runtime set <name>` | Switch runtime (`claude-code`, `codex`) |
 | `leashd runtime list` | List available runtimes with stability |
+| `leashd webui` / `leashd webui show` | Show WebUI status (enabled, host, port) |
+| `leashd webui enable` | Enable WebUI, set API key and port |
+| `leashd webui disable` | Disable WebUI |
+| `leashd webui url` | Print the WebUI URL |
+| `leashd webui tunnel [--provider ...]` | Start a tunnel to expose WebUI publicly (ngrok, cloudflare, tailscale) |
 | `leashd clean` | Remove all runtime artifacts |
 | `leashd version` | Show version |
 
@@ -53,11 +58,50 @@ Interactive first-time setup that prompts for:
 2. **Telegram bot token** — optional; without it, leashd runs in CLI REPL mode
 3. **Telegram user ID** — restricts the bot to your account only
 4. **Autonomous mode** — optional setup for AI approval, task orchestrator, and autonomous loop
-5. **Browser profile** — optional path for persistent browser sessions in `/web`
+5. **WebUI** — when Telegram is skipped, offers browser-based interface setup (API key and port)
+6. **Browser profile** — optional path for persistent browser sessions in `/web`
 
 Writes configuration to `~/.leashd/config.yaml`. Run again to reconfigure.
 
 **Source:** `setup.py`
+
+## WebUI
+
+Manage the browser-based interface. The WebUI runs alongside Telegram (or standalone) on the same daemon.
+
+### Viewing Settings
+
+```bash
+leashd webui show
+```
+
+Displays whether WebUI is enabled, the host/port, and whether an API key is configured.
+
+### Enabling
+
+```bash
+leashd webui enable
+```
+
+Prompts for an API key (generates one if skipped) and port. Writes to `~/.leashd/config.yaml`. A daemon restart is required for changes to take effect.
+
+### Disabling
+
+```bash
+leashd webui disable
+```
+
+### Printing the URL
+
+```bash
+leashd webui url
+```
+
+Prints the URL to open in a browser (e.g., `http://localhost:8080`).
+
+**Source:** `cli.py`
+
+See [WebUI](webui.md) for the full user guide.
 
 ## Browser Configuration
 

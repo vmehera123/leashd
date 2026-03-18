@@ -69,6 +69,7 @@ class SubprocessAgent:
         ]
         | None = None,
         on_retry: Callable[[], Coroutine[Any, Any, None]] | None = None,  # noqa: ARG002
+        attachments: list[Any] | None = None,  # noqa: ARG002
     ) -> AgentResponse:
         self._write_instructions(session)
         cmd = self._build_command(prompt, session)

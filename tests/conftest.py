@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from leashd.connectors.base import BaseConnector, InlineButton
+from leashd.connectors.base import Attachment, BaseConnector, InlineButton
 from leashd.core.config import LeashdConfig
 from leashd.core.events import EventBus
 from leashd.core.interactions import InteractionCoordinator
@@ -54,6 +54,7 @@ class MockConnector(BaseConnector):
         self.cleared_question_chats: list[str] = []
         self.interrupt_prompts: list[dict] = []
         self.scheduled_cleanups: list[dict] = []
+        self.closed_agent_groups: list[str] = []
         self._support_streaming = support_streaming
         self._next_message_id = 1
         self._activity_message_id: dict[str, str] = {}
@@ -160,6 +161,8 @@ class MockConnector(BaseConnector):
         chat_id: str,
         tool_name: str,
         description: str,
+        *,
+        agent_name: str = "",
     ) -> str | None:
         if not self._support_streaming:
             return None
@@ -201,6 +204,9 @@ class MockConnector(BaseConnector):
         if msg_id:
             self.cleared_activities.append(chat_id)
             self.deleted_messages.append({"chat_id": chat_id, "message_id": msg_id})
+
+    async def close_agent_group(self, chat_id: str) -> None:
+        self.closed_agent_groups.append(chat_id)
 
     async def send_plan_messages(
         self,
@@ -276,15 +282,28 @@ class MockConnector(BaseConnector):
             return await self._interaction_resolver(interaction_id, answer)
         return False
 
-    async def simulate_message(self, user_id: str, text: str, chat_id: str) -> None:
+    async def simulate_message(
+        self,
+        user_id: str,
+        text: str,
+        chat_id: str,
+        attachments: list[Attachment] | None = None,
+    ) -> None:
         if self._message_handler:
-            await self._message_handler(user_id, text, chat_id)
+            await self._message_handler(user_id, text, chat_id, attachments or [])
 
     async def simulate_command(
-        self, user_id: str, command: str, args: str, chat_id: str
+        self,
+        user_id: str,
+        command: str,
+        args: str,
+        chat_id: str,
+        attachments: list[Attachment] | None = None,
     ) -> str:
         if self._command_handler:
-            return await self._command_handler(user_id, command, args, chat_id)
+            return await self._command_handler(
+                user_id, command, args, chat_id, attachments or []
+            )
         return ""
 
 

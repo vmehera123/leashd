@@ -111,7 +111,6 @@ def connector():
 
 
 class TestStart:
-    @pytest.mark.asyncio
     async def test_start_creates_app_and_starts_polling(self, connector):
         mock_app = _make_mock_app()
         mock_app.add_error_handler = MagicMock()
@@ -128,7 +127,7 @@ class TestStart:
 
         mock_builder.token.assert_called_once_with("fake:token")
         mock_builder.concurrent_updates.assert_called_once_with(True)
-        assert mock_app.add_handler.call_count == 3
+        assert mock_app.add_handler.call_count == 5
         mock_app.add_error_handler.assert_called_once()
         mock_app.initialize.assert_awaited_once()
         mock_app.start.assert_awaited_once()
@@ -136,7 +135,6 @@ class TestStart:
 
 
 class TestStop:
-    @pytest.mark.asyncio
     async def test_stop_shuts_down_in_order(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -147,11 +145,9 @@ class TestStop:
         mock_app.stop.assert_awaited_once()
         mock_app.shutdown.assert_awaited_once()
 
-    @pytest.mark.asyncio
     async def test_stop_without_start_is_noop(self, connector):
         await connector.stop()  # should not raise
 
-    @pytest.mark.asyncio
     async def test_stop_timeout_does_not_hang(self, connector):
         """When shutdown hangs, the timeout fires and stop() completes."""
         mock_app = _make_mock_app()
@@ -170,7 +166,6 @@ class TestStop:
 
 
 class TestSendMessage:
-    @pytest.mark.asyncio
     async def test_sends_short_message(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -183,7 +178,6 @@ class TestSendMessage:
         assert "parse_mode" not in call_kwargs
         assert call_kwargs["reply_markup"] is None
 
-    @pytest.mark.asyncio
     async def test_sends_long_message_in_chunks(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -193,7 +187,6 @@ class TestSendMessage:
 
         assert mock_app.bot.send_message.await_count == 2
 
-    @pytest.mark.asyncio
     async def test_buttons_on_last_chunk_only(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -206,11 +199,9 @@ class TestSendMessage:
         assert calls[0].kwargs["reply_markup"] is None
         assert calls[1].kwargs["reply_markup"] is not None
 
-    @pytest.mark.asyncio
     async def test_no_app_is_noop(self, connector):
         await connector.send_message("123", "hello")  # should not raise
 
-    @pytest.mark.asyncio
     async def test_send_message_exception_logged_not_raised(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -218,7 +209,6 @@ class TestSendMessage:
 
         await connector.send_message("123", "hello")  # should not raise
 
-    @pytest.mark.asyncio
     async def test_partial_chunk_failure(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -240,7 +230,6 @@ class TestSendMessage:
 
 
 class TestSendTypingIndicator:
-    @pytest.mark.asyncio
     async def test_sends_typing_action(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -253,7 +242,6 @@ class TestSendTypingIndicator:
 
 
 class TestRequestApproval:
-    @pytest.mark.asyncio
     async def test_sends_description_with_buttons(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -273,7 +261,6 @@ class TestRequestApproval:
 
 
 class TestSendFile:
-    @pytest.mark.asyncio
     async def test_sends_document(self, connector, tmp_path):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -287,7 +274,6 @@ class TestSendFile:
         call_kwargs = mock_app.bot.send_document.await_args.kwargs
         assert call_kwargs["chat_id"] == 123
 
-    @pytest.mark.asyncio
     async def test_send_nonexistent_file_logged_not_raised(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -296,7 +282,6 @@ class TestSendFile:
 
         mock_app.bot.send_document.assert_not_awaited()
 
-    @pytest.mark.asyncio
     async def test_retry_resets_file_position(self, connector, tmp_path):
         """File position is reset to 0 before each retry attempt."""
         mock_app = _make_mock_app()
@@ -349,7 +334,6 @@ def _make_callback_update(data="approval:yes:abc-123"):
 
 
 class TestOnMessage:
-    @pytest.mark.asyncio
     async def test_delegates_to_handler(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -360,9 +344,8 @@ class TestOnMessage:
         update = _make_update(user_id=42, text="fix bug", chat_id=99)
         await connector._on_message(update, MagicMock())
 
-        handler.assert_awaited_once_with("42", "fix bug", "99")
+        handler.assert_awaited_once_with("42", "fix bug", "99", [])
 
-    @pytest.mark.asyncio
     async def test_does_not_send_response_itself(self, connector):
         """Connector delegates delivery to Engine; it must not send the response."""
         mock_app = _make_mock_app()
@@ -377,7 +360,6 @@ class TestOnMessage:
         for call in mock_app.bot.send_message.await_args_list:
             assert call.kwargs.get("text") != "done"
 
-    @pytest.mark.asyncio
     async def test_no_handler_is_noop(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -385,13 +367,11 @@ class TestOnMessage:
         update = _make_update()
         await connector._on_message(update, MagicMock())  # should not raise
 
-    @pytest.mark.asyncio
     async def test_no_message_is_noop(self, connector):
         update = MagicMock()
         update.message = None
         await connector._on_message(update, MagicMock())  # should not raise
 
-    @pytest.mark.asyncio
     async def test_handler_error_sends_error_message(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -406,7 +386,6 @@ class TestOnMessage:
         error_text = calls[-1].kwargs["text"]
         assert "error" in error_text.lower()
 
-    @pytest.mark.asyncio
     async def test_message_without_from_user_is_noop(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -422,14 +401,13 @@ class TestOnMessage:
         handler.assert_not_awaited()
         mock_app.bot.send_message.assert_not_awaited()
 
-    @pytest.mark.asyncio
     async def test_sends_typing_indicator_before_handler(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
 
         call_order = []
 
-        async def fake_handler(user_id, text, chat_id):
+        async def fake_handler(user_id, text, chat_id, _attachments):
             call_order.append("handler")
             return "ok"
 
@@ -444,7 +422,6 @@ class TestOnMessage:
 
         assert call_order == ["typing", "handler"]
 
-    @pytest.mark.asyncio
     async def test_handler_error_does_not_leak_details(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -462,7 +439,6 @@ class TestOnMessage:
 
 
 class TestOnCallbackQuery:
-    @pytest.mark.asyncio
     async def test_approval_yes_resolves_true(self, connector):
         resolver = AsyncMock()
         connector.set_approval_resolver(resolver)
@@ -472,7 +448,6 @@ class TestOnCallbackQuery:
 
         resolver.assert_awaited_once_with("abc-123", True)
 
-    @pytest.mark.asyncio
     async def test_approval_no_resolves_false(self, connector):
         resolver = AsyncMock()
         connector.set_approval_resolver(resolver)
@@ -482,7 +457,6 @@ class TestOnCallbackQuery:
 
         resolver.assert_awaited_once_with("abc-123", False)
 
-    @pytest.mark.asyncio
     async def test_non_approval_callback_ignored(self, connector):
         resolver = AsyncMock()
         connector.set_approval_resolver(resolver)
@@ -492,7 +466,6 @@ class TestOnCallbackQuery:
 
         resolver.assert_not_awaited()
 
-    @pytest.mark.asyncio
     async def test_edits_message_with_status(self, connector):
         connector.set_approval_resolver(AsyncMock(return_value=True))
 
@@ -504,13 +477,11 @@ class TestOnCallbackQuery:
         edited_text = call_args[0][0]
         assert "Approved \u2713" in edited_text
 
-    @pytest.mark.asyncio
     async def test_no_query_is_noop(self, connector):
         update = MagicMock()
         update.callback_query = None
         await connector._on_callback_query(update, MagicMock())
 
-    @pytest.mark.asyncio
     async def test_answers_callback_query(self, connector):
         update = _make_callback_update("approval:yes:abc-123")
         connector.set_approval_resolver(AsyncMock())
@@ -519,7 +490,6 @@ class TestOnCallbackQuery:
 
         update.callback_query.answer.assert_awaited_once()
 
-    @pytest.mark.asyncio
     async def test_approval_prefix_only_ignored(self, connector):
         """Data 'approval:' with no colon in suffix is already handled."""
         resolver = AsyncMock()
@@ -530,7 +500,6 @@ class TestOnCallbackQuery:
 
         resolver.assert_not_awaited()
 
-    @pytest.mark.asyncio
     async def test_empty_approval_id_ignored(self, connector):
         """Data 'approval:yes:' produces empty approval_id — must not call resolver."""
         resolver = AsyncMock()
@@ -541,7 +510,6 @@ class TestOnCallbackQuery:
 
         resolver.assert_not_awaited()
 
-    @pytest.mark.asyncio
     async def test_unknown_decision_value_resolves_as_rejected(self, connector):
         resolver = AsyncMock()
         connector.set_approval_resolver(resolver)
@@ -551,7 +519,6 @@ class TestOnCallbackQuery:
 
         resolver.assert_awaited_once_with("abc-123", False)
 
-    @pytest.mark.asyncio
     async def test_approval_id_with_colons_preserved(self, connector):
         resolver = AsyncMock()
         connector.set_approval_resolver(resolver)
@@ -561,7 +528,6 @@ class TestOnCallbackQuery:
 
         resolver.assert_awaited_once_with("id:with:colons", True)
 
-    @pytest.mark.asyncio
     async def test_resolver_exception_still_edits_message(self, connector):
         resolver = AsyncMock(side_effect=RuntimeError("resolver boom"))
         connector.set_approval_resolver(resolver)
@@ -573,7 +539,6 @@ class TestOnCallbackQuery:
         edited_text = update.callback_query.edit_message_text.await_args[0][0]
         assert "Expired" in edited_text
 
-    @pytest.mark.asyncio
     async def test_no_resolver_set_still_edits_message(self, connector):
         update = _make_callback_update("approval:yes:abc-123")
         await connector._on_callback_query(update, MagicMock())
@@ -582,7 +547,6 @@ class TestOnCallbackQuery:
         edited_text = update.callback_query.edit_message_text.await_args[0][0]
         assert "Expired" in edited_text
 
-    @pytest.mark.asyncio
     async def test_query_answer_failure_does_not_abort_handler(self, connector):
         resolver = AsyncMock(return_value=True)
         connector.set_approval_resolver(resolver)
@@ -596,7 +560,6 @@ class TestOnCallbackQuery:
         resolver.assert_awaited_once_with("abc-123", True)
         update.callback_query.edit_message_text.assert_awaited_once()
 
-    @pytest.mark.asyncio
     async def test_resolver_returns_false_shows_expired(self, connector):
         resolver = AsyncMock(return_value=False)
         connector.set_approval_resolver(resolver)
@@ -610,7 +573,6 @@ class TestOnCallbackQuery:
 
 
 class TestSendMessageWithId:
-    @pytest.mark.asyncio
     async def test_returns_message_id(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -625,7 +587,6 @@ class TestSendMessageWithId:
         assert call_kwargs["chat_id"] == 123
         assert "parse_mode" not in call_kwargs
 
-    @pytest.mark.asyncio
     async def test_returns_none_on_error(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -634,12 +595,10 @@ class TestSendMessageWithId:
         result = await connector.send_message_with_id("123", "hello")
         assert result is None
 
-    @pytest.mark.asyncio
     async def test_no_app_returns_none(self, connector):
         result = await connector.send_message_with_id("123", "hello")
         assert result is None
 
-    @pytest.mark.asyncio
     async def test_truncates_long_text(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -655,7 +614,6 @@ class TestSendMessageWithId:
 
 
 class TestEditMessage:
-    @pytest.mark.asyncio
     async def test_edits_message(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -668,11 +626,9 @@ class TestEditMessage:
         assert call_kwargs["message_id"] == 42
         assert "parse_mode" not in call_kwargs
 
-    @pytest.mark.asyncio
     async def test_no_app_is_noop(self, connector):
         await connector.edit_message("123", "42", "text")  # should not raise
 
-    @pytest.mark.asyncio
     async def test_exception_caught(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -680,7 +636,6 @@ class TestEditMessage:
 
         await connector.edit_message("123", "42", "text")  # should not raise
 
-    @pytest.mark.asyncio
     async def test_truncates_long_text(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -695,12 +650,10 @@ class TestEditMessage:
 class TestTelegramConnectorEdgeCases:
     """Coverage gap closers for telegram.py."""
 
-    @pytest.mark.asyncio
     async def test_send_typing_no_app_noop(self, connector):
         """send_typing_indicator with no app does nothing."""
         await connector.send_typing_indicator("123")  # should not raise
 
-    @pytest.mark.asyncio
     async def test_send_typing_exception_logged(self, connector):
         """Exception in send_typing_indicator is caught."""
         mock_app = _make_mock_app()
@@ -708,12 +661,10 @@ class TestTelegramConnectorEdgeCases:
         mock_app.bot.send_chat_action.side_effect = RuntimeError("typing error")
         await connector.send_typing_indicator("123")  # should not raise
 
-    @pytest.mark.asyncio
     async def test_send_file_no_app_noop(self, connector):
         """send_file with no app does nothing."""
         await connector.send_file("123", "/some/file.txt")  # should not raise
 
-    @pytest.mark.asyncio
     async def test_callback_query_no_data_ignored(self, connector):
         """Callback query with None data is handled gracefully."""
         resolver = AsyncMock()
@@ -725,7 +676,6 @@ class TestTelegramConnectorEdgeCases:
         await connector._on_callback_query(update, MagicMock())
         resolver.assert_not_awaited()
 
-    @pytest.mark.asyncio
     async def test_split_very_long_no_whitespace(self):
         """Very long string with no whitespace hits hard break at 4000."""
         text = "x" * 12000
@@ -736,7 +686,6 @@ class TestTelegramConnectorEdgeCases:
 
 
 class TestDeleteMessage:
-    @pytest.mark.asyncio
     async def test_deletes_message(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -745,11 +694,9 @@ class TestDeleteMessage:
 
         mock_app.bot.delete_message.assert_awaited_once_with(chat_id=123, message_id=42)
 
-    @pytest.mark.asyncio
     async def test_no_app_is_noop(self, connector):
         await connector.delete_message("123", "42")  # should not raise
 
-    @pytest.mark.asyncio
     async def test_exception_caught(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -759,7 +706,6 @@ class TestDeleteMessage:
 
 
 class TestTextReplyDeletion:
-    @pytest.mark.asyncio
     async def test_user_reply_deleted_when_consumed_as_interaction(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -774,7 +720,6 @@ class TestTextReplyDeletion:
 
         mock_app.bot.delete_message.assert_awaited_once_with(chat_id=99, message_id=555)
 
-    @pytest.mark.asyncio
     async def test_user_reply_not_deleted_for_normal_messages(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -791,7 +736,6 @@ class TestTextReplyDeletion:
 
 
 class TestDelayedDelete:
-    @pytest.mark.asyncio
     async def test_delayed_delete_waits_then_deletes(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -800,7 +744,6 @@ class TestDelayedDelete:
 
         mock_app.bot.delete_message.assert_awaited_once_with(chat_id=123, message_id=42)
 
-    @pytest.mark.asyncio
     async def test_interaction_callback_deletes_question_immediately(self, connector):
         resolver = AsyncMock(return_value=True)
         connector.set_interaction_resolver(resolver)
@@ -820,7 +763,6 @@ class TestDelayedDelete:
         # Question message should be immediately deleted
         mock_app.bot.delete_message.assert_awaited_once_with(chat_id=100, message_id=42)
 
-    @pytest.mark.asyncio
     async def test_approval_callback_schedules_deletion(self, connector):
         resolver = AsyncMock(return_value=True)
         connector.set_approval_resolver(resolver)
@@ -843,7 +785,6 @@ class TestDelayedDelete:
 
 
 class TestRequestApprovalReturnsMessageId:
-    @pytest.mark.asyncio
     async def test_returns_message_id(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -857,7 +798,6 @@ class TestRequestApprovalReturnsMessageId:
 
         assert result == "99"
 
-    @pytest.mark.asyncio
     async def test_returns_none_when_no_app(self, connector):
         result = await connector.request_approval(
             "123", "abc-123", "Run rm -rf?", "Bash"
@@ -866,7 +806,6 @@ class TestRequestApprovalReturnsMessageId:
 
 
 class TestRequestApprovalButtons:
-    @pytest.mark.asyncio
     async def test_approve_all_button_includes_tool_name(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -880,7 +819,6 @@ class TestRequestApprovalButtons:
         assert markup.inline_keyboard[1][0].text == "Approve all Write"
         assert markup.inline_keyboard[1][0].callback_data == "approval:all:abc-123"
 
-    @pytest.mark.asyncio
     async def test_approve_all_button_fallback_no_tool_name(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -892,7 +830,6 @@ class TestRequestApprovalButtons:
         assert markup is not None
         assert markup.inline_keyboard[1][0].text == "Approve all in session"
 
-    @pytest.mark.asyncio
     async def test_approve_all_button_scoped_bash_key(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -905,7 +842,6 @@ class TestRequestApprovalButtons:
         assert markup.inline_keyboard[1][0].text == "Approve all 'uv run' cmds"
         assert markup.inline_keyboard[1][0].callback_data == "approval:all:abc-123"
 
-    @pytest.mark.asyncio
     async def test_approve_all_callback_data_within_64_bytes(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -920,7 +856,6 @@ class TestRequestApprovalButtons:
             for btn in row:
                 assert len(btn.callback_data.encode()) <= 64
 
-    @pytest.mark.asyncio
     async def test_tool_name_stored_in_memory(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -929,7 +864,6 @@ class TestRequestApprovalButtons:
 
         assert connector._approval_tool_names["abc-123"] == "Write"
 
-    @pytest.mark.asyncio
     async def test_long_approval_id_callback_data_within_64_bytes(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -946,7 +880,6 @@ class TestRequestApprovalButtons:
 
 
 class TestApproveAllCallback:
-    @pytest.mark.asyncio
     async def test_all_decision_resolves_as_approved(self, connector):
         resolver = AsyncMock(return_value=True)
         connector.set_approval_resolver(resolver)
@@ -957,7 +890,6 @@ class TestApproveAllCallback:
 
         resolver.assert_awaited_once_with("abc-123", True)
 
-    @pytest.mark.asyncio
     async def test_all_decision_calls_auto_approve_handler_with_tool_name(
         self, connector
     ):
@@ -976,7 +908,6 @@ class TestApproveAllCallback:
 
         assert handler_calls == [("999", "Write")]
 
-    @pytest.mark.asyncio
     async def test_all_decision_shows_tool_specific_status(self, connector):
         resolver = AsyncMock(return_value=True)
         connector.set_approval_resolver(resolver)
@@ -990,7 +921,6 @@ class TestApproveAllCallback:
         assert "Bash" in edited_text
         assert "Approved \u2713" in edited_text
 
-    @pytest.mark.asyncio
     async def test_all_decision_scoped_bash_status(self, connector):
         resolver = AsyncMock(return_value=True)
         connector.set_approval_resolver(resolver)
@@ -1004,7 +934,6 @@ class TestApproveAllCallback:
         assert "Approved \u2713" in edited_text
         assert "'uv run' cmds auto-approved" in edited_text
 
-    @pytest.mark.asyncio
     async def test_all_decision_scoped_bash_calls_handler_with_key(self, connector):
         resolver = AsyncMock(return_value=True)
         connector.set_approval_resolver(resolver)
@@ -1021,7 +950,6 @@ class TestApproveAllCallback:
 
         assert handler_calls == [("999", "Bash::uv run")]
 
-    @pytest.mark.asyncio
     async def test_all_decision_no_handler_still_resolves(self, connector):
         resolver = AsyncMock(return_value=True)
         connector.set_approval_resolver(resolver)
@@ -1035,7 +963,6 @@ class TestApproveAllCallback:
         edited_text = update.callback_query.edit_message_text.await_args[0][0]
         assert "Approved \u2713" in edited_text
 
-    @pytest.mark.asyncio
     async def test_tool_name_cleaned_up_on_all_callback(self, connector):
         resolver = AsyncMock(return_value=True)
         connector.set_approval_resolver(resolver)
@@ -1046,7 +973,6 @@ class TestApproveAllCallback:
 
         assert "abc-123" not in connector._approval_tool_names
 
-    @pytest.mark.asyncio
     async def test_tool_name_cleaned_up_on_yes_callback(self, connector):
         resolver = AsyncMock(return_value=True)
         connector.set_approval_resolver(resolver)
@@ -1057,7 +983,6 @@ class TestApproveAllCallback:
 
         assert "abc-123" not in connector._approval_tool_names
 
-    @pytest.mark.asyncio
     async def test_tool_name_cleaned_up_on_no_callback(self, connector):
         resolver = AsyncMock(return_value=True)
         connector.set_approval_resolver(resolver)
@@ -1068,7 +993,6 @@ class TestApproveAllCallback:
 
         assert "abc-123" not in connector._approval_tool_names
 
-    @pytest.mark.asyncio
     async def test_missing_tool_name_defaults_to_empty(self, connector):
         """If approval_id has no stored tool_name, default to empty string."""
         resolver = AsyncMock(return_value=True)
@@ -1083,7 +1007,6 @@ class TestApproveAllCallback:
 
 
 class TestOnCommand:
-    @pytest.mark.asyncio
     async def test_command_handler_called(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -1094,9 +1017,8 @@ class TestOnCommand:
         update = _make_update(user_id=42, text="/plan", chat_id=99)
         await connector._on_command(update, MagicMock())
 
-        handler.assert_awaited_once_with("42", "plan", "", "99")
+        handler.assert_awaited_once_with("42", "plan", "", "99", [])
 
-    @pytest.mark.asyncio
     async def test_command_with_args(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -1107,9 +1029,8 @@ class TestOnCommand:
         update = _make_update(user_id=42, text="/edit extra args", chat_id=99)
         await connector._on_command(update, MagicMock())
 
-        handler.assert_awaited_once_with("42", "edit", "extra args", "99")
+        handler.assert_awaited_once_with("42", "edit", "extra args", "99", [])
 
-    @pytest.mark.asyncio
     async def test_command_with_bot_mention(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -1120,9 +1041,8 @@ class TestOnCommand:
         update = _make_update(user_id=42, text="/status@mybot", chat_id=99)
         await connector._on_command(update, MagicMock())
 
-        handler.assert_awaited_once_with("42", "status", "", "99")
+        handler.assert_awaited_once_with("42", "status", "", "99", [])
 
-    @pytest.mark.asyncio
     async def test_command_response_sent(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -1137,7 +1057,6 @@ class TestOnCommand:
         sent_text = mock_app.bot.send_message.await_args.kwargs["text"]
         assert "Switched to plan mode" in sent_text
 
-    @pytest.mark.asyncio
     async def test_no_command_handler_is_noop(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -1147,7 +1066,6 @@ class TestOnCommand:
 
         mock_app.bot.send_message.assert_not_awaited()
 
-    @pytest.mark.asyncio
     async def test_no_message_is_noop(self, connector):
         update = MagicMock()
         update.message = None
@@ -1157,7 +1075,6 @@ class TestOnCommand:
         await connector._on_command(update, MagicMock())
         handler.assert_not_awaited()
 
-    @pytest.mark.asyncio
     async def test_command_handler_error_caught(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -1169,7 +1086,6 @@ class TestOnCommand:
         await connector._on_command(update, MagicMock())
         # Should not raise
 
-    @pytest.mark.asyncio
     async def test_empty_response_not_sent(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -1184,7 +1100,6 @@ class TestOnCommand:
 
 
 class TestClearPlanMessages:
-    @pytest.mark.asyncio
     async def test_clears_tracked_plan_messages(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -1198,7 +1113,6 @@ class TestClearPlanMessages:
         mock_app.bot.delete_message.assert_any_await(chat_id=123, message_id=12)
         assert "123" not in connector._plan_message_ids
 
-    @pytest.mark.asyncio
     async def test_no_tracked_messages_is_noop(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -1207,7 +1121,6 @@ class TestClearPlanMessages:
 
         mock_app.bot.delete_message.assert_not_awaited()
 
-    @pytest.mark.asyncio
     async def test_no_app_is_noop(self, connector):
         connector._plan_message_ids["123"] = ["10", "11"]
 
@@ -1215,7 +1128,6 @@ class TestClearPlanMessages:
 
 
 class TestSendPlanReviewLongContent:
-    @pytest.mark.asyncio
     async def test_short_description_sends_plan_then_buttons(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -1238,7 +1150,6 @@ class TestSendPlanReviewLongContent:
         assert "Yes, manually approve edits" in button_texts
         assert "Adjust the plan" in button_texts
 
-    @pytest.mark.asyncio
     async def test_long_description_split_into_chunks_and_buttons(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -1256,7 +1167,6 @@ class TestSendPlanReviewLongContent:
         last_call = calls[-1]
         assert last_call.kwargs["reply_markup"] is not None
 
-    @pytest.mark.asyncio
     async def test_plan_message_ids_tracked(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -1269,7 +1179,6 @@ class TestSendPlanReviewLongContent:
         assert "123" in connector._plan_message_ids
         assert len(connector._plan_message_ids["123"]) >= 2  # plan msg + review msg
 
-    @pytest.mark.asyncio
     async def test_fallback_inline_plan_when_send_plan_messages_fails(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -1289,7 +1198,6 @@ class TestSendPlanReviewLongContent:
         assert "My plan content" in text
         assert "Proceed with implementation?" in text
 
-    @pytest.mark.asyncio
     async def test_clears_activity_before_sending_plan(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -1307,7 +1215,6 @@ class TestSendPlanReviewLongContent:
         mock_app.bot.delete_message.assert_awaited_once_with(chat_id=123, message_id=42)
         assert "123" not in connector._activity_message_id
 
-    @pytest.mark.asyncio
     async def test_empty_description_uses_generic_header(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -1322,7 +1229,6 @@ class TestSendPlanReviewLongContent:
         assert "Proceed with implementation?" in text
         assert last_call.kwargs["reply_markup"] is not None
 
-    @pytest.mark.asyncio
     async def test_inline_fallback_exact_boundary_no_truncation(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -1339,7 +1245,6 @@ class TestSendPlanReviewLongContent:
         assert "... (truncated)" not in text
         assert "Proceed with implementation?" in text
 
-    @pytest.mark.asyncio
     async def test_inline_fallback_over_boundary_adds_truncation_marker(
         self, connector
     ):
@@ -1363,7 +1268,6 @@ class TestSendPlanReviewLongContent:
 
 
 class TestRetryOnNetworkError:
-    @pytest.mark.asyncio
     async def test_succeeds_first_attempt(self):
         factory = AsyncMock(return_value="ok")
         result = await _retry_on_network_error(
@@ -1376,7 +1280,6 @@ class TestRetryOnNetworkError:
         assert result == "ok"
         factory.assert_awaited_once()
 
-    @pytest.mark.asyncio
     async def test_retries_on_timed_out_then_succeeds(self):
         factory = AsyncMock(side_effect=[TimedOut(), "ok"])
         with patch("leashd.connectors.telegram.asyncio.sleep") as mock_sleep:
@@ -1391,7 +1294,6 @@ class TestRetryOnNetworkError:
         assert factory.await_count == 2
         mock_sleep.assert_awaited_once()
 
-    @pytest.mark.asyncio
     async def test_retries_on_network_error_then_succeeds(self):
         factory = AsyncMock(side_effect=[NetworkError("conn reset"), "ok"])
         with patch("leashd.connectors.telegram.asyncio.sleep"):
@@ -1404,7 +1306,6 @@ class TestRetryOnNetworkError:
             )
         assert result == "ok"
 
-    @pytest.mark.asyncio
     async def test_exhausts_retries_raises_connector_error(self):
         factory = AsyncMock(side_effect=NetworkError("down"))
         with (
@@ -1420,7 +1321,6 @@ class TestRetryOnNetworkError:
             )
         assert factory.await_count == 3
 
-    @pytest.mark.asyncio
     async def test_non_network_error_propagates_immediately(self):
         factory = AsyncMock(side_effect=InvalidToken("bad token"))
         with pytest.raises(InvalidToken):
@@ -1433,7 +1333,6 @@ class TestRetryOnNetworkError:
             )
         factory.assert_awaited_once()
 
-    @pytest.mark.asyncio
     async def test_exponential_backoff_delays(self):
         factory = AsyncMock(
             side_effect=[NetworkError("1"), NetworkError("2"), NetworkError("3")]
@@ -1452,7 +1351,6 @@ class TestRetryOnNetworkError:
         delays = [call.args[0] for call in mock_sleep.await_args_list]
         assert delays == [2.0, 4.0, 8.0]
 
-    @pytest.mark.asyncio
     async def test_delay_capped_at_max(self):
         factory = AsyncMock(
             side_effect=[NetworkError("1"), NetworkError("2"), NetworkError("3")]
@@ -1471,7 +1369,6 @@ class TestRetryOnNetworkError:
         delays = [call.args[0] for call in mock_sleep.await_args_list]
         assert delays == [5.0, 8.0, 8.0]
 
-    @pytest.mark.asyncio
     async def test_retry_after_uses_server_delay(self):
         factory = AsyncMock(side_effect=[RetryAfter(42), "ok"])
         with patch("leashd.connectors.telegram.asyncio.sleep") as mock_sleep:
@@ -1487,7 +1384,6 @@ class TestRetryOnNetworkError:
 
 
 class TestStartRetry:
-    @pytest.mark.asyncio
     async def test_start_retries_initialize_on_timeout(self, connector):
         mock_app = _make_mock_app()
         mock_app.add_error_handler = MagicMock()
@@ -1509,7 +1405,6 @@ class TestStartRetry:
         assert mock_app.initialize.await_count == 2
         mock_app.start.assert_awaited_once()
 
-    @pytest.mark.asyncio
     async def test_start_raises_connector_error_after_exhausted(self, connector):
         mock_app = _make_mock_app()
         mock_app.add_error_handler = MagicMock()
@@ -1529,7 +1424,6 @@ class TestStartRetry:
         ):
             await connector.start()
 
-    @pytest.mark.asyncio
     async def test_start_does_not_retry_invalid_token(self, connector):
         mock_app = _make_mock_app()
         mock_app.add_error_handler = MagicMock()
@@ -1552,7 +1446,6 @@ class TestStartRetry:
 
 
 class TestSendMessageRetry:
-    @pytest.mark.asyncio
     async def test_send_message_retries_on_network_error(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -1563,7 +1456,6 @@ class TestSendMessageRetry:
 
         assert mock_app.bot.send_message.await_count == 2
 
-    @pytest.mark.asyncio
     async def test_send_message_exhausted_retries_caught(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -1573,7 +1465,6 @@ class TestSendMessageRetry:
             await connector.send_message("123", "hello")
         # ConnectorError caught by the outer except — no raise
 
-    @pytest.mark.asyncio
     async def test_send_message_with_id_retries(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -1591,7 +1482,6 @@ class TestSendMessageRetry:
 
 
 class TestInterruptPrompt:
-    @pytest.mark.asyncio
     async def test_send_interrupt_prompt_sends_buttons(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -1618,7 +1508,6 @@ class TestInterruptPrompt:
         assert "interrupt:send:int-abc" in row[0].callback_data
         assert "interrupt:wait:int-abc" in row[1].callback_data
 
-    @pytest.mark.asyncio
     async def test_interrupt_callback_send_now(self, connector):
         resolver = AsyncMock(return_value=True)
         connector.set_interrupt_resolver(resolver)
@@ -1631,7 +1520,6 @@ class TestInterruptPrompt:
         edited = update.callback_query.edit_message_text.await_args[0][0]
         assert "Interrupting" in edited
 
-    @pytest.mark.asyncio
     async def test_interrupt_callback_wait(self, connector):
         resolver = AsyncMock(return_value=True)
         connector.set_interrupt_resolver(resolver)
@@ -1644,7 +1532,6 @@ class TestInterruptPrompt:
         edited = update.callback_query.edit_message_text.await_args[0][0]
         assert "Queued" in edited
 
-    @pytest.mark.asyncio
     async def test_interrupt_callback_expired(self, connector):
         resolver = AsyncMock(return_value=False)
         connector.set_interrupt_resolver(resolver)
@@ -1657,7 +1544,6 @@ class TestInterruptPrompt:
         edited = update.callback_query.edit_message_text.await_args[0][0]
         assert "Expired" in edited
 
-    @pytest.mark.asyncio
     async def test_interrupt_callback_send_now_schedules_cleanup(self, connector):
         resolver = AsyncMock(return_value=True)
         connector.set_interrupt_resolver(resolver)
@@ -1670,7 +1556,6 @@ class TestInterruptPrompt:
             await connector._on_callback_query(update, MagicMock())
             mock_cleanup.assert_called_once_with("555", "42")
 
-    @pytest.mark.asyncio
     async def test_interrupt_callback_wait_schedules_cleanup(self, connector):
         resolver = AsyncMock(return_value=True)
         connector.set_interrupt_resolver(resolver)
@@ -1683,7 +1568,6 @@ class TestInterruptPrompt:
             await connector._on_callback_query(update, MagicMock())
             mock_cleanup.assert_called_once_with("555", "43")
 
-    @pytest.mark.asyncio
     async def test_interrupt_callback_expired_no_cleanup(self, connector):
         resolver = AsyncMock(return_value=False)
         connector.set_interrupt_resolver(resolver)
@@ -1694,7 +1578,6 @@ class TestInterruptPrompt:
             await connector._on_callback_query(update, MagicMock())
             mock_cleanup.assert_not_called()
 
-    @pytest.mark.asyncio
     async def test_interrupt_callback_edit_failure_does_not_crash(self, connector):
         """If edit_message_text fails, the error is swallowed (logged, not raised)."""
         resolver = AsyncMock(return_value=True)
@@ -1716,7 +1599,6 @@ class TestInterruptPrompt:
 
 
 class TestBadRequestNotRetried:
-    @pytest.mark.asyncio
     async def test_bad_request_propagates_immediately(self):
         factory = AsyncMock(side_effect=BadRequest("Message is not modified"))
         with pytest.raises(BadRequest):
@@ -1728,7 +1610,6 @@ class TestBadRequestNotRetried:
                 operation="test_op",
             )
 
-    @pytest.mark.asyncio
     async def test_bad_request_not_caught_as_network_error(self):
         factory = AsyncMock(side_effect=BadRequest("Message is not modified"))
         with pytest.raises(BadRequest):
@@ -1746,7 +1627,6 @@ class TestBadRequestNotRetried:
 
 
 class TestSendActivity:
-    @pytest.mark.asyncio
     async def test_creates_activity_message_and_returns_id(self, connector):
         mock_app = _make_mock_app()
         mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=77))
@@ -1756,7 +1636,6 @@ class TestSendActivity:
         assert msg_id == "77"
         assert connector._activity_message_id["123"] == "77"
 
-    @pytest.mark.asyncio
     async def test_edits_existing_activity_message(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -1768,7 +1647,6 @@ class TestSendActivity:
         mock_app.bot.edit_message_text.assert_awaited_once()
         assert connector._activity_last_text["123"] == "✏️ Editing: New task"
 
-    @pytest.mark.asyncio
     async def test_skips_edit_when_text_unchanged(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -1779,13 +1657,11 @@ class TestSendActivity:
         assert msg_id == "50"
         mock_app.bot.edit_message_text.assert_not_awaited()
 
-    @pytest.mark.asyncio
     async def test_no_app_returns_none(self, connector):
         assert connector._app is None
         result = await connector.send_activity("123", "Read", "desc")
         assert result is None
 
-    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("tool_name", "description", "expected_prefix"),
         [
@@ -1819,7 +1695,6 @@ class TestSendActivity:
 
 
 class TestClearActivity:
-    @pytest.mark.asyncio
     async def test_deletes_tracked_activity_and_clears_state(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -1831,7 +1706,6 @@ class TestClearActivity:
         assert "123" not in connector._activity_last_text
         mock_app.bot.delete_message.assert_awaited_once()
 
-    @pytest.mark.asyncio
     async def test_noop_when_no_activity(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -1839,7 +1713,6 @@ class TestClearActivity:
         await connector.clear_activity("123")
         mock_app.bot.delete_message.assert_not_awaited()
 
-    @pytest.mark.asyncio
     async def test_double_clear_is_safe(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -1855,7 +1728,6 @@ class TestClearActivity:
         await connector.clear_activity("123")
         assert mock_app.bot.delete_message.await_count == 1
 
-    @pytest.mark.asyncio
     async def test_clear_activity_retries_delete(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -1872,7 +1744,6 @@ class TestClearActivity:
         assert "123" not in connector._activity_last_text
         assert mock_app.bot.delete_message.await_count == 2
 
-    @pytest.mark.asyncio
     async def test_clear_activity_pops_state_on_delete_failure(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -1888,7 +1759,6 @@ class TestClearActivity:
 
 
 class TestSendActivityRecovery:
-    @pytest.mark.asyncio
     async def test_send_activity_recovers_from_stale_message_id(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -1911,7 +1781,6 @@ class TestSendActivityRecovery:
 
 
 class TestSendQuestion:
-    @pytest.mark.asyncio
     async def test_sends_question_with_options_and_hint(self, connector):
         mock_app = _make_mock_app()
         mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=99))
@@ -1929,7 +1798,6 @@ class TestSendQuestion:
         assert "Which framework?" in text
         assert "reply" in text.lower()
 
-    @pytest.mark.asyncio
     async def test_question_message_id_tracked(self, connector):
         mock_app = _make_mock_app()
         mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=88))
@@ -1940,7 +1808,6 @@ class TestSendQuestion:
         )
         assert connector._question_message_ids["123"] == "88"
 
-    @pytest.mark.asyncio
     async def test_callback_data_truncated_to_64_bytes(self, connector):
         mock_app = _make_mock_app()
         mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=99))
@@ -1953,7 +1820,6 @@ class TestSendQuestion:
         btn = markup.inline_keyboard[0][0]
         assert len(btn.callback_data.encode()) <= 64
 
-    @pytest.mark.asyncio
     async def test_header_prepended_to_question_text(self, connector):
         mock_app = _make_mock_app()
         mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=99))
@@ -1967,7 +1833,6 @@ class TestSendQuestion:
         assert "**Auth**" in text
         assert "Choose method" in text
 
-    @pytest.mark.asyncio
     async def test_multibyte_utf8_label_callback_data_within_64_bytes(self, connector):
         mock_app = _make_mock_app()
         mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=99))
@@ -1999,7 +1864,6 @@ class TestPlanReviewInteractionCallback:
         connector._plan_message_ids["999"] = ["10", "11", "12"]
         return connector
 
-    @pytest.mark.asyncio
     async def test_clean_edit_deletes_all_plan_messages(self, resolved_connector):
         update = _make_callback_update("interact:int-1:clean_edit")
         update.callback_query.message.chat_id = 999
@@ -2013,7 +1877,6 @@ class TestPlanReviewInteractionCallback:
             assert "11" in deleted_ids
             assert "12" in deleted_ids
 
-    @pytest.mark.asyncio
     async def test_edit_deletes_all_plan_messages(self, resolved_connector):
         update = _make_callback_update("interact:int-2:edit")
         update.callback_query.message.chat_id = 999
@@ -2027,7 +1890,6 @@ class TestPlanReviewInteractionCallback:
             assert "11" in deleted_ids
             assert "12" in deleted_ids
 
-    @pytest.mark.asyncio
     async def test_default_deletes_all_plan_messages(self, resolved_connector):
         update = _make_callback_update("interact:int-3:default")
         update.callback_query.message.chat_id = 999
@@ -2041,7 +1903,6 @@ class TestPlanReviewInteractionCallback:
             assert "11" in deleted_ids
             assert "12" in deleted_ids
 
-    @pytest.mark.asyncio
     async def test_adjust_deletes_all_plan_messages(self, resolved_connector):
         update = _make_callback_update("interact:int-4:adjust")
         update.callback_query.message.chat_id = 999
@@ -2055,7 +1916,6 @@ class TestPlanReviewInteractionCallback:
             assert "11" in deleted_ids
             assert "12" in deleted_ids
 
-    @pytest.mark.asyncio
     async def test_plan_review_sends_ack_for_proceed(self, resolved_connector):
         """Non-adjust answers send an ack message and schedule cleanup."""
         update = _make_callback_update("interact:int-5:edit")
@@ -2067,7 +1927,6 @@ class TestPlanReviewInteractionCallback:
             await resolved_connector._on_callback_query(update, MagicMock())
             mock_cleanup.assert_called_once_with("999", "500")
 
-    @pytest.mark.asyncio
     async def test_plan_review_adjust_no_ack(self, resolved_connector):
         """Adjust answer should not send an ack message."""
         update = _make_callback_update("interact:int-6:adjust")
@@ -2079,7 +1938,6 @@ class TestPlanReviewInteractionCallback:
             await resolved_connector._on_callback_query(update, MagicMock())
             mock_send.assert_not_awaited()
 
-    @pytest.mark.asyncio
     async def test_plan_review_empty_plan_ids_only_deletes_button(self, connector):
         """Empty plan_ids list -> only the button message is deleted."""
         mock_app = _make_mock_app()
@@ -2099,7 +1957,6 @@ class TestPlanReviewInteractionCallback:
             await connector._on_callback_query(update, MagicMock())
             mock_del.assert_awaited_once_with("999", "50")
 
-    @pytest.mark.asyncio
     async def test_plan_review_no_plan_ids_entry_only_deletes_button(self, connector):
         """No plan_ids entry for chat -> pop returns [], only button deleted."""
         mock_app = _make_mock_app()
@@ -2119,7 +1976,6 @@ class TestPlanReviewInteractionCallback:
             await connector._on_callback_query(update, MagicMock())
             mock_del.assert_awaited_once_with("999", "50")
 
-    @pytest.mark.asyncio
     async def test_plan_review_button_in_plan_ids_deleted_once(self, connector):
         """Button message ID in plan_ids -> filtered in loop, deleted after. Exactly once."""
         mock_app = _make_mock_app()
@@ -2143,7 +1999,6 @@ class TestPlanReviewInteractionCallback:
             assert "12" in deleted_ids
             assert deleted_ids.count("12") == 1
 
-    @pytest.mark.asyncio
     async def test_plan_review_ack_send_fails_no_cleanup_scheduled(self, connector):
         """send_message_with_id returns None -> schedule_message_cleanup not called."""
         mock_app = _make_mock_app()
@@ -2169,7 +2024,6 @@ class TestPlanReviewInteractionCallback:
             await connector._on_callback_query(update, MagicMock())
             mock_cleanup.assert_not_called()
 
-    @pytest.mark.asyncio
     async def test_expired_plan_review_no_deletion(self, connector):
         """Resolver returns False -> returns before cleanup. Plan messages intact."""
         mock_app = _make_mock_app()
@@ -2196,7 +2050,6 @@ class TestPlanReviewInteractionCallback:
 
 
 class TestGitCallback:
-    @pytest.mark.asyncio
     async def test_routes_to_git_handler_with_correct_params(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -2210,7 +2063,6 @@ class TestGitCallback:
         await connector._on_callback_query(update, MagicMock())
         handler.assert_awaited_once_with("42", "99", "status", "")
 
-    @pytest.mark.asyncio
     async def test_no_git_handler_is_noop(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -2222,7 +2074,6 @@ class TestGitCallback:
         # Should not raise
         await connector._on_callback_query(update, MagicMock())
 
-    @pytest.mark.asyncio
     async def test_git_callback_with_payload_colon(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -2236,7 +2087,6 @@ class TestGitCallback:
         await connector._on_callback_query(update, MagicMock())
         handler.assert_awaited_once_with("42", "99", "push", "origin/main")
 
-    @pytest.mark.asyncio
     async def test_git_callback_deletes_original_message(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -2261,7 +2111,6 @@ class TestGitCallback:
             await connector._on_callback_query(update, MagicMock())
             mock_del.assert_awaited_once_with("99", "555")
 
-    @pytest.mark.asyncio
     async def test_git_handler_exception_still_deletes_message(self, connector):
         """Handler raises RuntimeError -> message is still deleted."""
         mock_app = _make_mock_app()
@@ -2280,7 +2129,6 @@ class TestGitCallback:
             await connector._on_callback_query(update, MagicMock())
             mock_del.assert_awaited_once_with("99", "555")
 
-    @pytest.mark.asyncio
     async def test_git_callback_non_message_query_no_delete(self, connector):
         """query.message is not a Message instance -> early return, no delete."""
         mock_app = _make_mock_app()
@@ -2300,7 +2148,6 @@ class TestGitCallback:
             handler.assert_not_awaited()
             mock_del.assert_not_awaited()
 
-    @pytest.mark.asyncio
     async def test_git_callback_no_handler_no_delete(self, connector):
         """No git handler registered -> returns before delete block."""
         mock_app = _make_mock_app()
@@ -2323,7 +2170,6 @@ class TestGitCallback:
 
 
 class TestCallbackEdgeCases:
-    @pytest.mark.asyncio
     async def test_double_tap_approval_second_shows_expired(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -2346,7 +2192,6 @@ class TestCallbackEdgeCases:
         edited2 = update2.callback_query.edit_message_text.call_args[0][0]
         assert "Expired" in edited2
 
-    @pytest.mark.asyncio
     async def test_null_query_message_does_not_crash(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -2361,7 +2206,6 @@ class TestCallbackEdgeCases:
         # Should not raise
         await connector._on_callback_query(update, MagicMock())
 
-    @pytest.mark.asyncio
     async def test_expired_approval_message_scheduled_for_cleanup(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -2373,7 +2217,6 @@ class TestCallbackEdgeCases:
             await connector._on_callback_query(update, MagicMock())
             mock_cleanup.assert_called_once()
 
-    @pytest.mark.asyncio
     async def test_interaction_callback_expired_edits_message(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -2387,7 +2230,6 @@ class TestCallbackEdgeCases:
 
 
 class TestDirCallback:
-    @pytest.mark.asyncio
     async def test_routes_to_command_handler(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -2399,9 +2241,8 @@ class TestDirCallback:
         update.callback_query.message = MagicMock(spec=Message, chat_id=99)
 
         await connector._on_callback_query(update, MagicMock())
-        handler.assert_awaited_once_with("42", "dir", "api", "99")
+        handler.assert_awaited_once_with("42", "dir", "api", "99", [])
 
-    @pytest.mark.asyncio
     async def test_edits_message_with_result(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -2418,7 +2259,6 @@ class TestDirCallback:
             "Switched to api (/tmp/api)"
         )
 
-    @pytest.mark.asyncio
     async def test_does_not_schedule_cleanup_after_edit(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -2434,7 +2274,6 @@ class TestDirCallback:
             await connector._on_callback_query(update, MagicMock())
             mock_cleanup.assert_not_called()
 
-    @pytest.mark.asyncio
     async def test_no_command_handler_is_noop(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -2445,7 +2284,6 @@ class TestDirCallback:
 
         await connector._on_callback_query(update, MagicMock())
 
-    @pytest.mark.asyncio
     async def test_empty_result_does_not_edit(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -2459,7 +2297,6 @@ class TestDirCallback:
         await connector._on_callback_query(update, MagicMock())
         update.callback_query.edit_message_text.assert_not_awaited()
 
-    @pytest.mark.asyncio
     async def test_empty_dir_name_early_return(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -2473,7 +2310,6 @@ class TestDirCallback:
         await connector._on_callback_query(update, MagicMock())
         handler.assert_not_awaited()
 
-    @pytest.mark.asyncio
     async def test_from_user_none_early_return(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -2487,7 +2323,6 @@ class TestDirCallback:
         await connector._on_callback_query(update, MagicMock())
         handler.assert_not_awaited()
 
-    @pytest.mark.asyncio
     async def test_non_message_query_early_return(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -2501,7 +2336,6 @@ class TestDirCallback:
         await connector._on_callback_query(update, MagicMock())
         handler.assert_not_awaited()
 
-    @pytest.mark.asyncio
     async def test_handler_exception_does_not_crash(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -2516,7 +2350,6 @@ class TestDirCallback:
         handler.assert_awaited_once()
         update.callback_query.edit_message_text.assert_not_awaited()
 
-    @pytest.mark.asyncio
     async def test_edit_message_exception_does_not_crash(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -2535,7 +2368,6 @@ class TestDirCallback:
 
 
 class TestWsCallback:
-    @pytest.mark.asyncio
     async def test_routes_to_command_handler(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -2547,9 +2379,8 @@ class TestWsCallback:
         update.callback_query.message = MagicMock(spec=Message, chat_id=99)
 
         await connector._on_callback_query(update, MagicMock())
-        handler.assert_awaited_once_with("42", "workspace", "vb", "99")
+        handler.assert_awaited_once_with("42", "workspace", "vb", "99", [])
 
-    @pytest.mark.asyncio
     async def test_edits_message_with_result(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -2566,7 +2397,6 @@ class TestWsCallback:
             "Workspace 'vb' active — primary: /tmp/api"
         )
 
-    @pytest.mark.asyncio
     async def test_does_not_schedule_cleanup(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -2582,7 +2412,6 @@ class TestWsCallback:
             await connector._on_callback_query(update, MagicMock())
             mock_cleanup.assert_not_called()
 
-    @pytest.mark.asyncio
     async def test_no_command_handler_is_noop(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -2593,7 +2422,6 @@ class TestWsCallback:
 
         await connector._on_callback_query(update, MagicMock())
 
-    @pytest.mark.asyncio
     async def test_empty_result_does_not_edit(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -2607,7 +2435,6 @@ class TestWsCallback:
         await connector._on_callback_query(update, MagicMock())
         update.callback_query.edit_message_text.assert_not_awaited()
 
-    @pytest.mark.asyncio
     async def test_empty_ws_name_early_return(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -2621,7 +2448,6 @@ class TestWsCallback:
         await connector._on_callback_query(update, MagicMock())
         handler.assert_not_awaited()
 
-    @pytest.mark.asyncio
     async def test_from_user_none_early_return(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -2635,7 +2461,6 @@ class TestWsCallback:
         await connector._on_callback_query(update, MagicMock())
         handler.assert_not_awaited()
 
-    @pytest.mark.asyncio
     async def test_non_message_query_early_return(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -2649,7 +2474,6 @@ class TestWsCallback:
         await connector._on_callback_query(update, MagicMock())
         handler.assert_not_awaited()
 
-    @pytest.mark.asyncio
     async def test_handler_exception_does_not_crash(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -2664,7 +2488,6 @@ class TestWsCallback:
         handler.assert_awaited_once()
         update.callback_query.edit_message_text.assert_not_awaited()
 
-    @pytest.mark.asyncio
     async def test_edit_message_exception_does_not_crash(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -2683,7 +2506,6 @@ class TestWsCallback:
 
 
 class TestSendMessageWithIdAndButtons:
-    @pytest.mark.asyncio
     async def test_returns_message_id_on_success(self, connector):
         mock_app = _make_mock_app()
         mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=42))
@@ -2695,7 +2517,6 @@ class TestSendMessageWithIdAndButtons:
         )
         assert msg_id == "42"
 
-    @pytest.mark.asyncio
     async def test_returns_none_when_no_app(self, connector):
         buttons = [[InlineButton(text="OK", callback_data="ok")]]
         result = await connector._send_message_with_id_and_buttons(
@@ -2703,7 +2524,6 @@ class TestSendMessageWithIdAndButtons:
         )
         assert result is None
 
-    @pytest.mark.asyncio
     async def test_returns_none_on_exception(self, connector):
         mock_app = _make_mock_app()
         mock_app.bot.send_message = AsyncMock(side_effect=RuntimeError("fail"))
@@ -2715,7 +2535,6 @@ class TestSendMessageWithIdAndButtons:
         )
         assert result is None
 
-    @pytest.mark.asyncio
     async def test_truncates_long_text(self, connector):
         mock_app = _make_mock_app()
         mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=1))
@@ -2729,19 +2548,16 @@ class TestSendMessageWithIdAndButtons:
 
 
 class TestTryDeleteMessage:
-    @pytest.mark.asyncio
     async def test_returns_false_when_no_app(self, connector):
         result = await connector._try_delete_message("100", "1")
         assert result is False
 
-    @pytest.mark.asyncio
     async def test_returns_true_on_success(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
         result = await connector._try_delete_message("100", "1")
         assert result is True
 
-    @pytest.mark.asyncio
     async def test_returns_false_on_exception(self, connector):
         mock_app = _make_mock_app()
         mock_app.bot.delete_message = AsyncMock(
@@ -2753,19 +2569,16 @@ class TestTryDeleteMessage:
 
 
 class TestTryEditMessage:
-    @pytest.mark.asyncio
     async def test_returns_false_when_no_app(self, connector):
         result = await connector._try_edit_message("100", "1", "text")
         assert result is False
 
-    @pytest.mark.asyncio
     async def test_returns_true_on_success(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
         result = await connector._try_edit_message("100", "1", "updated")
         assert result is True
 
-    @pytest.mark.asyncio
     async def test_truncates_long_text(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -2776,12 +2589,10 @@ class TestTryEditMessage:
 
 
 class TestSendPlanMessagesMethod:
-    @pytest.mark.asyncio
     async def test_returns_empty_when_no_app(self, connector):
         result = await connector.send_plan_messages("100", "plan text")
         assert result == []
 
-    @pytest.mark.asyncio
     async def test_chunks_long_plan_text(self, connector):
         mock_app = _make_mock_app()
         mock_app.bot.send_message = AsyncMock(
@@ -2797,7 +2608,6 @@ class TestSendPlanMessagesMethod:
         assert len(ids) == 2
         assert ids == ["1", "2"]
 
-    @pytest.mark.asyncio
     async def test_tracks_message_ids_in_dict(self, connector):
         mock_app = _make_mock_app()
         mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=7))
@@ -2808,7 +2618,6 @@ class TestSendPlanMessagesMethod:
 
 
 class TestDeleteMessagesMethod:
-    @pytest.mark.asyncio
     async def test_deletes_each_message(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -2816,7 +2625,6 @@ class TestDeleteMessagesMethod:
         await connector.delete_messages("100", ["1", "2", "3"])
         assert mock_app.bot.delete_message.await_count == 3
 
-    @pytest.mark.asyncio
     async def test_clears_plan_message_ids(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -2825,7 +2633,6 @@ class TestDeleteMessagesMethod:
         await connector.delete_messages("100", ["1", "2"])
         assert "100" not in connector._plan_message_ids
 
-    @pytest.mark.asyncio
     async def test_handles_empty_list(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -2834,7 +2641,6 @@ class TestDeleteMessagesMethod:
 
 
 class TestClearQuestionMessage:
-    @pytest.mark.asyncio
     async def test_deletes_tracked_question_message(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -2843,14 +2649,12 @@ class TestClearQuestionMessage:
         await connector.clear_question_message("100")
         mock_app.bot.delete_message.assert_awaited_once_with(chat_id=100, message_id=55)
 
-    @pytest.mark.asyncio
     async def test_no_tracked_message_is_noop(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
         await connector.clear_question_message("100")
         mock_app.bot.delete_message.assert_not_awaited()
 
-    @pytest.mark.asyncio
     async def test_pops_from_tracking_dict(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -2861,13 +2665,11 @@ class TestClearQuestionMessage:
 
 
 class TestOnError:
-    @pytest.mark.asyncio
     async def test_does_not_raise(self, connector):
         ctx = MagicMock()
         ctx.error = RuntimeError("something broke")
         await connector._on_error(MagicMock(), ctx)
 
-    @pytest.mark.asyncio
     async def test_logs_error_details(self, connector):
         ctx = MagicMock()
         ctx.error = ValueError("bad value")
@@ -2880,7 +2682,6 @@ class TestOnError:
 
 
 class TestSendQuestionSendFails:
-    @pytest.mark.asyncio
     async def test_send_fails_message_id_not_tracked(self, connector):
         mock_app = _make_mock_app()
         mock_app.bot.send_message = AsyncMock(side_effect=RuntimeError("network fail"))
@@ -2893,7 +2694,6 @@ class TestSendQuestionSendFails:
 
 
 class TestCrossChatStateIsolation:
-    @pytest.mark.asyncio
     async def test_approval_tool_names_isolated_per_approval_id(self, connector):
         mock_app = _make_mock_app()
         mock_app.bot.send_message = AsyncMock(
@@ -2907,7 +2707,6 @@ class TestCrossChatStateIsolation:
         assert connector._approval_tool_names["ap-1"] == "Write"
         assert connector._approval_tool_names["ap-2"] == "Bash"
 
-    @pytest.mark.asyncio
     async def test_activity_message_id_isolated_per_chat(self, connector):
         mock_app = _make_mock_app()
         mock_app.bot.send_message = AsyncMock(
@@ -2921,7 +2720,6 @@ class TestCrossChatStateIsolation:
         assert connector._activity_message_id["100"] == "10"
         assert connector._activity_message_id["200"] == "20"
 
-    @pytest.mark.asyncio
     async def test_plan_message_ids_isolated_per_chat(self, connector):
         mock_app = _make_mock_app()
         msg_counter = iter(range(1, 100))
@@ -2937,7 +2735,6 @@ class TestCrossChatStateIsolation:
         assert "200" in connector._plan_message_ids
         assert connector._plan_message_ids["100"] != connector._plan_message_ids["200"]
 
-    @pytest.mark.asyncio
     async def test_question_message_ids_isolated_per_chat(self, connector):
         mock_app = _make_mock_app()
         mock_app.bot.send_message = AsyncMock(
@@ -2951,7 +2748,6 @@ class TestCrossChatStateIsolation:
         assert connector._question_message_ids["100"] == "10"
         assert connector._question_message_ids["200"] == "20"
 
-    @pytest.mark.asyncio
     async def test_concurrent_approvals_different_chats(self, connector):
         mock_app = _make_mock_app()
         mock_app.bot.send_message = AsyncMock(
@@ -2982,7 +2778,6 @@ class TestCrossChatStateIsolation:
         assert ("ap-1", True) in calls
         assert ("ap-2", True) in calls
 
-    @pytest.mark.asyncio
     async def test_clearing_one_chat_does_not_affect_other(self, connector):
         mock_app = _make_mock_app()
         msg_counter = iter(range(1, 100))
@@ -3000,7 +2795,6 @@ class TestCrossChatStateIsolation:
 
 
 class TestCallbackDataSecurity:
-    @pytest.mark.asyncio
     async def test_unknown_approval_id_shows_expired(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -3013,7 +2807,6 @@ class TestCallbackDataSecurity:
         edit_text = update.callback_query.edit_message_text.call_args.args[0]
         assert "Expired" in edit_text
 
-    @pytest.mark.asyncio
     async def test_unknown_interaction_id_shows_expired(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -3033,7 +2826,6 @@ class TestCallbackDataSecurity:
         assert truncated.startswith("approval:yes:")
         assert len(truncated.encode()) <= _CALLBACK_DATA_MAX_BYTES
 
-    @pytest.mark.asyncio
     async def test_approval_edit_exception_swallowed(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -3050,7 +2842,6 @@ class TestCallbackDataSecurity:
 
 
 class TestInputEdgeCases:
-    @pytest.mark.asyncio
     async def test_send_message_unicode_emoji(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -3060,7 +2851,6 @@ class TestInputEdgeCases:
         call_args = mock_app.bot.send_message.call_args
         assert call_args.kwargs["text"] == text
 
-    @pytest.mark.asyncio
     async def test_request_approval_empty_tool_name(self, connector):
         mock_app = _make_mock_app()
         mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=1))
@@ -3073,7 +2863,6 @@ class TestInputEdgeCases:
         approve_all_btn = markup.inline_keyboard[1][0]
         assert approve_all_btn.text == "Approve all in session"
 
-    @pytest.mark.asyncio
     async def test_request_approval_very_long_tool_name(self, connector):
         mock_app = _make_mock_app()
         mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=1))
@@ -3088,7 +2877,6 @@ class TestInputEdgeCases:
             for btn in row:
                 assert len(btn.callback_data.encode()) <= _CALLBACK_DATA_MAX_BYTES
 
-    @pytest.mark.asyncio
     async def test_send_question_empty_options(self, connector):
         mock_app = _make_mock_app()
         mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=1))
@@ -3099,7 +2887,6 @@ class TestInputEdgeCases:
 
 
 class TestCallbackRoutingEdgeCases:
-    @pytest.mark.asyncio
     async def test_interaction_no_colon_in_suffix(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -3110,7 +2897,6 @@ class TestCallbackRoutingEdgeCases:
         await connector._on_callback_query(update, MagicMock())
         resolver.assert_not_awaited()
 
-    @pytest.mark.asyncio
     async def test_interaction_empty_interaction_id(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -3121,7 +2907,6 @@ class TestCallbackRoutingEdgeCases:
         await connector._on_callback_query(update, MagicMock())
         resolver.assert_not_awaited()
 
-    @pytest.mark.asyncio
     async def test_interaction_empty_answer(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -3132,7 +2917,6 @@ class TestCallbackRoutingEdgeCases:
         await connector._on_callback_query(update, MagicMock())
         resolver.assert_not_awaited()
 
-    @pytest.mark.asyncio
     async def test_interaction_resolver_exception_shows_expired(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -3145,7 +2929,6 @@ class TestCallbackRoutingEdgeCases:
         edit_text = update.callback_query.edit_message_text.call_args.args[0]
         assert "Expired" in edit_text
 
-    @pytest.mark.asyncio
     async def test_interaction_non_message_query_early_return(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -3158,7 +2941,6 @@ class TestCallbackRoutingEdgeCases:
         await connector._on_callback_query(update, MagicMock())
         resolver.assert_awaited_once()
 
-    @pytest.mark.asyncio
     async def test_interaction_expired_edit_failure_swallowed(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -3171,7 +2953,6 @@ class TestCallbackRoutingEdgeCases:
         )
         await connector._on_callback_query(update, MagicMock())
 
-    @pytest.mark.asyncio
     async def test_interrupt_no_colon_in_suffix(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -3182,7 +2963,6 @@ class TestCallbackRoutingEdgeCases:
         await connector._on_callback_query(update, MagicMock())
         resolver.assert_not_awaited()
 
-    @pytest.mark.asyncio
     async def test_interrupt_empty_interrupt_id(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -3195,7 +2975,6 @@ class TestCallbackRoutingEdgeCases:
 
 
 class TestInterruptCallbackEdgeCases:
-    @pytest.mark.asyncio
     async def test_resolver_exception_does_not_crash(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -3211,7 +2990,6 @@ class TestInterruptCallbackEdgeCases:
         edit_text = update.callback_query.edit_message_text.call_args.args[0]
         assert "Expired" in edit_text
 
-    @pytest.mark.asyncio
     async def test_non_message_query_does_not_crash(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -3224,7 +3002,6 @@ class TestInterruptCallbackEdgeCases:
         await connector._on_callback_query(update, MagicMock())
         update.callback_query.edit_message_text.assert_not_awaited()
 
-    @pytest.mark.asyncio
     async def test_interrupt_prompt_truncates_long_preview(self, connector):
         mock_app = _make_mock_app()
         mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=1))
@@ -3240,7 +3017,6 @@ class TestInterruptCallbackEdgeCases:
 
 
 class TestGitCallbackEdgeCases:
-    @pytest.mark.asyncio
     async def test_action_only_no_colon(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -3258,7 +3034,6 @@ class TestGitCallbackEdgeCases:
 
 
 class TestApprovalLifecycle:
-    @pytest.mark.asyncio
     async def test_full_approve_flow(self, connector):
         mock_app = _make_mock_app()
         mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=50))
@@ -3284,7 +3059,6 @@ class TestApprovalLifecycle:
         assert "Approved" in edit_text
         assert len(connector._cleanup_tasks) >= 0
 
-    @pytest.mark.asyncio
     async def test_full_rejection_flow(self, connector):
         mock_app = _make_mock_app()
         mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=50))
@@ -3306,7 +3080,6 @@ class TestApprovalLifecycle:
         edit_text = update.callback_query.edit_message_text.call_args.args[0]
         assert "Rejected" in edit_text
 
-    @pytest.mark.asyncio
     async def test_full_approve_all_flow(self, connector):
         mock_app = _make_mock_app()
         mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=50))
@@ -3335,7 +3108,6 @@ class TestApprovalLifecycle:
 
 
 class TestPlanReviewLifecycle:
-    @pytest.mark.asyncio
     async def test_proceed_flow(self, connector):
         mock_app = _make_mock_app()
         msg_counter = iter(range(1, 100))
@@ -3365,7 +3137,6 @@ class TestPlanReviewLifecycle:
         resolver.assert_awaited_once_with("int-1", "edit")
         assert "100" not in connector._plan_message_ids
 
-    @pytest.mark.asyncio
     async def test_adjust_flow_no_ack(self, connector):
         mock_app = _make_mock_app()
         msg_counter = iter(range(1, 100))
@@ -3397,7 +3168,6 @@ class TestPlanReviewLifecycle:
         ack_sends = mock_app.bot.send_message.await_count - send_count_before
         assert ack_sends == 0
 
-    @pytest.mark.asyncio
     async def test_clean_edit_flow(self, connector):
         mock_app = _make_mock_app()
         msg_counter = iter(range(1, 100))
@@ -3428,7 +3198,6 @@ class TestPlanReviewLifecycle:
 
 
 class TestQuestionLifecycle:
-    @pytest.mark.asyncio
     async def test_full_question_flow(self, connector):
         mock_app = _make_mock_app()
         mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=10))
@@ -3451,7 +3220,6 @@ class TestQuestionLifecycle:
         resolver.assert_awaited_once_with("int-1", "A")
         assert "100" not in connector._question_message_ids
 
-    @pytest.mark.asyncio
     async def test_question_expired_flow(self, connector):
         mock_app = _make_mock_app()
         mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=10))
@@ -3515,7 +3283,6 @@ class TestTruncateCallbackData:
 
 
 class TestScheduleMessageCleanupState:
-    @pytest.mark.asyncio
     async def test_creates_asyncio_task(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -3526,7 +3293,6 @@ class TestScheduleMessageCleanupState:
         await asyncio.sleep(0.05)
         assert len(connector._cleanup_tasks) == 0
 
-    @pytest.mark.asyncio
     async def test_multiple_cleanups_tracked(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
@@ -3538,7 +3304,6 @@ class TestScheduleMessageCleanupState:
 
 
 class TestSendActivityStateTracking:
-    @pytest.mark.asyncio
     async def test_send_message_returns_none_no_state_tracked(self, connector):
         mock_app = _make_mock_app()
         mock_app.bot.send_message = AsyncMock(side_effect=RuntimeError("network fail"))
@@ -3548,7 +3313,6 @@ class TestSendActivityStateTracking:
         assert result is None
         assert "100" not in connector._activity_message_id
 
-    @pytest.mark.asyncio
     async def test_edit_fails_creates_new_message(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app

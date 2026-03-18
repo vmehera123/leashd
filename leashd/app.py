@@ -115,7 +115,17 @@ def _configure_logging(config: LeashdConfig, *, log_dir: Path | None = None) -> 
 
     # Silence noisy third-party loggers (httpx, telegram, etc.) — they flood
     # the log with low-value HTTP transport chatter at INFO/DEBUG.
-    for noisy_logger in ("httpx", "httpcore", "hpack", "telegram", "telegram.ext"):
+    for noisy_logger in (
+        "httpx",
+        "httpcore",
+        "hpack",
+        "telegram",
+        "telegram.ext",
+        "uvicorn",
+        "uvicorn.access",
+        "uvicorn.error",
+        "fastapi",
+    ):
         logging.getLogger(noisy_logger).setLevel(logging.WARNING)
 
     structlog.configure(
@@ -157,6 +167,7 @@ def build_engine(
     config: LeashdConfig | None = None,
     connector: BaseConnector | None = None,
     plugins: list[LeashdPlugin] | None = None,
+    message_store: MessageStore | None = None,
 ) -> Engine:
     if config is None:
         config = LeashdConfig()  # type: ignore[call-arg]  # pydantic-settings loads from env
@@ -165,11 +176,10 @@ def build_engine(
     project_base = config.approved_directories[0]
 
     audit_is_pinned = config.audit_log_path.is_absolute()
-    storage_is_pinned = config.storage_path.is_absolute()
+
     log_dir_is_pinned = config.log_dir is not None and config.log_dir.is_absolute()
 
     resolved_audit = _resolve_against(config.audit_log_path, project_base)
-    resolved_storage = _resolve_against(config.storage_path, project_base)
     resolved_log_dir = (
         _resolve_against(config.log_dir, project_base)
         if config.log_dir is not None
@@ -232,9 +242,10 @@ def build_engine(
     else:
         session_store = MemorySessionStore()
 
-    # Per-project message store — switches with /dir
-    message_store: MessageStore | None = None
-    if config.storage_backend == "sqlite":
+    # Message store — centralized at ~/.leashd/messages.db, never switches with /dir
+    resolved_storage = global_leashd_dir / "messages.db"
+    storage_is_pinned = True
+    if message_store is None and config.storage_backend == "sqlite":
         message_store = SqliteSessionStore(resolved_storage)
 
     message_logger = MessageLogger(message_store)
@@ -346,7 +357,10 @@ def build_engine(
     # Middleware
     middleware_chain = MiddlewareChain()
     if config.allowed_user_ids:
-        middleware_chain.add(AuthMiddleware(config.allowed_user_ids))
+        allowed = set(config.allowed_user_ids)
+        if config.web_enabled:
+            allowed.add("web")
+        middleware_chain.add(AuthMiddleware(allowed))
     if config.rate_limit_rpm > 0:
         middleware_chain.add(
             RateLimitMiddleware(config.rate_limit_rpm, config.rate_limit_burst)

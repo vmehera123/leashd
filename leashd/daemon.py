@@ -144,6 +144,7 @@ def start_daemon() -> int:
         )
 
     _LEASHD_DIR.mkdir(parents=True, exist_ok=True)
+    clean_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
     log_file = open(_DAEMON_LOG, "a")  # noqa: SIM115
     try:
         proc = subprocess.Popen(  # noqa: S603
@@ -151,6 +152,7 @@ def start_daemon() -> int:
             stdout=log_file,
             stderr=log_file,
             start_new_session=True,
+            env=clean_env,
         )
     finally:
         log_file.close()

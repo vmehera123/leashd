@@ -1757,3 +1757,257 @@ class TestBrowserHeadless:
         _handle_browser_show()
         captured = capsys.readouterr()
         assert "Headless: on" in captured.out
+
+
+class TestWebUI:
+    def test_show_disabled(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_webui_show
+
+        _handle_webui_show()
+        captured = capsys.readouterr()
+        assert "disabled" in captured.out
+
+    def test_show_enabled(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_webui_show
+
+        save_global_config(
+            {"web": {"enabled": True, "port": 9090, "api_key": "secret"}}
+        )
+        _handle_webui_show()
+        captured = capsys.readouterr()
+        assert "ENABLED" in captured.out
+        assert "9090" in captured.out
+        assert "configured" in captured.out
+
+    def test_enable(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_webui_enable
+        from leashd.config_store import get_web_config
+
+        with patch("builtins.input", side_effect=["my-secret", ""]):
+            _handle_webui_enable()
+
+        web = get_web_config()
+        assert web["enabled"] is True
+        assert web["api_key"] == "my-secret"
+        captured = capsys.readouterr()
+        assert "✓" in captured.out
+
+    def test_enable_already_enabled(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_webui_enable
+
+        save_global_config({"web": {"enabled": True, "api_key": "key"}})
+        _handle_webui_enable()
+        captured = capsys.readouterr()
+        assert "already enabled" in captured.out
+
+    def test_enable_no_key_aborts(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_webui_enable
+        from leashd.config_store import get_web_config
+
+        with patch("builtins.input", return_value=""):
+            _handle_webui_enable()
+
+        web = get_web_config()
+        assert not web.get("enabled")
+        captured = capsys.readouterr()
+        assert "required" in captured.err or "required" in captured.out
+
+    def test_disable(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_webui_disable
+        from leashd.config_store import get_web_config
+
+        save_global_config({"web": {"enabled": True, "api_key": "key"}})
+        _handle_webui_disable()
+
+        web = get_web_config()
+        assert web["enabled"] is False
+        captured = capsys.readouterr()
+        assert "disabled" in captured.out
+
+    def test_disable_already_disabled(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_webui_disable
+
+        _handle_webui_disable()
+        captured = capsys.readouterr()
+        assert "already disabled" in captured.out
+
+    def test_url(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_webui_url
+
+        save_global_config({"web": {"host": "127.0.0.1", "port": 3000}})
+        _handle_webui_url()
+        captured = capsys.readouterr()
+        assert "http://127.0.0.1:3000" in captured.out
+
+    def test_url_default(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_webui_url
+
+        _handle_webui_url()
+        captured = capsys.readouterr()
+        assert "http://0.0.0.0:8080" in captured.out
+
+    def test_webui_dispatch(self, fake_config_dir, capsys):
+        """Test that 'leashd webui show' dispatches correctly."""
+        import argparse
+
+        from leashd.cli import _handle_webui
+
+        args = argparse.Namespace(webui_command="show")
+        _handle_webui(args)
+        captured = capsys.readouterr()
+        assert "WebUI" in captured.out
+
+    def test_webui_dispatch_default(self, fake_config_dir, capsys):
+        """Test that 'leashd webui' (no subcommand) defaults to show."""
+        import argparse
+
+        from leashd.cli import _handle_webui
+
+        args = argparse.Namespace(webui_command=None)
+        _handle_webui(args)
+        captured = capsys.readouterr()
+        assert "WebUI" in captured.out
+
+    def test_webui_tunnel_dispatch(self, fake_config_dir, capsys):
+        """Test that 'leashd webui tunnel' dispatches to the tunnel handler."""
+        import argparse
+
+        from leashd.cli import _handle_webui
+
+        save_global_config({"web": {"enabled": True, "api_key": "key", "port": 9090}})
+        with (
+            patch("leashd.tunnel.TunnelProcess") as mock_cls,
+            patch("signal.pause", create=True),
+        ):
+            mock_tunnel = mock_cls.return_value
+            mock_tunnel.start.return_value = "https://test.ngrok.io"
+            mock_tunnel.is_alive = False
+
+            args = argparse.Namespace(
+                webui_command="tunnel", provider="ngrok", notify_telegram=False
+            )
+            _handle_webui(args)
+
+        captured = capsys.readouterr()
+        assert "https://test.ngrok.io" in captured.out
+
+
+class TestWebuiTunnel:
+    def test_webui_not_enabled(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_webui_tunnel
+
+        with pytest.raises(SystemExit) as exc_info:
+            _handle_webui_tunnel(provider="ngrok", notify_telegram=False)
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "not enabled" in captured.err
+
+    def test_no_api_key(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_webui_tunnel
+
+        save_global_config({"web": {"enabled": True}})
+        with pytest.raises(SystemExit) as exc_info:
+            _handle_webui_tunnel(provider="ngrok", notify_telegram=False)
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "API key" in captured.err
+
+    def test_tunnel_start_success(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_webui_tunnel
+
+        save_global_config({"web": {"enabled": True, "api_key": "key", "port": 9090}})
+        with (
+            patch("leashd.tunnel.TunnelProcess") as mock_cls,
+            patch("signal.pause", create=True),
+        ):
+            mock_tunnel = mock_cls.return_value
+            mock_tunnel.start.return_value = "https://abc.ngrok.io"
+            mock_tunnel.is_alive = False
+
+            _handle_webui_tunnel(provider="ngrok", notify_telegram=False)
+
+        captured = capsys.readouterr()
+        assert "https://abc.ngrok.io" in captured.out
+        assert "ngrok" in captured.out
+        assert "9090" in captured.out
+        mock_tunnel.stop.assert_called_once()
+
+    def test_tunnel_start_failure(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_webui_tunnel
+
+        save_global_config({"web": {"enabled": True, "api_key": "key"}})
+        with patch("leashd.tunnel.TunnelProcess") as mock_cls:
+            mock_cls.return_value.start.side_effect = Exception("ngrok not found")
+
+            with pytest.raises(SystemExit) as exc_info:
+                _handle_webui_tunnel(provider="ngrok", notify_telegram=False)
+            assert exc_info.value.code == 1
+
+        captured = capsys.readouterr()
+        assert "ngrok not found" in captured.err
+
+    def test_notify_telegram_success(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_webui_tunnel
+
+        save_global_config(
+            {
+                "web": {"enabled": True, "api_key": "key"},
+                "telegram": {"bot_token": "tok", "allowed_user_ids": [123]},
+            }
+        )
+        with (
+            patch("leashd.tunnel.TunnelProcess") as mock_cls,
+            patch("leashd.tunnel.notify_telegram", return_value=True) as mock_tg,
+            patch("signal.pause", create=True),
+        ):
+            mock_tunnel = mock_cls.return_value
+            mock_tunnel.start.return_value = "https://x.ngrok.io"
+            mock_tunnel.is_alive = False
+
+            _handle_webui_tunnel(provider="ngrok", notify_telegram=True)
+
+        mock_tg.assert_called_once_with(
+            "tok", "123", "WebUI tunnel active:\nhttps://x.ngrok.io"
+        )
+        captured = capsys.readouterr()
+        assert "Sent URL to Telegram user 123" in captured.out
+
+    def test_notify_telegram_no_config(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_webui_tunnel
+
+        save_global_config({"web": {"enabled": True, "api_key": "key"}})
+        with (
+            patch("leashd.tunnel.TunnelProcess") as mock_cls,
+            patch("signal.pause", create=True),
+        ):
+            mock_tunnel = mock_cls.return_value
+            mock_tunnel.start.return_value = "https://x.ngrok.io"
+            mock_tunnel.is_alive = False
+
+            _handle_webui_tunnel(provider="ngrok", notify_telegram=True)
+
+        captured = capsys.readouterr()
+        assert "not configured" in captured.err
+
+    def test_notify_telegram_failure(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_webui_tunnel
+
+        save_global_config(
+            {
+                "web": {"enabled": True, "api_key": "key"},
+                "telegram": {"bot_token": "tok", "allowed_user_ids": [99]},
+            }
+        )
+        with (
+            patch("leashd.tunnel.TunnelProcess") as mock_cls,
+            patch("leashd.tunnel.notify_telegram", return_value=False),
+            patch("signal.pause", create=True),
+        ):
+            mock_tunnel = mock_cls.return_value
+            mock_tunnel.start.return_value = "https://x.ngrok.io"
+            mock_tunnel.is_alive = False
+
+            _handle_webui_tunnel(provider="ngrok", notify_telegram=True)
+
+        captured = capsys.readouterr()
+        assert "Failed to notify Telegram user 99" in captured.err

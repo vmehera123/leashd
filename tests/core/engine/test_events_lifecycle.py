@@ -2,8 +2,6 @@
 
 from unittest.mock import AsyncMock
 
-import pytest
-
 from leashd.agents.base import AgentResponse, BaseAgent
 from leashd.core.engine import Engine
 from leashd.core.events import (
@@ -19,7 +17,6 @@ from tests.core.engine.conftest import FakeAgent
 
 
 class TestEngineEvents:
-    @pytest.mark.asyncio
     async def test_message_in_event_emitted(self, config, fake_agent, audit_logger):
         events = []
 
@@ -42,7 +39,6 @@ class TestEngineEvents:
         assert len(events) == 1
         assert events[0].data["user_id"] == "user1"
 
-    @pytest.mark.asyncio
     async def test_message_out_event_emitted(self, config, fake_agent, audit_logger):
         events = []
 
@@ -65,7 +61,6 @@ class TestEngineEvents:
         assert len(events) == 1
         assert "Echo: hello" in events[0].data["content"]
 
-    @pytest.mark.asyncio
     async def test_tool_allowed_event_emitted(
         self, config, fake_agent, audit_logger, tmp_dir
     ):
@@ -93,7 +88,6 @@ class TestEngineEvents:
         assert len(events) == 1
         assert events[0].data["tool_name"] == "Bash"
 
-    @pytest.mark.asyncio
     async def test_tool_denied_event_emitted(self, config, fake_agent, audit_logger):
         events = []
 
@@ -121,7 +115,6 @@ class TestEngineEvents:
 
 
 class TestEngineLifecycle:
-    @pytest.mark.asyncio
     async def test_engine_started_event(self, config, fake_agent, audit_logger):
         from leashd.core.events import ENGINE_STARTED
 
@@ -146,7 +139,6 @@ class TestEngineLifecycle:
         assert events[0].name == ENGINE_STARTED
         await eng.shutdown()
 
-    @pytest.mark.asyncio
     async def test_engine_stopped_event(self, config, fake_agent, audit_logger):
         from leashd.core.events import ENGINE_STOPPED
 
@@ -175,7 +167,6 @@ class TestEngineLifecycle:
 class TestEngineStartupShutdown:
     """Tests for engine startup/shutdown lifecycle (lines 84-101)."""
 
-    @pytest.mark.asyncio
     async def test_startup_calls_store_setup(self, config, fake_agent, audit_logger):
 
         from leashd.storage.memory import MemorySessionStore
@@ -194,7 +185,6 @@ class TestEngineStartupShutdown:
         store.setup.assert_awaited_once()
         await eng.shutdown()
 
-    @pytest.mark.asyncio
     async def test_startup_calls_plugin_init_and_start(
         self, config, fake_agent, audit_logger
     ):
@@ -227,7 +217,6 @@ class TestEngineStartupShutdown:
         assert FakePlugin.start_called
         await eng.shutdown()
 
-    @pytest.mark.asyncio
     async def test_shutdown_calls_plugin_stop(self, config, fake_agent, audit_logger):
         from leashd.plugins.base import LeashdPlugin, PluginMeta
         from leashd.plugins.registry import PluginRegistry
@@ -256,7 +245,6 @@ class TestEngineStartupShutdown:
         await eng.shutdown()
         assert FakePlugin.stop_called
 
-    @pytest.mark.asyncio
     async def test_shutdown_calls_store_teardown(
         self, config, fake_agent, audit_logger
     ):
@@ -277,7 +265,6 @@ class TestEngineStartupShutdown:
         await eng.shutdown()
         store.teardown.assert_awaited_once()
 
-    @pytest.mark.asyncio
     async def test_startup_shutdown_full_lifecycle(
         self, config, fake_agent, audit_logger
     ):
@@ -323,7 +310,6 @@ class TestEngineStartupShutdown:
         store.teardown.assert_awaited_once()
         assert lifecycle_events == ["init", "start", "stop"]
 
-    @pytest.mark.asyncio
     async def test_connector_sends_response(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -398,7 +384,6 @@ class TestAuditLogger:
 
 
 class TestEngineAgentCrashCancelsApprovals:
-    @pytest.mark.asyncio
     async def test_agent_crash_cancels_pending_approvals(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -435,7 +420,6 @@ class TestEngineAgentCrashCancelsApprovals:
 class TestTurnLimitNotification:
     """Verify user notification when the agent hits the max_turns limit."""
 
-    @pytest.mark.asyncio
     async def test_turn_limit_notification_sent(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -471,7 +455,6 @@ class TestTurnLimitNotification:
         assert len(turn_msgs) == 1
         assert str(config.max_turns) in turn_msgs[0]["text"]
 
-    @pytest.mark.asyncio
     async def test_turn_limit_no_notification_when_under_limit(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -506,7 +489,6 @@ class TestTurnLimitNotification:
         ]
         assert len(turn_msgs) == 0
 
-    @pytest.mark.asyncio
     async def test_turn_limit_no_notification_without_connector(
         self, config, audit_logger, policy_engine
     ):
@@ -537,7 +519,6 @@ class TestTurnLimitNotification:
         result = await eng.handle_message("user1", "do stuff", "chat1")
         assert result == "partial"
 
-    @pytest.mark.asyncio
     async def test_turn_limit_then_clear_resets_for_fresh_execution(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -591,7 +572,6 @@ class TestTurnLimitNotification:
 class TestTurnLimitWarningContent:
     """Verify turn limit warning includes actionable guidance."""
 
-    @pytest.mark.asyncio
     async def test_warning_includes_continue_option(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -630,7 +610,6 @@ class TestTurnLimitWarningContent:
         assert "/clear" in text
         assert "LEASHD_MAX_TURNS" in text
 
-    @pytest.mark.asyncio
     async def test_warning_exceeds_max_turns(
         self, config, audit_logger, policy_engine, mock_connector
     ):
@@ -671,7 +650,6 @@ class TestTurnLimitWarningContent:
 class TestModeSpecificTurnLimits:
     """Verify per-mode turn limits (web, test) use mode-specific thresholds."""
 
-    @pytest.mark.asyncio
     async def test_web_mode_uses_web_max_turns(
         self, tmp_path, audit_logger, policy_engine, mock_connector
     ):
@@ -718,7 +696,6 @@ class TestModeSpecificTurnLimits:
         assert "10 turns" in turn_msgs[0]["text"]
         assert "LEASHD_WEB_MAX_TURNS" in turn_msgs[0]["text"]
 
-    @pytest.mark.asyncio
     async def test_web_mode_no_warning_under_web_limit(
         self, tmp_path, audit_logger, policy_engine, mock_connector
     ):
@@ -763,7 +740,6 @@ class TestModeSpecificTurnLimits:
         ]
         assert len(turn_msgs) == 0
 
-    @pytest.mark.asyncio
     async def test_test_mode_uses_test_max_turns(
         self, tmp_path, audit_logger, policy_engine, mock_connector
     ):
@@ -810,7 +786,6 @@ class TestModeSpecificTurnLimits:
         assert "8 turns" in turn_msgs[0]["text"]
         assert "LEASHD_TEST_MAX_TURNS" in turn_msgs[0]["text"]
 
-    @pytest.mark.asyncio
     async def test_default_mode_shows_generic_env_hint(
         self, config, audit_logger, policy_engine, mock_connector
     ):

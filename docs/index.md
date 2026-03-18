@@ -36,6 +36,7 @@ flowchart LR
 | [Events](events.md) | EventBus, all event types, payload schemas |
 | [Plugins](plugins.md) | Plugin protocol, lifecycle hooks, AuditPlugin example |
 | [Agents](agents.md) | BaseAgent protocol, ClaudeCodeAgent, session resume |
+| [WebUI](webui.md) | Browser-based interface — setup, WebSocket protocol, authentication |
 | [Connectors](connectors.md) | BaseConnector ABC, handler registration, building a connector |
 | [Middleware](middleware.md) | MiddlewareChain, auth, rate limiting |
 | [Storage](storage.md) | SessionStore protocol, memory and SQLite backends |

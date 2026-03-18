@@ -13,6 +13,7 @@ from leashd.config_store import (
     get_approved_directories,
     get_browser_config,
     get_skills_config,
+    get_web_config,
     get_workspaces,
     inject_global_config_as_env,
     load_global_config,
@@ -25,6 +26,7 @@ from leashd.config_store import (
     save_global_config,
     save_skill_metadata,
     save_workspaces_config,
+    update_config_sections,
     workspaces_path,
 )
 from leashd.exceptions import ConfigError
@@ -681,3 +683,169 @@ class TestRemoveSkillMetadata:
     def test_non_dict_returns_false(self, fake_config_dir):
         save_global_config({"skills": "garbage"})
         assert remove_skill_metadata("nope") is False
+
+
+class TestWebConfig:
+    def test_get_web_config_empty(self, fake_config_dir):
+        assert get_web_config() == {}
+
+    def test_get_web_config_from_data(self):
+        data = {"web": {"enabled": True, "port": 9090}}
+        result = get_web_config(data)
+        assert result["enabled"] is True
+        assert result["port"] == 9090
+
+    def test_get_web_config_non_dict_returns_empty(self):
+        assert get_web_config({"web": "garbage"}) == {}
+
+    def test_inject_web_config(self, fake_config_dir, monkeypatch):
+        for key in list(os.environ):
+            if key.startswith("LEASHD_WEB_"):
+                monkeypatch.delenv(key, raising=False)
+
+        save_global_config(
+            {
+                "web": {
+                    "enabled": True,
+                    "host": "127.0.0.1",
+                    "port": 3000,
+                    "api_key": "my-key",
+                    "cors_origins": "http://localhost:3000",
+                }
+            }
+        )
+        inject_global_config_as_env(force=True)
+
+        assert os.environ["LEASHD_WEB_ENABLED"] == "true"
+        assert os.environ["LEASHD_WEB_HOST"] == "127.0.0.1"
+        assert os.environ["LEASHD_WEB_PORT"] == "3000"
+        assert os.environ["LEASHD_WEB_API_KEY"] == "my-key"
+        assert os.environ["LEASHD_WEB_CORS_ORIGINS"] == "http://localhost:3000"
+
+    def test_inject_web_config_no_overwrite(self, fake_config_dir, monkeypatch):
+        monkeypatch.setenv("LEASHD_WEB_PORT", "7777")
+        save_global_config({"web": {"port": 3000}})
+        inject_global_config_as_env(force=False)
+        assert os.environ["LEASHD_WEB_PORT"] == "7777"
+
+    def test_inject_web_config_force_overwrite(self, fake_config_dir, monkeypatch):
+        monkeypatch.setenv("LEASHD_WEB_PORT", "7777")
+        save_global_config({"web": {"port": 3000}})
+        inject_global_config_as_env(force=True)
+        assert os.environ["LEASHD_WEB_PORT"] == "3000"
+
+    def test_inject_web_config_non_dict_ignored(self, fake_config_dir, monkeypatch):
+        for key in list(os.environ):
+            if key.startswith("LEASHD_WEB_"):
+                monkeypatch.delenv(key, raising=False)
+        save_global_config({"web": "garbage"})
+        inject_global_config_as_env(force=True)
+        assert "LEASHD_WEB_ENABLED" not in os.environ
+
+
+class TestUpdateConfigSections:
+    def test_merges_agent_effort(self, fake_config_dir):
+        save_global_config({"effort": "low", "agent_runtime": "claude-code"})
+        update_config_sections({"agent": {"effort": "high"}})
+        data = load_global_config()
+        assert data["effort"] == "high"
+        assert data["agent_runtime"] == "claude-code"
+
+    def test_merges_agent_runtime(self, fake_config_dir):
+        save_global_config({"effort": "medium"})
+        update_config_sections({"agent": {"runtime": "codex"}})
+        data = load_global_config()
+        assert data["agent_runtime"] == "codex"
+        assert data["effort"] == "medium"
+
+    def test_merges_agent_default_mode(self, fake_config_dir):
+        save_global_config({})
+        update_config_sections({"agent": {"default_mode": "plan"}})
+        data = load_global_config()
+        assert data["default_mode"] == "plan"
+
+    def test_creates_autonomous_section(self, fake_config_dir):
+        save_global_config({})
+        update_config_sections({"autonomous": {"enabled": True, "auto_approver": True}})
+        data = load_global_config()
+        assert data["autonomous"]["enabled"] is True
+        assert data["autonomous"]["auto_approver"] is True
+
+    def test_merges_into_existing_autonomous(self, fake_config_dir):
+        save_global_config({"autonomous": {"enabled": True, "auto_plan": False}})
+        update_config_sections({"autonomous": {"auto_plan": True}})
+        data = load_global_config()
+        assert data["autonomous"]["enabled"] is True
+        assert data["autonomous"]["auto_plan"] is True
+
+    def test_maps_max_retries_to_task_max_retries(self, fake_config_dir):
+        save_global_config({})
+        update_config_sections({"autonomous": {"max_retries": 5}})
+        data = load_global_config()
+        assert data["autonomous"]["task_max_retries"] == 5
+
+    def test_updates_browser_section(self, fake_config_dir):
+        save_global_config({"browser": {"backend": "playwright"}})
+        update_config_sections(
+            {"browser": {"backend": "agent-browser", "headless": True}}
+        )
+        data = load_global_config()
+        assert data["browser"]["backend"] == "agent-browser"
+        assert data["browser"]["headless"] is True
+
+    def test_preserves_unmodified_sections(self, fake_config_dir):
+        save_global_config(
+            {
+                "effort": "medium",
+                "approved_directories": ["/tmp/a"],
+                "autonomous": {"enabled": True},
+            }
+        )
+        update_config_sections({"browser": {"headless": True}})
+        data = load_global_config()
+        assert data["effort"] == "medium"
+        assert data["approved_directories"] == ["/tmp/a"]
+        assert data["autonomous"]["enabled"] is True
+
+    def test_handles_non_dict_autonomous(self, fake_config_dir):
+        save_global_config({"autonomous": "garbage"})
+        update_config_sections({"autonomous": {"enabled": True}})
+        data = load_global_config()
+        assert data["autonomous"]["enabled"] is True
+
+    def test_handles_non_dict_browser(self, fake_config_dir):
+        save_global_config({"browser": "garbage"})
+        update_config_sections({"browser": {"headless": True}})
+        data = load_global_config()
+        assert data["browser"]["headless"] is True
+
+    def test_handles_non_dict_agent_ignored(self, fake_config_dir):
+        save_global_config({"effort": "low"})
+        update_config_sections({"agent": "not-a-dict"})
+        data = load_global_config()
+        assert data["effort"] == "low"
+
+    def test_empty_updates_is_noop(self, fake_config_dir):
+        save_global_config({"effort": "low"})
+        update_config_sections({})
+        data = load_global_config()
+        assert data["effort"] == "low"
+
+    def test_multiple_sections_at_once(self, fake_config_dir):
+        save_global_config({})
+        update_config_sections(
+            {
+                "agent": {"effort": "max"},
+                "autonomous": {"enabled": True},
+                "browser": {"headless": True},
+            }
+        )
+        data = load_global_config()
+        assert data["effort"] == "max"
+        assert data["autonomous"]["enabled"] is True
+        assert data["browser"]["headless"] is True
+
+    def test_creates_config_if_missing(self, fake_config_dir):
+        update_config_sections({"agent": {"effort": "high"}})
+        data = load_global_config()
+        assert data["effort"] == "high"

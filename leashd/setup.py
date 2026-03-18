@@ -123,6 +123,40 @@ def run_setup(
         else:
             print("  - Skipped\n")
 
+    web = data.get("web", {})
+    if not isinstance(web, dict):
+        web = {}
+    if not web.get("enabled") and not telegram.get("bot_token"):
+        print(
+            "  \U0001f310 WebUI (optional \u2014 browser-based access instead of Telegram)"
+        )
+        if _prompt_yes_no("  Enable Web UI?", default=True, input_fn=input_fn):
+            api_key = _prompt_optional(
+                "API key/password",
+                "required for security",
+                input_fn=input_fn,
+            )
+            if api_key:
+                web["api_key"] = api_key
+                port_str = _prompt_optional(
+                    "Port",
+                    "default: 8080",
+                    input_fn=input_fn,
+                )
+                if port_str:
+                    try:
+                        web["port"] = int(port_str)
+                    except ValueError:
+                        print("  Invalid port, using default 8080.")
+                web["enabled"] = True
+                data["web"] = web
+                port = web.get("port", 8080)
+                print(f"  \u2713 WebUI enabled at http://0.0.0.0:{port}\n")
+            else:
+                print("  API key is required. Skipped.\n")
+        else:
+            print("  - Skipped\n")
+
     browser = data.get("browser", {})
     if not isinstance(browser, dict):
         browser = {}

@@ -37,7 +37,6 @@ def gatekeeper(sandbox, mock_audit, event_bus):
 
 
 class TestGatekeeperSandbox:
-    @pytest.mark.asyncio
     async def test_sandbox_violation_denied(self, gatekeeper, mock_audit):
         result = await gatekeeper.check(
             "Read", {"file_path": "/etc/passwd"}, "s1", "c1"
@@ -46,12 +45,10 @@ class TestGatekeeperSandbox:
         assert "outside allowed" in result.message
         mock_audit.log_security_violation.assert_called_once()
 
-    @pytest.mark.asyncio
     async def test_non_path_tool_skips_sandbox(self, gatekeeper):
         result = await gatekeeper.check("Bash", {"command": "ls"}, "s1", "c1")
         assert result.behavior == "allow"
 
-    @pytest.mark.asyncio
     async def test_path_tool_inside_sandbox_allowed(self, gatekeeper, tmp_dir):
         result = await gatekeeper.check(
             "Read", {"file_path": str(tmp_dir / "foo.py")}, "s1", "c1"
@@ -60,7 +57,6 @@ class TestGatekeeperSandbox:
 
 
 class TestGatekeeperNoPolicy:
-    @pytest.mark.asyncio
     async def test_no_policy_allows_with_audit(self, gatekeeper, mock_audit, tmp_dir):
         result = await gatekeeper.check(
             "Read", {"file_path": str(tmp_dir / "foo.py")}, "s1", "c1"
@@ -86,21 +82,18 @@ class TestGatekeeperWithPolicy:
             policy_engine=policy_engine,
         )
 
-    @pytest.mark.asyncio
     async def test_policy_allow(self, policy_gatekeeper):
         result = await policy_gatekeeper.check(
             "Bash", {"command": "git status"}, "s1", "c1"
         )
         assert result.behavior == "allow"
 
-    @pytest.mark.asyncio
     async def test_policy_deny(self, policy_gatekeeper):
         result = await policy_gatekeeper.check(
             "Bash", {"command": "rm -rf /"}, "s1", "c1"
         )
         assert result.behavior == "deny"
 
-    @pytest.mark.asyncio
     async def test_require_approval_without_coordinator_denied(
         self, policy_gatekeeper, tmp_dir
     ):
@@ -124,7 +117,6 @@ class TestGatekeeperApproval:
             approval_coordinator=approval_coordinator,
         )
 
-    @pytest.mark.asyncio
     async def test_approval_granted(
         self, approval_gatekeeper, mock_connector, approval_coordinator, tmp_dir
     ):
@@ -142,7 +134,6 @@ class TestGatekeeperApproval:
         await task
         assert result.behavior == "allow"
 
-    @pytest.mark.asyncio
     async def test_approval_denied(
         self, approval_gatekeeper, mock_connector, approval_coordinator, tmp_dir
     ):
@@ -162,7 +153,6 @@ class TestGatekeeperApproval:
 
 
 class TestGatekeeperEvents:
-    @pytest.mark.asyncio
     async def test_tool_gated_event_emitted(self, gatekeeper, event_bus):
         from leashd.core.events import TOOL_GATED
 
@@ -176,7 +166,6 @@ class TestGatekeeperEvents:
         assert len(events) == 1
         assert events[0].data["tool_name"] == "Bash"
 
-    @pytest.mark.asyncio
     async def test_tool_allowed_event_emitted(self, gatekeeper, event_bus):
         from leashd.core.events import TOOL_ALLOWED
 
@@ -189,7 +178,6 @@ class TestGatekeeperEvents:
         await gatekeeper.check("Bash", {"command": "ls"}, "s1", "c1")
         assert len(events) == 1
 
-    @pytest.mark.asyncio
     async def test_tool_denied_event_emitted(self, gatekeeper, event_bus):
         from leashd.core.events import TOOL_DENIED
 
@@ -205,12 +193,10 @@ class TestGatekeeperEvents:
 
 
 class TestGatekeeperEdgeCases:
-    @pytest.mark.asyncio
     async def test_path_tool_no_path_key_skips_sandbox(self, gatekeeper):
         result = await gatekeeper.check("Read", {"content": "x"}, "s1", "c1")
         assert result.behavior == "allow"
 
-    @pytest.mark.asyncio
     async def test_path_tool_uses_path_key_fallback(
         self, sandbox, mock_audit, event_bus
     ):
@@ -219,7 +205,6 @@ class TestGatekeeperEdgeCases:
         assert result.behavior == "deny"
         assert "outside allowed" in result.message
 
-    @pytest.mark.asyncio
     async def test_non_default_path_tools_bypass_sandbox(
         self, sandbox, mock_audit, event_bus
     ):
@@ -236,14 +221,12 @@ class TestGatekeeperEdgeCases:
         result2 = await gk.check("Custom", {"file_path": "/etc/passwd"}, "s1", "c1")
         assert result2.behavior == "deny"
 
-    @pytest.mark.asyncio
     async def test_sandbox_violation_audit_severity(self, gatekeeper, mock_audit):
         await gatekeeper.check("Read", {"file_path": "/etc/passwd"}, "s1", "c1")
         mock_audit.log_security_violation.assert_called_once()
         call_args = mock_audit.log_security_violation.call_args
         assert call_args[0][3] == "critical"
 
-    @pytest.mark.asyncio
     async def test_policy_deny_reason_in_message(
         self, sandbox, mock_audit, event_bus, policy_engine
     ):
@@ -257,7 +240,6 @@ class TestGatekeeperEdgeCases:
         assert result.behavior == "deny"
         assert "Destructive" in result.message or "dangerous" in result.message.lower()
 
-    @pytest.mark.asyncio
     async def test_approval_denied_emits_tool_denied(
         self,
         sandbox,
@@ -297,7 +279,6 @@ class TestGatekeeperEdgeCases:
         await task
         assert any(e.data["tool_name"] == "Write" for e in events)
 
-    @pytest.mark.asyncio
     async def test_approval_granted_emits_via_approval(
         self,
         sandbox,
@@ -338,7 +319,6 @@ class TestGatekeeperEdgeCases:
         approval_events = [e for e in events if e.data.get("via") == "approval"]
         assert len(approval_events) == 1
 
-    @pytest.mark.asyncio
     async def test_approval_logs_to_audit(
         self,
         sandbox,
@@ -373,7 +353,6 @@ class TestGatekeeperEdgeCases:
         assert call_args[0][1] == "Write"  # tool_name
         assert call_args[0][2] is True  # approved
 
-    @pytest.mark.asyncio
     async def test_empty_tool_input_no_crash(self, gatekeeper):
         result = await gatekeeper.check("Bash", {}, "s1", "c1")
         assert result.behavior == "allow"
@@ -405,7 +384,6 @@ class TestGatekeeperAutoApprove:
     def test_disable_nonexistent_chat_no_error(self, auto_approve_gatekeeper):
         auto_approve_gatekeeper.disable_auto_approve("nonexistent")
 
-    @pytest.mark.asyncio
     async def test_auto_approve_bypasses_approval_request(
         self, auto_approve_gatekeeper, mock_connector, mock_audit, tmp_dir
     ):
@@ -424,7 +402,6 @@ class TestGatekeeperAutoApprove:
             "s1", "Write", True, "c1", approver_type="auto_approve"
         )
 
-    @pytest.mark.asyncio
     async def test_auto_approve_does_not_affect_other_chats(
         self, auto_approve_gatekeeper, mock_connector, approval_coordinator, tmp_dir
     ):
@@ -447,7 +424,6 @@ class TestGatekeeperAutoApprove:
         assert result.behavior == "allow"
         assert len(mock_connector.approval_requests) == 1
 
-    @pytest.mark.asyncio
     async def test_auto_approve_still_enforces_sandbox(
         self, auto_approve_gatekeeper, mock_audit
     ):
@@ -457,7 +433,6 @@ class TestGatekeeperAutoApprove:
         result = await gk.check("Read", {"file_path": "/etc/passwd"}, "s1", "c1")
         assert result.behavior == "deny"
 
-    @pytest.mark.asyncio
     async def test_auto_approve_still_enforces_policy_deny(
         self, auto_approve_gatekeeper
     ):
@@ -472,7 +447,6 @@ class TestGatekeeperAutoApprove:
         gk.enable_tool_auto_approve("c1", "Write")
         assert "Write" in gk._auto_approved_tools.get("c1", set())
 
-    @pytest.mark.asyncio
     async def test_per_tool_auto_approve_bypasses_for_matching_tool(
         self, auto_approve_gatekeeper, mock_connector, mock_audit, tmp_dir
     ):
@@ -488,7 +462,6 @@ class TestGatekeeperAutoApprove:
             "s1", "Write", True, "c1", approver_type="auto_approve"
         )
 
-    @pytest.mark.asyncio
     async def test_per_tool_auto_approve_does_not_bypass_other_tools(
         self, auto_approve_gatekeeper, mock_connector, approval_coordinator, tmp_dir
     ):
@@ -520,7 +493,6 @@ class TestGatekeeperAutoApprove:
         gk.disable_auto_approve("c1")
         assert "c1" not in gk._auto_approved_tools
 
-    @pytest.mark.asyncio
     async def test_bash_auto_approve_scoped_to_command_prefix(
         self, auto_approve_gatekeeper, mock_connector, approval_coordinator, mock_audit
     ):
@@ -548,7 +520,6 @@ class TestGatekeeperAutoApprove:
         assert result2.behavior == "allow"
         assert len(mock_connector.approval_requests) == 1
 
-    @pytest.mark.asyncio
     async def test_bash_auto_approve_different_prefix_not_matched(
         self, auto_approve_gatekeeper, mock_connector, approval_coordinator
     ):
@@ -571,7 +542,6 @@ class TestGatekeeperAutoApprove:
         assert result.behavior == "allow"
         assert len(mock_connector.approval_requests) == 1
 
-    @pytest.mark.asyncio
     async def test_bash_auto_approve_same_binary_different_subcommand(
         self, auto_approve_gatekeeper, mock_connector, approval_coordinator
     ):
@@ -592,7 +562,6 @@ class TestGatekeeperAutoApprove:
         assert result.behavior == "allow"
         assert len(mock_connector.approval_requests) == 1
 
-    @pytest.mark.asyncio
     async def test_non_bash_auto_approve_unchanged(
         self, auto_approve_gatekeeper, mock_connector, mock_audit, tmp_dir
     ):
@@ -719,7 +688,6 @@ class TestApprovalKeyExtraction:
 class TestGatekeeperSafetyInvariants:
     """Safety invariant validation tests."""
 
-    @pytest.mark.asyncio
     async def test_sandbox_runs_before_policy(
         self, sandbox, mock_audit, event_bus, tmp_dir
     ):
@@ -738,7 +706,6 @@ class TestGatekeeperSafetyInvariants:
         # Policy engine should NOT have been called
         mock_policy.classify.assert_not_called()
 
-    @pytest.mark.asyncio
     async def test_file_path_key_takes_precedence_over_path(
         self, sandbox, mock_audit, event_bus, tmp_dir
     ):
@@ -753,14 +720,12 @@ class TestGatekeeperSafetyInvariants:
         # file_path is inside sandbox → passes
         assert result.behavior == "allow"
 
-    @pytest.mark.asyncio
     async def test_path_key_fallback(self, sandbox, mock_audit, event_bus):
         """Only 'path' key → used for sandbox check."""
         gk = ToolGatekeeper(sandbox=sandbox, audit=mock_audit, event_bus=event_bus)
         result = await gk.check("Glob", {"path": "/etc"}, "s1", "c1")
         assert result.behavior == "deny"
 
-    @pytest.mark.asyncio
     async def test_relative_path_in_tool_input(self, sandbox, mock_audit, event_bus):
         """'../../../etc/passwd' → rejected by sandbox."""
         gk = ToolGatekeeper(sandbox=sandbox, audit=mock_audit, event_bus=event_bus)
@@ -769,7 +734,6 @@ class TestGatekeeperSafetyInvariants:
         )
         assert result.behavior == "deny"
 
-    @pytest.mark.asyncio
     async def test_policy_classify_exception_propagates(
         self, sandbox, mock_audit, event_bus, tmp_dir
     ):
@@ -787,7 +751,6 @@ class TestGatekeeperSafetyInvariants:
         with pytest.raises(RuntimeError, match="policy crash"):
             await gk.check("Bash", {"command": "ls"}, "s1", "c1")
 
-    @pytest.mark.asyncio
     async def test_approval_coordinator_exception_propagates(
         self, sandbox, mock_audit, event_bus, policy_engine, tmp_dir
     ):
@@ -806,7 +769,6 @@ class TestGatekeeperSafetyInvariants:
         with pytest.raises(RuntimeError, match="approval crash"):
             await gk.check("Write", {"file_path": str(tmp_dir / "main.py")}, "s1", "c1")
 
-    @pytest.mark.asyncio
     async def test_deny_always_wins_first_match(
         self, sandbox, mock_audit, event_bus, tmp_path
     ):
@@ -852,7 +814,6 @@ class TestGatekeeperRejectionReason:
             approval_coordinator=approval_coordinator,
         )
 
-    @pytest.mark.asyncio
     async def test_rejection_reason_flows_to_deny_message(
         self,
         rejection_gatekeeper,
@@ -874,7 +835,6 @@ class TestGatekeeperRejectionReason:
         assert result.behavior == "deny"
         assert result.message == "use uv add instead"
 
-    @pytest.mark.asyncio
     async def test_button_rejection_uses_default_message(
         self,
         rejection_gatekeeper,
@@ -897,7 +857,6 @@ class TestGatekeeperRejectionReason:
         assert result.behavior == "deny"
         assert result.message == "User denied the operation"
 
-    @pytest.mark.asyncio
     async def test_rejection_reason_logged_to_audit(
         self,
         rejection_gatekeeper,
@@ -921,7 +880,6 @@ class TestGatekeeperRejectionReason:
         call_kwargs = mock_audit.log_approval.call_args
         assert call_kwargs[1]["rejection_reason"] == "try another way"
 
-    @pytest.mark.asyncio
     async def test_button_approval_no_rejection_reason_in_audit(
         self,
         rejection_gatekeeper,
@@ -974,6 +932,53 @@ class TestCdStrippingApprovalKeys:
         assert _approval_key("Bash", {"command": "cd /project"}) == "Bash::cd"
 
 
+class TestSleepStrippingApprovalKeys:
+    def test_sleep_prefix_stripped_from_key(self):
+        assert (
+            _approval_key("Bash", {"command": "sleep 2 && agent-browser snapshot -i"})
+            == "Bash::agent-browser snapshot"
+        )
+
+    def test_chained_sleep_stripped(self):
+        assert (
+            _approval_key("Bash", {"command": "sleep 1 && sleep 2 && npm test"})
+            == "Bash::npm test"
+        )
+
+    def test_dangerous_sleep_not_stripped(self):
+        key = _approval_key("Bash", {"command": "sleep$(rm -rf /) && ls"})
+        assert key.startswith("Bash::sleep")
+
+    def test_sleep_semicolon_stripped(self):
+        assert (
+            _approval_key("Bash", {"command": "sleep 1 ; make build"})
+            == "Bash::make build"
+        )
+
+    def test_bare_sleep_no_chain(self):
+        assert _approval_key("Bash", {"command": "sleep 5"}) == "Bash::sleep 5"
+
+    def test_cd_then_sleep_both_stripped(self):
+        assert (
+            _approval_key(
+                "Bash", {"command": "cd /project && sleep 2 && uv run pytest"}
+            )
+            == "Bash::uv run pytest"
+        )
+
+    def test_sleep_then_cd_both_stripped(self):
+        assert (
+            _approval_key("Bash", {"command": "sleep 1 && cd /project && npm test"})
+            == "Bash::npm test"
+        )
+
+    def test_fractional_sleep_stripped(self):
+        assert (
+            _approval_key("Bash", {"command": "sleep 0.5 && agent-browser snapshot -i"})
+            == "Bash::agent-browser snapshot"
+        )
+
+
 class TestHierarchicalAutoApprove:
     @pytest.fixture
     def gk(self, sandbox, mock_audit, event_bus, policy_engine, approval_coordinator):
@@ -985,7 +990,6 @@ class TestHierarchicalAutoApprove:
             approval_coordinator=approval_coordinator,
         )
 
-    @pytest.mark.asyncio
     async def test_broader_key_covers_narrower(self, gk, mock_connector, mock_audit):
         gk.enable_tool_auto_approve("c1", "Bash::uv run")
 
@@ -993,7 +997,6 @@ class TestHierarchicalAutoApprove:
         assert result.behavior == "allow"
         assert len(mock_connector.approval_requests) == 0
 
-    @pytest.mark.asyncio
     async def test_narrower_key_does_not_cover_broader(
         self, gk, mock_connector, approval_coordinator
     ):
@@ -1015,7 +1018,6 @@ class TestHierarchicalAutoApprove:
         assert result.behavior == "allow"
         assert len(mock_connector.approval_requests) == 1
 
-    @pytest.mark.asyncio
     async def test_word_boundary_prevents_false_match(
         self, gk, mock_connector, approval_coordinator
     ):
@@ -1035,7 +1037,6 @@ class TestHierarchicalAutoApprove:
         assert result.behavior == "allow"
         assert len(mock_connector.approval_requests) == 1
 
-    @pytest.mark.asyncio
     async def test_exact_match_still_works(self, gk, mock_connector, mock_audit):
         gk.enable_tool_auto_approve("c1", "Bash::git push origin")
 
@@ -1048,7 +1049,6 @@ class TestHierarchicalAutoApprove:
         assert gk._matches_auto_approved("c1", "Write") is True
         assert gk._matches_auto_approved("c1", "WriteExtra") is False
 
-    @pytest.mark.asyncio
     async def test_docker_compose_auto_approved(self, gk, mock_connector, mock_audit):
         gk.enable_tool_auto_approve("c1", "Bash::docker compose")
         result = await gk.check(
@@ -1078,7 +1078,6 @@ class TestMCPToolNameNormalization:
     def test_normalize_empty_string(self):
         assert normalize_tool_name("") == ""
 
-    @pytest.mark.asyncio
     async def test_mcp_tool_matches_policy_after_normalization(
         self, sandbox, mock_audit, event_bus
     ):
@@ -1103,7 +1102,6 @@ class TestMCPToolNameNormalization:
         result = await gk.check("mcp__playwright__browser_snapshot", {}, "s1", "c1")
         assert result.behavior == "allow"
 
-    @pytest.mark.asyncio
     async def test_mcp_tool_matches_auto_approve_after_normalization(
         self, sandbox, mock_audit, event_bus, policy_engine, approval_coordinator
     ):
@@ -1133,7 +1131,6 @@ class TestMCPToolNameNormalization:
         )
         assert key == "browser_navigate"
 
-    @pytest.mark.asyncio
     async def test_events_preserve_original_tool_name(
         self, sandbox, mock_audit, event_bus
     ):
@@ -1171,7 +1168,6 @@ class TestGatekeeperAutoApproverIntegration:
             auto_approver=auto_approver,
         )
 
-    @pytest.mark.asyncio
     async def test_task_description_forwarded(self, ai_gatekeeper, tmp_dir):
         gk = ai_gatekeeper
         await gk.check(
@@ -1185,7 +1181,6 @@ class TestGatekeeperAutoApproverIntegration:
         call_kwargs = gk._auto_approver.evaluate.call_args[1]
         assert call_kwargs["task_description"] == "Fix the login bug"
 
-    @pytest.mark.asyncio
     async def test_audit_summary_forwarded(self, ai_gatekeeper, mock_audit, tmp_dir):
         mock_audit.get_recent_entries = MagicMock(
             return_value=[
@@ -1203,7 +1198,6 @@ class TestGatekeeperAutoApproverIntegration:
         call_kwargs = ai_gatekeeper._auto_approver.evaluate.call_args[1]
         assert "Read" in call_kwargs["audit_summary"]
 
-    @pytest.mark.asyncio
     async def test_session_mode_forwarded_to_audit(
         self, ai_gatekeeper, mock_audit, tmp_dir
     ):
@@ -1217,7 +1211,6 @@ class TestGatekeeperAutoApproverIntegration:
         call_args = mock_audit.log_tool_attempt.call_args
         assert call_args[1]["session_mode"] == "auto"
 
-    @pytest.mark.asyncio
     async def test_ai_auto_approver_deny_emits_tool_denied(
         self, sandbox, mock_audit, event_bus, policy_engine, tmp_dir
     ):
@@ -1267,7 +1260,6 @@ class TestGatekeeperAutoApproverIntegration:
         assert len(escalated_events) == 1
         assert escalated_events[0].data["ai_reason"] == "Too risky for AI"
 
-    @pytest.mark.asyncio
     async def test_ai_denial_escalates_to_human_approve(
         self, sandbox, mock_audit, event_bus, policy_engine, tmp_dir
     ):
@@ -1319,7 +1311,6 @@ class TestGatekeeperAutoApproverIntegration:
             mock_audit.log_approval.call_args[1]["approver_type"] == "human_escalation"
         )
 
-    @pytest.mark.asyncio
     async def test_ai_denial_escalates_to_human_deny(
         self, sandbox, mock_audit, event_bus, policy_engine, tmp_dir
     ):
@@ -1368,7 +1359,6 @@ class TestGatekeeperAutoApproverIntegration:
         ]
         assert len(user_denied) == 1
 
-    @pytest.mark.asyncio
     async def test_ai_denial_terminal_when_no_coordinator(
         self, sandbox, mock_audit, event_bus, policy_engine, tmp_dir
     ):
@@ -1400,7 +1390,6 @@ class TestGatekeeperAutoApproverIntegration:
         assert result.behavior == "deny"
         assert "Blocked by AI" in result.message
 
-    @pytest.mark.asyncio
     async def test_escalation_passes_ai_reason_to_coordinator(
         self, sandbox, mock_audit, event_bus, policy_engine, tmp_dir
     ):
@@ -1437,7 +1426,6 @@ class TestGatekeeperAutoApproverIntegration:
         call_kwargs = coordinator.request_approval.call_args[1]
         assert call_kwargs["ai_denial_reason"] == "npm ci is dangerous"
 
-    @pytest.mark.asyncio
     async def test_ai_auto_approver_approve_emits_via_ai(
         self, sandbox, mock_audit, event_bus, policy_engine, tmp_dir
     ):
@@ -1478,7 +1466,6 @@ class TestGatekeeperAutoApproverIntegration:
         ai_events = [e for e in events if e.data.get("via") == "ai_approver"]
         assert len(ai_events) == 1
 
-    @pytest.mark.asyncio
     async def test_blanket_auto_approve_skips_ai_approver(
         self, sandbox, mock_audit, event_bus, policy_engine, tmp_dir
     ):
@@ -1507,7 +1494,6 @@ class TestGatekeeperAutoApproverIntegration:
         assert result.behavior == "allow"
         auto_approver.evaluate.assert_not_called()
 
-    @pytest.mark.asyncio
     async def test_ai_approver_skipped_for_default_mode(
         self, sandbox, mock_audit, event_bus, policy_engine, tmp_dir
     ):
@@ -1545,7 +1531,6 @@ class TestGatekeeperAutoApproverIntegration:
         auto_approver.evaluate.assert_not_called()
         coordinator.request_approval.assert_called_once()
 
-    @pytest.mark.asyncio
     async def test_ai_approver_skipped_for_plan_mode(
         self, sandbox, mock_audit, event_bus, policy_engine, tmp_dir
     ):
@@ -1583,7 +1568,6 @@ class TestGatekeeperAutoApproverIntegration:
         auto_approver.evaluate.assert_not_called()
         coordinator.request_approval.assert_called_once()
 
-    @pytest.mark.asyncio
     async def test_ai_approver_active_for_task_mode(
         self, sandbox, mock_audit, event_bus, policy_engine, tmp_dir
     ):
@@ -1625,7 +1609,6 @@ class TestGatekeeperAutoApproverIntegration:
         ai_events = [e for e in events if e.data.get("via") == "ai_approver"]
         assert len(ai_events) == 1
 
-    @pytest.mark.asyncio
     async def test_per_tool_auto_approve_skips_ai_approver(
         self, sandbox, mock_audit, event_bus, policy_engine, tmp_dir
     ):
@@ -1654,7 +1637,6 @@ class TestGatekeeperAutoApproverIntegration:
         assert result.behavior == "allow"
         auto_approver.evaluate.assert_not_called()
 
-    @pytest.mark.asyncio
     async def test_ai_approver_skipped_for_edit_mode(
         self, sandbox, mock_audit, event_bus, policy_engine, tmp_dir
     ):
@@ -1712,21 +1694,18 @@ class TestGatekeeperSafetyInvariantsExtended:
             approval_coordinator=approval_coordinator,
         )
 
-    @pytest.mark.asyncio
     async def test_per_tool_auto_approve_cannot_bypass_policy_deny(self, policy_gk):
         gk = policy_gk
         gk.enable_tool_auto_approve("c1", "Bash")
         result = await gk.check("Bash", {"command": "rm -rf /"}, "s1", "c1")
         assert result.behavior == "deny"
 
-    @pytest.mark.asyncio
     async def test_per_tool_auto_approve_cannot_bypass_sandbox(self, policy_gk):
         gk = policy_gk
         gk.enable_tool_auto_approve("c1", "Read")
         result = await gk.check("Read", {"file_path": "/etc/passwd"}, "s1", "c1")
         assert result.behavior == "deny"
 
-    @pytest.mark.asyncio
     async def test_mcp_path_tool_checked_by_sandbox(
         self, sandbox, mock_audit, event_bus, policy_engine
     ):
@@ -1741,7 +1720,6 @@ class TestGatekeeperSafetyInvariantsExtended:
         )
         assert result.behavior == "deny"
 
-    @pytest.mark.asyncio
     async def test_auto_approve_does_not_override_deny_for_credential_files(
         self, sandbox, mock_audit, event_bus, tmp_path
     ):
@@ -1812,7 +1790,6 @@ class TestGatekeeperStateManagement:
             approval_coordinator=approval_coordinator,
         )
 
-    @pytest.mark.asyncio
     async def test_auto_approve_chat_isolation(
         self, gk, mock_connector, mock_audit, tmp_dir
     ):
@@ -1869,12 +1846,10 @@ class TestGatekeeperStateManagement:
         assert blanket_c2 is False
         assert per_tool_c2 == set()
 
-    @pytest.mark.asyncio
     async def test_empty_session_id_no_crash(self, gk):
         result = await gk.check("Bash", {"command": "ls"}, "", "c1")
         assert result.behavior == "allow"
 
-    @pytest.mark.asyncio
     async def test_empty_chat_id_no_crash(self, gk):
         result = await gk.check("Bash", {"command": "ls"}, "s1", "")
         assert result.behavior == "allow"
@@ -1883,7 +1858,6 @@ class TestGatekeeperStateManagement:
 class TestGatekeeperEventsExtended:
     """Additional event handler resilience tests."""
 
-    @pytest.mark.asyncio
     async def test_event_handler_exception_does_not_block_allow(
         self, sandbox, mock_audit, event_bus
     ):
@@ -1897,7 +1871,6 @@ class TestGatekeeperEventsExtended:
         result = await gk.check("Bash", {"command": "ls"}, "s1", "c1")
         assert result.behavior == "allow"
 
-    @pytest.mark.asyncio
     async def test_event_handler_exception_does_not_block_deny(
         self, sandbox, mock_audit, event_bus
     ):
