@@ -535,3 +535,243 @@ class TestFinalizeRobustness:
         await responder.on_chunk("hello")
         result = await responder.finalize("hello")
         assert result is True
+
+
+class TestCursorPause:
+    async def test_cursor_pauses_on_agent_activity(self):
+        from leashd.agents.base import ToolActivity
+        from leashd.core.engine import _StreamingResponder
+        from tests.conftest import MockConnector
+
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
+
+        await responder.on_chunk("I'll start")
+        assert responder._message_id is not None
+
+        await responder.on_activity(
+            ToolActivity(tool_name="Agent", description="sub-agent")
+        )
+        assert responder._cursor_paused is True
+        # Should have edited the message without cursor
+        pause_edit = [e for e in connector.edited_messages if e["text"] == "I'll start"]
+        assert len(pause_edit) == 1
+        # Stream is paused, not completed — no complete_stream call
+        assert len(connector.completed_streams) == 0
+
+    async def test_cursor_pause_skipped_without_message_id(self):
+        from leashd.agents.base import ToolActivity
+        from leashd.core.engine import _StreamingResponder
+        from tests.conftest import MockConnector
+
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
+
+        # No chunks sent — no message_id
+        await responder.on_activity(
+            ToolActivity(tool_name="Agent", description="sub-agent")
+        )
+        assert responder._cursor_paused is False
+        assert len(connector.completed_streams) == 0
+
+    async def test_cursor_pause_not_double_triggered(self):
+        from leashd.agents.base import ToolActivity
+        from leashd.core.engine import _StreamingResponder
+        from tests.conftest import MockConnector
+
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
+
+        await responder.on_chunk("text")
+
+        await responder.on_activity(
+            ToolActivity(tool_name="Agent", description="first")
+        )
+        assert responder._cursor_paused is True
+        # Exactly one pause edit (cursor-free text)
+        pause_edits = [e for e in connector.edited_messages if e["text"] == "text"]
+        assert len(pause_edits) == 1
+
+        await responder.on_activity(
+            ToolActivity(tool_name="Agent", description="second")
+        )
+        # No additional pause edit — cursor was already paused
+        pause_edits = [e for e in connector.edited_messages if e["text"] == "text"]
+        assert len(pause_edits) == 1
+
+    async def test_cursor_resumes_on_next_chunk(self):
+        from leashd.agents.base import ToolActivity
+        from leashd.core.engine import _StreamingResponder
+        from tests.conftest import MockConnector
+
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
+
+        await responder.on_chunk("I'll start")
+        await responder.on_activity(
+            ToolActivity(tool_name="Agent", description="sub-agent")
+        )
+        assert responder._cursor_paused is True
+
+        await responder.on_chunk(" more text")
+        assert responder._cursor_paused is False
+
+    async def test_all_tools_pause_cursor(self):
+        from leashd.agents.base import ToolActivity
+        from leashd.core.engine import _StreamingResponder
+        from tests.conftest import MockConnector
+
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
+
+        await responder.on_chunk("hello")
+        await responder.on_activity(
+            ToolActivity(tool_name="Read", description="something")
+        )
+        # First tool pauses cursor
+        assert responder._cursor_paused is True
+        pause_edit = [e for e in connector.edited_messages if e["text"] == "hello"]
+        assert len(pause_edit) == 1
+        # No complete_stream — stream is paused, not done
+        assert len(connector.completed_streams) == 0
+
+    async def test_reset_clears_cursor_paused(self):
+        from leashd.agents.base import ToolActivity
+        from leashd.core.engine import _StreamingResponder
+        from tests.conftest import MockConnector
+
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
+
+        await responder.on_chunk("text")
+        await responder.on_activity(
+            ToolActivity(tool_name="Agent", description="sub-agent")
+        )
+        assert responder._cursor_paused is True
+
+        responder.reset()
+        assert responder._cursor_paused is False
+
+    async def test_cursor_pause_does_not_call_complete_stream(self):
+        from leashd.agents.base import ToolActivity
+        from leashd.core.engine import _StreamingResponder
+        from tests.conftest import MockConnector
+
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
+
+        await responder.on_chunk("Let me check")
+        await responder.on_activity(
+            ToolActivity(tool_name="Bash", description="git status")
+        )
+        assert responder._cursor_paused is True
+        # complete_stream must NOT be called mid-conversation — it corrupts WebUI state
+        assert len(connector.completed_streams) == 0
+
+    async def test_cursor_pauses_for_various_tools(self):
+        from leashd.agents.base import ToolActivity
+        from leashd.core.engine import _StreamingResponder
+        from tests.conftest import MockConnector
+
+        for tool in ("Read", "Bash", "Grep", "Edit", "Write", "Agent"):
+            connector = MockConnector(support_streaming=True)
+            responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
+
+            await responder.on_chunk("text")
+            await responder.on_activity(
+                ToolActivity(tool_name=tool, description="test")
+            )
+            assert responder._cursor_paused is True, f"{tool} should pause cursor"
+            assert len(connector.completed_streams) == 0, (
+                f"{tool} should not complete stream"
+            )
+
+
+class TestStreamingSnapshot:
+    async def test_snapshot_returns_none_before_first_chunk(self):
+        from leashd.core.engine import _StreamingResponder
+        from tests.conftest import MockConnector
+
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
+
+        assert responder.snapshot() is None
+
+    async def test_snapshot_returns_current_display_window(self):
+        from leashd.core.engine import _StreamingResponder
+        from tests.conftest import MockConnector
+
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
+
+        await responder.on_chunk("hello world")
+        snap = responder.snapshot()
+        assert snap is not None
+        assert snap["message_id"] == "1"
+        assert snap["text"] == "hello world"
+
+    async def test_snapshot_returns_none_when_inactive(self):
+        from leashd.core.engine import _StreamingResponder
+        from tests.conftest import MockConnector
+
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
+
+        await responder.on_chunk("hello")
+        await responder.deactivate()
+        assert responder.snapshot() is None
+
+    async def test_snapshot_with_overflow_returns_current_window(self):
+        from leashd.core.engine import _MAX_STREAMING_DISPLAY, _StreamingResponder
+        from tests.conftest import MockConnector
+
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0)
+
+        # Overflow into second message
+        await responder.on_chunk("A" * (_MAX_STREAMING_DISPLAY + 100))
+        snap = responder.snapshot()
+        assert snap is not None
+        # Should contain only the current window (the overflow portion)
+        assert len(snap["text"]) <= _MAX_STREAMING_DISPLAY
+        assert snap["message_id"] == responder._message_id
+
+
+class TestActiveRespondersLifecycle:
+    async def test_active_responders_cleaned_up_after_execution(
+        self, config, policy_engine, audit_logger
+    ):
+        from tests.conftest import MockConnector
+
+        connector = MockConnector(support_streaming=True)
+        agent = FakeAgent()
+        eng = Engine(
+            connector=connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_message("user1", "hello", "chat1")
+        assert "chat1" not in eng._active_responders
+
+    async def test_active_responders_cleaned_up_on_error(
+        self, config, policy_engine, audit_logger
+    ):
+        from tests.conftest import MockConnector
+
+        connector = MockConnector(support_streaming=True)
+        agent = FakeAgent(fail=True)
+        eng = Engine(
+            connector=connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_message("user1", "hello", "chat1")
+        assert "chat1" not in eng._active_responders

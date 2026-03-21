@@ -616,6 +616,19 @@ def _handle_webui_tunnel(*, provider: str, notify_telegram: bool) -> None:
                         file=sys.stderr,
                     )
 
+    import time
+
+    if not tunnel.is_alive:
+        code = tunnel.exit_code
+        stderr_output = tunnel.get_stderr()
+        print(
+            f"\nError: Tunnel process exited unexpectedly (exit code {code}).",
+            file=sys.stderr,
+        )
+        if stderr_output:
+            print(f"  stderr: {stderr_output}", file=sys.stderr)
+        sys.exit(1)
+
     stop = False
 
     def _on_signal(signum: int, frame: object) -> None:  # noqa: ARG001
@@ -627,16 +640,22 @@ def _handle_webui_tunnel(*, provider: str, notify_telegram: bool) -> None:
 
     try:
         while not stop and tunnel.is_alive:
-            try:
-                _signal.pause()
-            except AttributeError:
-                import time
-
-                time.sleep(1)
+            time.sleep(1)
     finally:
-        print("\nStopping tunnel...")
-        tunnel.stop()
-        print("Tunnel stopped.")
+        if stop:
+            print("\nStopping tunnel...")
+            tunnel.stop()
+            print("Tunnel stopped.")
+        else:
+            code = tunnel.exit_code
+            stderr_output = tunnel.get_stderr()
+            print(
+                f"\nTunnel process exited unexpectedly (exit code {code}).",
+                file=sys.stderr,
+            )
+            if stderr_output:
+                print(f"  stderr: {stderr_output}", file=sys.stderr)
+            sys.exit(1)
 
 
 _VALID_EFFORT_LEVELS = {"low", "medium", "high", "max"}
@@ -903,6 +922,131 @@ def _handle_skill_show(name: str) -> None:
     print(f"Installed: {skill.installed_at}")
     if skill.tags:
         print(f"Tags: {', '.join(skill.tags)}")
+
+
+def _handle_plugin(args: argparse.Namespace) -> None:
+    """Route plugin subcommands."""
+    sub = getattr(args, "plugin_command", None)
+    if sub is None or sub == "list":
+        _handle_plugin_list()
+    elif sub == "show":
+        _handle_plugin_show(args.name)
+    elif sub == "add":
+        _handle_plugin_add(args.source)
+    elif sub == "remove":
+        _handle_plugin_remove(args.name)
+    elif sub == "enable":
+        _handle_plugin_enable(args.name)
+    elif sub == "disable":
+        _handle_plugin_disable(args.name)
+
+
+def _handle_plugin_list() -> None:
+    """List installed Claude Code plugins."""
+    from leashd.cc_plugins import list_plugins
+
+    plugins = list_plugins()
+    if not plugins:
+        print("No Claude Code plugins installed.")
+        return
+    print(f"Claude Code plugins ({len(plugins)}):")
+    for p in plugins:
+        status = "enabled" if p.enabled else "disabled"
+        print(f"  {p.name}: {p.description} [{status}]")
+
+
+def _handle_plugin_show(name: str) -> None:
+    """Show details of an installed Claude Code plugin."""
+    from leashd.cc_plugins import get_plugin
+
+    plugin = get_plugin(name)
+    if not plugin:
+        print(f"Error: plugin '{name}' not installed", file=sys.stderr)
+        sys.exit(1)
+    print(f"Plugin: {plugin.name}")
+    print(f"Version: {plugin.version}")
+    print(f"Author: {plugin.author}")
+    print(f"Description: {plugin.description}")
+    print(f"Source: {plugin.source}")
+    print(f"Installed: {plugin.installed_at}")
+    print(f"Status: {'enabled' if plugin.enabled else 'disabled'}")
+
+    # Show components if the plugin directory exists
+    plugin_dir = Path.home() / ".claude" / "plugins" / plugin.name
+    if plugin_dir.is_dir():
+        components = []
+        if (plugin_dir / "skills").is_dir():
+            components.append("skills/")
+        if (plugin_dir / "agents").is_dir():
+            components.append("agents/")
+        if (plugin_dir / "hooks").is_dir():
+            components.append("hooks/")
+        if (plugin_dir / ".mcp.json").is_file():
+            components.append(".mcp.json")
+        if components:
+            print(f"Components: {', '.join(components)}")
+
+
+def _handle_plugin_add(source: str) -> None:
+    """Install a Claude Code plugin from a directory or zip file."""
+    from leashd.cc_plugins import install_plugin
+
+    source_path = Path(source).expanduser().resolve()
+    try:
+        plugin = install_plugin(source_path)
+    except (FileNotFoundError, ValueError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    print(f"\u2713 Installed plugin '{plugin.name}' v{plugin.version}")
+    _notify_daemon_reload()
+
+
+def _handle_plugin_remove(name: str) -> None:
+    """Remove an installed Claude Code plugin."""
+    from leashd.cc_plugins import remove_plugin
+
+    try:
+        removed = remove_plugin(name)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    if not removed:
+        print(f"Error: plugin '{name}' not installed", file=sys.stderr)
+        sys.exit(1)
+    print(f"\u2713 Removed plugin '{name}'")
+    _notify_daemon_reload()
+
+
+def _handle_plugin_enable(name: str) -> None:
+    """Enable a Claude Code plugin."""
+    from leashd.cc_plugins import enable_plugin, get_plugin
+
+    plugin = get_plugin(name)
+    if not plugin:
+        print(f"Error: plugin '{name}' not installed", file=sys.stderr)
+        sys.exit(1)
+    if plugin.enabled:
+        print(f"Plugin '{name}' is already enabled.")
+        return
+    enable_plugin(name)
+    print(f"\u2713 Plugin '{name}' enabled")
+    _notify_daemon_reload()
+
+
+def _handle_plugin_disable(name: str) -> None:
+    """Disable a Claude Code plugin."""
+    from leashd.cc_plugins import disable_plugin, get_plugin
+
+    plugin = get_plugin(name)
+    if not plugin:
+        print(f"Error: plugin '{name}' not installed", file=sys.stderr)
+        sys.exit(1)
+    if not plugin.enabled:
+        print(f"Plugin '{name}' is already disabled.")
+        return
+    disable_plugin(name)
+    print(f"\u2713 Plugin '{name}' disabled")
+    _notify_daemon_reload()
 
 
 def _handle_ws(args: argparse.Namespace) -> None:
@@ -1333,6 +1477,23 @@ def main() -> None:
     skill_show = skill_sub.add_parser("show", help="Show skill details")
     skill_show.add_argument("name", help="Skill name to show")
 
+    # Claude Code plugin management
+    plugin_parser = subparsers.add_parser("plugin", help="Manage Claude Code plugins")
+    plugin_sub = plugin_parser.add_subparsers(dest="plugin_command")
+    plugin_sub.add_parser("list", help="List installed plugins (default)")
+    plugin_add = plugin_sub.add_parser(
+        "add", help="Install a plugin from a directory or zip"
+    )
+    plugin_add.add_argument("source", help="Path to plugin directory or zip file")
+    plugin_remove = plugin_sub.add_parser("remove", help="Remove an installed plugin")
+    plugin_remove.add_argument("name", help="Plugin name to remove")
+    plugin_show = plugin_sub.add_parser("show", help="Show plugin details")
+    plugin_show.add_argument("name", help="Plugin name")
+    plugin_enable = plugin_sub.add_parser("enable", help="Enable a plugin")
+    plugin_enable.add_argument("name", help="Plugin name to enable")
+    plugin_disable = plugin_sub.add_parser("disable", help="Disable a plugin")
+    plugin_disable.add_argument("name", help="Plugin name to disable")
+
     # Workspace management
     ws_parser = subparsers.add_parser("ws", help="Manage workspaces")
     ws_sub = ws_parser.add_subparsers(dest="ws_command")
@@ -1409,5 +1570,7 @@ def main() -> None:
         _handle_workflow(args)
     elif args.command == "skill":
         _handle_skill(args)
+    elif args.command == "plugin":
+        _handle_plugin(args)
     elif args.command == "ws":
         _handle_ws(args)

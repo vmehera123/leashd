@@ -2758,11 +2758,11 @@ class TestPlanOriginRouting:
         # AI reviewer was NOT called
         coordinator._auto_plan_reviewer.review_plan.assert_not_called()
 
-    async def test_auto_plan_routes_to_ai_review(
+    async def test_auto_plan_ai_approve_forwards_to_human_review(
         self, config, policy_engine, audit_logger
     ):
-        """When auto_plan activates plan mode automatically, ExitPlanMode routes to
-        AI review (handle_plan_review_auto)."""
+        """When auto_plan AI approves, the plan is forwarded to human review
+        so the user can see and interact with the plan."""
         from unittest.mock import AsyncMock, MagicMock
 
         from leashd.plugins.builtin.auto_plan_reviewer import AutoPlanReviewer
@@ -2791,7 +2791,15 @@ class TestPlanOriginRouting:
                         },
                         None,
                     )
+
+                    async def click():
+                        await asyncio.sleep(0.05)
+                        req = streaming_connector.plan_review_requests[0]
+                        await coordinator.resolve_option(req["interaction_id"], "edit")
+
+                    task = asyncio.create_task(click())
                     await can_use_tool("ExitPlanMode", {}, None)
+                    await task
 
                 return AgentResponse(content="ok", session_id="sid", cost=0.01)
 
@@ -2816,8 +2824,78 @@ class TestPlanOriginRouting:
 
         # AI reviewer WAS called (auto-initiated plan)
         mock_reviewer.review_plan.assert_called_once()
-        # Human review was NOT shown
+        # Human review WAS shown after AI approval
+        assert len(streaming_connector.plan_review_requests) == 1
+
+    async def test_auto_plan_ai_rejection_skips_human_review(
+        self, config, policy_engine, audit_logger
+    ):
+        """When auto_plan AI rejects the plan, the agent gets a deny result
+        and human review is NOT shown."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from leashd.plugins.builtin.auto_plan_reviewer import AutoPlanReviewer
+        from tests.conftest import MockConnector
+
+        streaming_connector = MockConnector(support_streaming=True)
+        config.auto_plan = True
+        config.streaming_enabled = True
+
+        coordinator = InteractionCoordinator(streaming_connector, config)
+        mock_reviewer = MagicMock(spec=AutoPlanReviewer)
+        mock_reviewer.review_plan = AsyncMock(
+            return_value=MagicMock(approved=False, feedback="Missing error handling")
+        )
+        coordinator._auto_plan_reviewer = mock_reviewer
+
+        deny_results = []
+        call_count = 0
+
+        class AutoPlanAgent(BaseAgent):
+            async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    session.mode = "plan"
+                    await can_use_tool(
+                        "Write",
+                        {
+                            "file_path": "/tmp/proj/.claude/plans/auto.md",
+                            "content": "# Auto Plan\n\n1. Steps",
+                        },
+                        None,
+                    )
+                    result = await can_use_tool("ExitPlanMode", {}, None)
+                    deny_results.append(result)
+
+                return AgentResponse(content="ok", session_id="sid", cost=0.01)
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        eng = Engine(
+            connector=streaming_connector,
+            agent=AutoPlanAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            interaction_coordinator=coordinator,
+        )
+
+        await eng.handle_message("user1", "Do the thing", "chat1")
+
+        # AI reviewer WAS called
+        mock_reviewer.review_plan.assert_called_once()
+        # Human review was NOT shown (AI rejected)
         assert len(streaming_connector.plan_review_requests) == 0
+        # Agent received a deny with the AI's feedback
+        assert len(deny_results) == 1
+        assert isinstance(deny_results[0], PermissionDeny)
+        assert "Missing error handling" in deny_results[0].message
 
 
 class TestNoAutoApproveBeforePlanExit:

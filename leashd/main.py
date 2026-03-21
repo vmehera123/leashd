@@ -6,7 +6,7 @@ import asyncio
 import os
 import signal
 import sys
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -115,12 +115,62 @@ async def _run_telegram(config: LeashdConfig) -> None:
         print("\nShutdown complete.")
 
 
+def _make_reconnect_state_callback(engine: Any) -> Any:
+    """Create a closure that queries engine coordinators for pending state."""
+
+    async def _get_reconnect_state(chat_id: str) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+
+        if engine.approval_coordinator:
+            approvals = [
+                {
+                    "request_id": p.approval_id,
+                    "tool": p.tool_name,
+                    "description": p.description,
+                }
+                for p in engine.approval_coordinator.pending.values()
+                if p.chat_id == chat_id
+            ]
+            if approvals:
+                result["approvals"] = approvals
+
+        if engine.interaction_coordinator:
+            for p in engine.interaction_coordinator.pending.values():
+                if p.chat_id != chat_id:
+                    continue
+                if p.kind == "question":
+                    result["question"] = {
+                        "interaction_id": p.interaction_id,
+                        "question": p.question,
+                        "header": p.header,
+                        "options": p.options,
+                    }
+                elif p.kind == "plan_review":
+                    result["plan_review"] = {
+                        "interaction_id": p.interaction_id,
+                        "description": p.description,
+                    }
+
+        if chat_id in engine.executing_chats:
+            result["agent_busy"] = True
+            responder = engine.active_responders.get(chat_id)
+            if responder:
+                snap = responder.snapshot()
+                if snap:
+                    result["streaming_content"] = snap
+
+        return result
+
+    return _get_reconnect_state
+
+
 async def _run_web(config: LeashdConfig) -> None:
     from leashd.connectors.web import WebConnector
 
     message_store = await _create_message_store(config)
     connector = WebConnector(config, message_store=message_store)
     engine = build_engine(config, connector=connector, message_store=message_store)
+    connector.ws_handler.set_on_reconnect_state(_make_reconnect_state_callback(engine))
     await engine.startup()
 
     logger.info(
@@ -177,7 +227,35 @@ async def _run_multi(config: LeashdConfig) -> None:
     web_connector._on_disconnect = lambda cid: multi.unregister_route(cid)
 
     engine = build_engine(config, connector=multi, message_store=message_store)
+    web_connector.ws_handler.set_on_reconnect_state(
+        _make_reconnect_state_callback(engine)
+    )
     await engine.startup()
+
+    if config.web_telegram_notify:
+        import contextlib
+
+        from leashd.core.events import (
+            APPROVAL_ESCALATED,
+            APPROVAL_REQUESTED,
+            INTERACTION_REQUESTED,
+            Event,
+        )
+
+        async def _telegram_cross_notify(event: Event) -> None:
+            chat_id = event.data.get("chat_id", "")
+            if not chat_id.startswith("web:"):
+                return
+            session_id = chat_id.removeprefix("web:")
+            kind = event.data.get("kind", event.name)
+            link = f"http://{config.web_host}:{config.web_port}/#{session_id}"
+            for uid in config.allowed_user_ids:
+                with contextlib.suppress(Exception):
+                    await telegram_connector.send_message(uid, f"WebUI: {kind}\n{link}")
+
+        engine.event_bus.subscribe(INTERACTION_REQUESTED, _telegram_cross_notify)
+        engine.event_bus.subscribe(APPROVAL_ESCALATED, _telegram_cross_notify)
+        engine.event_bus.subscribe(APPROVAL_REQUESTED, _telegram_cross_notify)
 
     logger.info(
         "multi_connector_starting",

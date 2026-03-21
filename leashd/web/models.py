@@ -40,6 +40,7 @@ ServerMessageType = Literal[
     "question",
     "plan_review",
     "interrupt_prompt",
+    "pending_state",
     "task_update",
     "error",
     "pong",

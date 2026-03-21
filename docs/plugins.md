@@ -2,6 +2,13 @@
 
 Plugins extend leashd with observability, custom logic, and integration hooks. They subscribe to `EventBus` events and react without modifying core components.
 
+## Two Plugin Systems
+
+leashd has two distinct plugin systems:
+
+- **leashd plugins** — EventBus subscribers managed via `PluginRegistry`. They hook into leashd's internal event lifecycle (tool gating, message routing, test workflows, etc.). This is what this document covers.
+- **Claude Code plugins** — SDK-level extension packages with `.claude-plugin/plugin.json` manifests. They provide skills, agents, hooks, MCP servers, and LSP servers to the Claude Agent SDK. Managed via the `leashd plugin` CLI and `/plugin` chat command. See [CLI Reference — Plugin Management](cli.md#plugin-management) for details.
+
 ## Plugin Protocol
 
 ```python

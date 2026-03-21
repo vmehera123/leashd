@@ -117,7 +117,7 @@ class _ToolCallbackState:
 
 ## Slash Commands
 
-The engine handles eleven commands via `handle_command()`:
+The engine handles twelve commands via `handle_command()`:
 
 | Command | Effect |
 |---|---|
@@ -131,6 +131,7 @@ The engine handles eleven commands via `handle_command()`:
 | `/cancel` | Cancels the active task in the current chat. Emits `MESSAGE_IN` with text="/cancel". |
 | `/tasks` | Lists tasks for the current chat — active first, then recent completed/failed. |
 | `/clear` | Deactivates session (forces new session next message), disables auto-approve |
+| `/plugin [subcommand]` | Manage Claude Code plugins: list, show, add, remove, enable, disable |
 | `/status` | Returns current mode, message count, total cost, auto-approve status |
 
 ## Streaming

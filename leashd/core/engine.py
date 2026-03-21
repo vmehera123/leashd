@@ -145,6 +145,7 @@ class _StreamingResponder:
         self._tool_counts: dict[str, int] = {}
         self._display_offset: int = 0
         self._all_message_ids: list[str] = []
+        self._cursor_paused: bool = False
 
     @property
     def buffer(self) -> str:
@@ -153,6 +154,17 @@ class _StreamingResponder:
     @property
     def all_message_ids(self) -> list[str]:
         return list(self._all_message_ids)
+
+    def snapshot(self) -> dict[str, Any] | None:
+        """Return current streaming state for reconnecting clients."""
+        if not self._active or self._message_id is None:
+            return None
+        text = self._buffer[
+            self._display_offset : self._display_offset + _MAX_STREAMING_DISPLAY
+        ]
+        if not text:
+            return None
+        return {"message_id": self._message_id, "text": text}
 
     async def delete_all_messages(self) -> None:
         for msg_id in self._all_message_ids:
@@ -176,6 +188,8 @@ class _StreamingResponder:
     async def on_chunk(self, text: str) -> None:
         if not self._active:
             return
+
+        self._cursor_paused = False
 
         if self._has_activity:
             await self._connector.clear_activity(self._chat_id)
@@ -231,6 +245,14 @@ class _StreamingResponder:
             await self._connector.close_agent_group(self._chat_id)
             return
 
+        if self._message_id is not None and not self._cursor_paused:
+            tail = self._buffer[self._display_offset :]
+            if tail:
+                await self._connector.edit_message(
+                    self._chat_id, self._message_id, tail
+                )
+                self._cursor_paused = True
+
         self._tool_counts[activity.tool_name] = (
             self._tool_counts.get(activity.tool_name, 0) + 1
         )
@@ -250,6 +272,7 @@ class _StreamingResponder:
         self._last_edit = 0.0
         self._display_offset = 0
         self._all_message_ids.clear()
+        self._cursor_paused = False
 
     async def deactivate(self) -> None:
         """Suppress all further streaming and clear any visible activity."""
@@ -394,6 +417,7 @@ class Engine:
 
         self._git_handler = git_handler
         self._executing_chats: set[str] = set()
+        self._active_responders: dict[str, _StreamingResponder] = {}
         self._pending_messages: dict[
             str, list[tuple[str, str, list[Attachment] | None]]
         ] = {}
@@ -422,6 +446,14 @@ class Engine:
             connector.set_interrupt_resolver(self._resolve_interrupt)
             if git_handler:
                 connector.set_git_handler(self._handle_git_callback)
+
+    @property
+    def executing_chats(self) -> set[str]:
+        return self._executing_chats
+
+    @property
+    def active_responders(self) -> dict[str, _StreamingResponder]:
+        return self._active_responders
 
     async def _handle_git_callback(
         self, user_id: str, chat_id: str, action: str, payload: str
@@ -730,6 +762,7 @@ class Engine:
             return "Error: An unexpected error occurred. Please try again."
         finally:
             self._executing_chats.discard(chat_id)
+            self._active_responders.pop(chat_id, None)
             self._executing_sessions.pop(chat_id, None)
             self._interrupted_chats.discard(chat_id)
             old_iid = self._pending_interrupts.pop(chat_id, None)
@@ -743,6 +776,8 @@ class Engine:
                     self.connector.schedule_message_cleanup(
                         chat_id, mid, delay=_TRANSIENT_MESSAGE_DELAY
                     )
+            if self.connector:
+                await self.connector.notify_completion(chat_id)
 
     @staticmethod
     def _combine_queued_messages(
@@ -833,6 +868,7 @@ class Engine:
             )
             on_text_chunk = responder.on_chunk
             on_tool_activity = responder.on_activity
+            self._active_responders[chat_id] = responder
 
         deadline = AgentDeadline(self.config.agent_timeout_seconds)
         can_use_tool, tool_state = self._build_can_use_tool(
@@ -1508,10 +1544,111 @@ class Engine:
             )
             return "\n".join(lines)
 
+        if command == "plugin":
+            return self._handle_plugin_command(args)
+
         logger.warning(
             "unknown_command", user_id=user_id, chat_id=chat_id, command=command
         )
         return f"Unknown command: /{command}"
+
+    def _handle_plugin_command(self, args: str) -> str:
+        """Handle /plugin subcommands for Claude Code plugin management."""
+        from leashd.cc_plugins import (
+            disable_plugin,
+            enable_plugin,
+            get_plugin,
+            install_plugin,
+            list_plugins,
+            remove_plugin,
+        )
+
+        parts = args.strip().split(maxsplit=1)
+        sub = parts[0] if parts else "list"
+        sub_args = parts[1].strip() if len(parts) > 1 else ""
+
+        if sub == "list":
+            plugins = list_plugins()
+            if not plugins:
+                return "No Claude Code plugins installed."
+            lines = [f"Claude Code plugins ({len(plugins)}):"]
+            for p in plugins:
+                status = "enabled" if p.enabled else "disabled"
+                lines.append(f"  {p.name}: {p.description} [{status}]")
+            return "\n".join(lines)
+
+        if sub == "show":
+            if not sub_args:
+                return "Usage: /plugin show <name>"
+            try:
+                plugin = get_plugin(sub_args)
+            except ValueError as e:
+                return f"Error: {e}"
+            if not plugin:
+                return f"Plugin '{sub_args}' not installed."
+            lines = [
+                f"Plugin: {plugin.name}",
+                f"Version: {plugin.version}",
+                f"Author: {plugin.author}",
+                f"Description: {plugin.description}",
+                f"Status: {'enabled' if plugin.enabled else 'disabled'}",
+            ]
+            return "\n".join(lines)
+
+        if sub == "add":
+            if not sub_args:
+                return "Usage: /plugin add <path>"
+            # Enforce sandbox: plugin source must be within approved directories
+            source_path = Path(sub_args).expanduser().resolve()
+            allowed, reason = self.sandbox.validate_path(source_path)
+            if not allowed:
+                return f"Blocked: plugin source path is outside approved directories. {reason}"
+            try:
+                plugin = install_plugin(sub_args)
+            except (FileNotFoundError, ValueError) as e:
+                return f"Error installing plugin: {e}"
+            return f"Installed plugin '{plugin.name}' v{plugin.version}. Active on next turn."
+
+        if sub == "remove":
+            if not sub_args:
+                return "Usage: /plugin remove <name>"
+            try:
+                removed = remove_plugin(sub_args)
+            except ValueError as e:
+                return f"Error: {e}"
+            if not removed:
+                return f"Plugin '{sub_args}' not installed."
+            return f"Removed plugin '{sub_args}'."
+
+        if sub == "enable":
+            if not sub_args:
+                return "Usage: /plugin enable <name>"
+            try:
+                if not enable_plugin(sub_args):
+                    return f"Plugin '{sub_args}' not installed."
+            except ValueError as e:
+                return f"Error: {e}"
+            return f"Plugin '{sub_args}' enabled. Active on next turn."
+
+        if sub == "disable":
+            if not sub_args:
+                return "Usage: /plugin disable <name>"
+            try:
+                if not disable_plugin(sub_args):
+                    return f"Plugin '{sub_args}' not installed."
+            except ValueError as e:
+                return f"Error: {e}"
+            return f"Plugin '{sub_args}' disabled."
+
+        return (
+            "Usage: /plugin <list|show|add|remove|enable|disable> [args]\n"
+            "  /plugin list — list installed plugins\n"
+            "  /plugin add <path> — install from directory or zip\n"
+            "  /plugin remove <name> — uninstall\n"
+            "  /plugin show <name> — show details\n"
+            "  /plugin enable <name> — enable\n"
+            "  /plugin disable <name> — disable"
+        )
 
     def _active_dir_name(self, session: Session) -> str:
         wd = Path(session.working_directory)
@@ -2005,12 +2142,13 @@ class Engine:
                 if deadline:
                     deadline.pause()
                 try:
+                    result: PermissionDeny | PlanReviewDecision
                     if (
                         self.config.auto_plan
                         and self.interaction_coordinator._auto_plan_reviewer
                         and session.plan_origin != "user"
                     ):
-                        result = (
+                        auto_result = (
                             await self.interaction_coordinator.handle_plan_review_auto(
                                 chat_id,
                                 tool_input,
@@ -2019,6 +2157,25 @@ class Engine:
                                 session_id=session.session_id,
                             )
                         )
+                        if isinstance(auto_result, PermissionDeny):
+                            logger.info(
+                                "auto_plan_review_rejected_skipping_human",
+                                chat_id=chat_id,
+                                session_id=session.session_id,
+                                feedback=auto_result.message,
+                            )
+                            result = auto_result
+                        else:
+                            logger.info(
+                                "auto_plan_review_approved_forwarding_to_human",
+                                chat_id=chat_id,
+                                session_id=session.session_id,
+                            )
+                            result = (
+                                await self.interaction_coordinator.handle_plan_review(
+                                    chat_id, tool_input, plan_content=plan_content
+                                )
+                            )
                     else:
                         result = await self.interaction_coordinator.handle_plan_review(
                             chat_id, tool_input, plan_content=plan_content

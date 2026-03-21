@@ -26,6 +26,97 @@ const state = {
   agentGroupEl: null,      // current .agent-group DOM container
   sidebarRefreshTimer: null, // pending sidebar refresh after new message
   messageCountInSession: 0,  // number of messages sent in current session
+  _pendingStatePayload: null, // deferred pending_state from server (applied after history loads)
+  _historyLoaded: false,      // true once loadHistory() completes for this session
+  _streamQueue: [],           // buffered stream/complete messages before history loads
+};
+
+// ============================================================
+// Pending State Cache — sessionStorage for surviving page reloads
+// ============================================================
+const PendingStateCache = {
+  _key(sessionId) {
+    return `leashd_pending_${sessionId}`;
+  },
+
+  _load(sessionId) {
+    try {
+      const raw = sessionStorage.getItem(this._key(sessionId));
+      if (!raw) return { approvals: {}, question: null, plan_review: null };
+      const data = JSON.parse(raw);
+      if (data._ts && Date.now() - data._ts > 300000) {
+        sessionStorage.removeItem(this._key(sessionId));
+        return { approvals: {}, question: null, plan_review: null };
+      }
+      return data;
+    } catch {
+      return { approvals: {}, question: null, plan_review: null };
+    }
+  },
+
+  _persist(sessionId, data) {
+    try {
+      data._ts = Date.now();
+      sessionStorage.setItem(this._key(sessionId), JSON.stringify(data));
+    } catch { /* quota exceeded */ }
+  },
+
+  saveApproval(sessionId, payload) {
+    const d = this._load(sessionId);
+    d.approvals[payload.request_id] = payload;
+    this._persist(sessionId, d);
+  },
+
+  removeApproval(sessionId, requestId) {
+    const d = this._load(sessionId);
+    delete d.approvals[requestId];
+    this._persist(sessionId, d);
+  },
+
+  saveQuestion(sessionId, payload) {
+    const d = this._load(sessionId);
+    d.question = payload;
+    this._persist(sessionId, d);
+  },
+
+  removeQuestion(sessionId) {
+    const d = this._load(sessionId);
+    d.question = null;
+    this._persist(sessionId, d);
+  },
+
+  savePlanReview(sessionId, payload) {
+    const d = this._load(sessionId);
+    d.plan_review = payload;
+    this._persist(sessionId, d);
+  },
+
+  removePlanReview(sessionId) {
+    const d = this._load(sessionId);
+    d.plan_review = null;
+    this._persist(sessionId, d);
+  },
+
+  get(sessionId) {
+    return this._load(sessionId);
+  },
+
+  syncWithServer(sessionId, serverPayload) {
+    const d = { approvals: {}, question: null, plan_review: null };
+    if (serverPayload.approvals) {
+      for (const a of serverPayload.approvals) {
+        d.approvals[a.request_id] = a;
+      }
+    }
+    if (serverPayload.question) d.question = serverPayload.question;
+    if (serverPayload.plan_review) d.plan_review = serverPayload.plan_review;
+    this._persist(sessionId, d);
+  },
+
+  clear(sessionId) {
+    try { sessionStorage.removeItem(this._key(sessionId)); }
+    catch { /* ignore */ }
+  },
 };
 
 /**
@@ -56,6 +147,7 @@ const SLASH_COMMANDS = [
   { command: "/tasks", description: "List active tasks" },
   { command: "/status", description: "Session status" },
   { command: "/clear", description: "Clear session" },
+  { command: "/plugin", description: "Manage Claude Code plugins" },
 ];
 
 // ============================================================
@@ -184,6 +276,26 @@ window.addEventListener("resize", () => {
   }
 });
 
+// Virtual keyboard — track visualViewport for mobile
+(function initViewportHeight() {
+  function update() {
+    const vv = window.visualViewport;
+    const h = vv ? vv.height : window.innerHeight;
+    document.documentElement.style.setProperty("--viewport-height", h + "px");
+    // iOS scrolls the document when the keyboard opens despite overflow:hidden —
+    // pin it back so the fixed layout stays in place
+    if (vv && vv.offsetTop > 0) {
+      window.scrollTo(0, 0);
+    }
+  }
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener("resize", update);
+    window.visualViewport.addEventListener("scroll", update);
+  }
+  window.addEventListener("resize", update);
+  update();
+})();
+
 // ============================================================
 // Theme Manager
 // ============================================================
@@ -192,7 +304,9 @@ const ThemeManager = {
 
   init() {
     const saved = localStorage.getItem("leashd_theme") || "auto";
+    const savedColor = localStorage.getItem("leashd_color_theme") || "cool-midnight";
     this.apply(saved);
+    this.applyColorTheme(savedColor);
     this._mediaQuery.addEventListener("change", () => {
       if (this.current() === "auto") {
         this._updateIcon("auto");
@@ -231,6 +345,15 @@ const ThemeManager = {
     themeToggleBtn.dataset.tooltip = `Theme: ${theme}`;
   },
 
+  applyColorTheme(theme) {
+    document.documentElement.setAttribute("data-color-theme", theme);
+    localStorage.setItem("leashd_color_theme", theme);
+  },
+
+  currentColorTheme() {
+    return document.documentElement.getAttribute("data-color-theme") || "cool-midnight";
+  },
+
   _updateHljsTheme(theme) {
     const darkSheet = $("#hljs-theme-dark");
     const lightSheet = $("#hljs-theme-light");
@@ -241,6 +364,252 @@ const ThemeManager = {
     }
     darkSheet.disabled = wantLight;
     lightSheet.disabled = !wantLight;
+  },
+};
+
+// ============================================================
+// Notification Manager
+// ============================================================
+const NotificationManager = {
+  _prefs: { enabled: true, sound: true, pushEnabled: false, events: {
+    approval_request: true, question: true, plan_review: true,
+    task_update: true, interrupt_prompt: true,
+  }},
+  _unreadCount: 0,
+  _originalTitle: document.title,
+  _flashInterval: null,
+  _swRegistration: null,
+  _swReady: null,
+  _audioCtx: null,
+  _bannerDismissed: false,
+
+  init() {
+    this._loadPrefs();
+    this._bannerDismissed = localStorage.getItem("leashd_notif_dismissed") === "1";
+    this._registerServiceWorker();
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") this._clearUnread();
+    });
+  },
+
+  _loadPrefs() {
+    try {
+      const raw = localStorage.getItem("leashd_notification_prefs");
+      if (raw) {
+        const saved = JSON.parse(raw);
+        Object.assign(this._prefs, saved);
+        if (saved.events) this._prefs.events = { ...this._prefs.events, ...saved.events };
+      }
+    } catch { /* ignore */ }
+  },
+
+  _savePrefs() {
+    try {
+      localStorage.setItem("leashd_notification_prefs", JSON.stringify(this._prefs));
+    } catch { /* ignore */ }
+  },
+
+  updatePrefs(newPrefs) {
+    Object.assign(this._prefs, newPrefs);
+    if (newPrefs.events) this._prefs.events = { ...this._prefs.events, ...newPrefs.events };
+    this._savePrefs();
+  },
+
+  async _registerServiceWorker() {
+    if (!("serviceWorker" in navigator)) return;
+    this._swReady = navigator.serviceWorker.register("/service-worker.js")
+      .then((reg) => { this._swRegistration = reg; return reg; })
+      .catch(() => null);
+  },
+
+  notify(eventType, title, body) {
+    if (!this._prefs.enabled) return;
+    if (!this._prefs.events[eventType]) return;
+    if (document.visibilityState === "visible") return;
+
+    this._unreadCount++;
+    this._flashTitle();
+    if (this._prefs.sound) this._playChime();
+
+    this._showWebNotification(title, body, eventType);
+  },
+
+  _flashTitle() {
+    if (this._flashInterval) return;
+    const flash = () => {
+      document.title = document.title === this._originalTitle
+        ? `(${this._unreadCount}) leashd — Action needed`
+        : this._originalTitle;
+    };
+    flash();
+    this._flashInterval = setInterval(flash, 1500);
+  },
+
+  _clearUnread() {
+    this._unreadCount = 0;
+    if (this._flashInterval) {
+      clearInterval(this._flashInterval);
+      this._flashInterval = null;
+    }
+    document.title = this._originalTitle;
+  },
+
+  _playChime() {
+    try {
+      const ctx = this._audioCtx || (this._audioCtx = new (window.AudioContext || window.webkitAudioContext)());
+      if (ctx.state === "suspended") ctx.resume();
+      const gain = ctx.createGain();
+      gain.gain.value = 0.15;
+      gain.connect(ctx.destination);
+
+      const osc1 = ctx.createOscillator();
+      osc1.frequency.value = 880;
+      osc1.type = "sine";
+      osc1.connect(gain);
+      osc1.start(ctx.currentTime);
+      osc1.stop(ctx.currentTime + 0.15);
+
+      const osc2 = ctx.createOscillator();
+      osc2.frequency.value = 1046;
+      osc2.type = "sine";
+      osc2.connect(gain);
+      osc2.start(ctx.currentTime + 0.15);
+      osc2.stop(ctx.currentTime + 0.3);
+    } catch { /* Web Audio not available */ }
+  },
+
+  _showWebNotification(title, body, tag) {
+    if (!("Notification" in window)) return;
+    if (Notification.permission !== "granted") return;
+    try {
+      const n = new Notification(title, {
+        body,
+        icon: "/icons/icon-192.png",
+        tag,
+        renotify: true,
+      });
+      n.onclick = () => { window.focus(); n.close(); };
+    } catch { /* ignore */ }
+  },
+
+  async requestPermission() {
+    if (!("Notification" in window)) return "denied";
+    const result = await Notification.requestPermission();
+    return result;
+  },
+
+  _isIOSNonStandalone() {
+    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+      (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+    const isStandalone = window.navigator.standalone === true ||
+      window.matchMedia("(display-mode: standalone)").matches;
+    return isIOS && !isStandalone;
+  },
+
+  async subscribeToPush() {
+    if (this._isIOSNonStandalone()) {
+      showToast("Add to Home Screen first: tap Share \u2192 Add to Home Screen, then enable push from the installed app.", "info");
+      return false;
+    }
+    if (this._swReady) await this._swReady;
+    if (!this._swRegistration) return false;
+    try {
+      const res = await authFetch("/api/push/vapid-key");
+      if (!res.ok) return false;
+      const { public_key } = await res.json();
+      if (!public_key) return false;
+
+      const sub = await this._swRegistration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: this._urlBase64ToUint8Array(public_key),
+      });
+
+      const postRes = await authFetch("/api/push/subscribe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ subscription: sub.toJSON(), chat_id: state.chatId }),
+      });
+
+      if (postRes.ok) {
+        this._prefs.pushEnabled = true;
+        this._savePrefs();
+        return true;
+      }
+    } catch {
+      showToast("Push notification setup failed — try toggling in Settings", "error");
+    }
+    return false;
+  },
+
+  async unsubscribeFromPush() {
+    if (!this._swRegistration) return;
+    try {
+      const sub = await this._swRegistration.pushManager.getSubscription();
+      if (sub) await sub.unsubscribe();
+      await authFetch("/api/push/subscribe", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chat_id: state.chatId }),
+      });
+    } catch { /* ignore */ }
+    this._prefs.pushEnabled = false;
+    this._savePrefs();
+  },
+
+  _urlBase64ToUint8Array(base64String) {
+    const padding = "=".repeat((4 - base64String.length % 4) % 4);
+    const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+    const raw = atob(base64);
+    const arr = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+    return arr;
+  },
+
+  showPermissionBanner() {
+    if (this._bannerDismissed) return;
+
+    const isIOSBrowser = this._isIOSNonStandalone();
+
+    if (!isIOSBrowser) {
+      if (!("Notification" in window)) return;
+      if (Notification.permission !== "default") return;
+    }
+
+    const banner = document.createElement("div");
+    banner.className = "notification-banner";
+
+    if (isIOSBrowser) {
+      banner.innerHTML = `
+        <span>Add to Home Screen for push notifications: tap Share \u2192 Add to Home Screen</span>
+        <button class="btn-dismiss" id="notif-dismiss-btn">\u2715</button>
+      `;
+    } else {
+      banner.innerHTML = `
+        <span>Enable notifications to get alerted for approvals?</span>
+        <button class="btn-secondary" id="notif-enable-btn">Enable</button>
+        <button class="btn-dismiss" id="notif-dismiss-btn">\u2715</button>
+      `;
+    }
+
+    const inputArea = document.getElementById("input-area");
+    inputArea.parentNode.insertBefore(banner, inputArea);
+
+    const enableBtn = banner.querySelector("#notif-enable-btn");
+    if (enableBtn) {
+      enableBtn.onclick = async () => {
+        const result = await this.requestPermission();
+        if (result === "granted") {
+          await this.subscribeToPush();
+          showToast("Notifications enabled");
+        }
+        banner.remove();
+      };
+    }
+    banner.querySelector("#notif-dismiss-btn").onclick = () => {
+      this._bannerDismissed = true;
+      localStorage.setItem("leashd_notif_dismissed", "1");
+      banner.remove();
+    };
   },
 };
 
@@ -587,6 +956,19 @@ const TabManager = {
     if (cached) {
       messagesEl.innerHTML = cached.html;
       messagesEl.scrollTop = cached.scrollPosition;
+      // Strip unresolved pending interaction DOM elements — their event handlers
+      // are dead after innerHTML restore. Server will re-send via pending_state.
+      for (const el of messagesEl.querySelectorAll(".msg-row-approval, .msg-row-question")) {
+        if (!el.querySelector(".approval-resolved, .question-resolved")) {
+          el.remove();
+        }
+      }
+      // Also strip plan review messages with dead button handlers
+      for (const el of messagesEl.querySelectorAll('[data-message-id^="plan-review-"]')) {
+        if (el.querySelector(".msg-btn:not([disabled])")) {
+          el.remove();
+        }
+      }
     } else {
       messagesEl.innerHTML = "";
     }
@@ -739,6 +1121,8 @@ function getWsUrl() {
 }
 
 function connect() {
+  if (state.ws && state.ws.readyState === WebSocket.CONNECTING) return;
+
   if (state.ws) {
     state.ws.onclose = null;
     state.ws.close();
@@ -766,8 +1150,9 @@ function connect() {
   };
 
   ws.onclose = () => {
+    const wasConnected = state.connected;
     setConnected(false);
-    if (state.connected) {
+    if (wasConnected) {
       scheduleReconnect();
     }
   };
@@ -779,6 +1164,8 @@ function connect() {
 
 function scheduleReconnect() {
   if (state.reconnectTimeout) return;
+  connectionDot.className = "dot dot-reconnecting";
+  connectionDot.title = "Reconnecting...";
   const jitter = state.reconnectDelay * (0.5 + Math.random());
   state.reconnectTimeout = setTimeout(() => {
     state.reconnectTimeout = null;
@@ -854,21 +1241,32 @@ function handleServerMessage(msg) {
       break;
     case "approval_request":
       onApprovalRequest(payload);
+      NotificationManager.notify("approval_request", "Approval Required",
+        `${payload.tool || "Tool"}: ${(payload.description || "").slice(0, 100)}`);
       break;
     case "approval_resolved":
       onApprovalResolved(payload);
       break;
     case "question":
       onQuestion(payload);
+      NotificationManager.notify("question", payload.header || "Question",
+        (payload.question || "").slice(0, 100));
       break;
     case "plan_review":
       onPlanReview(payload);
+      NotificationManager.notify("plan_review", "Plan Review",
+        (payload.description || "").slice(0, 100));
       break;
     case "interrupt_prompt":
       onInterruptPrompt(payload);
+      NotificationManager.notify("interrupt_prompt", "Message Queued",
+        (payload.message_preview || "").slice(0, 100));
       break;
     case "task_update":
       onTaskUpdate(payload);
+      if (["completed", "failed", "escalated"].includes(payload.status))
+        NotificationManager.notify("task_update", `Task ${payload.status}`,
+          (payload.description || "").slice(0, 100));
       break;
     case "status":
       onStatus(payload);
@@ -886,6 +1284,9 @@ function handleServerMessage(msg) {
         connectionDot.title = "Connected";
       }
       break;
+    case "pending_state":
+      onPendingState(payload);
+      break;
     case "reload":
       location.reload();
       break;
@@ -902,14 +1303,18 @@ function handleServerMessage(msg) {
 // Auth Handlers
 // ============================================================
 function onAuthOk(payload) {
+  const wasReconnect = !!state.chatId;
   state.chatId = payload.chat_id || "";
   state.sessionId = payload.session_id || "";
   state.reconnectDelay = 1000;
+  state._historyLoaded = false;
+  state._pendingStatePayload = null;
 
   for (const el of Object.values(state.streamingMessages)) {
     el?.querySelector?.(".msg-content")?.classList?.remove("streaming");
   }
   state.streamingMessages = {};
+  state._streamQueue = [];
 
   authScreen.hidden = true;
   chatScreen.hidden = false;
@@ -917,6 +1322,16 @@ function onAuthOk(payload) {
   setConnected(true);
   startPing();
   messageInput.focus();
+
+  if (wasReconnect) {
+    showToast("Reconnected", "success");
+  } else {
+    NotificationManager.showPermissionBanner();
+  }
+
+  if (NotificationManager._prefs.pushEnabled) {
+    NotificationManager.subscribeToPush();
+  }
 
   // Store API key for reconnection
   try { sessionStorage.setItem("leashd_key", state.apiKey); }
@@ -954,6 +1369,7 @@ function onAuthOk(payload) {
 }
 
 async function loadHistory() {
+  state._historyLoaded = false;
   const tab = TabManager.tabs.find(t => t.id === TabManager.activeTab);
   const path = tab?.path || "";
   try {
@@ -967,6 +1383,33 @@ async function loadHistory() {
       onHistory({ messages: data.messages });
     }
   } catch { /* ignore */ }
+  finally {
+    state._historyLoaded = true;
+    // Apply deferred pending state (server sent it before history loaded)
+    if (state._pendingStatePayload) {
+      const payload = state._pendingStatePayload;
+      state._pendingStatePayload = null;
+      renderPendingState(payload);
+    } else {
+      // No server pending_state — restore from client cache as fallback
+      applyCachedPendingState();
+    }
+    _replayStreamQueue();
+    _restoreDraft();
+  }
+}
+
+function _replayStreamQueue() {
+  const queue = state._streamQueue;
+  state._streamQueue = [];
+  for (const item of queue) {
+    switch (item.type) {
+      case "stream_token": onStreamToken(item.payload); break;
+      case "message_complete": onMessageComplete(item.payload); break;
+      case "message_delete": onMessageDelete(item.payload); break;
+      case "message": onMessage(item.payload); break;
+    }
+  }
 }
 
 function onAuthError(payload) {
@@ -983,6 +1426,10 @@ function onAuthError(payload) {
 // Message Handlers
 // ============================================================
 function onMessage(payload) {
+  if (!state._historyLoaded) {
+    state._streamQueue.push({ type: "message", payload });
+    return;
+  }
   const text = payload.text || "";
   const messageId = payload.message_id;
   const buttons = payload.buttons;
@@ -1002,6 +1449,10 @@ function onMessage(payload) {
 }
 
 function onStreamToken(payload) {
+  if (!state._historyLoaded) {
+    state._streamQueue.push({ type: "stream_token", payload });
+    return;
+  }
   const text = payload.text || "";
   const messageId = payload.message_id;
 
@@ -1047,6 +1498,10 @@ function onStreamToken(payload) {
 }
 
 function onMessageComplete(payload) {
+  if (!state._historyLoaded) {
+    state._streamQueue.push({ type: "message_complete", payload });
+    return;
+  }
   const messageId = payload.message_id;
   if (messageId && state.streamingMessages[messageId]) {
     const el = state.streamingMessages[messageId];
@@ -1067,6 +1522,10 @@ function onMessageComplete(payload) {
 }
 
 function onMessageDelete(payload) {
+  if (!state._historyLoaded) {
+    state._streamQueue.push({ type: "message_delete", payload });
+    return;
+  }
   const messageId = payload.message_id;
   if (!messageId) return;
 
@@ -1264,6 +1723,7 @@ document.addEventListener("keydown", handleModalKeydown);
 // ============================================================
 function onApprovalRequest(payload) {
   const { request_id, tool, description } = payload;
+  PendingStateCache.saveApproval(state.sessionId, payload);
   hideEmptyState();
 
   const row = document.createElement("div");
@@ -1310,6 +1770,8 @@ function onApprovalRequest(payload) {
 }
 
 function resolveApprovalCard(row, approved) {
+  const approvalId = row.getAttribute("data-approval-id");
+  if (approvalId) PendingStateCache.removeApproval(state.sessionId, approvalId);
   const card = row.querySelector(".approval-card");
   if (!card) return;
   card.classList.add(approved ? "approved" : "denied");
@@ -1342,12 +1804,14 @@ function onApprovalResolved(payload) {
 // ============================================================
 function onQuestion(payload) {
   const { interaction_id, question, header, options } = payload;
+  PendingStateCache.saveQuestion(state.sessionId, payload);
   hideEmptyState();
 
   let answered = false;
   function submitAnswer(answer, label) {
     if (answered) return;
     answered = true;
+    PendingStateCache.removeQuestion(state.sessionId);
     wsSend("interaction_response", { interaction_id, answer });
     resolveQuestionCard(row, label);
   }
@@ -1473,6 +1937,7 @@ function resolveQuestionCard(row, chosenLabel) {
 
 function onPlanReview(payload) {
   const { interaction_id, description, message_id } = payload;
+  PendingStateCache.savePlanReview(state.sessionId, payload);
   const msgId = message_id || `plan-review-${interaction_id}`;
 
   const buttons = [
@@ -1533,6 +1998,62 @@ function dismissQueuedBanner() {
 
 function isQueuedBannerMsg(messageId) {
   return messageId && state.queuedBannerMsgId === messageId;
+}
+
+// ============================================================
+// Pending State — re-render approvals/questions after reconnect
+// ============================================================
+function onPendingState(payload) {
+  // Sync client cache with server's authoritative state
+  PendingStateCache.syncWithServer(state.sessionId, payload);
+
+  if (state._historyLoaded) {
+    renderPendingState(payload);
+  } else {
+    // Defer until loadHistory completes (avoids innerHTML wipe race)
+    state._pendingStatePayload = payload;
+  }
+}
+
+function renderPendingState(payload) {
+  // Agent's partial output FIRST so it appears above interactive elements
+  if (payload.streaming_content) {
+    const sc = payload.streaming_content;
+    const el = addAssistantMessage(sc.text, { messageId: sc.message_id, streaming: true });
+    state.streamingMessages[sc.message_id] = el;
+  } else if (payload.agent_busy) {
+    addSystemMessage("Agent is working...");
+  }
+  // Interactive elements AFTER (at the bottom, actionable)
+  if (payload.approvals) {
+    for (const a of payload.approvals) {
+      if (messagesEl.querySelector(`[data-approval-id="${CSS.escape(a.request_id)}"]`)) continue;
+      onApprovalRequest(a);
+    }
+  }
+  if (payload.question) {
+    const q = payload.question;
+    if (!messagesEl.querySelector(`[data-interaction-id="${CSS.escape(q.interaction_id)}"]`)) {
+      onQuestion(q);
+    }
+  }
+  if (payload.plan_review) {
+    const pr = payload.plan_review;
+    onPlanReview({ interaction_id: pr.interaction_id, description: pr.description });
+  }
+}
+
+function applyCachedPendingState() {
+  const cached = PendingStateCache.get(state.sessionId);
+  if (!cached) return;
+  const approvals = Object.values(cached.approvals || {});
+  if (approvals.length === 0 && !cached.question && !cached.plan_review) return;
+
+  const payload = {};
+  if (approvals.length > 0) payload.approvals = approvals;
+  if (cached.question) payload.question = cached.question;
+  if (cached.plan_review) payload.plan_review = cached.plan_review;
+  renderPendingState(payload);
 }
 
 // ============================================================
@@ -1603,6 +2124,9 @@ messageInput.addEventListener("input", () => {
   messageInput.style.height = Math.min(messageInput.scrollHeight, 160) + "px";
   sendBtn.disabled = !state.connected || !(messageInput.value.trim() || pendingAttachments.length > 0);
 
+  // Persist draft text across page reloads
+  _saveDraft();
+
   // Command palette
   const val = messageInput.value;
   if (val.startsWith("/") && !val.includes("\n")) {
@@ -1618,6 +2142,25 @@ messageInput.addEventListener("input", () => {
     CommandPalette.hide();
   }
 });
+
+function _saveDraft() {
+  if (!state.sessionId) return;
+  try { sessionStorage.setItem("leashd_draft:" + state.sessionId, messageInput.value); }
+  catch { /* ignore quota errors */ }
+}
+
+function _restoreDraft() {
+  if (!state.sessionId) return;
+  try {
+    const saved = sessionStorage.getItem("leashd_draft:" + state.sessionId);
+    if (saved && !messageInput.value) {
+      messageInput.value = saved;
+      messageInput.style.height = "auto";
+      messageInput.style.height = Math.min(messageInput.scrollHeight, 160) + "px";
+      sendBtn.disabled = !state.connected || !(messageInput.value.trim() || pendingAttachments.length > 0);
+    }
+  } catch { /* ignore */ }
+}
 
 messageInput.addEventListener("keydown", (e) => {
   if (CommandPalette.isVisible()) {
@@ -1756,6 +2299,11 @@ function sendMessage() {
 
   messageInput.value = "";
   messageInput.style.height = "auto";
+  // Clear persisted draft after sending
+  if (state.sessionId) {
+    try { sessionStorage.removeItem("leashd_draft:" + state.sessionId); }
+    catch { /* ignore */ }
+  }
   pendingAttachments.length = 0;
   renderAttachmentPreviews();
   sendBtn.disabled = true;
@@ -1816,7 +2364,10 @@ function addSystemMessage(text, opts = {}) {
   const content = document.createElement("div");
   content.className = "msg-content";
   if (opts.raw) {
-    content.innerHTML = text;
+    // Sanitize even pre-built HTML to prevent XSS via injected payloads
+    content.innerHTML = typeof DOMPurify !== "undefined"
+      ? DOMPurify.sanitize(text, PURIFY_CONFIG)
+      : escapeHtml(text);
   } else {
     content.innerHTML = renderMarkdown(text);
   }
@@ -1905,6 +2456,7 @@ function createMessageRow(role, text, opts = {}) {
         el.onclick = () => {
           if (btn.data && btn.data.startsWith("plan:")) {
             const [, interactionId, decision] = btn.data.split(":");
+            PendingStateCache.removePlanReview(state.sessionId);
             wsSend("interaction_response", {
               interaction_id: interactionId,
               answer: decision,
@@ -2166,6 +2718,7 @@ const SettingsManager = {
   _render(config) {
     const html = `<div class="settings-inner">
       ${this._renderDisplaySection()}
+      ${this._renderNotificationSection()}
       ${this._renderAgentSection(config.agent)}
       ${this._renderAutonomousSection(config.autonomous)}
       ${this._renderBrowserSection(config.browser)}
@@ -2175,17 +2728,112 @@ const SettingsManager = {
   },
 
   _renderDisplaySection() {
-    const theme = ThemeManager.current();
+    const mode = ThemeManager.current();
+    const colorTheme = ThemeManager.currentColorTheme();
+    const themes = [
+      { id: "cool-midnight", name: "Midnight", color: "#22d3ee" },
+      { id: "ember",         name: "Ember",    color: "#e8922e" },
+      { id: "monochrome",    name: "Mono",     color: "#00e676" },
+      { id: "forest",        name: "Forest",   color: "#8bc34a" },
+      { id: "plum",          name: "Plum",     color: "#e8a0b4" },
+      { id: "arctic",        name: "Arctic",     color: "#60a5fa" },
+      { id: "neon",          name: "Neon",       color: "#ff1493" },
+      { id: "paper",         name: "Paper",      color: "#8a857e" },
+      { id: "ink",           name: "Ink",        color: "#ffffff" },
+      { id: "cyberpunk",     name: "Cyberpunk",  color: "#e0ff00" },
+      { id: "synthwave",     name: "Synthwave",  color: "#ff2a6d" },
+      { id: "solarized",     name: "Solarized",  color: "#268bd2" },
+      { id: "vault",         name: "Vault",      color: "#00ff41" },
+      { id: "enderman",      name: "Enderman",   color: "#55ffcc" },
+      { id: "hades",         name: "Hades",      color: "#ff3c3c" },
+      { id: "creep",         name: "Creep",      color: "#43d643" },
+      { id: "portal",        name: "Portal",     color: "#ff6a00" },
+      { id: "dracula",       name: "Dracula",    color: "#bd93f9" },
+      { id: "monokai",       name: "Monokai",    color: "#e6db74" },
+      { id: "gruvbox",       name: "Gruvbox",    color: "#fe8019" },
+      { id: "catppuccin",    name: "Catppuccin", color: "#cba6f7" },
+      { id: "nord",          name: "Nord",       color: "#88c0d0" },
+      { id: "tokyo-night",   name: "Tokyo",      color: "#7aa2f7" },
+      { id: "one-dark",      name: "One Dark",   color: "#56b6c2" },
+      { id: "rose-pine",     name: "Rosé Pine",  color: "#ebbcba" },
+      { id: "vaporwave",     name: "Vaporwave",  color: "#ff71ce" },
+      { id: "matrix",        name: "Matrix",     color: "#00ff00" },
+    ];
+    const swatches = themes.map(t =>
+      `<button class="theme-swatch${colorTheme === t.id ? ' active' : ''}" data-color-theme="${t.id}" title="${t.name}">` +
+      `<span class="swatch-color" style="background:${t.color}"></span>` +
+      `<span class="swatch-label">${t.name}</span></button>`
+    ).join("");
     return `<div class="settings-section">
       <h3>Display</h3>
       <div class="setting-row">
-        <div><div class="setting-label">Theme</div></div>
+        <div><div class="setting-label">Mode</div></div>
         <div class="segmented-control" data-setting="theme">
-          <button data-value="auto" class="${theme === 'auto' ? 'active' : ''}">Auto</button>
-          <button data-value="dark" class="${theme === 'dark' ? 'active' : ''}">Dark</button>
-          <button data-value="light" class="${theme === 'light' ? 'active' : ''}">Light</button>
+          <button data-value="auto" class="${mode === 'auto' ? 'active' : ''}">Auto</button>
+          <button data-value="dark" class="${mode === 'dark' ? 'active' : ''}">Dark</button>
+          <button data-value="light" class="${mode === 'light' ? 'active' : ''}">Light</button>
         </div>
       </div>
+      <div class="setting-row" style="flex-direction:column;align-items:stretch;gap:8px;">
+        <div class="setting-label">Color Theme</div>
+        <div class="theme-grid">${swatches}</div>
+      </div>
+    </div>`;
+  },
+
+  _renderNotificationSection() {
+    const p = NotificationManager._prefs;
+    const perm = ("Notification" in window) ? Notification.permission : "denied";
+
+    const notifToggle = (label, key, value) => `
+      <div class="setting-row">
+        <div><div class="setting-label">${escapeHtml(label)}</div></div>
+        <label class="toggle-switch">
+          <input type="checkbox" data-notif="${key}" ${value ? 'checked' : ''}>
+          <span class="toggle-slider"></span>
+        </label>
+      </div>`;
+
+    let pushRow;
+    if (perm === "denied") {
+      pushRow = `<div class="setting-row">
+        <div><div class="setting-label">Push Notifications</div>
+        <div class="setting-sublabel">Blocked by browser — enable in site settings</div></div>
+      </div>`;
+    } else if (perm === "granted") {
+      const testBtn = p.pushEnabled
+        ? `<button class="btn-secondary" id="push-test-btn" style="margin-left:8px">Test</button>`
+        : "";
+      pushRow = `<div class="setting-row">
+        <div><div class="setting-label">Push Notifications</div></div>
+        <div style="display:flex;align-items:center;gap:4px">
+          <label class="toggle-switch">
+            <input type="checkbox" data-notif="push" ${p.pushEnabled ? 'checked' : ''}>
+            <span class="toggle-slider"></span>
+          </label>
+          ${testBtn}
+        </div>
+      </div>`;
+    } else {
+      pushRow = `<div class="setting-row">
+        <div><div class="setting-label">Push Notifications</div>
+        <div class="setting-sublabel">Get notified even when the browser is closed</div></div>
+        <button class="btn-secondary" id="push-enable-btn">Enable</button>
+      </div>`;
+    }
+
+    return `<div class="settings-section">
+      <h3>Notifications</h3>
+      ${notifToggle("Notifications", "enabled", p.enabled)}
+      ${notifToggle("Sound", "sound", p.sound)}
+      ${pushRow}
+      <div class="setting-divider"></div>
+      <div class="setting-sublabel" style="margin-bottom:8px;">Event Types</div>
+      ${notifToggle("Approval Requests", "event.approval_request", p.events.approval_request)}
+      ${notifToggle("Questions", "event.question", p.events.question)}
+      ${notifToggle("Plan Reviews", "event.plan_review", p.events.plan_review)}
+      ${notifToggle("Task Completion", "event.task_update", p.events.task_update)}
+      ${notifToggle("Queued Messages", "event.interrupt_prompt", p.events.interrupt_prompt)}
     </div>`;
   },
 
@@ -2310,6 +2958,69 @@ const SettingsManager = {
     for (const input of settingsBody.querySelectorAll('input[type="text"], input[type="number"]')) {
       input.oninput = () => this._markDirty();
     }
+
+    // Color theme swatches (client-side only)
+    for (const swatch of settingsBody.querySelectorAll(".theme-swatch")) {
+      swatch.onclick = () => {
+        settingsBody.querySelectorAll(".theme-swatch").forEach(s => s.classList.remove("active"));
+        swatch.classList.add("active");
+        ThemeManager.applyColorTheme(swatch.dataset.colorTheme);
+      };
+    }
+
+    // Notification toggles (client-side only, no server save needed)
+    for (const input of settingsBody.querySelectorAll("[data-notif]")) {
+      input.onchange = () => {
+        const key = input.dataset.notif;
+        if (key === "push") {
+          if (input.checked) {
+            NotificationManager.subscribeToPush().then(ok => { if (!ok) input.checked = false; });
+          } else {
+            NotificationManager.unsubscribeFromPush();
+          }
+        } else if (key.startsWith("event.")) {
+          const evtKey = key.slice(6);
+          const events = { ...NotificationManager._prefs.events, [evtKey]: input.checked };
+          NotificationManager.updatePrefs({ events });
+        } else {
+          NotificationManager.updatePrefs({ [key]: input.checked });
+        }
+      };
+    }
+
+    // Push enable button (when permission is "default")
+    const pushEnableBtn = settingsBody.querySelector("#push-enable-btn");
+    if (pushEnableBtn) {
+      pushEnableBtn.onclick = async () => {
+        const result = await NotificationManager.requestPermission();
+        if (result === "granted") {
+          const ok = await NotificationManager.subscribeToPush();
+          if (ok) showToast("Push notifications enabled");
+        }
+        this._fetchAndRender();
+      };
+    }
+
+    const pushTestBtn = settingsBody.querySelector("#push-test-btn");
+    if (pushTestBtn) {
+      pushTestBtn.onclick = async () => {
+        pushTestBtn.disabled = true;
+        pushTestBtn.textContent = "Sending\u2026";
+        try {
+          const res = await authFetch("/api/push/test", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ chat_id: state.chatId }),
+          });
+          const data = await res.json();
+          showToast(data.ok ? "Test notification sent" : "Push failed \u2014 try re-enabling in Settings");
+        } catch {
+          showToast("Push test failed");
+        }
+        pushTestBtn.disabled = false;
+        pushTestBtn.textContent = "Test";
+      };
+    }
   },
 
   _markDirty() {
@@ -2393,10 +3104,49 @@ document.addEventListener("keydown", (e) => {
 themeToggleBtn.addEventListener("click", () => ThemeManager.toggle());
 
 // ============================================================
+// Page Visibility — instant reconnect on phone unlock / tab focus
+// ============================================================
+let _lastHiddenAt = 0;
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") {
+    _lastHiddenAt = Date.now();
+    return;
+  }
+  if (document.visibilityState !== "visible" || !state.apiKey) return;
+
+  const elapsed = Date.now() - _lastHiddenAt;
+  const wsAlive = state.ws && state.ws.readyState === WebSocket.OPEN;
+
+  if (!wsAlive || elapsed > 3000) {
+    if (state.ws) {
+      state.ws.onclose = null;
+      state.ws.close();
+    }
+    setConnected(false);
+    if (state.reconnectTimeout) {
+      clearTimeout(state.reconnectTimeout);
+      state.reconnectTimeout = null;
+    }
+    state.reconnectDelay = 1000;
+    state.lastPongTime = Date.now();
+    connect();
+  }
+});
+
+// bfcache restore — iOS can freeze PWAs without firing visibilitychange
+window.addEventListener("pageshow", (e) => {
+  if (e.persisted && state.apiKey && (!state.ws || state.ws.readyState !== WebSocket.OPEN)) {
+    state.reconnectDelay = 1000;
+    connect();
+  }
+});
+
+// ============================================================
 // Auto-reconnect with saved key
 // ============================================================
 (function init() {
   ThemeManager.init();
+  NotificationManager.init();
   try {
     const savedKey = sessionStorage.getItem("leashd_key");
     if (savedKey) {

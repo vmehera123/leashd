@@ -441,6 +441,11 @@ class ClaudeCodeAgent(BaseAgent):
 
             if has_installed_skills() and "Skill" not in opts.allowed_tools:
                 opts.allowed_tools.append("Skill")
+        from leashd.cc_plugins import get_enabled_plugin_paths
+
+        plugin_paths = get_enabled_plugin_paths()
+        if plugin_paths:
+            opts.plugins = [{"type": "local", "path": p} for p in plugin_paths]
         if self._config.disallowed_tools:
             opts.disallowed_tools = self._config.disallowed_tools
         # Block playwright MCP tools when using agent-browser backend — the SDK's
@@ -640,13 +645,13 @@ class ClaudeCodeAgent(BaseAgent):
                                         if (
                                             delta.get("type") == "text_delta"
                                             and on_text_chunk
+                                            and not agent_stack
                                         ):
-                                            if not agent_stack:
-                                                await _safe_callback(
-                                                    on_text_chunk,
-                                                    delta.get("text", ""),
-                                                    log_event="on_stream_text_delta_error",
-                                                )
+                                            await _safe_callback(
+                                                on_text_chunk,
+                                                delta.get("text", ""),
+                                                log_event="on_stream_text_delta_error",
+                                            )
                                             streamed_text_in_turn = True
                                 except Exception:
                                     logger.debug("stream_event_parse_error")

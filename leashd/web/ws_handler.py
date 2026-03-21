@@ -66,6 +66,9 @@ class WebSocketHandler:
         ) = None
         self._on_connect: Callable[[str], None] | None = None
         self._on_disconnect: Callable[[str], None] | None = None
+        self._on_reconnect_state: (
+            Callable[[str], Coroutine[Any, Any, dict[str, Any]]] | None
+        ) = None
 
     @property
     def connections(self) -> dict[str, WebSocket]:
@@ -105,6 +108,12 @@ class WebSocketHandler:
 
     def set_on_disconnect(self, callback: Callable[[str], None]) -> None:
         self._on_disconnect = callback
+
+    def set_on_reconnect_state(
+        self,
+        callback: Callable[[str], Coroutine[Any, Any, dict[str, Any]]],
+    ) -> None:
+        self._on_reconnect_state = callback
 
     async def handle(self, websocket: WebSocket) -> None:
         """Main WebSocket endpoint handler."""
@@ -195,6 +204,17 @@ class WebSocketHandler:
                 },
             ),
         )
+
+        if session_id and self._on_reconnect_state:
+            try:
+                pending = await self._on_reconnect_state(chat_id)
+                if pending:
+                    await self._send_raw(
+                        websocket,
+                        ServerMessage(type="pending_state", payload=pending),
+                    )
+            except Exception:
+                logger.warning("webui_reconnect_state_error", chat_id=chat_id)
 
         try:
             await self._receive_loop(websocket, chat_id, client_host)

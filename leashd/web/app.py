@@ -22,6 +22,7 @@ def create_app(
     config: LeashdConfig,
     ws_handler: WebSocketHandler,
     message_store: Any = None,
+    push_service: Any = None,
 ) -> FastAPI:
     app = FastAPI(
         title="leashd WebUI",
@@ -29,14 +30,15 @@ def create_app(
         redoc_url=None,
     )
 
-    origins = [o.strip() for o in config.web_cors_origins.split(",")]
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=origins,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    origins = [o.strip() for o in config.web_cors_origins.split(",") if o.strip()]
+    if origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=origins,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
 
     if config.web_dev_mode:
 
@@ -49,7 +51,7 @@ def create_app(
             response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
             return response
 
-    router = create_rest_router(config, message_store)
+    router = create_rest_router(config, message_store, push_service)
     app.include_router(router)
 
     @app.websocket("/ws")

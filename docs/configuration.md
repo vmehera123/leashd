@@ -76,7 +76,9 @@ Each layer overrides the one before it: `~/.leashd/config.yaml` → `.env` → e
 | `LEASHD_WEB_HOST` | `str` | `"0.0.0.0"` | Host to bind the WebUI HTTP/WebSocket server |
 | `LEASHD_WEB_PORT` | `int` | `8080` | Port for the WebUI server |
 | `LEASHD_WEB_API_KEY` | `str \| None` | `None` | API key for WebUI authentication. Required when WebUI is enabled. |
-| `LEASHD_WEB_CORS_ORIGINS` | `list[str]` | `[]` | Comma-separated list of allowed CORS origins for cross-origin WebUI access |
+| `LEASHD_WEB_CORS_ORIGINS` | `list[str]` | `""` | Comma-separated list of allowed CORS origins. Empty = no cross-origin (secure default). |
+| `LEASHD_WEB_DEV_MODE` | `bool` | `false` | Enable dev mode (disables caching, adds debug headers) |
+| `LEASHD_WEB_TELEGRAM_NOTIFY` | `bool` | `false` | Send Telegram cross-notifications with deep links when user is away from browser |
 
 ### Storage
 

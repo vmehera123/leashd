@@ -52,6 +52,7 @@ def _check_auth(api_key: str, config: LeashdConfig) -> str | None:
 def create_rest_router(
     config: LeashdConfig,
     message_store: MessageStore | None,
+    push_service: Any = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api")
 
@@ -278,6 +279,73 @@ def create_rest_router(
                 "config_saved_no_daemon", hint="daemon not running, reload skipped"
             )
         return JSONResponse(content={"success": True})
+
+    # ---- Push notification endpoints ----
+
+    @router.get("/push/vapid-key")
+    async def vapid_key(x_api_key: str = Header("")) -> JSONResponse:
+        if err := _check_auth(x_api_key, config):
+            return JSONResponse(status_code=401, content={"error": err})
+        key = push_service.public_key if push_service else ""
+        return JSONResponse(content={"public_key": key})
+
+    @router.post("/push/subscribe")
+    async def push_subscribe(
+        body: dict[str, Any],
+        x_api_key: str = Header(""),
+    ) -> JSONResponse:
+        if err := _check_auth(x_api_key, config):
+            return JSONResponse(status_code=401, content={"error": err})
+        if not push_service:
+            return JSONResponse(
+                status_code=501, content={"error": "push not available"}
+            )
+        sub = body.get("subscription")
+        chat_id = body.get("chat_id", "")
+        if not sub or not chat_id:
+            return JSONResponse(
+                status_code=400, content={"error": "subscription and chat_id required"}
+            )
+        push_service.subscribe(chat_id, sub)
+        return JSONResponse(content={"ok": True})
+
+    @router.delete("/push/subscribe")
+    async def push_unsubscribe(
+        body: dict[str, Any],
+        x_api_key: str = Header(""),
+    ) -> JSONResponse:
+        if err := _check_auth(x_api_key, config):
+            return JSONResponse(status_code=401, content={"error": err})
+        if not push_service:
+            return JSONResponse(
+                status_code=501, content={"error": "push not available"}
+            )
+        chat_id = body.get("chat_id", "")
+        if chat_id:
+            push_service.unsubscribe(chat_id)
+        return JSONResponse(content={"ok": True})
+
+    @router.post("/push/test")
+    async def push_test(
+        body: dict[str, Any],
+        x_api_key: str = Header(""),
+    ) -> JSONResponse:
+        if err := _check_auth(x_api_key, config):
+            return JSONResponse(status_code=401, content={"error": err})
+        if not push_service:
+            return JSONResponse(
+                status_code=501, content={"error": "push not available"}
+            )
+        chat_id = body.get("chat_id", "")
+        if not chat_id:
+            return JSONResponse(status_code=400, content={"error": "chat_id required"})
+        ok = await push_service.send_push(
+            chat_id,
+            title="leashd",
+            body="Test notification — push is working!",
+            event_type="test",
+        )
+        return JSONResponse(content={"ok": ok})
 
     return router
 

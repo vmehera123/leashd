@@ -39,7 +39,20 @@ class WebConnector(BaseConnector):
         super().__init__()
         self._config = config
         self._ws_handler = WebSocketHandler(api_key=config.web_api_key)
-        self._app = create_app(config, self._ws_handler, message_store)
+
+        self._push_service: Any = None
+        try:
+            from leashd.web.push import PushService
+
+            self._push_service = PushService()
+        except ImportError:
+            logger.info(
+                "push_unavailable", hint="install pywebpush for push notifications"
+            )
+
+        self._app = create_app(
+            config, self._ws_handler, message_store, push_service=self._push_service
+        )
         self._server: Any = None
         self._serve_task: asyncio.Task[None] | None = None
         self._watcher_task: asyncio.Task[None] | None = None
@@ -48,6 +61,7 @@ class WebConnector(BaseConnector):
         self._plan_message_ids: dict[str, list[str]] = {}
         self._activity_message_id: dict[str, str] = {}
         self._question_message_ids: dict[str, str] = {}
+        self._disconnect_timers: dict[str, asyncio.TimerHandle] = {}
         self._on_connect: Callable[[str], None] | None = None
         self._on_disconnect: Callable[[str], None] | None = None
         self._ws_handler.set_on_connect(self._handle_connect)
@@ -58,15 +72,24 @@ class WebConnector(BaseConnector):
         return self._ws_handler
 
     def _handle_connect(self, chat_id: str) -> None:
+        timer = self._disconnect_timers.pop(chat_id, None)
+        if timer:
+            timer.cancel()
         if self._on_connect:
             self._on_connect(chat_id)
 
     def _handle_disconnect(self, chat_id: str) -> None:
+        loop = asyncio.get_running_loop()
+        timer = loop.call_later(120.0, self._clear_chat_state, chat_id)
+        self._disconnect_timers[chat_id] = timer
+        if self._on_disconnect:
+            self._on_disconnect(chat_id)
+
+    def _clear_chat_state(self, chat_id: str) -> None:
+        self._disconnect_timers.pop(chat_id, None)
         self._question_message_ids.pop(chat_id, None)
         self._plan_message_ids.pop(chat_id, None)
         self._activity_message_id.pop(chat_id, None)
-        if self._on_disconnect:
-            self._on_disconnect(chat_id)
 
     async def start(self) -> None:
         import uvicorn
@@ -162,6 +185,12 @@ class WebConnector(BaseConnector):
                 },
             ),
         )
+        await self._send_push(
+            chat_id,
+            title="Approval Required",
+            body=f"{tool_name}: {description[:100]}",
+            event_type="approval_request",
+        )
         return approval_id
 
     async def send_file(self, chat_id: str, file_path: str) -> None:
@@ -253,6 +282,27 @@ class WebConnector(BaseConnector):
         await self.clear_activity(chat_id)
         await self._ws_handler.send_to(chat_id, ServerMessage(type="tool_end"))
 
+    async def _send_push(
+        self, chat_id: str, *, title: str, body: str, event_type: str
+    ) -> None:
+        if not self._push_service:
+            return
+        session_id = chat_id.removeprefix("web:")
+        # Hash format must match Router.parse(): #/{tabId}/{sessionId} or #/{sessionId}
+        parts = session_id.split(":", 1)
+        if len(parts) == 2:
+            tab_id = parts[0]
+            url = f"/#/{tab_id}/{session_id}"
+        else:
+            url = f"/#/{session_id}"
+        await self._push_service.send_push(
+            chat_id,
+            title=title,
+            body=body,
+            event_type=event_type,
+            url=url,
+        )
+
     async def send_question(
         self,
         chat_id: str,
@@ -273,6 +323,12 @@ class WebConnector(BaseConnector):
                     "options": options,
                 },
             ),
+        )
+        await self._send_push(
+            chat_id,
+            title=header or "Question",
+            body=question_text[:100],
+            event_type="question",
         )
 
     async def clear_question_message(self, chat_id: str) -> None:
@@ -299,6 +355,12 @@ class WebConnector(BaseConnector):
             ),
         )
         self._plan_message_ids.setdefault(chat_id, []).append(message_id)
+        await self._send_push(
+            chat_id,
+            title="Plan Review",
+            body=description[:100],
+            event_type="plan_review",
+        )
 
     async def send_task_update(
         self,
@@ -318,6 +380,13 @@ class WebConnector(BaseConnector):
                 },
             ),
         )
+        if status in ("completed", "failed", "escalated"):
+            await self._send_push(
+                chat_id,
+                title=f"Task {status}",
+                body=description[:100],
+                event_type="task_update",
+            )
 
     async def send_plan_messages(self, chat_id: str, plan_text: str) -> list[str]:
         msg_id = str(uuid.uuid4())
@@ -336,6 +405,14 @@ class WebConnector(BaseConnector):
         for msg_id in msg_ids:
             await self.delete_message(chat_id, msg_id)
 
+    async def notify_completion(self, chat_id: str) -> None:
+        await self._send_push(
+            chat_id,
+            title="Agent Finished",
+            body="The agent has finished working on your request.",
+            event_type="completion",
+        )
+
     async def send_interrupt_prompt(
         self,
         chat_id: str,
@@ -353,6 +430,12 @@ class WebConnector(BaseConnector):
                     "message_id": msg_id,
                 },
             ),
+        )
+        await self._send_push(
+            chat_id,
+            title="Message Queued",
+            body=message_preview[:100],
+            event_type="interrupt_prompt",
         )
         return msg_id
 

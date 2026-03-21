@@ -262,3 +262,9 @@ class BaseConnector(ABC):
         description: str,
     ) -> None:
         """Send a task progress update to the client. Default: no-op."""
+
+    async def notify_completion(  # noqa: B027
+        self,
+        chat_id: str,
+    ) -> None:
+        """Send a push notification that the agent finished working. Default: no-op."""

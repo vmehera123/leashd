@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 if TYPE_CHECKING:
     from leashd.connectors.base import BaseConnector
     from leashd.core.config import LeashdConfig
+    from leashd.core.events import EventBus
     from leashd.core.safety.policy import Classification
 
 logger = structlog.get_logger()
@@ -35,12 +36,19 @@ class PendingApproval(BaseModel):
     decision: bool | None = None
     rejection_reason: str | None = None
     message_id: str | None = None
+    description: str = ""
 
 
 class ApprovalCoordinator:
-    def __init__(self, connector: BaseConnector, config: LeashdConfig) -> None:
+    def __init__(
+        self,
+        connector: BaseConnector,
+        config: LeashdConfig,
+        event_bus: EventBus | None = None,
+    ) -> None:
         self.connector = connector
         self.config = config
+        self._event_bus = event_bus
         self.pending: dict[str, PendingApproval] = {}
 
     async def request_approval(
@@ -66,6 +74,7 @@ class ApprovalCoordinator:
         description = self._format_description(
             tool_name, tool_input, classification, ai_denial_reason=ai_denial_reason
         )
+        pending.description = description
 
         msg_id = await self.connector.request_approval(
             chat_id, approval_id, description, tool_name
@@ -78,6 +87,21 @@ class ApprovalCoordinator:
             tool=tool_name,
             chat_id=chat_id,
         )
+
+        if self._event_bus:
+            from leashd.core.events import APPROVAL_REQUESTED, Event
+
+            await self._event_bus.emit(
+                Event(
+                    name=APPROVAL_REQUESTED,
+                    data={
+                        "chat_id": chat_id,
+                        "tool_name": tool_name,
+                        "approval_id": approval_id,
+                        "kind": "approval_request",
+                    },
+                )
+            )
 
         try:
             await asyncio.wait_for(pending.event.wait(), timeout=timeout)

@@ -6,6 +6,7 @@ import json
 import re
 import shutil
 import subprocess
+import threading
 import time
 import urllib.request
 
@@ -100,6 +101,8 @@ class TunnelProcess:
         self._provider = provider
         self._port = port
         self._proc: subprocess.Popen[bytes] | None = None
+        self._stderr_lines: list[str] = []
+        self._stderr_thread: threading.Thread | None = None
 
     def start(self) -> str:
         """Start the tunnel subprocess and return the public URL."""
@@ -122,8 +125,12 @@ class TunnelProcess:
             self._proc = subprocess.Popen(  # noqa: S603
                 cmd,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
             )
+            self._stderr_thread = threading.Thread(
+                target=self._drain_stderr, daemon=True
+            )
+            self._stderr_thread.start()
         else:
             self._proc = subprocess.Popen(  # noqa: S603
                 cmd,
@@ -155,6 +162,29 @@ class TunnelProcess:
     def is_alive(self) -> bool:
         """Check if the tunnel process is still running."""
         return self._proc is not None and self._proc.poll() is None
+
+    @property
+    def exit_code(self) -> int | None:
+        """Return the process exit code, or None if still running."""
+        if self._proc is None:
+            return None
+        return self._proc.poll()
+
+    def get_stderr(self) -> str:
+        """Return captured stderr output (if any)."""
+        if self._stderr_thread is not None:
+            self._stderr_thread.join(timeout=1)
+        return "\n".join(self._stderr_lines)
+
+    def _drain_stderr(self) -> None:
+        """Read stderr lines into a buffer (runs in a background thread)."""
+        if self._proc is None or self._proc.stderr is None:
+            return
+        for raw_line in self._proc.stderr:
+            self._stderr_lines.append(
+                raw_line.decode("utf-8", errors="replace").rstrip()
+            )
+        self._proc.stderr.close()
 
 
 def notify_telegram(bot_token: str, chat_id: str, text: str) -> bool:

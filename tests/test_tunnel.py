@@ -158,6 +158,50 @@ class TestTunnelProcess:
             with pytest.raises(TunnelError, match="exited immediately"):
                 tunnel.start()
 
+    def test_exit_code_none_when_not_started(self):
+        tunnel = TunnelProcess("ngrok", 8080)
+        assert tunnel.exit_code is None
+
+    def test_exit_code_none_when_running(self):
+        tunnel = TunnelProcess("ngrok", 8080)
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        tunnel._proc = mock_proc
+        assert tunnel.exit_code is None
+
+    def test_exit_code_returns_value(self):
+        tunnel = TunnelProcess("ngrok", 8080)
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = 2
+        tunnel._proc = mock_proc
+        assert tunnel.exit_code == 2
+
+    def test_get_stderr_empty(self):
+        tunnel = TunnelProcess("ngrok", 8080)
+        assert tunnel.get_stderr() == ""
+
+    def test_get_stderr_with_content(self):
+        tunnel = TunnelProcess("ngrok", 8080)
+        tunnel._stderr_lines = ["auth failed", "session expired"]
+        assert tunnel.get_stderr() == "auth failed\nsession expired"
+
+    def test_ngrok_start_captures_stderr(self):
+        with (
+            patch("leashd.tunnel.shutil.which", return_value="/usr/bin/ngrok"),
+            patch("leashd.tunnel.subprocess.Popen") as mock_popen,
+            patch("leashd.tunnel._parse_ngrok_url", return_value="https://x.ngrok.io"),
+        ):
+            mock_proc = mock_popen.return_value
+            mock_proc.poll.return_value = None
+            mock_proc.stderr = io.BytesIO(b"")
+
+            tunnel = TunnelProcess("ngrok", 8080)
+            tunnel.start()
+
+            call_kwargs = mock_popen.call_args[1]
+            assert call_kwargs["stderr"] == subprocess.PIPE
+            assert tunnel._stderr_thread is not None
+
 
 class TestParseNgrokUrl:
     def test_success(self):

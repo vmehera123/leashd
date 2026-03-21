@@ -335,8 +335,133 @@ class TestConnectDisconnectCallbacks:
         connector._handle_connect("web:test")
         assert calls == [("connect", "web:test")]
 
-    def test_on_disconnect_callback(self, connector):
+    async def test_on_disconnect_callback(self, connector):
         calls = []
         connector._on_disconnect = lambda cid: calls.append(("disconnect", cid))
         connector._handle_disconnect("web:test")
         assert calls == [("disconnect", "web:test")]
+        # Grace timer defers cleanup instead of immediate clear
+        assert "web:test" in connector._disconnect_timers
+
+
+class TestDisconnectTimerAndClearState:
+    async def test_reconnect_cancels_disconnect_timer(self, connector):
+        connector._handle_disconnect("web:1")
+        assert "web:1" in connector._disconnect_timers
+
+        connector._handle_connect("web:1")
+
+        assert "web:1" not in connector._disconnect_timers
+
+    def test_clear_chat_state_removes_tracked_ids(self, connector):
+        connector._question_message_ids["web:1"] = "q-1"
+        connector._plan_message_ids["web:1"] = ["p-1", "p-2"]
+        connector._activity_message_id["web:1"] = "a-1"
+        connector._disconnect_timers["web:1"] = MagicMock()
+
+        connector._clear_chat_state("web:1")
+
+        assert "web:1" not in connector._question_message_ids
+        assert "web:1" not in connector._plan_message_ids
+        assert "web:1" not in connector._activity_message_id
+        assert "web:1" not in connector._disconnect_timers
+
+    async def test_notify_completion_sends_push(self, connector):
+        mock_push = AsyncMock()
+        mock_push.send_push = AsyncMock(return_value=True)
+        connector._push_service = mock_push
+
+        await connector.notify_completion("web:1")
+
+        mock_push.send_push.assert_awaited_once()
+        call_kwargs = mock_push.send_push.call_args
+        assert call_kwargs.kwargs["event_type"] == "completion"
+        assert call_kwargs.kwargs["title"] == "Agent Finished"
+
+    async def test_notify_completion_no_push_service(self, connector):
+        connector._push_service = None
+        # Should not raise
+        await connector.notify_completion("web:1")
+
+
+class TestPushNotifications:
+    """Push must fire for every human-feedback event, regardless of WS state."""
+
+    @pytest.fixture
+    def push_connector(self, connector):
+        mock_push = AsyncMock()
+        mock_push.send_push = AsyncMock(return_value=True)
+        connector._push_service = mock_push
+        connector._ws_handler.send_to = AsyncMock()
+        return connector
+
+    async def test_push_sent_for_approval_request(self, push_connector):
+        await push_connector.request_approval("web:1", "ap-1", "Install numpy", "Bash")
+        push_connector._push_service.send_push.assert_awaited_once()
+        call_kw = push_connector._push_service.send_push.call_args
+        assert call_kw.kwargs["event_type"] == "approval_request"
+
+    async def test_push_sent_even_with_ws_connected(self, push_connector):
+        push_connector._ws_handler._connections["web:1"] = MagicMock()
+        await push_connector.request_approval("web:1", "ap-2", "Run tests", "Bash")
+        push_connector._push_service.send_push.assert_awaited_once()
+
+    async def test_push_sent_for_question(self, push_connector):
+        await push_connector.send_question(
+            "web:1", "int-1", "Which option?", "Choose", [{"text": "A", "value": "a"}]
+        )
+        push_connector._push_service.send_push.assert_awaited_once()
+        assert (
+            push_connector._push_service.send_push.call_args.kwargs["event_type"]
+            == "question"
+        )
+
+    async def test_push_sent_for_plan_review(self, push_connector):
+        await push_connector.send_plan_review("web:1", "int-2", "Plan description")
+        push_connector._push_service.send_push.assert_awaited_once()
+        assert (
+            push_connector._push_service.send_push.call_args.kwargs["event_type"]
+            == "plan_review"
+        )
+
+    async def test_push_sent_for_terminal_task_update(self, push_connector):
+        for status in ("completed", "failed", "escalated"):
+            push_connector._push_service.send_push.reset_mock()
+            await push_connector.send_task_update("web:1", "implement", status, "Done")
+            push_connector._push_service.send_push.assert_awaited_once()
+
+    async def test_push_not_sent_for_non_terminal_task_update(self, push_connector):
+        await push_connector.send_task_update(
+            "web:1", "implement", "in_progress", "Working"
+        )
+        push_connector._push_service.send_push.assert_not_awaited()
+
+    async def test_push_skipped_when_no_push_service(self, connector):
+        connector._push_service = None
+        connector._ws_handler.send_to = AsyncMock()
+        await connector.request_approval("web:1", "ap-3", "Test", "Bash")
+        # Should not raise
+
+    async def test_push_sent_for_interrupt_prompt(self, push_connector):
+        await push_connector.send_interrupt_prompt("web:1", "irq-1", "preview")
+        push_connector._push_service.send_push.assert_awaited_once()
+        assert (
+            push_connector._push_service.send_push.call_args.kwargs["event_type"]
+            == "interrupt_prompt"
+        )
+
+    async def test_push_url_matches_router_hash_format(self, push_connector):
+        """Push URL must use #/ prefix so the frontend Router.parse() can route it."""
+        await push_connector.request_approval("web:sess123", "ap-1", "Test", "Bash")
+        url = push_connector._push_service.send_push.call_args.kwargs["url"]
+        assert url == "/#/sess123", (
+            f"Single-dir URL should be /#/{{sessionId}}, got {url}"
+        )
+
+    async def test_push_url_multi_tab_format(self, push_connector):
+        """Multi-tab chat_id (tabId:sessionId) should produce /#/tabId/tabId:sessionId."""
+        await push_connector.request_approval(
+            "web:tab1:sess456", "ap-2", "Test", "Bash"
+        )
+        url = push_connector._push_service.send_push.call_args.kwargs["url"]
+        assert url == "/#/tab1/tab1:sess456", f"Multi-tab URL format wrong, got {url}"

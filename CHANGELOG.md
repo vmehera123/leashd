@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.10.0] - 2026-03-18
+- **added**: WebUI push notifications — layered system with Web Push via Service Worker (lock-screen alerts when browser is closed), in-page notifications (Web Notification API + audio chime + tab title flash), and optional Telegram cross-notification with deep links
+- **added**: PWA support — manifest, Service Worker, and installability on iOS/Android/desktop with safe-area inset handling for notched devices
+- **added**: Claude Code plugin management — `leashd plugin` CLI and `/plugin` chat command for installing, removing, enabling, and disabling SDK-level plugins mid-session
+- **added**: Seamless reconnection — `pending_state` server message re-sends all pending approvals/questions/plan reviews after reconnect, 120-second disconnect grace period, and instant reconnect on phone unlock via Page Visibility API
+- **fixed**: WebSocket auto-reconnection completely broken — `onclose` handler never triggered `scheduleReconnect()` due to premature state flag reset
+- **fixed**: PWA streaming breaks after background/resume — force-reconnects on resume after >3s hidden or stale socket, replacing unreliable `state.connected` check
+- **fixed**: Pending interactions lost on page reload/tab switch — sessionStorage cache with deferred rendering fixes race condition where `loadHistory()` wiped pending state
+
 ## [0.9.0] - 2026-03-17
 - **added**: `leashd webui tunnel` command — expose WebUI via ngrok/cloudflare/tailscale with optional Telegram notification
 - **added**: WebUI — full browser-based interface via FastAPI + WebSocket with real-time streaming, inline approvals and interactions, conversation history sidebar, directory and workspace tabs, settings page, dark/light mode, markdown rendering with syntax-highlighted code blocks, and mobile-responsive layout

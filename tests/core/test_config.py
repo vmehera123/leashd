@@ -376,7 +376,7 @@ class TestWebConfig:
         assert config.web_host == "0.0.0.0"  # noqa: S104
         assert config.web_port == 8080
         assert config.web_api_key is None
-        assert config.web_cors_origins == "*"
+        assert config.web_cors_origins == ""
 
     def test_custom_values(self, tmp_path):
         config = LeashdConfig(

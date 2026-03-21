@@ -27,16 +27,7 @@ from leashd.git.service import GitService
 from leashd.middleware.auth import AuthMiddleware
 from leashd.middleware.base import MiddlewareChain
 from leashd.middleware.rate_limit import RateLimitMiddleware
-from leashd.plugins.builtin.audit_plugin import AuditPlugin
-from leashd.plugins.builtin.auto_approver import AutoApprover
-from leashd.plugins.builtin.autonomous_loop import AutonomousLoop
-from leashd.plugins.builtin.browser_tools import BrowserToolsPlugin
-from leashd.plugins.builtin.merge_resolver import MergeResolverPlugin
-from leashd.plugins.builtin.task_orchestrator import TaskOrchestrator
-from leashd.plugins.builtin.test_runner import TestRunnerPlugin
-from leashd.plugins.builtin.web_agent import WebAgentPlugin
-from leashd.plugins.builtin.web_interaction_logger import WebInteractionLogger
-from leashd.plugins.registry import PluginRegistry
+from leashd.plugins.registry import create_builtin_plugins
 from leashd.storage.memory import MemorySessionStore
 from leashd.storage.sqlite import SqliteSessionStore
 
@@ -271,88 +262,25 @@ def build_engine(
     )
     audit = AuditLogger(resolved_audit)
 
-    auto_approver = None
-    if config.auto_approver:
-        auto_approver = AutoApprover(
-            audit,
-            model=config.auto_approver_model,
-            max_calls_per_session=config.auto_approver_max_calls,
-        )
-        logger.info(
-            "auto_approver_enabled",
-            model=config.auto_approver_model or "(default)",
-            max_calls=config.auto_approver_max_calls,
-        )
-
-    auto_plan_reviewer = None
-    if config.auto_plan:
-        from leashd.plugins.builtin.auto_plan_reviewer import AutoPlanReviewer
-
-        auto_plan_reviewer = AutoPlanReviewer(audit, model=config.auto_plan_model)
-        logger.info(
-            "auto_plan_reviewer_enabled",
-            model=config.auto_plan_model or "(default)",
-        )
+    builtins = create_builtin_plugins(
+        audit=audit,
+        config=config,
+        connector=connector,
+        session_db_path=str(session_db_path),
+        extra_plugins=plugins,
+    )
 
     approval_coordinator = None
     interaction_coordinator = None
     if connector:
-        approval_coordinator = ApprovalCoordinator(connector, config)
+        approval_coordinator = ApprovalCoordinator(connector, config, event_bus)
         interaction_coordinator = InteractionCoordinator(
             connector,
             config,
             event_bus,
-            auto_plan_reviewer=auto_plan_reviewer,
+            auto_plan_reviewer=builtins.auto_plan_reviewer,
             message_logger=message_logger,
         )
-
-    autonomous_loop = None
-    if config.autonomous_loop:
-        autonomous_loop = AutonomousLoop(
-            connector,
-            max_retries=config.autonomous_max_retries,
-            auto_pr=config.auto_pr,
-            auto_pr_base_branch=config.auto_pr_base_branch,
-        )
-        logger.info(
-            "autonomous_loop_enabled",
-            max_retries=config.autonomous_max_retries,
-            auto_pr=config.auto_pr,
-        )
-
-    task_orchestrator = None
-    if config.task_orchestrator:
-        task_orchestrator = TaskOrchestrator(
-            connector=connector,
-            db_path=str(session_db_path),
-            max_retries=config.task_max_retries,
-            auto_pr=config.auto_pr,
-            auto_pr_base_branch=config.auto_pr_base_branch,
-        )
-        logger.info(
-            "task_orchestrator_enabled",
-            max_retries=config.task_max_retries,
-            auto_pr=config.auto_pr,
-        )
-
-    # Plugins
-    registry = PluginRegistry()
-    registry.register(AuditPlugin(audit))
-    registry.register(BrowserToolsPlugin())
-    registry.register(TestRunnerPlugin())
-    registry.register(WebAgentPlugin())
-    registry.register(WebInteractionLogger())
-    registry.register(MergeResolverPlugin())
-    if auto_approver:
-        registry.register(auto_approver)
-    if auto_plan_reviewer:
-        registry.register(auto_plan_reviewer)
-    if autonomous_loop:
-        registry.register(autonomous_loop)
-    if task_orchestrator:
-        registry.register(task_orchestrator)
-    for plugin in plugins or []:
-        registry.register(plugin)
 
     # Middleware
     middleware_chain = MiddlewareChain()
@@ -381,7 +309,7 @@ def build_engine(
         "engine_built",
         has_auth=bool(config.allowed_user_ids),
         has_rate_limit=config.rate_limit_rpm > 0,
-        plugin_count=len(registry.plugins),
+        plugin_count=len(builtins.registry.plugins),
         streaming=config.streaming_enabled,
     )
 
@@ -394,10 +322,10 @@ def build_engine(
         sandbox=sandbox,
         audit=audit,
         approval_coordinator=approval_coordinator,
-        auto_approver=auto_approver,
+        auto_approver=builtins.auto_approver,
         interaction_coordinator=interaction_coordinator,
         event_bus=event_bus,
-        plugin_registry=registry,
+        plugin_registry=builtins.registry,
         middleware_chain=middleware_chain,
         store=session_store,
         message_store=message_store,
@@ -413,10 +341,10 @@ def build_engine(
         ),
     )
 
-    if autonomous_loop:
-        autonomous_loop.set_engine(engine)
+    if builtins.autonomous_loop:
+        builtins.autonomous_loop.set_engine(engine)
 
-    if task_orchestrator:
-        task_orchestrator.set_engine(engine)
+    if builtins.task_orchestrator:
+        builtins.task_orchestrator.set_engine(engine)
 
     return engine

@@ -30,7 +30,9 @@ Open `http://localhost:8080` (or your configured port) and enter your API key.
 | `LEASHD_WEB_HOST` | `str` | `"0.0.0.0"` | Host to bind the HTTP server |
 | `LEASHD_WEB_PORT` | `int` | `8080` | Port for the HTTP/WebSocket server |
 | `LEASHD_WEB_API_KEY` | `str \| None` | `None` | API key for authentication (required) |
-| `LEASHD_WEB_CORS_ORIGINS` | `list[str]` | `[]` | Allowed CORS origins for cross-origin requests |
+| `LEASHD_WEB_CORS_ORIGINS` | `list[str]` | `""` | Comma-separated allowed CORS origins. Empty = no cross-origin (secure default). |
+| `LEASHD_WEB_DEV_MODE` | `bool` | `false` | Enable dev mode (disables caching, adds debug headers) |
+| `LEASHD_WEB_TELEGRAM_NOTIFY` | `bool` | `false` | Send Telegram cross-notifications with deep links when user is away from browser |
 
 These can be set in `~/.leashd/config.yaml`, `.env`, or as environment variables. The `leashd webui enable` command manages them for you.
 
@@ -39,7 +41,7 @@ These can be set in `~/.leashd/config.yaml`, `.env`, or as environment variables
 The WebUI uses API key authentication at two levels:
 
 1. **WebSocket auth** — after connecting, the client sends an `auth` message with the API key. The server validates it and returns `auth_ok` (with `chat_id` and `session_id`) or `auth_error`.
-2. **REST API auth** — the `/api/history` endpoint requires `api_key` as a query parameter. The `/api/health` and `/api/status` endpoints are public.
+2. **REST API auth** — endpoints require the `X-Api-Key` header. The `/api/health` and `/api/status` endpoints are public.
 
 API keys are compared using constant-time comparison (`hmac.compare_digest`) to prevent timing attacks. Failed WebSocket auth attempts are rate-limited per IP (5 failures → 60-second lockout).
 
@@ -80,6 +82,9 @@ The WebUI communicates over a single WebSocket connection at `/ws`. Messages are
 | `task_update` | `{ phase, status, description }` | Task orchestrator phase change |
 | `status` | `{ typing? }` | Status indicator |
 | `error` | `{ reason }` | Error message |
+| `pending_state` | `{ approvals, questions, interrupts }` | Re-sends all pending interactions after reconnect |
+| `config_updated` | `{ key, value }` | Server-side config change notification |
+| `reload` | `{}` | Signal client to reload (e.g., after daemon config reload) |
 | `history` | `{ messages }` | Message history replay |
 | `pong` | `{}` | Response to ping |
 
@@ -99,6 +104,60 @@ When the agent needs human approval:
 Approval modals cannot be dismissed with Escape or by clicking outside — they require explicit action. Question and interrupt modals can be dismissed with Escape.
 
 If multiple approvals arrive simultaneously, they are queued and shown one at a time.
+
+## Push Notifications
+
+leashd supports a layered notification system so you never miss an approval:
+
+1. **Web Push** — Service Worker delivers lock-screen alerts even when the browser is closed. Uses VAPID key authentication. VAPID keys are stored in `~/.leashd/vapid_keys.json` and subscriptions in `~/.leashd/push_subscriptions.json`.
+2. **In-page notifications** — Web Notification API with an audio chime and tab title flash when the tab is in the background.
+3. **Telegram cross-notification** — optional deep links sent to your phone when you're away from the browser. Enable with `LEASHD_WEB_TELEGRAM_NOTIFY=true`.
+
+Push notification endpoints:
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/api/push/vapid-key` | GET | Get the server's VAPID public key |
+| `/api/push/subscribe` | POST | Subscribe to push notifications (`{ subscription, chat_id }`) |
+| `/api/push/subscribe` | DELETE | Unsubscribe (`{ chat_id }`) |
+| `/api/push/test` | POST | Send a test push notification (`{ chat_id }`) |
+
+All push endpoints require the `X-Api-Key` header.
+
+## PWA Support
+
+The WebUI is installable as a Progressive Web App on iOS, Android, and desktop. Add it to your home screen for a standalone app experience with proper safe-area handling on notched devices.
+
+To install: in Chrome or Safari, tap "Add to Home Screen" (mobile) or "Install" (desktop).
+
+Push notifications require PWA installation on iOS — Safari in-browser does not support Web Push. The app detects this and prompts you to install first.
+
+## Color Themes
+
+27 color themes are available, each with dark and light variants. Select from the Settings page in the WebUI. Themes include: Dracula, Monokai, Catppuccin, Nord, Synthwave, Matrix, Solarized, One Dark, Gruvbox, and more.
+
+The theme preference is stored in `localStorage` and applied immediately without page reload.
+
+## Seamless Reconnection
+
+The WebUI handles disconnections gracefully:
+
+- **Pending state recovery** — after reconnect, the server sends a `pending_state` message re-delivering all pending approvals, questions, and plan reviews so nothing is lost.
+- **Grace period** — a 120-second disconnect grace period keeps your session alive through sleep/wake cycles and network blips.
+- **Instant reconnect** — the Page Visibility API triggers immediate reconnection when you unlock your phone or switch back to the tab.
+- **Session cache** — pending interactions are cached in `sessionStorage` so they survive page reloads.
+
+## Tunnel (Remote Access)
+
+Access the WebUI from your phone or any device:
+
+```bash
+leashd webui tunnel                           # ngrok (default)
+leashd webui tunnel --provider cloudflare      # Cloudflare Tunnel
+leashd webui tunnel --provider tailscale       # Tailscale Funnel
+```
+
+The tunnel provider CLI must be installed separately. When exposed publicly, your `LEASHD_WEB_API_KEY` is your authentication layer — choose a strong key. Failed auth attempts are rate-limited (5 failures → 60s lockout).
 
 ## Mobile Browser Support
 

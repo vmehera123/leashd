@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import pytest
 
+from leashd.core.config import LeashdConfig
 from leashd.core.events import EventBus
+from leashd.core.safety.audit import AuditLogger
 from leashd.exceptions import PluginError
 from leashd.plugins.base import LeashdPlugin, PluginContext, PluginMeta
-from leashd.plugins.registry import PluginRegistry
+from leashd.plugins.registry import (
+    BuiltinPlugins,
+    PluginRegistry,
+    create_builtin_plugins,
+)
 
 
 class StubPlugin(LeashdPlugin):
@@ -231,3 +237,107 @@ class TestPluginRegistry:
         await registry.init_all(plugin_context)
         await registry.start_all()
         assert started == ["pa", "pb"]
+
+
+class TestCreateBuiltinPlugins:
+    def test_returns_builtin_plugins(self, tmp_path):
+        audit = AuditLogger(tmp_path / "audit.jsonl")
+        config = LeashdConfig(approved_directories=[tmp_path])
+        result = create_builtin_plugins(
+            audit=audit,
+            config=config,
+            connector=None,
+            session_db_path=str(tmp_path / "s.db"),
+        )
+        assert isinstance(result, BuiltinPlugins)
+
+    def test_core_plugins_always_registered(self, tmp_path):
+        audit = AuditLogger(tmp_path / "audit.jsonl")
+        config = LeashdConfig(approved_directories=[tmp_path])
+        result = create_builtin_plugins(
+            audit=audit,
+            config=config,
+            connector=None,
+            session_db_path=str(tmp_path / "s.db"),
+        )
+        names = {p.meta.name for p in result.registry.plugins}
+        assert names == {
+            "audit",
+            "browser_tools",
+            "test_runner",
+            "web_agent",
+            "web_interaction_logger",
+            "merge_resolver",
+        }
+
+    def test_auto_approver_disabled_by_default(self, tmp_path):
+        audit = AuditLogger(tmp_path / "audit.jsonl")
+        config = LeashdConfig(approved_directories=[tmp_path])
+        result = create_builtin_plugins(
+            audit=audit,
+            config=config,
+            connector=None,
+            session_db_path=str(tmp_path / "s.db"),
+        )
+        assert result.auto_approver is None
+
+    def test_auto_approver_when_enabled(self, tmp_path):
+        audit = AuditLogger(tmp_path / "audit.jsonl")
+        config = LeashdConfig(approved_directories=[tmp_path], auto_approver=True)
+        result = create_builtin_plugins(
+            audit=audit,
+            config=config,
+            connector=None,
+            session_db_path=str(tmp_path / "s.db"),
+        )
+        assert result.auto_approver is not None
+        assert result.registry.get("auto_approver") is result.auto_approver
+
+    def test_task_orchestrator_when_enabled(self, tmp_path):
+        audit = AuditLogger(tmp_path / "audit.jsonl")
+        config = LeashdConfig(approved_directories=[tmp_path], task_orchestrator=True)
+        result = create_builtin_plugins(
+            audit=audit,
+            config=config,
+            connector=None,
+            session_db_path=str(tmp_path / "s.db"),
+        )
+        assert result.task_orchestrator is not None
+        assert result.registry.get("task_orchestrator") is result.task_orchestrator
+
+    def test_autonomous_loop_when_enabled(self, tmp_path):
+        audit = AuditLogger(tmp_path / "audit.jsonl")
+        config = LeashdConfig(approved_directories=[tmp_path], autonomous_loop=True)
+        result = create_builtin_plugins(
+            audit=audit,
+            config=config,
+            connector=None,
+            session_db_path=str(tmp_path / "s.db"),
+        )
+        assert result.autonomous_loop is not None
+        assert result.registry.get("autonomous_loop") is result.autonomous_loop
+
+    def test_auto_plan_reviewer_when_enabled(self, tmp_path):
+        audit = AuditLogger(tmp_path / "audit.jsonl")
+        config = LeashdConfig(approved_directories=[tmp_path], auto_plan=True)
+        result = create_builtin_plugins(
+            audit=audit,
+            config=config,
+            connector=None,
+            session_db_path=str(tmp_path / "s.db"),
+        )
+        assert result.auto_plan_reviewer is not None
+        assert result.registry.get("auto_plan_reviewer") is result.auto_plan_reviewer
+
+    def test_extra_plugins_appended(self, tmp_path):
+        audit = AuditLogger(tmp_path / "audit.jsonl")
+        config = LeashdConfig(approved_directories=[tmp_path])
+        extra = StubPlugin()
+        result = create_builtin_plugins(
+            audit=audit,
+            config=config,
+            connector=None,
+            session_db_path=str(tmp_path / "s.db"),
+            extra_plugins=[extra],
+        )
+        assert result.registry.get("stub") is extra

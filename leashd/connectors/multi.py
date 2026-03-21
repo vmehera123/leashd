@@ -138,6 +138,9 @@ class MultiConnector(BaseConnector):
             chat_id, phase, status, description
         )
 
+    async def notify_completion(self, chat_id: str) -> None:
+        await self._get_connector(chat_id).notify_completion(chat_id)
+
     async def send_plan_messages(self, chat_id: str, plan_text: str) -> list[str]:
         return await self._get_connector(chat_id).send_plan_messages(chat_id, plan_text)
 

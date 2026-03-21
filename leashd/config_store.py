@@ -508,6 +508,73 @@ def remove_skill_metadata(name: str) -> bool:
     return True
 
 
+# --- Claude Code plugin config ---
+
+
+def get_cc_plugins_config(data: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Read the ``cc_plugins`` section from global config.
+
+    Returns an empty dict when the section is missing or not a dict.
+    """
+    if data is None:
+        data = load_global_config()
+    plugins = data.get("cc_plugins", {})
+    if not isinstance(plugins, dict):
+        return {}
+    return plugins
+
+
+def save_cc_plugin_metadata(
+    *,
+    name: str,
+    description: str,
+    version: str,
+    author: str,
+    source: str,
+    installed_at: str,
+    enabled: bool = True,
+) -> None:
+    """Upsert a Claude Code plugin entry in the global config."""
+    data = load_global_config()
+    plugins = data.get("cc_plugins", {})
+    if not isinstance(plugins, dict):
+        plugins = {}
+    plugins[name] = {
+        "description": description,
+        "version": version,
+        "author": author,
+        "source": source,
+        "installed_at": installed_at,
+        "enabled": enabled,
+    }
+    data["cc_plugins"] = plugins
+    save_global_config(data)
+
+
+def remove_cc_plugin_metadata(name: str) -> bool:
+    """Delete a Claude Code plugin entry from config. Returns True if it existed."""
+    data = load_global_config()
+    plugins = data.get("cc_plugins", {})
+    if not isinstance(plugins, dict) or name not in plugins:
+        return False
+    del plugins[name]
+    data["cc_plugins"] = plugins
+    save_global_config(data)
+    return True
+
+
+def set_cc_plugin_enabled(name: str, *, enabled: bool) -> bool:
+    """Toggle the enabled flag for a Claude Code plugin. Returns True if found."""
+    data = load_global_config()
+    plugins = data.get("cc_plugins", {})
+    if not isinstance(plugins, dict) or name not in plugins:
+        return False
+    plugins[name]["enabled"] = enabled
+    data["cc_plugins"] = plugins
+    save_global_config(data)
+    return True
+
+
 def remove_workspace_dirs(name: str, directories: list[str]) -> list[str]:
     """Remove specific directories from a workspace.
 

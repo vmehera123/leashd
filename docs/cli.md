@@ -28,6 +28,12 @@ leashd is controlled entirely from the command line. The `leashd` command manage
 | `leashd runtime show` | Show current agent runtime |
 | `leashd runtime set <name>` | Switch runtime (`claude-code`, `codex`) |
 | `leashd runtime list` | List available runtimes with stability |
+| `leashd plugin list` | List installed Claude Code plugins |
+| `leashd plugin add <source>` | Install from directory or zip |
+| `leashd plugin remove <name>` | Uninstall a plugin |
+| `leashd plugin show <name>` | Show plugin details |
+| `leashd plugin enable <name>` | Enable a disabled plugin |
+| `leashd plugin disable <name>` | Disable a plugin |
 | `leashd webui` / `leashd webui show` | Show WebUI status (enabled, host, port) |
 | `leashd webui enable` | Enable WebUI, set API key and port |
 | `leashd webui disable` | Disable WebUI |
@@ -177,6 +183,56 @@ leashd runtime list
 Shows all registered runtimes with their stability level and marks the active one.
 
 **Source:** `cli.py`, `agents/registry.py`
+
+## Plugin Management
+
+Manage Claude Code plugins — SDK-level extension packages with `.claude-plugin/plugin.json` manifests containing skills, agents, hooks, MCP servers, and LSP servers. These are distinct from leashd's internal plugins (EventBus subscribers managed via `PluginRegistry`).
+
+Plugins activate on the next agent turn — no daemon restart needed.
+
+### Listing Plugins
+
+```bash
+leashd plugin list
+```
+
+Shows all installed Claude Code plugins with their enabled/disabled status.
+
+### Installing a Plugin
+
+```bash
+leashd plugin add /path/to/plugin-dir     # from a directory
+leashd plugin add /path/to/plugin.zip     # from a zip file
+```
+
+The source must contain a `.claude-plugin/plugin.json` manifest with `name`, `description`, `version`, and `author` fields. The plugin is copied to `~/.claude/plugins/{name}/`.
+
+### Removing a Plugin
+
+```bash
+leashd plugin remove my-plugin
+```
+
+Removes the plugin directory and config metadata.
+
+### Showing Plugin Details
+
+```bash
+leashd plugin show my-plugin
+```
+
+Displays name, version, author, description, and enabled/disabled status.
+
+### Enabling / Disabling
+
+```bash
+leashd plugin enable my-plugin
+leashd plugin disable my-plugin
+```
+
+Disabled plugins remain installed but are not loaded by the Claude Agent SDK.
+
+**Source:** `cli.py`, `cc_plugins.py`
 
 ## Daemon Lifecycle
 

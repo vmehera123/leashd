@@ -34,7 +34,7 @@ flowchart LR
 | [Configuration](configuration.md) | All `LEASHD_` environment variables reference |
 | [Policies](policies.md) | YAML policy format, rule matching algorithm, built-in presets |
 | [Events](events.md) | EventBus, all event types, payload schemas |
-| [Plugins](plugins.md) | Plugin protocol, lifecycle hooks, AuditPlugin example |
+| [Plugins](plugins.md) | Plugin protocol, lifecycle hooks, AuditPlugin example, Claude Code plugins |
 | [Agents](agents.md) | BaseAgent protocol, ClaudeCodeAgent, session resume |
 | [WebUI](webui.md) | Browser-based interface — setup, WebSocket protocol, authentication |
 | [Connectors](connectors.md) | BaseConnector ABC, handler registration, building a connector |

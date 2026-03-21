@@ -55,6 +55,7 @@ class MockConnector(BaseConnector):
         self.interrupt_prompts: list[dict] = []
         self.scheduled_cleanups: list[dict] = []
         self.closed_agent_groups: list[str] = []
+        self.completed_streams: list[dict] = []
         self._support_streaming = support_streaming
         self._next_message_id = 1
         self._activity_message_id: dict[str, str] = {}
@@ -204,6 +205,9 @@ class MockConnector(BaseConnector):
         if msg_id:
             self.cleared_activities.append(chat_id)
             self.deleted_messages.append({"chat_id": chat_id, "message_id": msg_id})
+
+    async def complete_stream(self, chat_id: str, message_id: str) -> None:
+        self.completed_streams.append({"chat_id": chat_id, "message_id": message_id})
 
     async def close_agent_group(self, chat_id: str) -> None:
         self.closed_agent_groups.append(chat_id)

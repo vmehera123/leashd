@@ -97,8 +97,9 @@ class LeashdConfig(BaseSettings):
     web_host: str = "0.0.0.0"  # noqa: S104
     web_port: int = 8080
     web_api_key: str | None = None
-    web_cors_origins: str = "*"
+    web_cors_origins: str = ""
     web_dev_mode: bool = False
+    web_telegram_notify: bool = False
 
     # Workspaces
     workspace_config_root: Path | None = None

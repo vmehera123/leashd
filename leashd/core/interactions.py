@@ -56,6 +56,7 @@ class PendingInteraction(BaseModel):
     options: list[dict[str, str]] = Field(default_factory=list)
     user_id: str | None = None
     session_id: str | None = None
+    description: str = ""
 
 
 class InteractionCoordinator:
@@ -184,10 +185,12 @@ class InteractionCoordinator:
     ) -> PermissionDeny | PlanReviewDecision:
         interaction_id = str(uuid.uuid4())
 
+        description = plan_content if plan_content else "Plan is ready for review."
         pending = PendingInteraction(
             interaction_id=interaction_id,
             chat_id=chat_id,
             kind="plan_review",
+            description=description,
         )
         self.pending[interaction_id] = pending
         self._chat_index[chat_id] = interaction_id
@@ -201,7 +204,6 @@ class InteractionCoordinator:
             },
         )
 
-        description = plan_content if plan_content else "Plan is ready for review."
         logger.info(
             "plan_review_sending",
             description_length=len(description),

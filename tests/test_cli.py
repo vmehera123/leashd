@@ -1,7 +1,7 @@
 """Tests for leashd.cli — CLI subcommand routing."""
 
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import PropertyMock, patch
 
 import pytest
 
@@ -1875,13 +1875,20 @@ class TestWebUI:
         from leashd.cli import _handle_webui
 
         save_global_config({"web": {"enabled": True, "api_key": "key", "port": 9090}})
+
+        def _send_sigint(*_args: object) -> None:
+            import os
+            import signal as _sig
+
+            os.kill(os.getpid(), _sig.SIGINT)
+
         with (
             patch("leashd.tunnel.TunnelProcess") as mock_cls,
-            patch("signal.pause", create=True),
+            patch("time.sleep", side_effect=_send_sigint),
         ):
             mock_tunnel = mock_cls.return_value
             mock_tunnel.start.return_value = "https://test.ngrok.io"
-            mock_tunnel.is_alive = False
+            type(mock_tunnel).is_alive = PropertyMock(return_value=True)
 
             args = argparse.Namespace(
                 webui_command="tunnel", provider="ngrok", notify_telegram=False
@@ -1916,13 +1923,20 @@ class TestWebuiTunnel:
         from leashd.cli import _handle_webui_tunnel
 
         save_global_config({"web": {"enabled": True, "api_key": "key", "port": 9090}})
+
+        def _send_sigint(*_args: object) -> None:
+            import os
+            import signal as _sig
+
+            os.kill(os.getpid(), _sig.SIGINT)
+
         with (
             patch("leashd.tunnel.TunnelProcess") as mock_cls,
-            patch("signal.pause", create=True),
+            patch("time.sleep", side_effect=_send_sigint),
         ):
             mock_tunnel = mock_cls.return_value
             mock_tunnel.start.return_value = "https://abc.ngrok.io"
-            mock_tunnel.is_alive = False
+            type(mock_tunnel).is_alive = PropertyMock(return_value=True)
 
             _handle_webui_tunnel(provider="ngrok", notify_telegram=False)
 
@@ -1955,14 +1969,21 @@ class TestWebuiTunnel:
                 "telegram": {"bot_token": "tok", "allowed_user_ids": [123]},
             }
         )
+
+        def _send_sigint(*_args: object) -> None:
+            import os
+            import signal as _sig
+
+            os.kill(os.getpid(), _sig.SIGINT)
+
         with (
             patch("leashd.tunnel.TunnelProcess") as mock_cls,
             patch("leashd.tunnel.notify_telegram", return_value=True) as mock_tg,
-            patch("signal.pause", create=True),
+            patch("time.sleep", side_effect=_send_sigint),
         ):
             mock_tunnel = mock_cls.return_value
             mock_tunnel.start.return_value = "https://x.ngrok.io"
-            mock_tunnel.is_alive = False
+            type(mock_tunnel).is_alive = PropertyMock(return_value=True)
 
             _handle_webui_tunnel(provider="ngrok", notify_telegram=True)
 
@@ -1976,13 +1997,20 @@ class TestWebuiTunnel:
         from leashd.cli import _handle_webui_tunnel
 
         save_global_config({"web": {"enabled": True, "api_key": "key"}})
+
+        def _send_sigint(*_args: object) -> None:
+            import os
+            import signal as _sig
+
+            os.kill(os.getpid(), _sig.SIGINT)
+
         with (
             patch("leashd.tunnel.TunnelProcess") as mock_cls,
-            patch("signal.pause", create=True),
+            patch("time.sleep", side_effect=_send_sigint),
         ):
             mock_tunnel = mock_cls.return_value
             mock_tunnel.start.return_value = "https://x.ngrok.io"
-            mock_tunnel.is_alive = False
+            type(mock_tunnel).is_alive = PropertyMock(return_value=True)
 
             _handle_webui_tunnel(provider="ngrok", notify_telegram=True)
 
@@ -1998,16 +2026,261 @@ class TestWebuiTunnel:
                 "telegram": {"bot_token": "tok", "allowed_user_ids": [99]},
             }
         )
+
+        def _send_sigint(*_args: object) -> None:
+            import os
+            import signal as _sig
+
+            os.kill(os.getpid(), _sig.SIGINT)
+
         with (
             patch("leashd.tunnel.TunnelProcess") as mock_cls,
             patch("leashd.tunnel.notify_telegram", return_value=False),
-            patch("signal.pause", create=True),
+            patch("time.sleep", side_effect=_send_sigint),
         ):
             mock_tunnel = mock_cls.return_value
             mock_tunnel.start.return_value = "https://x.ngrok.io"
-            mock_tunnel.is_alive = False
+            type(mock_tunnel).is_alive = PropertyMock(return_value=True)
 
             _handle_webui_tunnel(provider="ngrok", notify_telegram=True)
 
         captured = capsys.readouterr()
         assert "Failed to notify Telegram user 99" in captured.err
+
+    def test_tunnel_exits_before_loop(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_webui_tunnel
+
+        save_global_config({"web": {"enabled": True, "api_key": "key"}})
+        with patch("leashd.tunnel.TunnelProcess") as mock_cls:
+            mock_tunnel = mock_cls.return_value
+            mock_tunnel.start.return_value = "https://x.ngrok.io"
+            type(mock_tunnel).is_alive = PropertyMock(return_value=False)
+            type(mock_tunnel).exit_code = PropertyMock(return_value=1)
+            mock_tunnel.get_stderr.return_value = "auth token expired"
+
+            with pytest.raises(SystemExit) as exc_info:
+                _handle_webui_tunnel(provider="ngrok", notify_telegram=False)
+            assert exc_info.value.code == 1
+
+        captured = capsys.readouterr()
+        assert "exited unexpectedly" in captured.err
+        assert "exit code 1" in captured.err
+        assert "auth token expired" in captured.err
+
+    def test_tunnel_crashes_during_loop(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_webui_tunnel
+
+        save_global_config({"web": {"enabled": True, "api_key": "key"}})
+        with (
+            patch("leashd.tunnel.TunnelProcess") as mock_cls,
+            patch("time.sleep"),
+        ):
+            mock_tunnel = mock_cls.return_value
+            mock_tunnel.start.return_value = "https://x.ngrok.io"
+            type(mock_tunnel).is_alive = PropertyMock(side_effect=[True, True, False])
+            type(mock_tunnel).exit_code = PropertyMock(return_value=2)
+            mock_tunnel.get_stderr.return_value = "session limit reached"
+
+            with pytest.raises(SystemExit) as exc_info:
+                _handle_webui_tunnel(provider="ngrok", notify_telegram=False)
+            assert exc_info.value.code == 1
+
+        captured = capsys.readouterr()
+        assert "exited unexpectedly" in captured.err
+        assert "session limit reached" in captured.err
+
+
+class TestPluginCli:
+    """Tests for the Claude Code plugin CLI (leashd plugin)."""
+
+    @pytest.fixture
+    def fake_plugins_dir(self, tmp_path):
+        """Redirect plugins installation directory to temp."""
+        plugins_dir = tmp_path / "plugins"
+        with patch("leashd.cc_plugins._PLUGINS_DIR", plugins_dir):
+            yield plugins_dir
+
+    def _make_test_plugin(self, tmp_path, name="test-plugin"):
+        """Create a valid plugin directory for testing."""
+        import json
+
+        plugin_dir = tmp_path / f"src-{name}"
+        manifest_dir = plugin_dir / ".claude-plugin"
+        manifest_dir.mkdir(parents=True)
+        (manifest_dir / "plugin.json").write_text(
+            json.dumps(
+                {
+                    "name": name,
+                    "description": f"A {name} plugin",
+                    "version": "1.0.0",
+                    "author": "Test Author",
+                }
+            )
+        )
+        return plugin_dir
+
+    def test_plugin_list_empty(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_plugin_list
+
+        _handle_plugin_list()
+        captured = capsys.readouterr()
+        assert "No Claude Code plugins installed" in captured.out
+
+    def test_plugin_list_with_installed(
+        self, tmp_path, fake_config_dir, fake_plugins_dir, capsys
+    ):
+        from leashd.cc_plugins import install_plugin
+        from leashd.cli import _handle_plugin_list
+
+        plugin_dir = self._make_test_plugin(tmp_path)
+        install_plugin(plugin_dir)
+        _handle_plugin_list()
+        captured = capsys.readouterr()
+        assert "Claude Code plugins (1):" in captured.out
+        assert "test-plugin" in captured.out
+        assert "[enabled]" in captured.out
+
+    def test_plugin_list_shows_disabled(
+        self, tmp_path, fake_config_dir, fake_plugins_dir, capsys
+    ):
+        from leashd.cc_plugins import disable_plugin, install_plugin
+        from leashd.cli import _handle_plugin_list
+
+        plugin_dir = self._make_test_plugin(tmp_path)
+        install_plugin(plugin_dir)
+        disable_plugin("test-plugin")
+        _handle_plugin_list()
+        captured = capsys.readouterr()
+        assert "[disabled]" in captured.out
+
+    def test_plugin_show(self, tmp_path, fake_config_dir, fake_plugins_dir, capsys):
+        from leashd.cc_plugins import install_plugin
+        from leashd.cli import _handle_plugin_show
+
+        plugin_dir = self._make_test_plugin(tmp_path)
+        install_plugin(plugin_dir)
+        _handle_plugin_show("test-plugin")
+        captured = capsys.readouterr()
+        assert "Plugin: test-plugin" in captured.out
+        assert "Version: 1.0.0" in captured.out
+        assert "Author: Test Author" in captured.out
+        assert "Status: enabled" in captured.out
+
+    def test_plugin_show_not_installed(self, fake_config_dir):
+        from leashd.cli import _handle_plugin_show
+
+        with pytest.raises(SystemExit) as exc_info:
+            _handle_plugin_show("nonexistent")
+        assert exc_info.value.code == 1
+
+    def test_plugin_add(self, tmp_path, fake_config_dir, fake_plugins_dir, capsys):
+        from leashd.cli import _handle_plugin_add
+
+        plugin_dir = self._make_test_plugin(tmp_path)
+        with patch("leashd.cli._notify_daemon_reload"):
+            _handle_plugin_add(str(plugin_dir))
+        captured = capsys.readouterr()
+        assert "\u2713" in captured.out
+        assert "test-plugin" in captured.out
+
+    def test_plugin_add_invalid(self, tmp_path, fake_config_dir, fake_plugins_dir):
+        from leashd.cli import _handle_plugin_add
+
+        with pytest.raises(SystemExit) as exc_info:
+            _handle_plugin_add(str(tmp_path / "nonexistent"))
+        assert exc_info.value.code == 1
+
+    def test_plugin_remove(self, tmp_path, fake_config_dir, fake_plugins_dir, capsys):
+        from leashd.cc_plugins import install_plugin
+        from leashd.cli import _handle_plugin_remove
+
+        plugin_dir = self._make_test_plugin(tmp_path)
+        install_plugin(plugin_dir)
+        with patch("leashd.cli._notify_daemon_reload"):
+            _handle_plugin_remove("test-plugin")
+        captured = capsys.readouterr()
+        assert "\u2713" in captured.out
+        assert "Removed" in captured.out
+
+    def test_plugin_remove_not_installed(self, fake_config_dir, fake_plugins_dir):
+        from leashd.cli import _handle_plugin_remove
+
+        with pytest.raises(SystemExit) as exc_info:
+            _handle_plugin_remove("nonexistent")
+        assert exc_info.value.code == 1
+
+    def test_plugin_disable(self, tmp_path, fake_config_dir, fake_plugins_dir, capsys):
+        from leashd.cc_plugins import get_plugin, install_plugin
+        from leashd.cli import _handle_plugin_disable
+
+        plugin_dir = self._make_test_plugin(tmp_path)
+        install_plugin(plugin_dir)
+        with patch("leashd.cli._notify_daemon_reload"):
+            _handle_plugin_disable("test-plugin")
+        captured = capsys.readouterr()
+        assert "\u2713" in captured.out
+        assert "disabled" in captured.out
+        assert get_plugin("test-plugin").enabled is False
+
+    def test_plugin_disable_already_disabled(
+        self, tmp_path, fake_config_dir, fake_plugins_dir, capsys
+    ):
+        from leashd.cc_plugins import disable_plugin, install_plugin
+        from leashd.cli import _handle_plugin_disable
+
+        plugin_dir = self._make_test_plugin(tmp_path)
+        install_plugin(plugin_dir)
+        disable_plugin("test-plugin")
+        _handle_plugin_disable("test-plugin")
+        captured = capsys.readouterr()
+        assert "already disabled" in captured.out
+
+    def test_plugin_disable_not_installed(self, fake_config_dir, fake_plugins_dir):
+        from leashd.cli import _handle_plugin_disable
+
+        with pytest.raises(SystemExit) as exc_info:
+            _handle_plugin_disable("nonexistent")
+        assert exc_info.value.code == 1
+
+    def test_plugin_enable(self, tmp_path, fake_config_dir, fake_plugins_dir, capsys):
+        from leashd.cc_plugins import disable_plugin, get_plugin, install_plugin
+        from leashd.cli import _handle_plugin_enable
+
+        plugin_dir = self._make_test_plugin(tmp_path)
+        install_plugin(plugin_dir)
+        disable_plugin("test-plugin")
+        with patch("leashd.cli._notify_daemon_reload"):
+            _handle_plugin_enable("test-plugin")
+        captured = capsys.readouterr()
+        assert "\u2713" in captured.out
+        assert "enabled" in captured.out
+        assert get_plugin("test-plugin").enabled is True
+
+    def test_plugin_enable_already_enabled(
+        self, tmp_path, fake_config_dir, fake_plugins_dir, capsys
+    ):
+        from leashd.cc_plugins import install_plugin
+        from leashd.cli import _handle_plugin_enable
+
+        plugin_dir = self._make_test_plugin(tmp_path)
+        install_plugin(plugin_dir)
+        _handle_plugin_enable("test-plugin")
+        captured = capsys.readouterr()
+        assert "already enabled" in captured.out
+
+    def test_plugin_enable_not_installed(self, fake_config_dir, fake_plugins_dir):
+        from leashd.cli import _handle_plugin_enable
+
+        with pytest.raises(SystemExit) as exc_info:
+            _handle_plugin_enable("nonexistent")
+        assert exc_info.value.code == 1
+
+    def test_plugin_bare_defaults_to_list(self, fake_config_dir, capsys):
+        import argparse
+
+        from leashd.cli import _handle_plugin
+
+        args = argparse.Namespace(plugin_command=None)
+        _handle_plugin(args)
+        captured = capsys.readouterr()
+        assert "No Claude Code plugins installed" in captured.out

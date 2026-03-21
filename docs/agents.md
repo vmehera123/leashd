@@ -97,6 +97,7 @@ sequenceDiagram
 | `allowed_tools` | `config.allowed_tools` |
 | `disallowed_tools` | `config.disallowed_tools` |
 | `resume` | `session.claude_session_id` (for multi-turn continuity) |
+| `plugins` | `cc_plugins.get_enabled_plugin_paths()` — list of local plugin paths, refreshed every turn |
 | `can_use_tool` | Tool gating callback from engine |
 
 ### Plan Mode Instruction
