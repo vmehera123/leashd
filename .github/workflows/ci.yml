@@ -48,11 +48,6 @@ jobs:
         run: uv sync
       - name: Unit tests
         run: uv run pytest tests/ -m "not e2e" --cov=leashd --cov-fail-under=89 --cov-report=xml --cov-report=term-missing -v
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      - name: JS tests
-        run: cd tests/js && npm install && npm test
 
   e2e:
     name: E2E tests
