@@ -96,8 +96,10 @@ _ACTION_DESCRIPTIONS: dict[str, str] = {
     "implement": "IMPLEMENT: Write code changes following the plan or task description.",
     "test": "TEST: Run automated test suites (pytest, jest, vitest, etc.).",
     "verify": (
-        "VERIFY: Browser-based verification — start dev server, navigate to "
-        "pages/endpoints, confirm UI renders correctly or API responds as expected."
+        "VERIFY: Build & run the project to verify it works end-to-end. "
+        "If Docker/Compose files exist, build images and start services. "
+        "Check health endpoints, then use agent-browser for UI/API smoke checks. "
+        "Clean up containers after verification."
     ),
     "fix": "FIX: Fix specific issues found in testing or verification.",
     "review": "REVIEW: Self-review all changes via git diff. Read-only — no modifications.",
@@ -180,10 +182,26 @@ def _build_conductor_context(
     return "\n".join(parts)
 
 
-_JSON_RE = re.compile(r"\{(?:[^{}]|\{[^{}]*\})*\}")
+_JSON_DECODER = json.JSONDecoder()
+
+
+def _extract_json_dict(raw: str) -> dict[str, object] | None:
+    """Extract the first JSON object from *raw* using stdlib decoder."""
+    idx = raw.find("{")
+    while idx != -1:
+        try:
+            obj, _ = _JSON_DECODER.raw_decode(raw, idx)
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError:
+            pass
+        idx = raw.find("{", idx + 1)
+    return None
+
+
 _FALLBACK_RE = re.compile(
     rf"^({'|'.join(_VALID_ACTIONS)})\s*:\s*(.+)$",
-    re.IGNORECASE,
+    re.IGNORECASE | re.MULTILINE,
 )
 
 
@@ -192,27 +210,22 @@ def _parse_response(raw: str) -> ConductorDecision:
     raw = raw.strip()
 
     # Try JSON
-    match = _JSON_RE.search(raw)
-    if match:
-        try:
-            data = json.loads(match.group())
-            action = str(data.get("action", "")).lower()
-            if action in _VALID_ACTIONS:
-                complexity = data.get("complexity")
-                if complexity and str(complexity).lower() not in _VALID_COMPLEXITIES:
-                    complexity = None
-                return ConductorDecision(
-                    action=action,  # type: ignore[arg-type]
-                    reason=str(data.get("reason", "")),
-                    instruction=str(data.get("instruction", "")),
-                    complexity=str(complexity).lower() if complexity else None,  # type: ignore[arg-type]
-                )
-        except (json.JSONDecodeError, TypeError, KeyError):
-            pass
+    data = _extract_json_dict(raw)
+    if data is not None:
+        action = str(data.get("action", "")).lower()
+        if action in _VALID_ACTIONS:
+            complexity = data.get("complexity")
+            if complexity and str(complexity).lower() not in _VALID_COMPLEXITIES:
+                complexity = None
+            return ConductorDecision(
+                action=action,  # type: ignore[arg-type]
+                reason=str(data.get("reason", "")),
+                instruction=str(data.get("instruction", "")),
+                complexity=str(complexity).lower() if complexity else None,  # type: ignore[arg-type]
+            )
 
-    # Fallback: ACTION: reason
-    first_line = raw.split("\n")[0] if raw else ""
-    fb_match = _FALLBACK_RE.match(first_line)
+    # Fallback: ACTION: reason (search all lines)
+    fb_match = _FALLBACK_RE.search(raw)
     if fb_match:
         action = fb_match.group(1).lower()
         if action in _VALID_ACTIONS:

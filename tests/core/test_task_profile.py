@@ -6,9 +6,10 @@ import json
 import textwrap
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from leashd.core.task_profile import (
-    CI,
-    PLATFORM,
     STANDALONE,
     TaskProfile,
     _merge_instructions,
@@ -32,31 +33,22 @@ class TestTaskProfileDefaults:
     def test_standalone_no_docker(self):
         assert STANDALONE.docker_compose_available is False
 
-    def test_platform_disables_explore_verify_pr(self):
-        assert "explore" not in PLATFORM.enabled_actions
-        assert "verify" not in PLATFORM.enabled_actions
-        assert "pr" not in PLATFORM.enabled_actions
+    def test_frozen(self):
+        with pytest.raises(ValidationError):
+            STANDALONE.initial_action = "plan"  # type: ignore[misc]
 
-    def test_platform_enables_core_actions(self):
-        assert "plan" in PLATFORM.enabled_actions
-        assert "implement" in PLATFORM.enabled_actions
-        assert "test" in PLATFORM.enabled_actions
-        assert "fix" in PLATFORM.enabled_actions
-        assert "review" in PLATFORM.enabled_actions
-        assert "complete" in PLATFORM.enabled_actions
-
-    def test_platform_initial_action_is_plan(self):
-        assert PLATFORM.initial_action == "plan"
-
-    def test_platform_has_docker(self):
-        assert PLATFORM.docker_compose_available is True
-
-    def test_ci_minimal_actions(self):
-        assert "explore" not in CI.enabled_actions
-        assert "verify" not in CI.enabled_actions
-        assert "review" not in CI.enabled_actions
-        assert "pr" not in CI.enabled_actions
-        assert CI.initial_action == "implement"
+    def test_custom_profile_with_restricted_actions(self):
+        profile = TaskProfile(
+            enabled_actions=frozenset(
+                {"plan", "implement", "test", "fix", "review", "complete", "escalate"}
+            ),
+            initial_action="plan",
+            docker_compose_available=True,
+        )
+        assert "explore" not in profile.enabled_actions
+        assert "plan" in profile.enabled_actions
+        assert profile.initial_action == "plan"
+        assert profile.docker_compose_available is True
 
 
 class TestIsActionEnabled:
@@ -64,21 +56,18 @@ class TestIsActionEnabled:
         assert STANDALONE.is_action_enabled("explore") is True
 
     def test_disabled_action(self):
-        assert PLATFORM.is_action_enabled("explore") is False
+        profile = TaskProfile(
+            enabled_actions=frozenset({"plan", "implement", "complete"})
+        )
+        assert profile.is_action_enabled("explore") is False
 
-    def test_complete_always_enabled_in_platform(self):
-        assert PLATFORM.is_action_enabled("complete") is True
+    def test_complete_always_queryable(self):
+        assert STANDALONE.is_action_enabled("complete") is True
 
 
 class TestResolveProfile:
     def test_resolve_standalone(self):
         assert resolve_profile("standalone") is STANDALONE
-
-    def test_resolve_platform(self):
-        assert resolve_profile("platform") is PLATFORM
-
-    def test_resolve_ci(self):
-        assert resolve_profile("ci") is CI
 
     def test_resolve_with_whitespace(self):
         assert resolve_profile("  standalone  ") is STANDALONE

@@ -88,6 +88,44 @@ class TestParseResponse:
             result = _parse_response(raw)
             assert result.complexity == level
 
+    def test_json_with_nested_braces_in_instruction(self):
+        raw = '{"action": "implement", "reason": "ready", "instruction": "Replace <p>{task.description}</p> with <TaskDescription text={task.description} />"}'
+        result = _parse_response(raw)
+        assert result.action == "implement"
+        assert "{task.description}" in result.instruction
+
+    def test_json_with_deeply_nested_braces(self):
+        raw = '{"action": "fix", "reason": "test failed", "instruction": "Update the dict: {\\"key\\": {\\"nested\\": \\"value\\"}}"}'
+        result = _parse_response(raw)
+        assert result.action == "fix"
+
+    def test_json_with_escaped_quotes(self):
+        raw = '{"action": "plan", "reason": "need to design the \\"auth\\" module", "instruction": "read specs"}'
+        result = _parse_response(raw)
+        assert result.action == "plan"
+        assert '"auth"' in result.reason
+
+    def test_fallback_on_non_first_line(self):
+        raw = "Based on my analysis, the plan looks good.\n\nimplement: plan is thorough, proceed"
+        result = _parse_response(raw)
+        assert result.action == "implement"
+        assert "plan is thorough" in result.reason
+
+    def test_fallback_with_preamble_paragraphs(self):
+        raw = (
+            "I've reviewed the task memory and the last output.\n"
+            "The tests all passed successfully.\n\n"
+            "REVIEW: all tests pass, ready for self-review"
+        )
+        result = _parse_response(raw)
+        assert result.action == "review"
+
+    def test_action_keyword_mid_sentence_does_not_match(self):
+        raw = "I think we should implement the feature carefully"
+        result = _parse_response(raw)
+        assert result.action == "implement"
+        assert "unparseable" in result.reason
+
 
 class TestDecideNextAction:
     async def test_returns_decision_on_success(self):

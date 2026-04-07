@@ -15,11 +15,11 @@ prioritize, and how to behave.  Predefined profiles handle common scenarios:
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import structlog
+from pydantic import BaseModel, ConfigDict
 
 from leashd.plugins.builtin._conductor import ConductorAction
 
@@ -42,22 +42,15 @@ _ALL_ACTIONS: frozenset[str] = frozenset(
 )
 
 
-@dataclass(frozen=True)
-class TaskProfile:
+class TaskProfile(BaseModel):
     """Declares what the conductor should and shouldn't do."""
 
+    model_config = ConfigDict(frozen=True)
+
     enabled_actions: frozenset[str] = _ALL_ACTIONS
-
-    # Force the first action instead of letting conductor decide
     initial_action: ConductorAction | None = None
-
-    # Extra instructions appended to the conductor system prompt
     conductor_instructions: str = ""
-
-    # Per-action extra instructions (merged with action suffixes)
-    action_instructions: dict[str, str] = field(default_factory=dict)
-
-    # Whether to inform conductor about docker-compose availability
+    action_instructions: dict[str, str] = {}
     docker_compose_available: bool = False
 
     def is_action_enabled(self, action: str) -> bool:
@@ -68,36 +61,8 @@ class TaskProfile:
 
 STANDALONE = TaskProfile()
 
-PLATFORM = TaskProfile(
-    enabled_actions=frozenset(
-        {"plan", "implement", "test", "fix", "review", "complete", "escalate"}
-    ),
-    initial_action="plan",
-    conductor_instructions=(
-        "You are running inside a sandboxed platform. "
-        "The platform handles Docker verification and PR creation after you complete. "
-        "Focus on: plan → implement → test → review → complete.\n"
-        "Do NOT choose explore (plan reads the codebase), verify (platform does Docker "
-        "verify), or pr (platform creates the PR)."
-    ),
-    docker_compose_available=True,
-)
-
-CI = TaskProfile(
-    enabled_actions=frozenset(
-        {"plan", "implement", "test", "fix", "complete", "escalate"}
-    ),
-    initial_action="implement",
-    conductor_instructions=(
-        "Running in CI mode. No browser available. No PR creation. "
-        "Focus on: implement → test → complete."
-    ),
-)
-
 _NAMED_PROFILES: dict[str, TaskProfile] = {
     "standalone": STANDALONE,
-    "platform": PLATFORM,
-    "ci": CI,
 }
 
 

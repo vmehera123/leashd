@@ -1,11 +1,17 @@
 # Changelog
 
+## [0.13.1] - 2026-04-07
+- **fixed**: Conductor response parser now handles nested braces in instruction fields (e.g., JSX/dict literals) and catches `ACTION: reason` lines even when preceded by LLM preamble text
+- **changed**: VERIFY action description updated to include Docker build/start and agent-browser verification
+
+
 ## [0.13.0] - 2026-04-07
 
 - **added**: TaskProfile system — declarative contracts that control conductor behavior. Predefined profiles: `standalone` (full autonomy), `platform` (for hosting platforms), `ci` (minimal). Customizable per-project via `.leashd/task-config.yaml`
 - **changed**: Default browser backend switched from Playwright MCP to agent-browser (headless). Playwright remains supported via `leashd browser set-backend playwright`
 - **changed**: Conductor is now smarter about phase selection — plan-first for moderate tasks (no redundant explore), verify only when tests didn't include browser checks
 - **added**: Auto-PR enforcement — conductor cannot skip the PR step when `auto_pr` is enabled
+
 
 ## [0.12.1] - 2026-04-06
 
