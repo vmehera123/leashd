@@ -14,13 +14,17 @@ if TYPE_CHECKING:
 
 from leashd.config_store import (
     add_approved_directory,
+    clear_directory_setting,
+    clear_workspace_settings,
     config_path,
+    get_all_directory_settings,
     get_approved_directories,
     get_autonomous_config,
     get_browser_config,
     get_codebase_memory_config,
     get_skills_config,
     get_web_config,
+    get_workspace_settings,
     get_workspaces,
     inject_global_config_as_env,
     load_global_config,
@@ -29,7 +33,10 @@ from leashd.config_store import (
     remove_workspace,
     remove_workspace_dirs,
     save_global_config,
+    set_directory_setting,
+    set_workspace_settings,
 )
+from leashd.core.runtime_settings import VALID_EFFORTS, classify_model
 
 
 def _notify_daemon_reload() -> None:
@@ -710,7 +717,28 @@ def _handle_webui_tunnel(*, provider: str, notify_telegram: bool) -> None:
             sys.exit(1)
 
 
-_VALID_EFFORT_LEVELS = {"low", "medium", "high", "max"}
+_VALID_EFFORT_LEVELS = set(VALID_EFFORTS)
+_VALID_TASK_VERSIONS = {"v1", "v2", "v3"}
+
+
+def _scope_from_args(args: argparse.Namespace) -> tuple[str, str | None]:
+    """Parse mutually-exclusive ``--dir`` / ``--workspace`` into a scope tuple.
+
+    Returns ``(scope, value)`` where ``scope`` is one of
+    ``"global"``, ``"dir"``, ``"workspace"`` and ``value`` is the dir
+    path or workspace name (or ``None`` for global).
+    """
+    dir_arg = getattr(args, "dir", None)
+    ws_arg = getattr(args, "workspace", None)
+    if dir_arg and ws_arg:
+        print("Error: --dir and --workspace are mutually exclusive.", file=sys.stderr)
+        sys.exit(1)
+    if dir_arg:
+        resolved = Path(dir_arg).expanduser().resolve()
+        return ("dir", str(resolved))
+    if ws_arg:
+        return ("workspace", ws_arg)
+    return ("global", None)
 
 
 def _handle_effort(args: argparse.Namespace) -> None:
@@ -719,18 +747,40 @@ def _handle_effort(args: argparse.Namespace) -> None:
     if sub is None or sub == "show":
         _handle_effort_show()
     elif sub == "set":
-        _handle_effort_set(args.level)
+        _handle_effort_set(args.level, args)
+    elif sub == "clear":
+        _handle_effort_clear(args)
 
 
 def _handle_effort_show() -> None:
-    """Display current thinking effort level."""
+    """Display resolved effort defaults across all scopes."""
     data = load_global_config()
-    level = data.get("effort", "medium")
-    print(f"Thinking effort: {level}")
+    global_level = data.get("effort", "medium")
+    print(f"Thinking effort (global): {global_level}")
+
+    dir_settings = get_all_directory_settings()
+    dir_rows = [
+        (path, entry["effort"])
+        for path, entry in sorted(dir_settings.items())
+        if entry.get("effort")
+    ]
+    if dir_rows:
+        print("\nPer-directory overrides:")
+        for path, level in dir_rows:
+            print(f"  {path}: {level}")
+
+    ws_rows: list[tuple[str, str]] = []
+    for name in sorted(get_workspaces()):
+        settings = get_workspace_settings(name)
+        if settings.get("effort"):
+            ws_rows.append((name, settings["effort"]))
+    if ws_rows:
+        print("\nPer-workspace overrides:")
+        for name, level in ws_rows:
+            print(f"  {name}: {level}")
 
 
-def _handle_effort_set(level: str) -> None:
-    """Set the thinking effort level."""
+def _validate_effort(level: str) -> None:
     if level not in _VALID_EFFORT_LEVELS:
         print(
             f"Error: invalid effort level '{level}'. "
@@ -739,11 +789,199 @@ def _handle_effort_set(level: str) -> None:
         )
         sys.exit(1)
 
+
+def _handle_effort_set(level: str, args: argparse.Namespace) -> None:
+    """Set the thinking effort at global / directory / workspace scope."""
+    _validate_effort(level)
+    scope, value = _scope_from_args(args)
+
+    if scope == "dir":
+        assert value is not None  # noqa: S101
+        set_directory_setting(value, effort=level)
+        print(f"\u2713 Thinking effort set to {level} for directory {value}")
+    elif scope == "workspace":
+        assert value is not None  # noqa: S101
+        if not set_workspace_settings(value, effort=level):
+            print(f"Error: workspace '{value}' does not exist.", file=sys.stderr)
+            sys.exit(1)
+        print(f"\u2713 Thinking effort set to {level} for workspace {value}")
+    else:
+        data = load_global_config()
+        data["effort"] = level
+        save_global_config(data)
+        inject_global_config_as_env(force=True)
+        print(f"\u2713 Thinking effort set to {level}")
+    _notify_daemon_reload()
+
+
+def _handle_effort_clear(args: argparse.Namespace) -> None:
+    """Remove an effort override at a directory or workspace scope."""
+    scope, value = _scope_from_args(args)
+    if scope == "global":
+        print(
+            "Error: --dir or --workspace is required for 'effort clear'.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    assert value is not None  # noqa: S101
+    if scope == "dir":
+        if not clear_directory_setting(value, field="effort"):
+            print(f"No directory effort override for {value}.", file=sys.stderr)
+            sys.exit(1)
+        print(f"\u2713 Cleared directory effort override for {value}")
+    else:
+        if not clear_workspace_settings(value, field="effort"):
+            print(f"No workspace effort override for {value}.", file=sys.stderr)
+            sys.exit(1)
+        print(f"\u2713 Cleared workspace effort override for {value}")
+    _notify_daemon_reload()
+
+
+def _handle_model(args: argparse.Namespace) -> None:
+    """Route model subcommands."""
+    sub = getattr(args, "model_command", None)
+    if sub is None or sub == "show":
+        _handle_model_show()
+    elif sub == "set":
+        _handle_model_set(args.value, args)
+    elif sub == "clear":
+        _handle_model_clear(args)
+
+
+def _classify_model_for_scope(value: str, runtime_hint: str | None) -> str:
+    """Infer whether a model value targets claude_model or codex_model.
+
+    Honours ``--runtime claude|codex`` when the caller supplies it; otherwise
+    uses the shared prefix heuristic in ``runtime_settings.classify_model``.
+    Falls back to ``claude_model`` for unclassifiable values and emits a
+    warning so users can disambiguate with ``--runtime``.
+    """
+    if runtime_hint:
+        if runtime_hint in {"claude", "claude-cli", "claude-code"}:
+            return "claude_model"
+        if runtime_hint == "codex":
+            return "codex_model"
+        print(
+            f"Error: unknown --runtime '{runtime_hint}' "
+            "(use claude, claude-cli, claude-code, or codex).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    kind = classify_model(value)
+    if kind == "codex":
+        return "codex_model"
+    if kind is None:
+        print(
+            f"Note: could not infer runtime family for '{value}'; "
+            "defaulting to claude_model. Pass --runtime codex to override.",
+            file=sys.stderr,
+        )
+    return "claude_model"
+
+
+def _model_label(field: str) -> str:
+    return "claude_model" if field == "claude_model" else "codex_model"
+
+
+def _handle_model_show() -> None:
+    """Display resolved model defaults across all scopes."""
     data = load_global_config()
-    data["effort"] = level
-    save_global_config(data)
-    inject_global_config_as_env(force=True)
-    print(f"\u2713 Thinking effort set to {level}")
+    claude_model = data.get("claude_model")
+    codex_model = data.get("codex_model")
+    print(f"claude_model (global): {claude_model or '—'}")
+    print(f"codex_model  (global): {codex_model or '—'}")
+
+    dir_settings = get_all_directory_settings()
+    dir_rows = [
+        (path, entry)
+        for path, entry in sorted(dir_settings.items())
+        if entry.get("claude_model") or entry.get("codex_model")
+    ]
+    if dir_rows:
+        print("\nPer-directory overrides:")
+        for path, entry in dir_rows:
+            parts = []
+            if entry.get("claude_model"):
+                parts.append(f"claude_model={entry['claude_model']}")
+            if entry.get("codex_model"):
+                parts.append(f"codex_model={entry['codex_model']}")
+            print(f"  {path}: {', '.join(parts)}")
+
+    ws_rows: list[tuple[str, dict[str, Any]]] = []
+    for name in sorted(get_workspaces()):
+        settings = get_workspace_settings(name)
+        if settings.get("claude_model") or settings.get("codex_model"):
+            ws_rows.append((name, settings))
+    if ws_rows:
+        print("\nPer-workspace overrides:")
+        for name, settings in ws_rows:
+            parts = []
+            if settings.get("claude_model"):
+                parts.append(f"claude_model={settings['claude_model']}")
+            if settings.get("codex_model"):
+                parts.append(f"codex_model={settings['codex_model']}")
+            print(f"  {name}: {', '.join(parts)}")
+
+
+def _handle_model_set(value: str, args: argparse.Namespace) -> None:
+    """Set a model value at global / directory / workspace scope."""
+    scope, scope_value = _scope_from_args(args)
+    runtime_hint = getattr(args, "runtime", None)
+    field = _classify_model_for_scope(value, runtime_hint)
+
+    if scope == "dir":
+        assert scope_value is not None  # noqa: S101
+        kwargs: dict[str, Any] = {field: value}
+        set_directory_setting(scope_value, **kwargs)
+        print(f"\u2713 Set {_model_label(field)}={value} for directory {scope_value}")
+    elif scope == "workspace":
+        assert scope_value is not None  # noqa: S101
+        kwargs = {field: value}
+        if not set_workspace_settings(scope_value, **kwargs):
+            print(f"Error: workspace '{scope_value}' does not exist.", file=sys.stderr)
+            sys.exit(1)
+        print(f"\u2713 Set {_model_label(field)}={value} for workspace {scope_value}")
+    else:
+        data = load_global_config()
+        data[field] = value
+        save_global_config(data)
+        inject_global_config_as_env(force=True)
+        print(f"\u2713 Set {_model_label(field)} to {value}")
+    _notify_daemon_reload()
+
+
+def _handle_model_clear(args: argparse.Namespace) -> None:
+    """Clear a model override at a specific scope."""
+    scope, scope_value = _scope_from_args(args)
+    runtime_hint = getattr(args, "runtime", None)
+    field = "codex_model" if runtime_hint == "codex" else "claude_model"
+
+    if scope == "global":
+        data = load_global_config()
+        if data.pop(field, None) is None:
+            print(f"No global {_model_label(field)} set.", file=sys.stderr)
+            sys.exit(1)
+        save_global_config(data)
+        inject_global_config_as_env(force=True)
+        print(f"\u2713 Cleared global {_model_label(field)}")
+    elif scope == "dir":
+        assert scope_value is not None  # noqa: S101
+        if not clear_directory_setting(scope_value, field=field):
+            print(
+                f"No {_model_label(field)} override for {scope_value}.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        print(f"\u2713 Cleared directory {_model_label(field)} for {scope_value}")
+    else:
+        assert scope_value is not None  # noqa: S101
+        if not clear_workspace_settings(scope_value, field=field):
+            print(
+                f"No {_model_label(field)} override for workspace {scope_value}.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        print(f"\u2713 Cleared workspace {_model_label(field)} for {scope_value}")
     _notify_daemon_reload()
 
 
@@ -760,7 +998,9 @@ def _handle_turns_show() -> None:
     """Display current max turns setting."""
     data = load_global_config()
     value = data.get("max_turns", 250)
+    task_value = data.get("task_max_turns", 300)
     print(f"Max turns: {value}")
+    print(f"Task max turns: {task_value}")
 
 
 def _handle_turns_set(value: int) -> None:
@@ -774,6 +1014,50 @@ def _handle_turns_set(value: int) -> None:
     save_global_config(data)
     inject_global_config_as_env(force=True)
     print(f"\u2713 Max turns set to {value}")
+    _notify_daemon_reload()
+
+
+def _handle_task(args: argparse.Namespace) -> None:
+    """Route task subcommands."""
+    sub = getattr(args, "task_command", None)
+    if sub == "version":
+        _handle_task_version(args)
+    else:
+        print("Usage: leashd task version {show,set} [v1|v2|v3]", file=sys.stderr)
+        sys.exit(1)
+
+
+def _handle_task_version(args: argparse.Namespace) -> None:
+    """Route task version subcommands."""
+    sub = getattr(args, "task_version_command", None)
+    if sub is None or sub == "show":
+        _handle_task_version_show()
+    elif sub == "set":
+        _handle_task_version_set(args.version)
+
+
+def _handle_task_version_show() -> None:
+    """Display current task orchestrator version."""
+    data = load_global_config()
+    version = data.get("task_orchestrator_version", "v2")
+    print(f"Task orchestrator version: {version}")
+
+
+def _handle_task_version_set(version: str) -> None:
+    """Set the task orchestrator version."""
+    if version not in _VALID_TASK_VERSIONS:
+        print(
+            f"Error: invalid task orchestrator version '{version}'. "
+            f"Must be one of: {', '.join(sorted(_VALID_TASK_VERSIONS))}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    data = load_global_config()
+    data["task_orchestrator_version"] = version
+    save_global_config(data)
+    inject_global_config_as_env(force=True)
+    print(f"\u2713 Task orchestrator version set to {version}")
     _notify_daemon_reload()
 
 
@@ -1571,9 +1855,62 @@ def main() -> None:
     # Thinking effort
     effort_parser = subparsers.add_parser("effort", help="Manage thinking effort level")
     effort_sub = effort_parser.add_subparsers(dest="effort_command")
-    effort_sub.add_parser("show", help="Show current effort level (default)")
+    effort_sub.add_parser(
+        "show",
+        help="Show current effort level and per-scope overrides (default)",
+    )
     effort_set = effort_sub.add_parser("set", help="Set thinking effort level")
     effort_set.add_argument("level", choices=["low", "medium", "high", "max"])
+    effort_set.add_argument(
+        "--dir",
+        help="Apply to a specific approved directory (absolute path). Omit for global.",
+    )
+    effort_set.add_argument(
+        "--workspace",
+        help="Apply to a specific workspace. Mutually exclusive with --dir.",
+    )
+    effort_clear = effort_sub.add_parser(
+        "clear", help="Remove an effort override at a directory or workspace scope"
+    )
+    effort_clear.add_argument("--dir", help="Directory whose override to clear")
+    effort_clear.add_argument("--workspace", help="Workspace whose override to clear")
+
+    # Model selection
+    model_parser = subparsers.add_parser(
+        "model", help="Manage default model (claude_model / codex_model)"
+    )
+    model_sub = model_parser.add_subparsers(dest="model_command")
+    model_sub.add_parser(
+        "show",
+        help="Show current model defaults and per-scope overrides (default)",
+    )
+    model_set = model_sub.add_parser(
+        "set",
+        help="Set claude_model or codex_model (runtime inferred from value)",
+    )
+    model_set.add_argument(
+        "value",
+        help="Model alias or full name (e.g. opus, claude-opus-4-7, gpt-5.2)",
+    )
+    model_set.add_argument("--dir", help="Apply to a specific directory")
+    model_set.add_argument("--workspace", help="Apply to a specific workspace")
+    model_set.add_argument(
+        "--runtime",
+        choices=["claude", "claude-cli", "claude-code", "codex"],
+        help="Disambiguate which model field to set when the value is ambiguous",
+    )
+    model_clear = model_sub.add_parser(
+        "clear",
+        help="Remove a model override (defaults to claude_model; pass "
+        "--runtime codex to clear codex_model)",
+    )
+    model_clear.add_argument("--dir", help="Directory whose override to clear")
+    model_clear.add_argument("--workspace", help="Workspace whose override to clear")
+    model_clear.add_argument(
+        "--runtime",
+        choices=["claude", "claude-cli", "claude-code", "codex"],
+        help="Target runtime family (defaults to claude)",
+    )
 
     # Max turns
     turns_parser = subparsers.add_parser("turns", help="Manage max turns per request")
@@ -1581,6 +1918,19 @@ def main() -> None:
     turns_sub.add_parser("show", help="Show current max turns (default)")
     turns_set = turns_sub.add_parser("set", help="Set max turns per request")
     turns_set.add_argument("value", type=int, help="Max turns (positive integer)")
+
+    # Task orchestrator
+    task_parser = subparsers.add_parser(
+        "task", help="Manage task orchestrator settings"
+    )
+    task_sub = task_parser.add_subparsers(dest="task_command")
+    task_version = task_sub.add_parser(
+        "version", help="Manage task orchestrator version (v1/v2/v3)"
+    )
+    tv_sub = task_version.add_subparsers(dest="task_version_command")
+    tv_sub.add_parser("show", help="Show current task orchestrator version (default)")
+    tv_set = tv_sub.add_parser("set", help="Set task orchestrator version")
+    tv_set.add_argument("version", choices=["v1", "v2", "v3"])
 
     # Max tool calls
     tc_parser = subparsers.add_parser(
@@ -1711,8 +2061,12 @@ def main() -> None:
         _handle_codebase_memory(args)
     elif args.command == "effort":
         _handle_effort(args)
+    elif args.command == "model":
+        _handle_model(args)
     elif args.command == "turns":
         _handle_turns(args)
+    elif args.command == "task":
+        _handle_task(args)
     elif args.command == "tool-calls":
         _handle_tool_calls(args)
     elif args.command == "runtime":

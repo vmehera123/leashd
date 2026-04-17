@@ -241,3 +241,61 @@ LEASHD_LOG_DIR=.leashd/logs
 LEASHD_LOG_MAX_BYTES=10485760
 LEASHD_LOG_BACKUP_COUNT=5
 ```
+
+## Scoped settings (effort and model)
+
+`effort` and model selection (`claude_model` / `codex_model`) can be overridden at four scopes. Higher-precedence scopes win:
+
+```
+task override  >  workspace.settings  >  directory_settings[<path>]  >  global
+```
+
+Any field may be unset at any scope — the resolver walks down the chain until a value is found and falls back to the global default (`effort="medium"`, `claude_model`/`codex_model` → runtime default).
+
+### CLI
+
+```bash
+# Global defaults
+leashd effort set high
+leashd model set opus                  # claude_model inferred from alias
+leashd model set gpt-5.2               # codex_model inferred from gpt- prefix
+leashd model set foo --runtime codex   # force codex_model when value is ambiguous
+
+# Per-directory
+leashd effort set high --dir /path/to/repo
+leashd model  set opus --dir /path/to/repo
+
+# Per-workspace
+leashd effort set high --workspace my-saas
+leashd model  set opus --workspace my-saas
+
+# Inspect / clear
+leashd effort show                     # table: global + dir + workspace overrides
+leashd model  show                     # same for models
+leashd effort clear --dir /path
+leashd model  clear --workspace my-saas
+leashd model  clear --runtime codex    # clears codex_model at the chosen scope
+```
+
+### Per-task
+
+`/task` accepts inline flags before the description:
+
+```
+/task --effort high --model opus Add a login endpoint
+```
+
+The resulting `RuntimeSettings` is persisted on `TaskRun.settings_override` so it survives daemon restarts and gets reapplied to every phase of the task.
+
+### Storage
+
+- Global: top-level `effort:`, `claude_model:`, `codex_model:` in `~/.leashd/config.yaml`.
+- Per-directory: `directory_settings:` map in `~/.leashd/config.yaml`, keyed by absolute path.
+- Per-workspace: `settings:` block under each workspace in `~/.leashd/workspaces.yaml`.
+- Per-task: `settings_override` column in the SQLite `task_runs` table.
+
+### Runtime notes
+
+- `claude-cli` and `claude-code` runtimes both accept model aliases (`opus`, `sonnet`, `haiku`) or full names (`claude-opus-4-7`).
+- The `codex` runtime uses `codex_model` (e.g. `gpt-5.2`); its `model_reasoning_effort` is derived from `effort` via the mapping `low|medium|high → low|medium|high`, `max → xhigh`.
+- Setting `claude_model` while the active runtime is Codex (or vice versa) is a no-op — the wrong field is ignored, so you can switch runtimes freely without clearing overrides.

@@ -125,6 +125,24 @@ class TestTaskStore:
         assert loaded.retry_count == 2
         assert loaded.previous_phase == "pending"
 
+    async def test_workspace_roundtrip(self, store):
+        task = _make_task()
+        task.workspace_name = "multi"
+        task.workspace_directories = ["/repo/a", "/repo/b"]
+        await store.save(task)
+        loaded = await store.load(task.run_id)
+        assert loaded is not None
+        assert loaded.workspace_name == "multi"
+        assert loaded.workspace_directories == ["/repo/a", "/repo/b"]
+
+    async def test_workspace_defaults_when_absent(self, store):
+        task = _make_task()
+        await store.save(task)
+        loaded = await store.load(task.run_id)
+        assert loaded is not None
+        assert loaded.workspace_name is None
+        assert loaded.workspace_directories == []
+
     async def test_load_active_for_chat(self, store):
         task = _make_task(chat_id="chat1")
         await store.save(task)

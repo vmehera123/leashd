@@ -61,12 +61,14 @@ def _make_session(
     session_id: str = "sess-1",
     chat_id: str = "chat-1",
     user_id: str = "user-1",
+    task_run_id: str | None = None,
 ):
     session = MagicMock()
     session.mode = mode
     session.session_id = session_id
     session.chat_id = chat_id
     session.user_id = user_id
+    session.task_run_id = task_run_id
     return session
 
 
@@ -142,6 +144,27 @@ class TestSessionCompletedIgnoresNonAuto:
             data={"session": session, "chat_id": "chat-1", "response_content": "done"},
         )
         await loop_plugin._on_session_completed(event)
+        assert loop_plugin.active_chats == set()
+
+    async def test_skips_when_session_has_task_run_id(
+        self, loop_plugin, mock_engine, event_bus, tmp_path
+    ):
+        """v3 task sessions must not trigger legacy /test dispatch."""
+        config = LeashdConfig(approved_directories=[tmp_path])
+        ctx = PluginContext(event_bus=event_bus, config=config)
+        await loop_plugin.initialize(ctx)
+
+        # mode="auto" would normally trigger /test — but this session
+        # belongs to a v3 task run, so the loop must short-circuit.
+        session = _make_session(mode="auto", task_run_id="run-123")
+        event = Event(
+            name=SESSION_COMPLETED,
+            data={"session": session, "chat_id": "chat-1", "response_content": "done"},
+        )
+        await loop_plugin._on_session_completed(event)
+        await asyncio.sleep(0.05)
+
+        mock_engine.handle_command.assert_not_called()
         assert loop_plugin.active_chats == set()
 
 

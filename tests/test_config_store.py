@@ -260,6 +260,48 @@ class TestInjectGlobalConfigAsEnv:
         inject_global_config_as_env()
         assert "LEASHD_APPROVED_DIRECTORIES" not in os.environ
 
+    def test_sets_task_orchestrator_version_from_top_level(
+        self, fake_config_dir, monkeypatch
+    ):
+        """`leashd task version set v3` writes the key at YAML top level —
+        the bridge must pick it up there, not from `autonomous:`."""
+        save_global_config({"task_orchestrator_version": "v3"})
+        monkeypatch.delenv("LEASHD_TASK_ORCHESTRATOR_VERSION", raising=False)
+        inject_global_config_as_env()
+        assert os.environ["LEASHD_TASK_ORCHESTRATOR_VERSION"] == "v3"
+
+    def test_task_orchestrator_version_absent_leaves_env_unset(
+        self, fake_config_dir, monkeypatch
+    ):
+        save_global_config({"approved_directories": ["/tmp/a"]})
+        monkeypatch.delenv("LEASHD_TASK_ORCHESTRATOR_VERSION", raising=False)
+        inject_global_config_as_env()
+        assert "LEASHD_TASK_ORCHESTRATOR_VERSION" not in os.environ
+
+    def test_task_orchestrator_version_env_wins_without_force(
+        self, fake_config_dir, monkeypatch
+    ):
+        save_global_config({"task_orchestrator_version": "v3"})
+        monkeypatch.setenv("LEASHD_TASK_ORCHESTRATOR_VERSION", "v2")
+        inject_global_config_as_env()
+        assert os.environ["LEASHD_TASK_ORCHESTRATOR_VERSION"] == "v2"
+
+    def test_task_orchestrator_version_force_overrides_env(
+        self, fake_config_dir, monkeypatch
+    ):
+        save_global_config({"task_orchestrator_version": "v3"})
+        monkeypatch.setenv("LEASHD_TASK_ORCHESTRATOR_VERSION", "v2")
+        inject_global_config_as_env(force=True)
+        assert os.environ["LEASHD_TASK_ORCHESTRATOR_VERSION"] == "v3"
+
+    def test_task_orchestrator_version_not_in_autonomous_field_map(self):
+        """Regression guard: the key must NOT be in the autonomous map.
+        Otherwise the autonomous injector would silently no-op (the key
+        lives at top level) and we'd be back where we started."""
+        from leashd.config_store import _AUTONOMOUS_FIELD_MAP
+
+        assert "task_orchestrator_version" not in _AUTONOMOUS_FIELD_MAP
+
 
 class TestLoadSaveYamlLabels:
     def test_workspace_error_messages_contain_label(self, fake_config_dir):

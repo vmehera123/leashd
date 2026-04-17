@@ -2441,7 +2441,7 @@ class TestTaskCommand:
 
         result = await eng.handle_command("user1", "task", "", "chat1")
 
-        assert result == "Usage: /task <description of the task>"
+        assert result.startswith("Usage: /task")
 
     async def test_task_emits_event_and_sets_mode(
         self, config, audit_logger, policy_engine, mock_connector
@@ -2475,6 +2475,47 @@ class TestTaskCommand:
         assert len(captured_events) == 1
         assert captured_events[0].data["task"] == "Build a widget"
         assert captured_events[0].data["chat_id"] == "chat1"
+        # Workspace fields are always present (None / empty) so downstream
+        # consumers can rely on the keys without .get() gymnastics.
+        assert captured_events[0].data["workspace_name"] is None
+        assert captured_events[0].data["workspace_directories"] == []
+
+    async def test_task_propagates_active_workspace(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        from leashd.core.events import TASK_SUBMITTED, Event
+
+        captured_events: list[Event] = []
+
+        async def capture(event: Event) -> None:
+            captured_events.append(event)
+
+        bus = EventBus()
+        bus.subscribe(TASK_SUBMITTED, capture)
+
+        agent = FakeAgent()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            event_bus=bus,
+        )
+
+        session = await eng.session_manager.get_or_create("user1", "chat1", "/repo/a")
+        session.workspace_name = "multi"
+        session.workspace_directories = ["/repo/a", "/repo/b"]
+
+        await eng.handle_command("user1", "task", "Do the thing", "chat1")
+
+        assert len(captured_events) == 1
+        assert captured_events[0].data["workspace_name"] == "multi"
+        assert captured_events[0].data["workspace_directories"] == [
+            "/repo/a",
+            "/repo/b",
+        ]
 
 
 class TestCancelCommand:

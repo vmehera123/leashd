@@ -23,7 +23,12 @@ from typing import TYPE_CHECKING
 import structlog
 from pydantic import BaseModel, ConfigDict
 
-from leashd.core.events import PLAN_REVIEW_COMPLETED, SESSION_COMPLETED, Event
+from leashd.core.events import (
+    PLAN_REVIEW_COMPLETED,
+    SESSION_COMPLETED,
+    SESSION_FAILED,
+    Event,
+)
 from leashd.plugins.base import LeashdPlugin, PluginMeta
 from leashd.plugins.builtin._cli_evaluator import (
     evaluate_via_cli,
@@ -95,6 +100,7 @@ class AutoPlanReviewer(LeashdPlugin):
     async def initialize(self, context: PluginContext) -> None:
         self._event_bus = context.event_bus
         context.event_bus.subscribe(SESSION_COMPLETED, self._on_session_completed)
+        context.event_bus.subscribe(SESSION_FAILED, self._on_session_completed)
 
     async def start(self) -> None:
         pass
@@ -102,6 +108,7 @@ class AutoPlanReviewer(LeashdPlugin):
     async def stop(self) -> None:
         if self._event_bus:
             self._event_bus.unsubscribe(SESSION_COMPLETED, self._on_session_completed)
+            self._event_bus.unsubscribe(SESSION_FAILED, self._on_session_completed)
         self._session_revision_counts.clear()
 
     async def _on_session_completed(self, event: Event) -> None:

@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 
     from leashd.agents.capabilities import AgentCapabilities
     from leashd.core.config import LeashdConfig
+    from leashd.core.runtime_settings import RuntimeSettings
     from leashd.core.session import Session
 
 logger = structlog.get_logger()
@@ -194,13 +195,16 @@ class CodexAgent:
             return self._config.codex_approval
         return _APPROVAL_MAP.get(mode, "on-request")
 
-    def _resolve_model(self) -> str:
-        return self._config.codex_model or "gpt-5.2"
+    def _resolve_model(self, settings: RuntimeSettings | None = None) -> str:
+        override = settings.codex_model if settings else None
+        return override or self._config.codex_model or "gpt-5.2"
 
-    def _build_thread_options(self, session: Session) -> Any:
+    def _build_thread_options(
+        self, session: Session, settings: RuntimeSettings | None = None
+    ) -> Any:
         from codex_sdk import ThreadOptions
 
-        model = self._resolve_model()
+        model = self._resolve_model(settings)
         sandbox = self._resolve_sandbox(session.mode)
         approval = self._resolve_approval(session.mode)
 
@@ -215,8 +219,9 @@ class CodexAgent:
         if self._config.codex_search:
             opts.web_search_enabled = True
 
-        if self._config.effort:
-            mapped = _EFFORT_MAP.get(self._config.effort)
+        effort = (settings.effort if settings else None) or self._config.effort
+        if effort:
+            mapped = _EFFORT_MAP.get(effort)
             if mapped:
                 opts.model_reasoning_effort = mapped
 
@@ -270,6 +275,7 @@ class CodexAgent:
         | None = None,
         on_retry: Callable[[], Coroutine[Any, Any, None]] | None = None,
         attachments: list[Any] | None = None,
+        settings: RuntimeSettings | None = None,
     ) -> AgentResponse:
         if attachments:
             logger.warning(
@@ -297,6 +303,7 @@ class CodexAgent:
                     on_text_chunk=on_text_chunk,
                     on_tool_activity=on_tool_activity,
                     on_retry=on_retry,
+                    settings=settings,
                 )
             return await self._execute_autonomous(
                 prompt,
@@ -304,6 +311,7 @@ class CodexAgent:
                 on_text_chunk=on_text_chunk,
                 on_tool_activity=on_tool_activity,
                 on_retry=on_retry,
+                settings=settings,
             )
         except AgentError:
             raise
@@ -338,6 +346,7 @@ class CodexAgent:
         on_tool_activity: Callable[[ToolActivity | None], Coroutine[Any, Any, None]]
         | None = None,
         on_retry: Callable[[], Coroutine[Any, Any, None]] | None = None,
+        settings: RuntimeSettings | None = None,
     ) -> AgentResponse:
         """AppServerClient path — bidirectional approval interception."""
         from codex_sdk import (
@@ -395,7 +404,7 @@ class CodexAgent:
                         else:
                             thread_resp = await app.thread_start(
                                 cwd=session.working_directory,
-                                model=self._resolve_model(),
+                                model=self._resolve_model(settings),
                                 sandbox=self._resolve_sandbox(session.mode),
                                 approval_policy=self._resolve_approval(session.mode),
                             )
@@ -528,6 +537,7 @@ class CodexAgent:
         on_tool_activity: Callable[[ToolActivity | None], Coroutine[Any, Any, None]]
         | None = None,
         on_retry: Callable[[], Coroutine[Any, Any, None]] | None = None,
+        settings: RuntimeSettings | None = None,
     ) -> AgentResponse:
         """Thread.run_streamed_events path — auto-approved execution."""
         from codex_sdk import (
@@ -545,7 +555,7 @@ class CodexAgent:
         )
 
         last_error: AgentResponse | None = None
-        thread_options = self._build_thread_options(session)
+        thread_options = self._build_thread_options(session, settings)
         ever_had_resume = False
 
         for attempt in range(_MAX_RETRIES):
@@ -567,7 +577,9 @@ class CodexAgent:
             input_tokens = 0
             output_tokens = 0
             is_error = False
-            max_turns = self._config.effective_max_turns(session.mode)
+            max_turns = self._config.effective_max_turns(
+                session.mode, is_task=bool(session.task_run_id)
+            )
             had_resume_token = session.agent_resume_token is not None
             if had_resume_token:
                 ever_had_resume = True

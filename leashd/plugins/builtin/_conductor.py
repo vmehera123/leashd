@@ -8,6 +8,8 @@ context-aware decision point.
 
 import json
 import re
+from collections.abc import Sequence
+from pathlib import Path
 from typing import Literal, get_args
 
 import structlog
@@ -163,8 +165,32 @@ def _build_conductor_context(
     retry_count: int,
     max_retries: int,
     is_first_call: bool,
+    working_directory: str | None = None,
+    workspace_name: str | None = None,
+    workspace_directories: Sequence[str] | None = None,
 ) -> str:
     parts: list[str] = [f"TASK: {task_description}"]
+
+    extra_dirs = [
+        d for d in (workspace_directories or []) if d and d != working_directory
+    ]
+
+    if extra_dirs and working_directory:
+        repo_lines = [f"  - {working_directory} (primary, cwd)"]
+        repo_lines.extend(f"  - {d}" for d in extra_dirs)
+        parts.append(f"WORKSPACE: {workspace_name or 'workspace'}")
+        parts.append("REPOS (cwd + --add-dir):\n" + "\n".join(repo_lines))
+        parts.append(
+            "The task spans all listed repos. Each repo has its own CLAUDE.md — "
+            "read and follow the one in whichever repo you're modifying."
+        )
+    elif working_directory:
+        parts.append(f"WORKING DIRECTORY: {working_directory}")
+        parts.append(f"PROJECT: {Path(working_directory).name}")
+        parts.append(
+            "The task is scoped to this project. Do not reference or explore "
+            "other codebases, even if they appear in your ambient context."
+        )
 
     if is_first_call:
         parts.append(_FIRST_CALL_ADDENDUM)
@@ -257,6 +283,9 @@ async def decide_next_action(
     enabled_actions: frozenset[str] | None = None,
     extra_instructions: str = "",
     docker_compose_available: bool = False,
+    working_directory: str | None = None,
+    workspace_name: str | None = None,
+    workspace_directories: Sequence[str] | None = None,
 ) -> ConductorDecision:
     """Ask the conductor what the coding agent should do next.
 
@@ -270,6 +299,9 @@ async def decide_next_action(
         retry_count=retry_count,
         max_retries=max_retries,
         is_first_call=is_first_call,
+        working_directory=working_directory,
+        workspace_name=workspace_name,
+        workspace_directories=workspace_directories,
     )
 
     system_prompt = _build_system_prompt(
@@ -284,6 +316,8 @@ async def decide_next_action(
             context,
             model=model,
             timeout=timeout,
+            cwd=working_directory,
+            add_dirs=workspace_directories,
         )
     except (TimeoutError, RuntimeError) as exc:
         exc_detail = str(exc) or f"{type(exc).__name__} (no details)"

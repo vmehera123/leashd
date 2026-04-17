@@ -1281,6 +1281,44 @@ class TestAutoApproveClearedBetweenPhases:
         mock_engine.disable_auto_approve.assert_called_with("c1")
 
 
+class TestSettingsOverridePropagation:
+    async def test_settings_override_propagates_to_session(
+        self, orchestrator, event_bus, task_store, mock_engine
+    ):
+        # Regression: v1 _execute_phase used to skip session.task_settings_override,
+        # silently dropping /task --effort --model flags under the legacy pipeline.
+        task = _make_task(
+            chat_id="c1",
+            phase="plan",
+            phase_pipeline=["pending", "plan", "implement", "test", "pr", "completed"],
+            settings_override={"effort": "high", "claude_model": "opus"},
+        )
+        await task_store.save(task)
+        orchestrator._active_tasks["c1"] = task
+
+        session = MagicMock()
+        session.chat_id = "c1"
+        session.task_run_id = task.run_id
+
+        await event_bus.emit(
+            Event(
+                name=SESSION_COMPLETED,
+                data={
+                    "session": session,
+                    "chat_id": "c1",
+                    "response_content": "Plan done",
+                },
+            )
+        )
+        await asyncio.sleep(0.05)
+
+        mock_session = mock_engine.session_manager.get_or_create.return_value
+        assert mock_session.task_settings_override == {
+            "effort": "high",
+            "claude_model": "opus",
+        }
+
+
 class TestEventUnsubscribe:
     async def test_events_fire_once_after_stop_reinitialize(
         self, task_store, mock_connector, mock_engine, tmp_path

@@ -65,6 +65,7 @@ if TYPE_CHECKING:
     from leashd.agents.capabilities import AgentCapabilities
     from leashd.connectors.base import Attachment
     from leashd.core.config import LeashdConfig
+    from leashd.core.runtime_settings import RuntimeSettings
     from leashd.core.session import Session
 
 logger = structlog.get_logger()
@@ -125,6 +126,7 @@ class ClaudeCodeAgent(BaseAgent):
         | None = None,
         on_retry: Callable[[], Coroutine[Any, Any, None]] | None = None,
         attachments: list[Attachment] | None = None,
+        settings: RuntimeSettings | None = None,
     ) -> AgentResponse:
         if can_use_tool:
             _original = can_use_tool
@@ -150,7 +152,7 @@ class ClaudeCodeAgent(BaseAgent):
                 "Use /stop in another conversation first."
             )
 
-        options = self._build_options(session, can_use_tool)
+        options = self._build_options(session, can_use_tool, settings)
 
         logger.info(
             "agent_execute_started",
@@ -204,17 +206,27 @@ class ClaudeCodeAgent(BaseAgent):
         self,
         session: Session,
         can_use_tool: Callable[..., Any] | None,
+        settings: RuntimeSettings | None = None,
     ) -> ClaudeAgentOptions:
         opts = ClaudeAgentOptions(
             cwd=session.working_directory,
-            max_turns=self._config.effective_max_turns(session.mode),
+            max_turns=self._config.effective_max_turns(
+                session.mode, is_task=bool(session.task_run_id)
+            ),
             can_use_tool=can_use_tool,
             permission_mode=SESSION_TO_PERMISSION_MODE.get(session.mode, "default"),
             setting_sources=["project", "user"],
             max_buffer_size=MAX_BUFFER_SIZE,
             include_partial_messages=True,
         )
-        opts.effort = self._config.effort
+        effort = (settings.effort if settings else None) or self._config.effort
+        opts.effort = effort
+
+        model = (
+            settings.claude_model if settings else None
+        ) or self._config.claude_model
+        if model:
+            opts.model = model
         system_prompt = self._config.system_prompt or ""
         if session.mode == "plan":
             system_prompt = prepend_instruction(PLAN_MODE_INSTRUCTION, system_prompt)

@@ -32,6 +32,7 @@ from leashd.core.events import (
     MESSAGE_IN,
     SESSION_COMPLETED,
     SESSION_ESCALATED,
+    SESSION_FAILED,
     SESSION_RETRY,
     Event,
 )
@@ -106,6 +107,7 @@ class AutonomousLoop(LeashdPlugin):
         self._event_bus = context.event_bus
         self._subscriptions: list[tuple[str, Any]] = [
             (SESSION_COMPLETED, self._on_session_completed),
+            (SESSION_FAILED, self._on_session_failed),
             (MESSAGE_IN, self._on_user_message),
         ]
         for event_name, handler in self._subscriptions:
@@ -130,6 +132,17 @@ class AutonomousLoop(LeashdPlugin):
     async def _on_session_completed(self, event: Event) -> None:
         session = event.data.get("session")
         if not session:
+            return
+
+        # v3 task orchestrator owns its own retry/advance logic.  If this
+        # session is part of a live task run, let v3 drive it — the legacy
+        # /test submission here would double-fire on implement→verify.
+        if getattr(session, "task_run_id", None):
+            logger.debug(
+                "autonomous_loop_skipping_task_run",
+                task_run_id=session.task_run_id,
+                chat_id=getattr(session, "chat_id", ""),
+            )
             return
 
         mode = getattr(session, "mode", "default")
@@ -178,6 +191,29 @@ class AutonomousLoop(LeashdPlugin):
                 chat_id=chat_id,
             )
             return
+
+    async def _on_session_failed(self, event: Event) -> None:
+        """Clear loop state on CLI cancel / timeout / error.
+
+        Without this, an in-flight test-retry loop would keep firing after
+        the underlying session has already failed.
+        """
+        session = event.data.get("session")
+        if not session:
+            return
+        if getattr(session, "task_run_id", None):
+            return  # v3 owns this task; let its handler drive terminal state.
+        chat_id = event.data.get("chat_id", getattr(session, "chat_id", ""))
+        task = self._active_tasks.pop(chat_id, None)
+        if task and not task.done():
+            task.cancel()
+        if chat_id in self._session_states:
+            self._session_states.pop(chat_id, None)
+            logger.info(
+                "autonomous_loop_cleared_on_session_failed",
+                chat_id=chat_id,
+                reason=event.data.get("reason"),
+            )
 
     async def _on_user_message(self, event: Event) -> None:
         chat_id = event.data.get("chat_id", "")

@@ -11,10 +11,16 @@ from fastapi import APIRouter, Header
 from fastapi.responses import JSONResponse
 
 from leashd.config_store import (
+    clear_directory_setting,
+    clear_workspace_settings,
+    get_all_directory_settings,
     get_autonomous_config,
     get_browser_config,
+    get_workspace_settings,
     get_workspaces,
     load_global_config,
+    set_directory_setting,
+    set_workspace_settings,
     update_config_sections,
 )
 from leashd.core.config import build_directory_names
@@ -29,10 +35,11 @@ if TYPE_CHECKING:
     from leashd.storage.base import MessageStore
 
 _VALID_EFFORTS = {"low", "medium", "high", "max"}
-_VALID_RUNTIMES = {"claude-code", "codex"}
+_VALID_RUNTIMES = {"claude-cli", "claude-code", "codex"}
 _VALID_MODES = {"default", "plan", "auto"}
 _VALID_BROWSER_BACKENDS = {"playwright", "agent-browser"}
 _VALID_CONFIG_SECTIONS = {"agent", "autonomous", "browser"}
+_SETTING_FIELDS = {"effort", "claude_model", "codex_model"}
 _AUTONOMOUS_BOOLEANS = {
     "enabled",
     "auto_approver",
@@ -234,6 +241,14 @@ def create_rest_router(
                     "default_mode": raw.get("default_mode", "default"),
                     "max_turns": raw.get("max_turns", 250),
                     "max_tool_calls": raw.get("max_tool_calls", -1),
+                    "claude_model": raw.get("claude_model") or "",
+                    "codex_model": raw.get("codex_model") or "",
+                },
+                "directory_settings": get_all_directory_settings(),
+                "workspace_settings": {
+                    name: get_workspace_settings(name)
+                    for name in get_workspaces()
+                    if get_workspace_settings(name)
                 },
                 "autonomous": {
                     "enabled": autonomous.get("enabled", False),
@@ -281,6 +296,151 @@ def create_rest_router(
                 "config_saved_no_daemon", hint="daemon not running, reload skipped"
             )
         return JSONResponse(content={"success": True})
+
+    # ---- Per-directory & per-workspace RuntimeSettings overrides ----
+
+    @router.get("/config/directory-settings")
+    async def list_directory_settings(
+        x_api_key: str = Header(""),
+    ) -> JSONResponse:
+        if err := _check_auth(x_api_key, config):
+            return JSONResponse(status_code=401, content={"error": err})
+        return JSONResponse(
+            content={"directory_settings": get_all_directory_settings()}
+        )
+
+    @router.put("/config/directory-settings")
+    async def put_directory_settings(
+        body: dict[str, Any],
+        x_api_key: str = Header(""),
+    ) -> JSONResponse:
+        if err := _check_auth(x_api_key, config):
+            return JSONResponse(
+                status_code=401, content={"success": False, "reason": err}
+            )
+        path = body.get("path")
+        if not isinstance(path, str) or not path:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "reason": "path is required"},
+            )
+        if reason := _validate_settings_fields(body):
+            return JSONResponse(
+                status_code=400, content={"success": False, "reason": reason}
+            )
+        set_directory_setting(
+            path,
+            effort=body.get("effort"),
+            claude_model=body.get("claude_model"),
+            codex_model=body.get("codex_model"),
+            replace=bool(body.get("replace", False)),
+        )
+        if not signal_reload():
+            logger.info("config_saved_no_daemon")
+        return JSONResponse(content={"success": True})
+
+    @router.delete("/config/directory-settings")
+    async def delete_directory_settings(
+        body: dict[str, Any],
+        x_api_key: str = Header(""),
+    ) -> JSONResponse:
+        if err := _check_auth(x_api_key, config):
+            return JSONResponse(
+                status_code=401, content={"success": False, "reason": err}
+            )
+        path = body.get("path")
+        if not isinstance(path, str) or not path:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "reason": "path is required"},
+            )
+        field = body.get("field")
+        if field is not None and field not in _SETTING_FIELDS:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "reason": f"unknown field '{field}'"},
+            )
+        removed = clear_directory_setting(path, field=field)
+        if not signal_reload():
+            logger.info("config_saved_no_daemon")
+        return JSONResponse(content={"success": removed})
+
+    @router.get("/config/workspace-settings")
+    async def list_workspace_settings(
+        x_api_key: str = Header(""),
+    ) -> JSONResponse:
+        if err := _check_auth(x_api_key, config):
+            return JSONResponse(status_code=401, content={"error": err})
+        return JSONResponse(
+            content={
+                "workspace_settings": {
+                    name: get_workspace_settings(name)
+                    for name in get_workspaces()
+                    if get_workspace_settings(name)
+                }
+            }
+        )
+
+    @router.put("/config/workspace-settings")
+    async def put_workspace_settings(
+        body: dict[str, Any],
+        x_api_key: str = Header(""),
+    ) -> JSONResponse:
+        if err := _check_auth(x_api_key, config):
+            return JSONResponse(
+                status_code=401, content={"success": False, "reason": err}
+            )
+        name = body.get("name")
+        if not isinstance(name, str) or not name:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "reason": "name is required"},
+            )
+        if reason := _validate_settings_fields(body):
+            return JSONResponse(
+                status_code=400, content={"success": False, "reason": reason}
+            )
+        ok = set_workspace_settings(
+            name,
+            effort=body.get("effort"),
+            claude_model=body.get("claude_model"),
+            codex_model=body.get("codex_model"),
+            replace=bool(body.get("replace", False)),
+        )
+        if not ok:
+            return JSONResponse(
+                status_code=404,
+                content={"success": False, "reason": f"workspace '{name}' not found"},
+            )
+        if not signal_reload():
+            logger.info("config_saved_no_daemon")
+        return JSONResponse(content={"success": True})
+
+    @router.delete("/config/workspace-settings")
+    async def delete_workspace_settings(
+        body: dict[str, Any],
+        x_api_key: str = Header(""),
+    ) -> JSONResponse:
+        if err := _check_auth(x_api_key, config):
+            return JSONResponse(
+                status_code=401, content={"success": False, "reason": err}
+            )
+        name = body.get("name")
+        if not isinstance(name, str) or not name:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "reason": "name is required"},
+            )
+        field = body.get("field")
+        if field is not None and field not in _SETTING_FIELDS:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "reason": f"unknown field '{field}'"},
+            )
+        removed = clear_workspace_settings(name, field=field)
+        if not signal_reload():
+            logger.info("config_saved_no_daemon")
+        return JSONResponse(content={"success": removed})
 
     # ---- Push notification endpoints ----
 
@@ -375,6 +535,11 @@ def _validate_config_update(body: dict[str, Any]) -> str | None:
             mtc = agent["max_tool_calls"]
             if not isinstance(mtc, int) or (mtc != -1 and mtc < 1):
                 return "max_tool_calls must be -1 (unlimited) or a positive integer"
+        for field in ("claude_model", "codex_model"):
+            if field in agent:
+                val = agent[field]
+                if val is not None and not isinstance(val, str):
+                    return f"{field} must be a string or null"
 
     if "autonomous" in body:
         auto = body["autonomous"]
@@ -397,4 +562,16 @@ def _validate_config_update(body: dict[str, Any]) -> str | None:
         if "headless" in browser and not isinstance(browser["headless"], bool):
             return "browser.headless must be a boolean"
 
+    return None
+
+
+def _validate_settings_fields(body: dict[str, Any]) -> str | None:
+    """Validate a PUT body for directory-settings / workspace-settings endpoints."""
+    effort = body.get("effort")
+    if effort is not None and effort not in _VALID_EFFORTS:
+        return f"effort must be one of: {', '.join(sorted(_VALID_EFFORTS))}"
+    for field in ("claude_model", "codex_model"):
+        val = body.get(field)
+        if val is not None and not isinstance(val, str):
+            return f"{field} must be a string or null"
     return None

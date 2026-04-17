@@ -28,12 +28,19 @@ from leashd.core.events import (
     MESSAGE_OUT,
     MESSAGE_QUEUED,
     SESSION_COMPLETED,
+    SESSION_FAILED,
     TASK_SUBMITTED,
     Event,
     EventBus,
 )
 from leashd.core.interactions import PlanReviewDecision
 from leashd.core.message_logger import MessageLogger
+from leashd.core.runtime_settings import (
+    VALID_EFFORTS,
+    RuntimeSettings,
+    classify_model,
+    resolve_settings,
+)
 from leashd.core.safety.audit import AuditLogger
 from leashd.core.safety.gatekeeper import ToolGatekeeper
 from leashd.core.safety.policy import PolicyEngine
@@ -57,6 +64,39 @@ if TYPE_CHECKING:
     from leashd.storage.base import SessionStore
 
 logger = structlog.get_logger()
+
+
+def _parse_task_flags(args: str) -> tuple[RuntimeSettings, str]:
+    """Strip ``--effort`` / ``--model`` flags off the head of a /task args string.
+
+    Flags must appear before the task description and each takes a single value.
+    Unknown flags or malformed values stop parsing and are treated as task text.
+    """
+    override = RuntimeSettings()
+    remaining = args.strip()
+    while remaining.startswith("--"):
+        parts = remaining.split(maxsplit=2)
+        if len(parts) < 2:
+            break
+        flag, value = parts[0], parts[1]
+        rest = parts[2] if len(parts) > 2 else ""
+        if flag == "--effort":
+            if value not in VALID_EFFORTS:
+                break
+            override = override.model_copy(update={"effort": value})
+        elif flag == "--model":
+            kind = classify_model(value)
+            if kind == "codex":
+                override = override.model_copy(update={"codex_model": value})
+            else:
+                # Default unknown / claude-ish values to claude_model so a
+                # plain "opus" works without the user specifying a runtime.
+                override = override.model_copy(update={"claude_model": value})
+        else:
+            break
+        remaining = rest
+    return override, remaining.strip()
+
 
 _STREAMING_CURSOR = "\u258d"
 _MAX_STREAMING_DISPLAY = 4000
@@ -1055,12 +1095,18 @@ class Engine:
                 )
             )
 
-            effective_limit = self.config.effective_max_turns(session.mode)
+            is_task = bool(session.task_run_id)
+            effective_limit = self.config.effective_max_turns(
+                session.mode, is_task=is_task
+            )
             if response.num_turns >= effective_limit and self.connector:
-                env_hint = {
-                    "web": "LEASHD_WEB_MAX_TURNS",
-                    "test": "LEASHD_TEST_MAX_TURNS",
-                }.get(session.mode, "LEASHD_MAX_TURNS")
+                if is_task:
+                    env_hint = "LEASHD_TASK_MAX_TURNS"
+                else:
+                    env_hint = {
+                        "web": "LEASHD_WEB_MAX_TURNS",
+                        "test": "LEASHD_TEST_MAX_TURNS",
+                    }.get(session.mode, "LEASHD_MAX_TURNS")
                 await self.connector.send_message(
                     chat_id,
                     f"\u26a0\ufe0f Agent reached the turn limit ({effective_limit} turns). "
@@ -1148,6 +1194,19 @@ class Engine:
                     await responder.deactivate()
                 session.agent_resume_token = None
                 await self.session_manager.save(session)
+                await self.event_bus.emit(
+                    Event(
+                        name=SESSION_FAILED,
+                        data={
+                            "session": session,
+                            "session_id": session.session_id,
+                            "chat_id": chat_id,
+                            "user_id": user_id,
+                            "error": str(e),
+                            "reason": "cancelled",
+                        },
+                    )
+                )
                 return ""
             if tool_state.plan_adjustment_feedback and not (
                 tool_state.clean_proceed or tool_state.proceed_in_context
@@ -1219,7 +1278,51 @@ class Engine:
                     await self.connector.send_message(chat_id, error_msg)
                 except Exception:
                     logger.exception("error_notification_send_failed", chat_id=chat_id)
+            reason = "timeout" if "timed out" in str(e).lower() else "agent_error"
+            await self.event_bus.emit(
+                Event(
+                    name=SESSION_FAILED,
+                    data={
+                        "session": session,
+                        "session_id": session.session_id,
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                        "error": str(e),
+                        "reason": reason,
+                    },
+                )
+            )
             raise
+
+    def _resolve_runtime_settings(self, session: Session) -> RuntimeSettings:
+        """Merge global → dir → workspace → task overlays for this session.
+
+        Re-reads ``directory_settings`` from the YAML on each request so
+        ``leashd effort set --dir`` changes take effect without a daemon
+        restart (matches the behaviour of the existing global ``effort``
+        setter after ``leashd reload``).
+        """
+        from leashd.config_store import get_all_directory_settings
+
+        directory_settings = get_all_directory_settings()
+        workspace = None
+        if session.workspace_name:
+            workspace = self._workspaces.get(session.workspace_name)
+        task_override: RuntimeSettings | None = None
+        if session.task_settings_override:
+            try:
+                task_override = RuntimeSettings.model_validate(
+                    session.task_settings_override
+                )
+            except Exception as exc:  # pragma: no cover — defensive
+                logger.warning("task_settings_override_invalid", error=str(exc))
+        return resolve_settings(
+            global_cfg=self.config,
+            directory=session.working_directory,
+            directory_settings=directory_settings,
+            workspace=workspace,
+            task_override=task_override,
+        )
 
     async def _execute_agent_with_timeout(
         self,
@@ -1236,6 +1339,14 @@ class Engine:
         pre_exec_resume_token = session.agent_resume_token
         if deadline is None:
             deadline = AgentDeadline(self.config.agent_timeout_seconds)
+        settings = self._resolve_runtime_settings(session)
+        logger.debug(
+            "runtime_settings_resolved",
+            chat_id=chat_id,
+            effort=settings.effort,
+            claude_model=settings.claude_model,
+            codex_model=settings.codex_model,
+        )
         agent_task = asyncio.create_task(
             self.agent.execute(
                 prompt=text,
@@ -1245,6 +1356,7 @@ class Engine:
                 on_tool_activity=on_tool_activity,
                 on_retry=on_retry,
                 attachments=attachments,
+                settings=settings,
             )
         )
         try:
@@ -1451,24 +1563,29 @@ class Engine:
             return ""
 
         if command == "task":
-            task_text = args.strip()
+            task_override, task_text = _parse_task_flags(args)
             if not task_text:
-                return "Usage: /task <description of the task>"
+                return (
+                    "Usage: /task [--effort low|medium|high|max] "
+                    "[--model <name>] <description of the task>"
+                )
             session.mode = "task"
             session.task_run_id = None
             await self.session_manager.save(session)
-            await self.event_bus.emit(
-                Event(
-                    name=TASK_SUBMITTED,
-                    data={
-                        "user_id": user_id,
-                        "chat_id": chat_id,
-                        "session_id": session.session_id,
-                        "task": task_text,
-                        "working_directory": session.working_directory,
-                    },
+            event_data: dict[str, Any] = {
+                "user_id": user_id,
+                "chat_id": chat_id,
+                "session_id": session.session_id,
+                "task": task_text,
+                "working_directory": session.working_directory,
+                "workspace_name": session.workspace_name,
+                "workspace_directories": list(session.workspace_directories),
+            }
+            if not task_override.is_empty():
+                event_data["settings_override"] = task_override.model_dump(
+                    exclude_none=True
                 )
-            )
+            await self.event_bus.emit(Event(name=TASK_SUBMITTED, data=event_data))
             return ""
 
         if command == "cancel":

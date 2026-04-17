@@ -1179,11 +1179,21 @@ class TestTaskEventsIntegration:
 class TestCapturePlanToMemory:
     """Plan file content should be captured into task memory ## Plan section."""
 
+    @staticmethod
+    def _started_task(working_dir: str) -> TaskRun:
+        """Return a task that has transitioned past 'pending' so started_at is set."""
+        from datetime import datetime, timedelta, timezone
+
+        task = _make_task(working_dir=working_dir)
+        # Start time is 60s ago — any plan file written "now" is after cutoff.
+        task.started_at = datetime.now(timezone.utc) - timedelta(seconds=60)
+        task.phase_started_at = task.started_at
+        return task
+
     def test_captures_newest_plan_file(self, tmp_path):
-        task = _make_task(working_dir=str(tmp_path))
+        task = self._started_task(str(tmp_path))
         task_memory.seed(task.run_id, task.task, str(tmp_path))
 
-        # Create a .claude/plans/ directory with a plan file
         plans_dir = tmp_path / ".claude" / "plans"
         plans_dir.mkdir(parents=True)
         plan_file = plans_dir / "fuzzy-forging-bear.md"
@@ -1198,10 +1208,9 @@ class TestCapturePlanToMemory:
         assert "(no plan yet)" not in content
 
     def test_skips_when_no_plans_dir(self, tmp_path):
-        task = _make_task(working_dir=str(tmp_path))
+        task = self._started_task(str(tmp_path))
         task_memory.seed(task.run_id, task.task, str(tmp_path))
 
-        # No .claude/plans/ directory — should not crash
         AgenticOrchestrator._capture_plan_to_memory(task)
 
         content = task_memory.read(task.run_id, str(tmp_path))
@@ -1209,7 +1218,7 @@ class TestCapturePlanToMemory:
         assert "(no plan yet)" in content
 
     def test_skips_when_plans_dir_empty(self, tmp_path):
-        task = _make_task(working_dir=str(tmp_path))
+        task = self._started_task(str(tmp_path))
         task_memory.seed(task.run_id, task.task, str(tmp_path))
 
         plans_dir = tmp_path / ".claude" / "plans"
@@ -1222,10 +1231,9 @@ class TestCapturePlanToMemory:
         assert "(no plan yet)" in content
 
     def test_does_not_overwrite_existing_plan(self, tmp_path):
-        task = _make_task(working_dir=str(tmp_path))
+        task = self._started_task(str(tmp_path))
         task_memory.seed(task.run_id, task.task, str(tmp_path))
 
-        # Agent already wrote plan content to task memory
         task_memory.update_section(
             task.run_id,
             str(tmp_path),
@@ -1233,7 +1241,6 @@ class TestCapturePlanToMemory:
             content="Agent's own plan",
         )
 
-        # Plan file also exists
         plans_dir = tmp_path / ".claude" / "plans"
         plans_dir.mkdir(parents=True)
         (plans_dir / "some-plan.md").write_text("Plan from file")
@@ -1248,7 +1255,7 @@ class TestCapturePlanToMemory:
     def test_picks_newest_file_by_mtime(self, tmp_path):
         import time
 
-        task = _make_task(working_dir=str(tmp_path))
+        task = self._started_task(str(tmp_path))
         task_memory.seed(task.run_id, task.task, str(tmp_path))
 
         plans_dir = tmp_path / ".claude" / "plans"
@@ -1264,7 +1271,7 @@ class TestCapturePlanToMemory:
         assert "New plan content" in content
 
     def test_skips_empty_plan_file(self, tmp_path):
-        task = _make_task(working_dir=str(tmp_path))
+        task = self._started_task(str(tmp_path))
         task_memory.seed(task.run_id, task.task, str(tmp_path))
 
         plans_dir = tmp_path / ".claude" / "plans"
@@ -1275,4 +1282,28 @@ class TestCapturePlanToMemory:
 
         content = task_memory.read(task.run_id, str(tmp_path))
         assert content is not None
+        assert "(no plan yet)" in content
+
+    def test_ignores_plan_file_older_than_task_start(self, tmp_path):
+        """Regression: stale .claude/plans/*.md from earlier tasks must not leak."""
+        import os
+        from datetime import datetime, timezone
+
+        task = self._started_task(str(tmp_path))
+        task_memory.seed(task.run_id, task.task, str(tmp_path))
+
+        plans_dir = tmp_path / ".claude" / "plans"
+        plans_dir.mkdir(parents=True)
+        stale = plans_dir / "toasty-conjuring-sparrow.md"
+        stale.write_text("STALE plan from a previous task — must not appear")
+        # Backdate the stale file to well before this task started.
+        task_start = task.started_at or datetime.now(timezone.utc)
+        stale_mtime = task_start.timestamp() - 3600
+        os.utime(stale, (stale_mtime, stale_mtime))
+
+        AgenticOrchestrator._capture_plan_to_memory(task)
+
+        content = task_memory.read(task.run_id, str(tmp_path))
+        assert content is not None
+        assert "STALE" not in content
         assert "(no plan yet)" in content

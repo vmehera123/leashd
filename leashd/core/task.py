@@ -76,12 +76,19 @@ class TaskRun(BaseModel):
     phase_costs: dict[str, float] = Field(default_factory=dict)
 
     working_directory: str
+    workspace_name: str | None = None
+    workspace_directories: list[str] = Field(default_factory=list)
 
     phase_pipeline: list[TaskPhase] = Field(default_factory=list)
 
     # v2 orchestrator fields
     complexity: str | None = None
     memory_file_path: str | None = None
+
+    # Per-task RuntimeSettings overrides parsed from /task --effort --model flags.
+    # Stored as a plain dict so SQLite serialisation stays trivial; the engine
+    # materialises it into a RuntimeSettings at dispatch time.
+    settings_override: dict[str, Any] | None = None
 
     def is_terminal(self) -> bool:
         return self.phase in _TERMINAL_PHASES
@@ -121,9 +128,12 @@ CREATE TABLE IF NOT EXISTS task_runs (
     total_cost REAL DEFAULT 0.0,
     phase_costs TEXT DEFAULT '{}',
     working_directory TEXT NOT NULL,
+    workspace_name TEXT,
+    workspace_directories TEXT DEFAULT '[]',
     phase_pipeline TEXT DEFAULT '[]',
     complexity TEXT,
-    memory_file_path TEXT
+    memory_file_path TEXT,
+    settings_override TEXT
 )
 """
 
@@ -165,6 +175,18 @@ class TaskStore:
             await self._db.execute(
                 "ALTER TABLE task_runs ADD COLUMN memory_file_path TEXT"
             )
+        if "workspace_name" not in columns:
+            await self._db.execute(
+                "ALTER TABLE task_runs ADD COLUMN workspace_name TEXT"
+            )
+        if "workspace_directories" not in columns:
+            await self._db.execute(
+                "ALTER TABLE task_runs ADD COLUMN workspace_directories TEXT DEFAULT '[]'"
+            )
+        if "settings_override" not in columns:
+            await self._db.execute(
+                "ALTER TABLE task_runs ADD COLUMN settings_override TEXT"
+            )
 
         await self._db.commit()
         logger.info("task_store_tables_created")
@@ -178,8 +200,10 @@ class TaskStore:
                 retry_count, max_retries, phase_context,
                 created_at, started_at, phase_started_at, completed_at,
                 last_updated, total_cost, phase_costs, working_directory,
-                phase_pipeline, complexity, memory_file_path)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                workspace_name, workspace_directories,
+                phase_pipeline, complexity, memory_file_path,
+                settings_override)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 task.run_id,
                 task.user_id,
@@ -202,9 +226,12 @@ class TaskStore:
                 task.total_cost,
                 json.dumps(task.phase_costs),
                 task.working_directory,
+                task.workspace_name,
+                json.dumps(task.workspace_directories),
                 json.dumps(task.phase_pipeline),
                 task.complexity,
                 task.memory_file_path,
+                json.dumps(task.settings_override) if task.settings_override else None,
             ),
         )
         await self._db.commit()
@@ -298,11 +325,29 @@ class TaskStore:
             except (json.JSONDecodeError, TypeError):
                 return []
 
+        def _parse_str_list(val: str | None) -> list[str]:
+            if not val:
+                return []
+            try:
+                result = json.loads(val)
+                return [str(x) for x in result] if isinstance(result, list) else []
+            except (json.JSONDecodeError, TypeError):
+                return []
+
         def _safe_get(key: str) -> str | None:
             try:
                 result: str | None = row[key]
                 return result
             except (IndexError, KeyError):
+                return None
+
+        def _parse_optional_json(val: str | None) -> dict[str, Any] | None:
+            if not val:
+                return None
+            try:
+                result = json.loads(val)
+                return result if isinstance(result, dict) else None
+            except (json.JSONDecodeError, TypeError):
                 return None
 
         return TaskRun(
@@ -327,9 +372,12 @@ class TaskStore:
             total_cost=row["total_cost"] or 0.0,
             phase_costs=_parse_json(row["phase_costs"]),
             working_directory=row["working_directory"],
+            workspace_name=_safe_get("workspace_name"),
+            workspace_directories=_parse_str_list(_safe_get("workspace_directories")),
             phase_pipeline=_parse_list(row["phase_pipeline"]),
             complexity=_safe_get("complexity"),
             memory_file_path=_safe_get("memory_file_path"),
+            settings_override=_parse_optional_json(_safe_get("settings_override")),
         )
 
     @staticmethod

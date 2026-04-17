@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     from leashd.agents.capabilities import AgentCapabilities
     from leashd.connectors.base import Attachment
     from leashd.core.config import LeashdConfig
+    from leashd.core.runtime_settings import RuntimeSettings
     from leashd.core.session import Session
 
 logger = structlog.get_logger()
@@ -108,7 +109,9 @@ class ClaudeCliAgent(BaseAgent):
 
     # -- Command building ----------------------------------------------------
 
-    def _build_command(self, session: Session) -> list[str]:
+    def _build_command(
+        self, session: Session, settings: RuntimeSettings | None = None
+    ) -> list[str]:
         cmd = [
             self._cli_path,
             "--output-format",
@@ -146,9 +149,25 @@ class ClaudeCliAgent(BaseAgent):
         perm_mode = SESSION_TO_PERMISSION_MODE.get(session.mode, "default")
         cmd.extend(["--permission-mode", perm_mode])
 
-        cmd.extend(["--max-turns", str(self._config.effective_max_turns(session.mode))])
-        if self._config.effort:
-            cmd.extend(["--effort", self._config.effort])
+        cmd.extend(
+            [
+                "--max-turns",
+                str(
+                    self._config.effective_max_turns(
+                        session.mode, is_task=bool(session.task_run_id)
+                    )
+                ),
+            ]
+        )
+        effort = (settings.effort if settings else None) or self._config.effort
+        if effort:
+            cmd.extend(["--effort", effort])
+
+        model = (
+            settings.claude_model if settings else None
+        ) or self._config.claude_model
+        if model:
+            cmd.extend(["--model", model])
 
         allowed = list(self._config.allowed_tools) if self._config.allowed_tools else []
         from leashd.skills import has_installed_skills
@@ -220,6 +239,7 @@ class ClaudeCliAgent(BaseAgent):
         | None = None,
         on_retry: Callable[[], Coroutine[Any, Any, None]] | None = None,
         attachments: list[Attachment] | None = None,
+        settings: RuntimeSettings | None = None,
     ) -> AgentResponse:
         os.environ.pop("CLAUDECODE", None)
 
@@ -230,7 +250,7 @@ class ClaudeCliAgent(BaseAgent):
                 "Use /stop in another conversation first."
             )
 
-        cmd = self._build_command(session)
+        cmd = self._build_command(session, settings)
 
         logger.info(
             "agent_execute_started",
@@ -252,6 +272,7 @@ class ClaudeCliAgent(BaseAgent):
                 on_tool_activity=on_tool_activity,
                 on_retry=on_retry,
                 attachments=attachments,
+                settings=settings,
             )
             if not response:
                 return AgentResponse(content="No response from agent.", is_error=True)
@@ -294,6 +315,7 @@ class ClaudeCliAgent(BaseAgent):
         | None,
         on_retry: Callable[[], Coroutine[Any, Any, None]] | None,
         attachments: list[Attachment] | None,
+        settings: RuntimeSettings | None = None,
     ) -> AgentResponse:
         stderr_buf = StderrBuffer()
         self._stderr_buffers[session.session_id] = stderr_buf
@@ -337,7 +359,7 @@ class ClaudeCliAgent(BaseAgent):
                         session=session.session_id,
                     )
                     session.agent_resume_token = None
-                    cmd = self._build_command(session)
+                    cmd = self._build_command(session, settings)
                     resume_cleared = True
                     continue
 
@@ -370,7 +392,7 @@ class ClaudeCliAgent(BaseAgent):
                         stderr=stderr_buf.get()[:ERROR_TRUNCATION_LENGTH] or None,
                     )
                     session.agent_resume_token = None
-                    cmd = self._build_command(session)
+                    cmd = self._build_command(session, settings)
                     resume_cleared = True
                     continue
 

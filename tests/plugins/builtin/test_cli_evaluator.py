@@ -175,6 +175,32 @@ class TestEvaluateViaCli:
             proc.kill.assert_called_once()
             proc.wait.assert_called_once()
 
+    async def test_add_dirs_emits_flags_and_skips_cwd(self):
+        proc = _mock_process(0, b"ok", b"")
+        captured_cmd: list[str] = []
+
+        async def fake_exec(*args, **kw):
+            captured_cmd.extend(args)
+            return proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+            await evaluate_via_cli(
+                "sys",
+                "user",
+                cwd="/repo/a",
+                add_dirs=["/repo/a", "/repo/b", "/repo/c"],
+            )
+
+        # cwd dir must NOT appear as --add-dir; the other two must.
+        add_dir_pairs = [
+            (captured_cmd[i], captured_cmd[i + 1])
+            for i in range(len(captured_cmd) - 1)
+            if captured_cmd[i] == "--add-dir"
+        ]
+        assert ("--add-dir", "/repo/b") in add_dir_pairs
+        assert ("--add-dir", "/repo/c") in add_dir_pairs
+        assert ("--add-dir", "/repo/a") not in add_dir_pairs
+
 
 class TestSanitizeEdgeCases:
     """Validates CONTROL_CHAR_RE regex against security-relevant character classes."""

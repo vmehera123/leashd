@@ -302,6 +302,16 @@ leashd turns set <N>     # set max turns to N (positive integer)
 
 Max turns can also be adjusted from the WebUI Settings page.
 
+### Task orchestrator version
+
+```bash
+leashd task version show       # display current version (v1, v2, or v3)
+leashd task version set v3     # switch to v3 (linear plan→implement→verify→review pipeline)
+leashd task version set v2     # switch back to v2 (LLM-driven think-act-observe loop, default)
+```
+
+Restart the daemon (`leashd restart`) to pick up the new version.
+
 ### Thinking effort
 
 ```bash

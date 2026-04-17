@@ -408,6 +408,7 @@ class TaskOrchestrator(LeashdPlugin):
             task=event.data["task"],
             working_directory=event.data["working_directory"],
             max_retries=self._max_retries,
+            settings_override=event.data.get("settings_override"),
         )
         task.phase_context["auto_pr_base_branch"] = self._auto_pr_base_branch
         task.phase_pipeline = _build_phase_pipeline(task.task, auto_pr=self._auto_pr)
@@ -576,6 +577,7 @@ class TaskOrchestrator(LeashdPlugin):
         )
         session.mode = mode
         session.task_run_id = task.run_id
+        session.task_settings_override = task.settings_override
         if mode == "plan":
             session.plan_origin = "task"
 
@@ -711,6 +713,7 @@ class TaskOrchestrator(LeashdPlugin):
                 session.mode = "default"
                 session.mode_instruction = None
                 session.task_run_id = None
+                session.task_settings_override = None
                 session.plan_origin = None
                 await self._engine.session_manager.save(session)
             self._engine.disable_auto_approve(task.chat_id)

@@ -1455,10 +1455,12 @@ class TestEffort:
         assert "high" in captured.out
 
     def test_effort_set_valid(self, fake_config_dir, capsys):
+        from argparse import Namespace
+
         from leashd.cli import _handle_effort_set
 
         with patch("leashd.cli._notify_daemon_reload"):
-            _handle_effort_set("high")
+            _handle_effort_set("high", Namespace(dir=None, workspace=None))
         captured = capsys.readouterr()
         assert "\u2713" in captured.out
         assert "high" in captured.out
@@ -1468,10 +1470,106 @@ class TestEffort:
         assert data["effort"] == "high"
 
     def test_effort_set_invalid(self, fake_config_dir):
+        from argparse import Namespace
+
         from leashd.cli import _handle_effort_set
 
         with pytest.raises(SystemExit) as exc_info:
-            _handle_effort_set("turbo")
+            _handle_effort_set("turbo", Namespace(dir=None, workspace=None))
+        assert exc_info.value.code == 1
+
+    def test_effort_set_per_directory(self, fake_config_dir, tmp_path, capsys):
+        from argparse import Namespace
+
+        from leashd.cli import _handle_effort_set
+        from leashd.config_store import get_all_directory_settings
+
+        with patch("leashd.cli._notify_daemon_reload"):
+            _handle_effort_set("high", Namespace(dir=str(tmp_path), workspace=None))
+        captured = capsys.readouterr()
+        assert "\u2713" in captured.out
+        assert str(tmp_path.resolve()) in captured.out
+
+        all_dirs = get_all_directory_settings()
+        assert all_dirs[str(tmp_path.resolve())]["effort"] == "high"
+
+
+class TestModelCli:
+    def test_model_set_inferred_claude(self, fake_config_dir, capsys):
+        from argparse import Namespace
+
+        from leashd.cli import _handle_model_set
+        from leashd.config_store import load_global_config
+
+        with patch("leashd.cli._notify_daemon_reload"):
+            _handle_model_set("opus", Namespace(dir=None, workspace=None, runtime=None))
+        data = load_global_config()
+        assert data["claude_model"] == "opus"
+        assert "claude_model" in capsys.readouterr().out
+
+    def test_model_set_inferred_codex(self, fake_config_dir, capsys):
+        from argparse import Namespace
+
+        from leashd.cli import _handle_model_set
+        from leashd.config_store import load_global_config
+
+        with patch("leashd.cli._notify_daemon_reload"):
+            _handle_model_set(
+                "gpt-5.2", Namespace(dir=None, workspace=None, runtime=None)
+            )
+        data = load_global_config()
+        assert data["codex_model"] == "gpt-5.2"
+        assert "codex_model" in capsys.readouterr().out
+
+    def test_model_set_per_directory(self, fake_config_dir, tmp_path):
+        from argparse import Namespace
+
+        from leashd.cli import _handle_model_set
+        from leashd.config_store import get_all_directory_settings
+
+        with patch("leashd.cli._notify_daemon_reload"):
+            _handle_model_set(
+                "opus",
+                Namespace(dir=str(tmp_path), workspace=None, runtime=None),
+            )
+        all_dirs = get_all_directory_settings()
+        assert all_dirs[str(tmp_path.resolve())]["claude_model"] == "opus"
+
+
+class TestTaskVersion:
+    def test_task_version_show_default(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_task_version_show
+
+        _handle_task_version_show()
+        captured = capsys.readouterr()
+        assert "v2" in captured.out
+
+    def test_task_version_show_custom(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_task_version_show
+
+        save_global_config({"task_orchestrator_version": "v3"})
+        _handle_task_version_show()
+        captured = capsys.readouterr()
+        assert "v3" in captured.out
+
+    def test_task_version_set_valid(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_task_version_set
+
+        with patch("leashd.cli._notify_daemon_reload"):
+            _handle_task_version_set("v3")
+        captured = capsys.readouterr()
+        assert "\u2713" in captured.out
+        assert "v3" in captured.out
+        from leashd.config_store import load_global_config
+
+        data = load_global_config()
+        assert data["task_orchestrator_version"] == "v3"
+
+    def test_task_version_set_invalid(self, fake_config_dir):
+        from leashd.cli import _handle_task_version_set
+
+        with pytest.raises(SystemExit) as exc_info:
+            _handle_task_version_set("v4")
         assert exc_info.value.code == 1
 
 

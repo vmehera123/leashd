@@ -647,7 +647,10 @@ class AgenticOrchestrator(LeashdPlugin):
             session_id=event.data["session_id"],
             task=event.data["task"],
             working_directory=event.data["working_directory"],
+            workspace_name=event.data.get("workspace_name"),
+            workspace_directories=list(event.data.get("workspace_directories") or []),
             max_retries=self._max_retries,
+            settings_override=event.data.get("settings_override"),
         )
         task.phase_context["auto_pr_base_branch"] = self._auto_pr_base_branch
 
@@ -880,6 +883,9 @@ class AgenticOrchestrator(LeashdPlugin):
                 enabled_actions=profile.enabled_actions,
                 extra_instructions=profile.conductor_instructions,
                 docker_compose_available=profile.docker_compose_available,
+                working_directory=task.working_directory,
+                workspace_name=task.workspace_name,
+                workspace_directories=task.workspace_directories,
             )
 
         # Re-check after conductor call — task may have been cancelled
@@ -1038,6 +1044,9 @@ class AgenticOrchestrator(LeashdPlugin):
                     enabled_actions=profile.enabled_actions,
                     extra_instructions=reask_extra,
                     docker_compose_available=profile.docker_compose_available,
+                    working_directory=task.working_directory,
+                    workspace_name=task.workspace_name,
+                    workspace_directories=task.workspace_directories,
                 )
                 logger.info(
                     "conductor_reask_result",
@@ -1176,6 +1185,13 @@ class AgenticOrchestrator(LeashdPlugin):
         session = await self._engine.session_manager.get_or_create(
             task.user_id, task.chat_id, task.working_directory
         )
+        # Restore workspace scope on the session so runtimes emit
+        # --add-dir for every repo. SQLite only persists workspace_name,
+        # so directories may be empty after a daemon restart — the task
+        # row carries the authoritative list.
+        if task.workspace_name:
+            session.workspace_name = task.workspace_name
+            session.workspace_directories = list(task.workspace_directories)
         # Phase isolation: each phase starts a FRESH agent conversation.
         # The task memory file (.leashd/tasks/{run_id}.md) is the sole
         # context bridge between phases — conversation is ephemeral.
@@ -1187,6 +1203,7 @@ class AgenticOrchestrator(LeashdPlugin):
         )
         session.mode = mode
         session.task_run_id = task.run_id
+        session.task_settings_override = task.settings_override
         if mode == "plan":
             session.plan_origin = "task"
 
@@ -1283,13 +1300,18 @@ class AgenticOrchestrator(LeashdPlugin):
 
     @staticmethod
     def _capture_plan_to_memory(task: TaskRun) -> None:
-        """Copy the newest .claude/plans/*.md content into ## Plan.
+        """Copy the newest plan file written during this task into ## Plan.
 
         After the plan phase, the agent may have written its plan to
         Claude CLI's native plan file instead of (or in addition to) the
-        task memory file.  This method reads the most recently modified
-        plan file and injects its content into the task memory's ## Plan
-        section — but only if that section still has a placeholder.
+        task memory file.  This method reads a plan file that was created
+        or modified *during* the current task run and injects its content
+        into the task memory's ## Plan section — but only if that section
+        still has a placeholder.
+
+        Plan files older than this task's start are ignored — otherwise
+        stale leftovers from prior tasks in the same project would
+        contaminate the memory file.
         """
         from pathlib import Path
 
@@ -1297,11 +1319,25 @@ class AgenticOrchestrator(LeashdPlugin):
         if not plans_dir.is_dir():
             return
 
-        plan_files = sorted(plans_dir.glob("*.md"), key=lambda p: p.stat().st_mtime)
-        if not plan_files:
+        # Scope to files written during this run. Fall back to phase_started_at
+        # if the task lifecycle never recorded started_at (shouldn't happen
+        # in practice, but keeps the method robust).
+        cutoff_dt = task.started_at or task.phase_started_at
+        cutoff = cutoff_dt.timestamp() if cutoff_dt else 0.0
+
+        fresh: list[Path] = [
+            p for p in plans_dir.glob("*.md") if p.stat().st_mtime >= cutoff
+        ]
+        if not fresh:
+            logger.debug(
+                "plan_capture_no_fresh_file",
+                run_id=task.run_id,
+                cutoff=cutoff,
+                candidates=len(list(plans_dir.glob("*.md"))),
+            )
             return
 
-        newest = plan_files[-1]
+        newest = max(fresh, key=lambda p: p.stat().st_mtime)
         try:
             plan_content = newest.read_text(encoding="utf-8")
         except OSError:
@@ -1464,6 +1500,9 @@ class AgenticOrchestrator(LeashdPlugin):
                 max_retries=task.max_retries,
                 model=self._conductor_model,
                 timeout=self._conductor_timeout,
+                working_directory=task.working_directory,
+                workspace_name=task.workspace_name,
+                workspace_directories=task.workspace_directories,
             )
 
             task_events.append(
@@ -1511,6 +1550,7 @@ class AgenticOrchestrator(LeashdPlugin):
                 session.mode = "default"
                 session.mode_instruction = None
                 session.task_run_id = None
+                session.task_settings_override = None
                 session.plan_origin = None
                 await self._engine.session_manager.save(session)
             self._engine.disable_auto_approve(task.chat_id)

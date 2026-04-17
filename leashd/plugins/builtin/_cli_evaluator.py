@@ -38,8 +38,20 @@ async def evaluate_via_cli(
     *,
     model: str | None = None,
     timeout: float = 30.0,
+    cwd: str | None = None,
+    add_dirs: Sequence[str] | None = None,
 ) -> str:
-    """Run a one-shot evaluation via ``claude -p``."""
+    """Run a one-shot evaluation via ``claude -p``.
+
+    When *cwd* is given, the subprocess runs in that directory so Claude
+    CLI resolves ``CLAUDE.md`` relative to the actual project instead of
+    the daemon's working directory. This also prevents user-global
+    ``additionalDirectories`` in ``~/.claude/settings.json`` from
+    anchoring the model's reasoning on unrelated projects.
+
+    ``add_dirs`` contributes extra ``--add-dir`` flags so the evaluator
+    sees every repo in an active workspace (skip values equal to *cwd*).
+    """
     prompt = f"{system_prompt}\n\n{user_message}"
     cmd = [
         "claude",
@@ -54,10 +66,15 @@ async def evaluate_via_cli(
     ]
     if model:
         cmd.extend(["--model", model])
+    if add_dirs:
+        for d in add_dirs:
+            if d and d != cwd:
+                cmd.extend(["--add-dir", d])
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        cwd=cwd,
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -119,6 +136,8 @@ async def evaluate_phase_outcome(
     max_retries: int = 3,
     model: str | None = None,
     timeout: float = 30.0,
+    cwd: str | None = None,
+    add_dirs: Sequence[str] | None = None,
 ) -> PhaseDecision:
     """AI-powered phase transition decision via ``claude -p``.
 
@@ -144,7 +163,12 @@ async def evaluate_phase_outcome(
     )
 
     raw = await evaluate_via_cli(
-        _PHASE_EVAL_SYSTEM_PROMPT, context, model=model, timeout=timeout
+        _PHASE_EVAL_SYSTEM_PROMPT,
+        context,
+        model=model,
+        timeout=timeout,
+        cwd=cwd,
+        add_dirs=add_dirs,
     )
 
     first_line = raw.strip().split("\n")[0] if raw else ""

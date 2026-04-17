@@ -2775,11 +2775,13 @@ const SettingsManager = {
       ${this._renderDisplaySection()}
       ${this._renderNotificationSection()}
       ${this._renderAgentSection(config.agent)}
+      ${this._renderScopedSettingsSection(config)}
       ${this._renderAutonomousSection(config.autonomous)}
       ${this._renderBrowserSection(config.browser)}
     </div>`;
     settingsBody.innerHTML = html;
     this._bindEvents();
+    this._bindScopedSettings();
   },
 
   _renderDisplaySection() {
@@ -2896,9 +2898,11 @@ const SettingsManager = {
     const effort = agent.effort || "medium";
     const runtime = agent.runtime || "claude-code";
     const mode = agent.default_mode || "default";
+    const claudeModel = agent.claude_model || "";
+    const codexModel = agent.codex_model || "";
 
     return `<div class="settings-section">
-      <h3>Agent</h3>
+      <h3>Agent (Global)</h3>
       <div class="setting-row">
         <div><div class="setting-label">Effort</div></div>
         <div class="segmented-control" data-setting="agent.effort">
@@ -2910,9 +2914,24 @@ const SettingsManager = {
       <div class="setting-row">
         <div><div class="setting-label">Runtime</div></div>
         <select class="select-control" data-setting="agent.runtime">
-          <option value="claude-code" ${runtime === 'claude-code' ? 'selected' : ''}>Claude Code</option>
+          <option value="claude-cli" ${runtime === 'claude-cli' ? 'selected' : ''}>Claude CLI</option>
+          <option value="claude-code" ${runtime === 'claude-code' ? 'selected' : ''}>Claude Code (SDK)</option>
           <option value="codex" ${runtime === 'codex' ? 'selected' : ''}>Codex</option>
         </select>
+      </div>
+      <div class="setting-row">
+        <div><div class="setting-label">Claude model</div>
+          <div class="setting-sublabel">Alias (opus / sonnet) or full name. Used by claude-cli and claude-code runtimes.</div></div>
+        <input type="text" class="text-input" data-setting="agent.claude_model"
+          placeholder="opus, sonnet, claude-opus-4-7, …"
+          value="${escapeHtml(claudeModel)}">
+      </div>
+      <div class="setting-row">
+        <div><div class="setting-label">Codex model</div>
+          <div class="setting-sublabel">Used by the codex runtime (e.g. gpt-5.2).</div></div>
+        <input type="text" class="text-input" data-setting="agent.codex_model"
+          placeholder="gpt-5.2"
+          value="${escapeHtml(codexModel)}">
       </div>
       <div class="setting-row">
         <div><div class="setting-label">Default Mode</div></div>
@@ -2929,6 +2948,145 @@ const SettingsManager = {
           value="${agent.max_tool_calls != null ? agent.max_tool_calls : -1}" min="-1">
       </div>
     </div>`;
+  },
+
+  _renderScopedSettingsSection(config) {
+    const dirSettings = config.directory_settings || {};
+    const wsSettings = config.workspace_settings || {};
+    const dirRows = Object.keys(dirSettings).sort().map(path => {
+      const entry = dirSettings[path] || {};
+      return this._renderScopedRow("dir", path, path, entry);
+    }).join("");
+    const wsRows = Object.keys(wsSettings).sort().map(name => {
+      const entry = wsSettings[name] || {};
+      return this._renderScopedRow("workspace", name, name, entry);
+    }).join("");
+
+    return `<div class="settings-section" data-scoped-section>
+      <h3>Per-directory / per-workspace overrides</h3>
+      <div class="setting-sublabel" style="margin-bottom:10px;">
+        Overrides win in the order: task &gt; workspace &gt; directory &gt; global.
+        Leave a field blank to fall through to the next scope.
+      </div>
+
+      <div class="setting-sublabel"><strong>Directories</strong></div>
+      <div data-scoped-list="dir">
+        ${dirRows || '<div class="setting-sublabel" style="padding:6px 0;">No overrides.</div>'}
+      </div>
+      <div class="setting-row" style="gap:6px;">
+        <input type="text" class="text-input" data-scoped-add="dir" placeholder="/path/to/directory (absolute)">
+        <button type="button" class="btn-secondary" data-scoped-add-btn="dir">Add</button>
+      </div>
+
+      <div class="setting-divider"></div>
+
+      <div class="setting-sublabel"><strong>Workspaces</strong></div>
+      <div data-scoped-list="workspace">
+        ${wsRows || '<div class="setting-sublabel" style="padding:6px 0;">No overrides. Use <code>leashd ws add</code> to create a workspace first, then configure overrides here.</div>'}
+      </div>
+    </div>`;
+  },
+
+  _renderScopedRow(scope, key, label, entry) {
+    const effort = entry.effort || "";
+    const claudeModel = entry.claude_model || "";
+    const codexModel = entry.codex_model || "";
+    const efforts = ["", "low", "medium", "high", "max"];
+    return `<div class="setting-row" data-scoped-row="${scope}" data-scoped-key="${escapeHtml(key)}" style="flex-wrap:wrap; gap:6px; border-bottom:1px solid var(--border-subtle); padding-bottom:8px;">
+      <div style="flex-basis:100%;"><div class="setting-label">${escapeHtml(label)}</div></div>
+      <select class="select-control" data-scoped-field="effort" style="flex:1 1 80px;">
+        ${efforts.map(v => `<option value="${v}" ${effort === v ? 'selected' : ''}>${v || '—'}</option>`).join("")}
+      </select>
+      <input type="text" class="text-input" data-scoped-field="claude_model"
+        placeholder="claude model" value="${escapeHtml(claudeModel)}" style="flex:2 1 140px;">
+      <input type="text" class="text-input" data-scoped-field="codex_model"
+        placeholder="codex model" value="${escapeHtml(codexModel)}" style="flex:2 1 140px;">
+      <button type="button" class="btn-secondary" data-scoped-save>Save</button>
+      <button type="button" class="btn-danger" data-scoped-clear>Clear all</button>
+    </div>`;
+  },
+
+  _bindScopedSettings() {
+    const section = settingsBody.querySelector('[data-scoped-section]');
+    if (!section) return;
+
+    const refresh = () => this._fetchAndRender();
+
+    const saveRow = async (row) => {
+      const scope = row.dataset.scopedRow;
+      const key = row.dataset.scopedKey;
+      const body = {
+        effort: row.querySelector('[data-scoped-field="effort"]').value || null,
+        claude_model: row.querySelector('[data-scoped-field="claude_model"]').value || null,
+        codex_model: row.querySelector('[data-scoped-field="codex_model"]').value || null,
+        replace: true,
+      };
+      body[scope === "dir" ? "path" : "name"] = key;
+      const endpoint = scope === "dir"
+        ? "/api/config/directory-settings"
+        : "/api/config/workspace-settings";
+      const res = await authFetch(endpoint, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (data.success) {
+        showToast("Override saved");
+        refresh();
+      } else {
+        showToast(data.reason || "Save failed", "error");
+      }
+    };
+
+    const clearRow = async (row) => {
+      const scope = row.dataset.scopedRow;
+      const key = row.dataset.scopedKey;
+      const body = {};
+      body[scope === "dir" ? "path" : "name"] = key;
+      const endpoint = scope === "dir"
+        ? "/api/config/directory-settings"
+        : "/api/config/workspace-settings";
+      const res = await authFetch(endpoint, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (data.success) {
+        showToast("Override cleared");
+        refresh();
+      } else {
+        showToast(data.reason || "Clear failed", "error");
+      }
+    };
+
+    for (const row of section.querySelectorAll('[data-scoped-row]')) {
+      row.querySelector('[data-scoped-save]').onclick = () => saveRow(row);
+      row.querySelector('[data-scoped-clear]').onclick = () => clearRow(row);
+    }
+
+    const addBtn = section.querySelector('[data-scoped-add-btn="dir"]');
+    const addInput = section.querySelector('[data-scoped-add="dir"]');
+    if (addBtn && addInput) {
+      addBtn.onclick = async () => {
+        const path = addInput.value.trim();
+        if (!path) return;
+        const res = await authFetch("/api/config/directory-settings", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path, effort: "medium", replace: true }),
+        });
+        const data = await res.json();
+        if (data.success) {
+          addInput.value = "";
+          showToast("Directory override added");
+          refresh();
+        } else {
+          showToast(data.reason || "Add failed", "error");
+        }
+      };
+    }
   },
 
   _renderAutonomousSection(auto) {
@@ -3107,6 +3265,10 @@ const SettingsManager = {
     if (modeSel) agent.default_mode = modeSel.value;
     const tcInput = settingsBody.querySelector('[data-setting="agent.max_tool_calls"]');
     if (tcInput) agent.max_tool_calls = parseInt(tcInput.value, 10);
+    const claudeInput = settingsBody.querySelector('[data-setting="agent.claude_model"]');
+    if (claudeInput) agent.claude_model = claudeInput.value.trim();
+    const codexInput = settingsBody.querySelector('[data-setting="agent.codex_model"]');
+    if (codexInput) agent.codex_model = codexInput.value.trim();
     if (Object.keys(agent).length) updates.agent = agent;
 
     // Collect autonomous settings

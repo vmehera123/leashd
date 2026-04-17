@@ -139,6 +139,14 @@ def inject_global_config_as_env(*, force: bool = False) -> None:
     if effort and (force or "LEASHD_EFFORT" not in os.environ):
         os.environ["LEASHD_EFFORT"] = str(effort)
 
+    claude_model = data.get("claude_model")
+    if claude_model and (force or "LEASHD_CLAUDE_MODEL" not in os.environ):
+        os.environ["LEASHD_CLAUDE_MODEL"] = str(claude_model)
+
+    codex_model = data.get("codex_model")
+    if codex_model and (force or "LEASHD_CODEX_MODEL" not in os.environ):
+        os.environ["LEASHD_CODEX_MODEL"] = str(codex_model)
+
     agent_runtime = data.get("agent_runtime")
     if agent_runtime and (force or "LEASHD_AGENT_RUNTIME" not in os.environ):
         os.environ["LEASHD_AGENT_RUNTIME"] = str(agent_runtime)
@@ -147,11 +155,24 @@ def inject_global_config_as_env(*, force: bool = False) -> None:
     if max_turns and (force or "LEASHD_MAX_TURNS" not in os.environ):
         os.environ["LEASHD_MAX_TURNS"] = str(max_turns)
 
+    task_max_turns = data.get("task_max_turns")
+    if task_max_turns and (force or "LEASHD_TASK_MAX_TURNS" not in os.environ):
+        os.environ["LEASHD_TASK_MAX_TURNS"] = str(task_max_turns)
+
     max_tool_calls = data.get("max_tool_calls")
     if max_tool_calls is not None and (
         force or "LEASHD_MAX_TOOL_CALLS" not in os.environ
     ):
         os.environ["LEASHD_MAX_TOOL_CALLS"] = str(max_tool_calls)
+
+    # task_orchestrator_version lives at top level (CLI writes it there).
+    # Must be bridged here, not via _AUTONOMOUS_FIELD_MAP — the autonomous
+    # injector only sees keys under `autonomous:`.
+    orchestrator_version = data.get("task_orchestrator_version")
+    if orchestrator_version and (
+        force or "LEASHD_TASK_ORCHESTRATOR_VERSION" not in os.environ
+    ):
+        os.environ["LEASHD_TASK_ORCHESTRATOR_VERSION"] = str(orchestrator_version)
 
     _inject_autonomous_config(data, force=force)
     _inject_browser_config(data, force=force)
@@ -168,7 +189,6 @@ _AUTONOMOUS_FIELD_MAP: dict[str, str] = {
     "auto_pr_base_branch": "LEASHD_AUTO_PR_BASE_BRANCH",
     "autonomous_loop": "LEASHD_AUTONOMOUS_LOOP",
     "task_max_retries": "LEASHD_TASK_MAX_RETRIES",
-    "task_orchestrator_version": "LEASHD_TASK_ORCHESTRATOR_VERSION",
     "task_conductor_model": "LEASHD_TASK_CONDUCTOR_MODEL",
     "task_conductor_timeout": "LEASHD_TASK_CONDUCTOR_TIMEOUT",
     "task_memory_max_chars": "LEASHD_TASK_MEMORY_MAX_CHARS",
@@ -360,15 +380,24 @@ def save_workspaces_config(data: dict[str, Any]) -> None:
 
 
 def add_workspace(name: str, directories: list[Path], description: str = "") -> None:
-    """Create or update a workspace entry."""
+    """Create or update a workspace entry.
+
+    Preserves any existing ``settings`` block on the workspace so that
+    ``leashd ws add`` doesn't clobber effort/model overrides previously
+    configured via ``leashd model set --workspace``.
+    """
     data = load_workspaces_config()
     workspaces = data.get("workspaces", {})
     if not isinstance(workspaces, dict):
         workspaces = {}
-    workspaces[name] = {
+    entry: dict[str, Any] = {
         "directories": [str(d) for d in directories],
         "description": description,
     }
+    existing = workspaces.get(name)
+    if isinstance(existing, dict) and isinstance(existing.get("settings"), dict):
+        entry["settings"] = existing["settings"]
+    workspaces[name] = entry
     data["workspaces"] = workspaces
     save_workspaces_config(data)
 
@@ -481,6 +510,16 @@ def update_config_sections(updates: dict[str, Any]) -> None:
                     data["max_turns"] = value
                 elif key == "max_tool_calls":
                     data["max_tool_calls"] = value
+                elif key == "claude_model":
+                    if value:
+                        data["claude_model"] = value
+                    else:
+                        data.pop("claude_model", None)
+                elif key == "codex_model":
+                    if value:
+                        data["codex_model"] = value
+                    else:
+                        data.pop("codex_model", None)
 
     if "autonomous" in updates:
         auto_update = updates["autonomous"]
@@ -623,6 +662,207 @@ def set_cc_plugin_enabled(name: str, *, enabled: bool) -> bool:
     plugins[name]["enabled"] = enabled
     data["cc_plugins"] = plugins
     save_global_config(data)
+    return True
+
+
+# --- Per-directory RuntimeSettings overrides ---
+
+_VALID_SETTING_FIELDS = frozenset({"effort", "claude_model", "codex_model"})
+
+
+def _normalize_dir_key(path: str | Path) -> str:
+    """Return the canonical absolute-path key used in ``directory_settings``."""
+    return str(Path(path).expanduser().resolve())
+
+
+def get_all_directory_settings() -> dict[str, dict[str, Any]]:
+    """Return the full ``directory_settings`` map from the global config.
+
+    Keys are absolute paths; values are the raw override dicts
+    (``{"effort": ..., "claude_model": ..., "codex_model": ...}``).
+    Missing / malformed entries yield an empty map.
+    """
+    data = load_global_config()
+    raw = data.get("directory_settings", {})
+    if not isinstance(raw, dict):
+        return {}
+    result: dict[str, dict[str, Any]] = {}
+    for key, value in raw.items():
+        if not isinstance(value, dict):
+            continue
+        result[str(key)] = {
+            k: v for k, v in value.items() if k in _VALID_SETTING_FIELDS
+        }
+    return result
+
+
+def get_directory_settings(path: str | Path) -> dict[str, Any]:
+    """Return the override entry for a single directory (or ``{}`` if none)."""
+    key = _normalize_dir_key(path)
+    return get_all_directory_settings().get(key, {})
+
+
+def set_directory_setting(
+    path: str | Path,
+    *,
+    effort: str | None = None,
+    claude_model: str | None = None,
+    codex_model: str | None = None,
+    replace: bool = False,
+) -> None:
+    """Upsert a directory override.
+
+    By default non-None arguments are *merged* into the existing entry
+    (so callers can update a single field).  Pass ``replace=True`` to
+    clear the entry first — used by the WebUI's ``PUT`` endpoint.
+    """
+    data = load_global_config()
+    directory_settings = data.get("directory_settings", {})
+    if not isinstance(directory_settings, dict):
+        directory_settings = {}
+
+    key = _normalize_dir_key(path)
+    entry: dict[str, Any] = {} if replace else dict(directory_settings.get(key, {}))
+
+    if effort is not None:
+        entry["effort"] = effort
+    if claude_model is not None:
+        entry["claude_model"] = claude_model
+    if codex_model is not None:
+        entry["codex_model"] = codex_model
+
+    entry = {k: v for k, v in entry.items() if k in _VALID_SETTING_FIELDS and v}
+    if entry:
+        directory_settings[key] = entry
+    else:
+        directory_settings.pop(key, None)
+
+    if directory_settings:
+        data["directory_settings"] = directory_settings
+    else:
+        data.pop("directory_settings", None)
+    save_global_config(data)
+
+
+def clear_directory_setting(path: str | Path, *, field: str | None = None) -> bool:
+    """Remove a directory override.
+
+    When ``field`` is ``None`` the entire directory entry is deleted.
+    Otherwise only the named field is removed (the entry is kept if
+    other fields remain).  Returns ``True`` if anything was removed.
+    """
+    data = load_global_config()
+    directory_settings = data.get("directory_settings", {})
+    if not isinstance(directory_settings, dict):
+        return False
+    key = _normalize_dir_key(path)
+    if key not in directory_settings:
+        return False
+    if field is None:
+        del directory_settings[key]
+    else:
+        entry = directory_settings[key]
+        if not isinstance(entry, dict) or field not in entry:
+            return False
+        del entry[field]
+        if entry:
+            directory_settings[key] = entry
+        else:
+            del directory_settings[key]
+    if directory_settings:
+        data["directory_settings"] = directory_settings
+    else:
+        data.pop("directory_settings", None)
+    save_global_config(data)
+    return True
+
+
+# --- Per-workspace RuntimeSettings overrides ---
+
+
+def get_workspace_settings(name: str) -> dict[str, Any]:
+    """Return the ``settings`` block for a single workspace (or ``{}``)."""
+    data = load_workspaces_config()
+    workspaces = data.get("workspaces", {})
+    if not isinstance(workspaces, dict):
+        return {}
+    entry = workspaces.get(name)
+    if not isinstance(entry, dict):
+        return {}
+    settings = entry.get("settings", {})
+    if not isinstance(settings, dict):
+        return {}
+    return {k: v for k, v in settings.items() if k in _VALID_SETTING_FIELDS}
+
+
+def set_workspace_settings(
+    name: str,
+    *,
+    effort: str | None = None,
+    claude_model: str | None = None,
+    codex_model: str | None = None,
+    replace: bool = False,
+) -> bool:
+    """Upsert the ``settings`` block for an existing workspace.
+
+    Returns ``False`` if the workspace does not exist.  Non-None fields
+    are merged into the existing block; ``replace=True`` clears first.
+    """
+    data = load_workspaces_config()
+    workspaces = data.get("workspaces", {})
+    if not isinstance(workspaces, dict) or name not in workspaces:
+        return False
+    entry = workspaces[name]
+    if not isinstance(entry, dict):
+        return False
+
+    existing = entry.get("settings", {})
+    if not isinstance(existing, dict) or replace:
+        existing = {}
+
+    if effort is not None:
+        existing["effort"] = effort
+    if claude_model is not None:
+        existing["claude_model"] = claude_model
+    if codex_model is not None:
+        existing["codex_model"] = codex_model
+
+    existing = {k: v for k, v in existing.items() if k in _VALID_SETTING_FIELDS and v}
+    if existing:
+        entry["settings"] = existing
+    else:
+        entry.pop("settings", None)
+    workspaces[name] = entry
+    data["workspaces"] = workspaces
+    save_workspaces_config(data)
+    return True
+
+
+def clear_workspace_settings(name: str, *, field: str | None = None) -> bool:
+    """Remove a workspace override (whole block or a single field)."""
+    data = load_workspaces_config()
+    workspaces = data.get("workspaces", {})
+    if not isinstance(workspaces, dict) or name not in workspaces:
+        return False
+    entry = workspaces[name]
+    if not isinstance(entry, dict):
+        return False
+    settings = entry.get("settings")
+    if not isinstance(settings, dict):
+        return False
+    if field is None:
+        entry.pop("settings", None)
+    else:
+        if field not in settings:
+            return False
+        del settings[field]
+        if settings:
+            entry["settings"] = settings
+        else:
+            entry.pop("settings", None)
+    workspaces[name] = entry
+    data["workspaces"] = workspaces
+    save_workspaces_config(data)
     return True
 
 

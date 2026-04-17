@@ -76,8 +76,8 @@ class TestRead:
         assert "# Task:" in result
         # Tail: checkpoint section preserved
         assert "Checkpoint" in result or "test" in result
-        # Truncation marker present
-        assert "[...middle truncated...]" in result
+        # Truncation marker present (rewritten to include path hint).
+        assert "middle truncated" in result
 
     def test_returns_none_when_file_unreadable(self, tmp_path):
         """File permissions lost mid-task (NFS mount drop, chmod by agent)."""
@@ -105,10 +105,12 @@ class TestRead:
 
         result = task_memory.read("r1", str(tmp_path), max_chars=800)
         assert result is not None
-        assert "[...middle truncated...]" in result
-        head_part = result.split("[...middle truncated...]")[0]
-        # Head should end at a newline boundary (not mid-line)
-        assert head_part.rstrip().endswith("\n") or head_part.endswith("\n")
+        assert "middle truncated" in result
+        # Head should end at a newline boundary. The marker now starts
+        # with "[..." so split on that prefix; head_part is the pure
+        # pre-marker content and must end with a newline.
+        head_part = result.split("[...middle truncated")[0]
+        assert head_part.endswith("\n")
 
     def test_head_preserves_plan_section(self, tmp_path):
         task_memory.seed("r1", "implement feature", str(tmp_path))
@@ -584,3 +586,100 @@ class TestUpdateChangesSection:
         fp.write_text(content, encoding="utf-8")
         ok = task_memory.update_changes_section("r1", str(tmp_path), diff_stat="x")
         assert ok is False
+
+
+class TestSeedV3Template:
+    def test_v3_has_four_phase_sections(self, tmp_path):
+        task_memory.seed("r1", "Build widget", str(tmp_path), version="v3")
+        content = task_memory.read("r1", str(tmp_path))
+        assert content is not None
+        assert "## Plan" in content
+        assert "## Implementation Summary" in content
+        assert "## Verification" in content
+        assert "## Review" in content
+
+    def test_v3_omits_legacy_sections(self, tmp_path):
+        task_memory.seed("r1", "Build widget", str(tmp_path), version="v3")
+        content = task_memory.read("r1", str(tmp_path))
+        assert content is not None
+        # v3 drops Assessment, Codebase Context, Changes, Test Results,
+        # Review Notes in favor of the four phase sections.
+        assert "## Assessment" not in content
+        assert "## Codebase Context" not in content
+        assert "## Test Results" not in content
+        assert "## Review Notes" not in content
+
+    def test_v3_checkpoint_seeded_with_pipeline(self, tmp_path):
+        task_memory.seed("r1", "t", str(tmp_path), version="v3")
+        content = task_memory.read("r1", str(tmp_path))
+        assert content is not None
+        assert "Next: plan" in content
+        assert "Phase: plan" in content
+        assert "Pending: plan, implement, verify, review" in content
+
+    def test_default_version_keeps_legacy_layout(self, tmp_path):
+        task_memory.seed("r1", "task", str(tmp_path))
+        content = task_memory.read("r1", str(tmp_path))
+        assert content is not None
+        assert "## Assessment" in content
+
+
+class TestReadSection:
+    def test_returns_none_for_missing_file(self, tmp_path):
+        assert (
+            task_memory.read_section("missing", str(tmp_path), section="Plan") is None
+        )
+
+    def test_returns_none_for_missing_section(self, tmp_path):
+        task_memory.seed("r1", "task", str(tmp_path), version="v3")
+        assert (
+            task_memory.read_section("r1", str(tmp_path), section="Nonexistent") is None
+        )
+
+    def test_reads_placeholder_body(self, tmp_path):
+        task_memory.seed("r1", "task", str(tmp_path), version="v3")
+        body = task_memory.read_section("r1", str(tmp_path), section="Plan")
+        assert body is not None
+        assert task_memory.is_placeholder(body)
+
+    def test_is_placeholder_helper(self, tmp_path):
+        task_memory.seed("r1", "task", str(tmp_path), version="v3")
+        plan = task_memory.read_section("r1", str(tmp_path), section="Plan")
+        assert task_memory.is_placeholder(plan)
+        # Real content starting with '(' must NOT be misclassified.
+        assert not task_memory.is_placeholder(
+            "(Note: scope narrowed) Step 1: add route"
+        )
+        assert task_memory.is_placeholder(None)
+        assert task_memory.is_placeholder("")
+        assert task_memory.is_placeholder("   \n  ")
+
+    def test_reads_populated_section(self, tmp_path):
+        task_memory.seed("r1", "task", str(tmp_path), version="v3")
+        task_memory.update_section(
+            "r1",
+            str(tmp_path),
+            section="Plan",
+            content="1. Do X\n2. Do Y",
+        )
+        body = task_memory.read_section("r1", str(tmp_path), section="Plan")
+        assert body == "1. Do X\n2. Do Y"
+
+    def test_stops_at_next_heading(self, tmp_path):
+        task_memory.seed("r1", "task", str(tmp_path), version="v3")
+        task_memory.update_section(
+            "r1",
+            str(tmp_path),
+            section="Plan",
+            content="PLAN-BODY",
+        )
+        task_memory.update_section(
+            "r1",
+            str(tmp_path),
+            section="Implementation Summary",
+            content="IMPL-BODY",
+        )
+        plan = task_memory.read_section("r1", str(tmp_path), section="Plan")
+        assert plan is not None
+        assert "PLAN-BODY" in plan
+        assert "IMPL-BODY" not in plan

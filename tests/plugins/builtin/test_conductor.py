@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from leashd.plugins.builtin._conductor import (
     ConductorDecision,
+    _build_conductor_context,
     _build_system_prompt,
     _parse_response,
     decide_next_action,
@@ -205,6 +206,31 @@ class TestDecideNextAction:
             )
             assert "RuntimeError (no details)" in result.reason
 
+    async def test_passes_working_directory_as_cwd(self):
+        captured: dict[str, object] = {}
+
+        async def mock_eval(system: str, user: str, **kw):
+            captured["cwd"] = kw.get("cwd")
+            captured["user"] = user
+            return '{"action": "plan", "reason": "r", "instruction": "i"}'
+
+        with patch(
+            "leashd.plugins.builtin._conductor.evaluate_via_cli",
+            new_callable=AsyncMock,
+            side_effect=mock_eval,
+        ):
+            await decide_next_action(
+                task_description="Fix the thing",
+                memory_content=None,
+                last_output="",
+                current_phase="pending",
+                is_first_call=True,
+                working_directory="/Users/me/projects/myapp",
+            )
+        assert captured["cwd"] == "/Users/me/projects/myapp"
+        assert "WORKING DIRECTORY: /Users/me/projects/myapp" in captured["user"]
+        assert "PROJECT: myapp" in captured["user"]
+
     async def test_includes_memory_in_context(self):
         captured_args = {}
 
@@ -225,6 +251,55 @@ class TestDecideNextAction:
             )
             assert "Found auth module" in captured_args["user"]
             assert "done planning" in captured_args["user"]
+
+
+class TestBuildConductorContext:
+    def test_omits_working_directory_block_when_none(self):
+        ctx = _build_conductor_context(
+            task_description="Do X",
+            memory_content=None,
+            last_output="",
+            current_phase="pending",
+            retry_count=0,
+            max_retries=3,
+            is_first_call=True,
+        )
+        assert "WORKING DIRECTORY" not in ctx
+        assert "PROJECT:" not in ctx
+
+    def test_includes_working_directory_and_project_name(self):
+        ctx = _build_conductor_context(
+            task_description="Do X",
+            memory_content=None,
+            last_output="",
+            current_phase="pending",
+            retry_count=0,
+            max_retries=3,
+            is_first_call=True,
+            working_directory="/home/alice/src/coolapp",
+        )
+        assert "WORKING DIRECTORY: /home/alice/src/coolapp" in ctx
+        assert "PROJECT: coolapp" in ctx
+
+    def test_workspace_block_lists_all_repos_and_suppresses_single_project(self):
+        ctx = _build_conductor_context(
+            task_description="Do X",
+            memory_content=None,
+            last_output="",
+            current_phase="pending",
+            retry_count=0,
+            max_retries=3,
+            is_first_call=True,
+            working_directory="/home/alice/src/coolapp",
+            workspace_name="multi",
+            workspace_directories=["/home/alice/src/coolapp", "/home/alice/src/api"],
+        )
+        assert "WORKSPACE: multi" in ctx
+        assert "(primary, cwd)" in ctx
+        assert "/home/alice/src/api" in ctx
+        # single-project framing should not be present when scope is multi-repo
+        assert "PROJECT: coolapp" not in ctx
+        assert "scoped to this project" not in ctx
 
 
 class TestConductorDecisionModel:
@@ -355,3 +430,33 @@ class TestDecideNextActionWithProfile:
                 docker_compose_available=True,
             )
             assert "docker compose" in captured_system["prompt"].lower()
+
+    async def test_workspace_forwarded_as_add_dirs(self):
+        captured = {}
+
+        async def mock_eval(system: str, user: str, **kw):
+            captured["system"] = system
+            captured["user"] = user
+            captured["add_dirs"] = kw.get("add_dirs")
+            captured["cwd"] = kw.get("cwd")
+            return '{"action": "plan", "reason": "go", "instruction": ""}'
+
+        with patch(
+            "leashd.plugins.builtin._conductor.evaluate_via_cli",
+            new_callable=AsyncMock,
+            side_effect=mock_eval,
+        ):
+            await decide_next_action(
+                task_description="multi-repo work",
+                memory_content=None,
+                last_output="",
+                current_phase="pending",
+                is_first_call=True,
+                working_directory="/repo/a",
+                workspace_name="multi",
+                workspace_directories=["/repo/a", "/repo/b", "/repo/c"],
+            )
+            assert captured["cwd"] == "/repo/a"
+            assert list(captured["add_dirs"]) == ["/repo/a", "/repo/b", "/repo/c"]
+            assert "WORKSPACE: multi" in captured["user"]
+            assert "/repo/b" in captured["user"]

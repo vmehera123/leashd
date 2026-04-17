@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.15.0] - 2026-04-12
+
+- **added**: Task orchestrator v3 — linear `plan → implement → verify → review` pipeline with a fresh Claude Code session per phase, bridged via `.leashd/tasks/{run_id}.md`; opt-in via new `leashd task version {show,set}` CLI
+- **added**: Per-directory, per-workspace, and per-task overrides for `effort` and model — new `leashd model` subcommand, `/task --effort --model` flags, WebUI overrides panel, and `claude_model` now plumbed through `claude-cli` and `claude-code` runtimes
+- **fixed**: `/task` now scopes the agent to all workspace directories across every phase — `TASK_SUBMITTED` carries workspace info, SQLite persists it, and v2/v3 re-emit `--add-dir` on restart
+- **fixed**: Conductor no longer hallucinates unrelated codebases — prompt includes `WORKING DIRECTORY` / `PROJECT` and the `claude -p` subprocess runs in the task's working directory
+- **fixed**: `leashd task version set v3` now actually reaches the daemon (env-var bridge only read from `autonomous:`); v1 `/task --effort --model` flags no longer silently dropped; `/stop` and `/clear` no longer race with the conductor advance loop
+
 ## [0.14.0] - 2026-04-10
 
 - **fixed**: `/stop` silently re-spawned a fresh agent subprocess when cancellation killed the CLI mid-turn — all three runtimes (claude-cli, claude-code, codex) now track cancelled sessions and abort instead of retrying; also fixed `/stop` and `/clear` during `/task` racing with the conductor advance loop

@@ -16,6 +16,7 @@ class TestLeashdConfig:
         assert config.max_turns == 250
         assert config.web_max_turns == 300
         assert config.test_max_turns == 200
+        assert config.task_max_turns == 300
         assert config.max_concurrent_agents == 5
         assert config.agent_timeout_seconds == 3600
         assert config.storage_backend == "sqlite"
@@ -309,6 +310,21 @@ class TestEffectiveMaxTurns:
         )
         assert config.effective_max_turns("test") == 350
         assert config.effective_max_turns("default") == 100
+
+    def test_is_task_overrides_mode(self, tmp_path):
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            max_turns=100,
+            web_max_turns=400,
+            test_max_turns=200,
+            task_max_turns=300,
+        )
+        assert config.effective_max_turns("plan", is_task=True) == 300
+        assert config.effective_max_turns("auto", is_task=True) == 300
+        assert config.effective_max_turns("test", is_task=True) == 300
+        assert config.effective_max_turns("web", is_task=True) == 300
+        assert config.effective_max_turns("plan", is_task=False) == 100
+        assert config.effective_max_turns("test", is_task=False) == 200
 
 
 class TestEnsureleashdDir:

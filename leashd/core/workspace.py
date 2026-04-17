@@ -9,6 +9,8 @@ import structlog
 import yaml
 from pydantic import BaseModel, ConfigDict
 
+from leashd.core.runtime_settings import RuntimeSettings
+
 logger = structlog.get_logger()
 
 
@@ -18,6 +20,7 @@ class Workspace(BaseModel):
     name: str
     directories: list[Path]
     description: str = ""
+    settings: RuntimeSettings = RuntimeSettings()
 
     @property
     def primary_directory(self) -> Path:
@@ -93,9 +96,25 @@ def _parse_workspaces(
             name=name,
             directories=dirs,
             description=entry.get("description", ""),
+            settings=_parse_settings(entry.get("settings")),
         )
 
     if workspaces:
         logger.info("workspaces_loaded", count=len(workspaces), names=list(workspaces))
 
     return workspaces
+
+
+def _parse_settings(raw: Any) -> RuntimeSettings:
+    """Parse a raw ``settings:`` YAML mapping into a ``RuntimeSettings``.
+
+    Unknown / malformed entries fall back to an empty RuntimeSettings so
+    a typo in the YAML doesn't break workspace loading.
+    """
+    if not isinstance(raw, dict):
+        return RuntimeSettings()
+    try:
+        return RuntimeSettings.model_validate(raw)
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.warning("workspace_settings_invalid", error=str(exc))
+        return RuntimeSettings()

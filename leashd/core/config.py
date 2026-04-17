@@ -67,6 +67,7 @@ class LeashdConfig(BaseSettings):
     max_tool_calls: int = -1  # -1 = unlimited
     web_max_turns: int = 300
     test_max_turns: int = 200
+    task_max_turns: int = 300
     max_concurrent_agents: int = 5
     agent_timeout_seconds: int = 3600  # 60 minutes
     system_prompt: str | None = None
@@ -75,6 +76,9 @@ class LeashdConfig(BaseSettings):
     mcp_servers: dict[str, Any] = {}
     codebase_memory_enabled: bool = True
     effort: Literal["low", "medium", "high", "max"] | None = "medium"
+
+    # Claude agent settings (apply when agent_runtime="claude-cli" or "claude-code")
+    claude_model: str | None = None
 
     # Codex agent settings (only apply when agent_runtime="codex")
     codex_model: str | None = None
@@ -132,7 +136,7 @@ class LeashdConfig(BaseSettings):
 
     # Task orchestration
     task_orchestrator: bool = False
-    task_orchestrator_version: Literal["v1", "v2"] = "v2"
+    task_orchestrator_version: Literal["v1", "v2", "v3"] = "v2"
     task_max_retries: int = 3
     task_phase_timeout_seconds: int = 1800  # 30 minutes per phase
     task_conductor_model: str | None = None
@@ -140,6 +144,9 @@ class LeashdConfig(BaseSettings):
     task_memory_max_chars: int = 8000
     task_profile: str = "standalone"
     task_conductor_instructions: str = ""
+    # v3-specific retry caps — both default to 1 (same as hardcoded v2 behaviour)
+    task_verify_max_retries: int = 1
+    task_review_max_loopbacks: int = 1
 
     # Streaming
     streaming_enabled: bool = True
@@ -198,7 +205,14 @@ class LeashdConfig(BaseSettings):
             return [Path(p.strip()) for p in v.split(",") if p.strip()]
         return v
 
-    def effective_max_turns(self, mode: str) -> int:
-        """Return the turn limit for the given session mode."""
+    def effective_max_turns(self, mode: str, *, is_task: bool = False) -> int:
+        """Return the turn limit for the given session mode.
+
+        ``is_task=True`` applies the autonomous-task ceiling regardless of
+        mode, since task phases reuse mode names (plan/auto/test) that
+        also occur in interactive sessions with tighter limits.
+        """
+        if is_task:
+            return self.task_max_turns
         limits = {"web": self.web_max_turns, "test": self.test_max_turns}
         return limits.get(mode, self.max_turns)

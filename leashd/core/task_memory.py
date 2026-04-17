@@ -70,8 +70,66 @@ Next: pending | Retries: 0 | Blocked: none
 """
 
 
-def seed(run_id: str, task: str, working_dir: str) -> Path:
-    """Create the initial memory file for a task. Returns the file path."""
+_V3_PLACEHOLDER_TOKEN = "<!-- pending:"  # noqa: S105 (sentinel marker, not a secret)
+
+_TEMPLATE_V3 = """\
+# Task: {task_short}
+Run ID: {run_id} | Status: in-progress | Phase: plan
+Created: {created} | Updated: {created}
+
+## Task Description
+{task_full}
+
+## Plan
+<!-- pending:plan --> (written by plan phase)
+
+## Implementation Summary
+<!-- pending:implement --> (written by implement phase — files changed + key decisions)
+
+## Verification
+<!-- pending:verify --> (written by verify phase — env spinup, test results, healing iterations)
+
+## Review
+<!-- pending:review --> (written by review phase — classified OK / MINOR / CRITICAL)
+
+## Progress
+| # | Phase | Action | Result | Time |
+|---|-------|--------|--------|------|
+
+## Checkpoint
+Next: plan | Phase: plan | Retries: 0 | Blocked: none
+Completed: none
+Pending: plan, implement, verify, review
+"""
+
+
+def is_placeholder(body: str | None) -> bool:
+    """Detect the v3 template's `<!-- pending:<phase> -->` sentinel.
+
+    Returns True when *body* is missing, empty, or still starts with the
+    sentinel HTML comment.  Designed to replace fragile
+    ``body.startswith("(")`` checks that misclassified real content
+    starting with a parenthesis as placeholder.
+    """
+    if body is None:
+        return True
+    stripped = body.strip()
+    if not stripped:
+        return True
+    return stripped.startswith(_V3_PLACEHOLDER_TOKEN)
+
+
+def seed(run_id: str, task: str, working_dir: str, *, version: str = "v1") -> Path:
+    """Create the initial memory file for a task. Returns the file path.
+
+    ``version`` selects the template layout:
+
+    - ``"v1"`` / ``"v2"`` (default) — legacy 10-section layout used by the
+      conductor-driven orchestrator.
+    - ``"v3"`` — slim 4-phase layout (Plan / Implementation Summary /
+      Verification / Review) used by the linear Claude-Code-native
+      orchestrator.
+    """
     fp = path(run_id, working_dir)
     fp.parent.mkdir(parents=True, exist_ok=True)
 
@@ -79,21 +137,25 @@ def seed(run_id: str, task: str, working_dir: str) -> Path:
     if len(task) > 80:
         short += "..."
 
-    content = _TEMPLATE.format(
+    template = _TEMPLATE_V3 if version == "v3" else _TEMPLATE
+    content = template.format(
         task_short=short,
         run_id=run_id,
         created=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         task_full=task,
     )
     fp.write_text(content, encoding="utf-8")
-    logger.info("task_memory_seeded", run_id=run_id, path=str(fp))
+    logger.info("task_memory_seeded", run_id=run_id, path=str(fp), version=version)
     return fp
 
 
 _PROGRESS_RE = re.compile(r"^##\s+Progress\s*$", re.MULTILINE)
 _PROGRESS_ROW_RE = re.compile(r"^\|\s*(\d+)\s*\|", re.MULTILINE)
 _NEXT_SECTION_RE = re.compile(r"^##\s+", re.MULTILINE)
-_MASK_MARKER = "[...middle truncated...]"
+_MASK_MARKER_TEMPLATE = (
+    "[...middle truncated — original {original} chars; head+tail preserved. "
+    "Use the Read tool on {path} if you need the full file...]"
+)
 
 
 def append_progress_row(
@@ -171,7 +233,15 @@ def read(run_id: str, working_dir: str, *, max_chars: int = 8000) -> str | None:
     if len(text) <= max_chars:
         return text
 
-    marker_cost = len(_MASK_MARKER) + 2  # two newlines around marker
+    logger.warning(
+        "task_memory_truncated",
+        run_id=run_id,
+        original_chars=len(text),
+        kept_chars=max_chars,
+        path=str(fp),
+    )
+    mask_marker = _MASK_MARKER_TEMPLATE.format(original=len(text), path=str(fp))
+    marker_cost = len(mask_marker) + 2  # two newlines around marker
     head_budget = int((max_chars - marker_cost) * 0.6)
     tail_budget = max_chars - marker_cost - head_budget
 
@@ -193,7 +263,7 @@ def read(run_id: str, working_dir: str, *, max_chars: int = 8000) -> str | None:
     if nl != -1 and nl < tail_budget // 2:
         tail = tail[nl + 1 :]
 
-    return f"{head}\n{_MASK_MARKER}\n{tail}"
+    return f"{head}\n{mask_marker}\n{tail}"
 
 
 _CHECKPOINT_RE = re.compile(
@@ -314,6 +384,33 @@ def _section_re(name: str) -> re.Pattern[str]:
             rf"^##\s+{re.escape(name)}\s*$", re.MULTILINE
         )
     return _SECTION_RE_CACHE[name]
+
+
+def read_section(run_id: str, working_dir: str, *, section: str) -> str | None:
+    """Return the body of a ``## <section>`` block, or ``None`` if absent.
+
+    Body is the text between the section heading and the next ``## ``
+    heading (or end of file).  Strips leading/trailing whitespace so
+    callers can check ``bool(text)`` to detect placeholder emptiness.
+    """
+    fp = path(run_id, working_dir)
+    if not fp.is_file():
+        return None
+
+    try:
+        text = fp.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+    heading = _section_re(section)
+    match = heading.search(text)
+    if not match:
+        return None
+
+    after = text[match.end() :]
+    next_heading = _NEXT_SECTION_RE.search(after)
+    body = after[: next_heading.start()] if next_heading else after
+    return body.strip()
 
 
 def update_section(

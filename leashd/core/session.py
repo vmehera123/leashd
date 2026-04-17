@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 from pydantic import BaseModel, Field
@@ -35,6 +35,9 @@ class Session(BaseModel):
     workspace_name: str | None = None
     workspace_directories: list[str] = Field(default_factory=list)
     task_run_id: str | None = None
+    # Per-task RuntimeSettings overlay (populated by the task orchestrator
+    # while a task phase is running; engine reads it at dispatch time).
+    task_settings_override: dict[str, Any] | None = None
     browser_fresh: bool = False
     browser_backend: str | None = None
 
@@ -140,6 +143,7 @@ class SessionManager:
         session.mode_instruction = None
         session.plan_origin = None
         session.task_run_id = None
+        session.task_settings_override = None
         session.browser_fresh = False
         session.browser_backend = None
         session.created_at = datetime.now(timezone.utc)
@@ -156,6 +160,58 @@ class SessionManager:
             session_id=session.session_id,
             working_directory=session.working_directory,
         )
+
+    async def begin_phase_session(
+        self,
+        user_id: str,
+        chat_id: str,
+        *,
+        phase: str,
+        task_run_id: str,
+        mode: Literal["plan", "auto", "test", "default"],
+        mode_instruction: str | None = None,
+        settings_override: dict[str, Any] | None = None,
+    ) -> Session:
+        """Force a fresh Claude Code session for a task-orchestrator phase.
+
+        Mints a new ``session_id``, clears the resume token, and resets
+        message count + cost counters so the next agent invocation starts
+        a brand-new Claude Code conversation.  Preserves identity fields
+        (``working_directory``, ``workspace_name``, ``workspace_directories``)
+        so CLAUDE.md loading and MCP discovery keep working.
+
+        When ``mode`` is ``"plan"`` this also sets ``plan_origin = "task"``
+        so the engine routes ``ExitPlanMode`` to the AutoPlanReviewer.
+        """
+        key = self._key(user_id, chat_id)
+        session = self._sessions.get(key)
+        if not session:
+            raise RuntimeError(
+                f"begin_phase_session requires an existing session for {user_id}:{chat_id}"
+            )
+        session.session_id = str(uuid.uuid4())
+        session.agent_resume_token = None
+        session.message_count = 0
+        session.total_cost = 0.0
+        session.mode = mode
+        session.mode_instruction = mode_instruction
+        session.plan_origin = "task" if mode == "plan" else None
+        session.task_run_id = task_run_id
+        session.task_settings_override = settings_override
+        session.last_used = datetime.now(timezone.utc)
+        session.is_active = True
+        if self._store:
+            await self._store.save(session)
+        logger.info(
+            "session_phase_begun",
+            user_id=user_id,
+            chat_id=chat_id,
+            session_id=session.session_id,
+            phase=phase,
+            mode=mode,
+            task_run_id=task_run_id,
+        )
+        return session
 
     async def deactivate(self, user_id: str, chat_id: str) -> None:
         key = self._key(user_id, chat_id)

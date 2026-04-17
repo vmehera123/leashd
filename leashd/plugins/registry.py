@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from leashd.plugins.builtin.auto_plan_reviewer import AutoPlanReviewer
     from leashd.plugins.builtin.autonomous_loop import AutonomousLoop
     from leashd.plugins.builtin.task_orchestrator import TaskOrchestrator
+    from leashd.plugins.builtin.task_v3 import TaskV3Orchestrator
 
 logger = structlog.get_logger()
 
@@ -77,7 +78,9 @@ class BuiltinPlugins(BaseModel):
     auto_approver: AutoApprover | None
     auto_plan_reviewer: AutoPlanReviewer | None
     autonomous_loop: AutonomousLoop | None
-    task_orchestrator: TaskOrchestrator | AgenticOrchestrator | None
+    task_orchestrator: (
+        TaskOrchestrator | AgenticOrchestrator | TaskV3Orchestrator | None
+    )
 
 
 def create_builtin_plugins(
@@ -97,6 +100,9 @@ def create_builtin_plugins(
     from leashd.plugins.builtin.browser_tools import BrowserToolsPlugin
     from leashd.plugins.builtin.merge_resolver import MergeResolverPlugin
     from leashd.plugins.builtin.task_orchestrator import TaskOrchestrator
+    from leashd.plugins.builtin.task_v3 import (
+        TaskV3Orchestrator,
+    )
     from leashd.plugins.builtin.test_runner import TestRunnerPlugin
     from leashd.plugins.builtin.web_agent import WebAgentPlugin
     from leashd.plugins.builtin.web_interaction_logger import WebInteractionLogger
@@ -153,9 +159,29 @@ def create_builtin_plugins(
             auto_pr=config.auto_pr,
         )
 
-    task_orchestrator: TaskOrchestrator | AgenticOrchestrator | None = None
+    task_orchestrator: (
+        TaskOrchestrator | AgenticOrchestrator | TaskV3Orchestrator | None
+    ) = None
     if config.task_orchestrator:
-        if config.task_orchestrator_version == "v2":
+        if config.task_orchestrator_version == "v3":
+            from leashd.core.task_profile import resolve_profile
+            from leashd.plugins.builtin.task_v3 import TaskV3Orchestrator
+
+            profile = resolve_profile(config.task_profile)
+            task_orchestrator = TaskV3Orchestrator(
+                connector=connector,
+                db_path=session_db_path,
+                profile=profile,
+                phase_timeout_seconds=config.task_phase_timeout_seconds,
+                verify_max_retries=config.task_verify_max_retries,
+                review_max_loopbacks=config.task_review_max_loopbacks,
+            )
+            logger.info(
+                "task_v3_orchestrator_enabled",
+                task_profile=config.task_profile,
+                phase_timeout_seconds=config.task_phase_timeout_seconds,
+            )
+        elif config.task_orchestrator_version == "v2":
             from leashd.core.task_profile import resolve_profile
 
             profile = resolve_profile(config.task_profile)

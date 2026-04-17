@@ -330,6 +330,25 @@ class TestCreateBuiltinPlugins:
         assert isinstance(result.task_orchestrator, AgenticOrchestrator)
         assert result.registry.get("task_orchestrator") is result.task_orchestrator
 
+    def test_task_orchestrator_v3_when_configured(self, tmp_path):
+        from leashd.plugins.builtin.task_v3 import TaskV3Orchestrator
+
+        audit = AuditLogger(tmp_path / "audit.jsonl")
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            task_orchestrator=True,
+            task_orchestrator_version="v3",
+        )
+        result = create_builtin_plugins(
+            audit=audit,
+            config=config,
+            connector=None,
+            session_db_path=str(tmp_path / "s.db"),
+        )
+        assert result.task_orchestrator is not None
+        assert isinstance(result.task_orchestrator, TaskV3Orchestrator)
+        assert result.registry.get("task_orchestrator") is result.task_orchestrator
+
     def test_autonomous_loop_when_enabled(self, tmp_path):
         audit = AuditLogger(tmp_path / "audit.jsonl")
         config = LeashdConfig(approved_directories=[tmp_path], autonomous_loop=True)

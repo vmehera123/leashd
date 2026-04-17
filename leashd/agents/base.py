@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 
     from leashd.agents.capabilities import AgentCapabilities
     from leashd.connectors.base import Attachment
+    from leashd.core.runtime_settings import RuntimeSettings
     from leashd.core.session import Session
 
 
@@ -47,6 +48,7 @@ class BaseAgent(Protocol):
         | None = None,
         on_retry: Callable[[], Coroutine[Any, Any, None]] | None = None,
         attachments: list[Attachment] | None = None,
+        settings: RuntimeSettings | None = None,
     ) -> AgentResponse: ...
 
     @property
