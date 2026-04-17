@@ -244,6 +244,29 @@ class TestBuildCommand:
         idx = cmd.index("--append-system-prompt")
         assert PLAN_MODE_INSTRUCTION in cmd[idx + 1]
 
+    def test_plan_mode_instruction_skipped_for_task_session(self, agent, session):
+        # v3 task orchestrator drives plan-phase sessions and manages
+        # ExitPlanMode itself — PLAN_MODE_INSTRUCTION would contradict it.
+        session.mode = "plan"
+        session.task_run_id = "abc123"
+        cmd = agent._build_command(session)
+        if "--append-system-prompt" in cmd:
+            idx = cmd.index("--append-system-prompt")
+            assert PLAN_MODE_INSTRUCTION not in cmd[idx + 1]
+
+    def test_permission_mode_downgraded_to_default_for_task_session(
+        self, agent, session
+    ):
+        # Defense in depth: even if something mis-mutates session.mode to
+        # "plan" during a v3 implement/verify/review phase (bug producing
+        # "Implement phase produced no summary"), the Claude CLI must not
+        # be launched with --permission-mode plan when task_run_id is set.
+        session.mode = "plan"
+        session.task_run_id = "abc123"
+        cmd = agent._build_command(session)
+        idx = cmd.index("--permission-mode")
+        assert cmd[idx + 1] == "default"
+
     def test_system_prompt_auto_mode(self, agent, session):
         session.mode = "auto"
         cmd = agent._build_command(session)
@@ -700,3 +723,458 @@ class TestCancelDuringRetry:
             await agent.execute("hi", session)
 
         assert session.session_id not in agent._cancelled_sessions
+
+
+class TestHandlePermissionRequest:
+    """Exercise _handle_permission_request — the SDK permission-callback gate
+    that mediates tool calls between the CLI subprocess and the safety pipeline."""
+
+    @staticmethod
+    def _capture_sink():
+        """Return (mock_stdin, lock, captured) where each write is appended."""
+        import asyncio as _asyncio
+        import json as _json
+
+        captured: list[dict] = []
+        stdin = MagicMock()
+
+        async def _drain():
+            return None
+
+        def _write(data):
+            # data is bytes ending in \n — parse back to dict for assertions.
+            captured.append(_json.loads(data.decode().rstrip("\n")))
+
+        stdin.write = _write
+        stdin.drain = _drain
+        return stdin, _asyncio.Lock(), captured
+
+    async def test_allow_forwards_updated_input(self, agent):
+        from leashd.agents.types import PermissionAllow
+
+        stdin, lock, captured = self._capture_sink()
+
+        async def can_use_tool(tool_name, tool_input, _signal):
+            # Strip the dangerous `--no-verify` flag before allowing.
+            safe = {
+                k: v
+                for k, v in tool_input.items()
+                if not (isinstance(v, str) and "--no-verify" in v)
+            }
+            return PermissionAllow(updated_input=safe)
+
+        tools_used: list[str] = []
+        agent_stack: list[dict] = []
+
+        await agent._handle_permission_request(
+            request={
+                "request_id": "req-1",
+                "request": {
+                    "tool_name": "Bash",
+                    "input": {"command": "git commit --no-verify -m x"},
+                },
+            },
+            stdin=stdin,
+            lock=lock,
+            can_use_tool=can_use_tool,
+            on_tool_activity=None,
+            tools_used=tools_used,
+            agent_stack=agent_stack,
+        )
+
+        assert len(captured) == 1
+        resp = captured[0]
+        assert resp["type"] == "control_response"
+        assert resp["response"]["subtype"] == "success"
+        assert resp["response"]["request_id"] == "req-1"
+        inner = resp["response"]["response"]
+        assert inner["behavior"] == "allow"
+        # Input was rewritten — the dangerous flag is gone.
+        assert "--no-verify" not in str(inner["updatedInput"])
+        assert tools_used == ["Bash"]
+        # Non-Agent tool — stack untouched.
+        assert agent_stack == []
+
+    async def test_deny_forwards_message(self, agent):
+        from leashd.agents.types import PermissionDeny
+
+        stdin, lock, captured = self._capture_sink()
+
+        async def can_use_tool(tool_name, tool_input, _signal):
+            return PermissionDeny(message="Policy blocks credential reads")
+
+        tools_used: list[str] = []
+
+        await agent._handle_permission_request(
+            request={
+                "request_id": "req-2",
+                "request": {
+                    "tool_name": "Read",
+                    "input": {"file_path": "/etc/shadow"},
+                },
+            },
+            stdin=stdin,
+            lock=lock,
+            can_use_tool=can_use_tool,
+            on_tool_activity=None,
+            tools_used=tools_used,
+            agent_stack=[],
+        )
+
+        assert len(captured) == 1
+        inner = captured[0]["response"]["response"]
+        assert inner["behavior"] == "deny"
+        assert inner["message"] == "Policy blocks credential reads"
+        # A denied tool must NOT be recorded as used.
+        assert tools_used == []
+
+    async def test_agent_tool_allow_pushes_agent_stack(self, agent):
+        from leashd.agents.types import PermissionAllow
+
+        stdin, lock, captured = self._capture_sink()
+
+        async def can_use_tool(tool_name, tool_input, _signal):
+            return PermissionAllow(updated_input=tool_input)
+
+        tools_used: list[str] = []
+        agent_stack: list[dict] = []
+
+        await agent._handle_permission_request(
+            request={
+                "request_id": "req-3",
+                "request": {
+                    "tool_name": "Agent",
+                    "input": {
+                        "subagent_type": "Explore",
+                        "description": "look at logs",
+                    },
+                },
+            },
+            stdin=stdin,
+            lock=lock,
+            can_use_tool=can_use_tool,
+            on_tool_activity=None,
+            tools_used=tools_used,
+            agent_stack=agent_stack,
+        )
+
+        # After allow, the Agent must be pushed onto the stack so later
+        # ToolActivity events can be attributed to it.
+        assert agent_stack == [{"name": "Explore"}]
+        assert tools_used == ["Agent"]
+        # The response still signals "allow" with the (unmodified) input.
+        inner = captured[0]["response"]["response"]
+        assert inner["behavior"] == "allow"
+
+    async def test_agent_tool_falls_back_to_description_when_no_subagent_type(
+        self, agent
+    ):
+        from leashd.agents.types import PermissionAllow
+
+        stdin, lock, _captured = self._capture_sink()
+
+        async def can_use_tool(tool_name, tool_input, _signal):
+            return PermissionAllow(updated_input=tool_input)
+
+        agent_stack: list[dict] = []
+        await agent._handle_permission_request(
+            request={
+                "request_id": "req-4",
+                "request": {
+                    "tool_name": "Agent",
+                    "input": {"description": "scan files"},
+                },
+            },
+            stdin=stdin,
+            lock=lock,
+            can_use_tool=can_use_tool,
+            on_tool_activity=None,
+            tools_used=[],
+            agent_stack=agent_stack,
+        )
+        assert agent_stack == [{"name": "scan files"}]
+
+    async def test_callback_exception_sends_error_subtype(self, agent):
+        stdin, lock, captured = self._capture_sink()
+
+        async def can_use_tool(tool_name, tool_input, _signal):
+            raise RuntimeError("approval service offline")
+
+        await agent._handle_permission_request(
+            request={
+                "request_id": "req-5",
+                "request": {"tool_name": "Bash", "input": {"command": "ls"}},
+            },
+            stdin=stdin,
+            lock=lock,
+            can_use_tool=can_use_tool,
+            on_tool_activity=None,
+            tools_used=[],
+            agent_stack=[],
+        )
+
+        assert len(captured) == 1
+        resp = captured[0]["response"]
+        assert resp["subtype"] == "error"
+        assert resp["request_id"] == "req-5"
+        assert "approval service offline" in resp["error"]
+
+    async def test_unexpected_result_type_allows_with_original_input(self, agent):
+        """Defensive branch: if can_use_tool returns something that is neither
+        PermissionAllow nor PermissionDeny (e.g. legacy caller), the handler
+        falls back to allow with the original input and records the tool."""
+        stdin, lock, captured = self._capture_sink()
+
+        async def can_use_tool(tool_name, tool_input, _signal):
+            return "yolo"  # not a Permission* type
+
+        tools_used: list[str] = []
+        await agent._handle_permission_request(
+            request={
+                "request_id": "req-6",
+                "request": {
+                    "tool_name": "Bash",
+                    "input": {"command": "echo hi"},
+                },
+            },
+            stdin=stdin,
+            lock=lock,
+            can_use_tool=can_use_tool,
+            on_tool_activity=None,
+            tools_used=tools_used,
+            agent_stack=[],
+        )
+
+        inner = captured[0]["response"]["response"]
+        assert inner["behavior"] == "allow"
+        assert inner["updatedInput"] == {"command": "echo hi"}
+        assert tools_used == ["Bash"]
+
+    async def test_tool_activity_callback_invoked_before_permission_check(self, agent):
+        from leashd.agents.types import PermissionAllow
+
+        stdin, lock, _captured = self._capture_sink()
+        order: list[str] = []
+
+        async def on_tool_activity(activity):
+            order.append(f"activity:{activity.tool_name}")
+
+        async def can_use_tool(tool_name, tool_input, _signal):
+            order.append("permission")
+            return PermissionAllow(updated_input=tool_input)
+
+        await agent._handle_permission_request(
+            request={
+                "request_id": "req-7",
+                "request": {
+                    "tool_name": "Bash",
+                    "input": {"command": "uv run pytest"},
+                },
+            },
+            stdin=stdin,
+            lock=lock,
+            can_use_tool=can_use_tool,
+            on_tool_activity=on_tool_activity,
+            tools_used=[],
+            agent_stack=[],
+        )
+
+        assert order == ["activity:Bash", "permission"]
+
+    async def test_tool_activity_attributes_to_current_agent_when_nested(self, agent):
+        from leashd.agents.types import PermissionAllow
+
+        stdin, lock, _captured = self._capture_sink()
+        seen_agents: list[str | None] = []
+
+        async def on_tool_activity(activity):
+            seen_agents.append(activity.agent_name)
+
+        async def can_use_tool(tool_name, tool_input, _signal):
+            return PermissionAllow(updated_input=tool_input)
+
+        await agent._handle_permission_request(
+            request={
+                "request_id": "req-8",
+                "request": {"tool_name": "Grep", "input": {"pattern": "TODO"}},
+            },
+            stdin=stdin,
+            lock=lock,
+            can_use_tool=can_use_tool,
+            on_tool_activity=on_tool_activity,
+            tools_used=[],
+            agent_stack=[{"name": "Explore"}],
+        )
+
+        assert seen_agents == ["Explore"]
+
+
+class TestRunWithRetry:
+    """Exercise the resume-token recovery and error retry branches in
+    _run_with_retry. These paths catch real CLI failure modes — zero-turn
+    ghost resumes, resume-token corruption, retryable stream errors."""
+
+    async def test_zero_turns_clears_resume_and_retries_fresh(self, agent, session):
+        """If the CLI returns num_turns=0 on the first attempt with a resume
+        token set, the token must be cleared and a fresh command rebuilt."""
+        from leashd.agents.base import AgentResponse
+
+        session.agent_resume_token = "stale-token-xyz"
+        attempts: list[str | None] = []
+
+        async def fake_run_once(cmd, prompt, session, stderr_buf, **kwargs):
+            attempts.append(session.agent_resume_token)
+            if len(attempts) == 1:
+                # First call: zero turns — means resume token is stale.
+                return AgentResponse(
+                    content="",
+                    session_id=None,
+                    cost=0.0,
+                    duration_ms=1,
+                    num_turns=0,
+                    tools_used=[],
+                    is_error=False,
+                )
+            # Second call: token cleared, fresh run succeeds.
+            return AgentResponse(
+                content="ok",
+                session_id="new",
+                cost=0.01,
+                duration_ms=2,
+                num_turns=3,
+                tools_used=[],
+                is_error=False,
+            )
+
+        with patch.object(agent, "_run_once", side_effect=fake_run_once):
+            result = await agent._run_with_retry(
+                cmd=["claude", "--resume", "stale-token-xyz"],
+                prompt="hi",
+                session=session,
+                can_use_tool=None,
+                on_text_chunk=None,
+                on_tool_activity=None,
+                on_retry=None,
+                attachments=None,
+                settings=None,
+            )
+
+        assert attempts[0] == "stale-token-xyz"
+        assert attempts[1] is None  # token cleared before second attempt
+        assert result.content == "ok"
+        assert session.agent_resume_token is None
+
+    async def test_resume_failed_exception_retries_fresh(self, agent, session):
+        """When an exception fires while a resume token is set, the handler
+        must clear the token and retry once from scratch before giving up."""
+        from leashd.agents.base import AgentResponse
+
+        session.agent_resume_token = "bad-token"
+        call_count = 0
+
+        async def fake_run_once(cmd, prompt, session, stderr_buf, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("stream died — token invalid")
+            return AgentResponse(
+                content="recovered",
+                session_id="s",
+                cost=0.0,
+                duration_ms=1,
+                num_turns=1,
+                tools_used=[],
+                is_error=False,
+            )
+
+        with patch.object(agent, "_run_once", side_effect=fake_run_once):
+            result = await agent._run_with_retry(
+                cmd=["claude"],
+                prompt="hi",
+                session=session,
+                can_use_tool=None,
+                on_text_chunk=None,
+                on_tool_activity=None,
+                on_retry=None,
+                attachments=None,
+                settings=None,
+            )
+
+        assert call_count == 2
+        assert session.agent_resume_token is None
+        assert result.content == "recovered"
+
+    async def test_retryable_stream_error_backs_off_and_retries(self, agent, session):
+        """A retryable error (e.g. rate limit) that isn't a resume-token issue
+        should trigger backoff and a fresh attempt, not a token clear."""
+        from leashd.agents.base import AgentResponse
+
+        session.agent_resume_token = None
+        call_count = 0
+
+        async def fake_run_once(cmd, prompt, session, stderr_buf, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("HTTP 529 overloaded")
+            return AgentResponse(
+                content="later",
+                session_id="s",
+                cost=0.0,
+                duration_ms=1,
+                num_turns=1,
+                tools_used=[],
+                is_error=False,
+            )
+
+        with (
+            patch.object(agent, "_run_once", side_effect=fake_run_once),
+            # Short-circuit backoff sleeps for fast tests.
+            patch(
+                "leashd.agents.runtimes.claude_cli.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await agent._run_with_retry(
+                cmd=["claude"],
+                prompt="hi",
+                session=session,
+                can_use_tool=None,
+                on_text_chunk=None,
+                on_tool_activity=None,
+                on_retry=None,
+                attachments=None,
+                settings=None,
+            )
+
+        assert call_count == 2
+        assert result.content == "later"
+
+    async def test_cancelled_during_run_does_not_clear_resume(self, agent, session):
+        """If the user cancels mid-run, _run_with_retry must raise
+        AgentError('cancelled') — never swallow the cancel into a retry."""
+        session.agent_resume_token = "some-token"
+
+        async def fake_run_once(cmd, prompt, session, stderr_buf, **kwargs):
+            agent._cancelled_sessions.add(session.session_id)
+            raise RuntimeError("CLI exited 143")
+
+        with (
+            patch.object(agent, "_run_once", side_effect=fake_run_once),
+            pytest.raises(AgentError, match="cancelled"),
+        ):
+            await agent._run_with_retry(
+                cmd=["claude"],
+                prompt="hi",
+                session=session,
+                can_use_tool=None,
+                on_text_chunk=None,
+                on_tool_activity=None,
+                on_retry=None,
+                attachments=None,
+                settings=None,
+            )
+
+        # Resume token must NOT have been cleared on a user cancel —
+        # the next real run can still resume.
+        assert session.agent_resume_token == "some-token"

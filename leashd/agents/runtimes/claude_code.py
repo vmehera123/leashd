@@ -208,13 +208,16 @@ class ClaudeCodeAgent(BaseAgent):
         can_use_tool: Callable[..., Any] | None,
         settings: RuntimeSettings | None = None,
     ) -> ClaudeAgentOptions:
+        perm_mode = SESSION_TO_PERMISSION_MODE.get(session.mode, "default")
+        if session.task_run_id and perm_mode == "plan":
+            perm_mode = "default"
         opts = ClaudeAgentOptions(
             cwd=session.working_directory,
             max_turns=self._config.effective_max_turns(
                 session.mode, is_task=bool(session.task_run_id)
             ),
             can_use_tool=can_use_tool,
-            permission_mode=SESSION_TO_PERMISSION_MODE.get(session.mode, "default"),
+            permission_mode=perm_mode,
             setting_sources=["project", "user"],
             max_buffer_size=MAX_BUFFER_SIZE,
             include_partial_messages=True,
@@ -228,7 +231,7 @@ class ClaudeCodeAgent(BaseAgent):
         if model:
             opts.model = model
         system_prompt = self._config.system_prompt or ""
-        if session.mode == "plan":
+        if session.mode == "plan" and session.task_run_id is None:
             system_prompt = prepend_instruction(PLAN_MODE_INSTRUCTION, system_prompt)
         elif session.mode in ("auto", "edit"):
             system_prompt = prepend_instruction(AUTO_MODE_INSTRUCTION, system_prompt)

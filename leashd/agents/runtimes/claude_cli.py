@@ -125,7 +125,7 @@ class ClaudeCliAgent(BaseAgent):
         ]
 
         system_prompt = self._config.system_prompt or ""
-        if session.mode == "plan":
+        if session.mode == "plan" and session.task_run_id is None:
             system_prompt = prepend_instruction(PLAN_MODE_INSTRUCTION, system_prompt)
         elif session.mode in ("auto", "edit"):
             system_prompt = prepend_instruction(AUTO_MODE_INSTRUCTION, system_prompt)
@@ -147,6 +147,8 @@ class ClaudeCliAgent(BaseAgent):
             cmd.extend(["--append-system-prompt", system_prompt])
 
         perm_mode = SESSION_TO_PERMISSION_MODE.get(session.mode, "default")
+        if session.task_run_id and perm_mode == "plan":
+            perm_mode = "default"
         cmd.extend(["--permission-mode", perm_mode])
 
         cmd.extend(

@@ -185,14 +185,21 @@ class CodexAgent:
     def update_config(self, config: LeashdConfig) -> None:
         self._config = config
 
-    def _resolve_sandbox(self, mode: str) -> str:
+    def _resolve_sandbox(self, mode: str, *, task_driven: bool = False) -> str:
         if self._config.codex_sandbox:
             return self._config.codex_sandbox
+        # v3/v2 task phases must never get the plan-mode read-only sandbox
+        # even if session.mode somehow becomes "plan" outside the plan phase.
+        # The orchestrator gates plan adequacy itself; subprocess can write.
+        if task_driven and mode == "plan":
+            return "workspace-write"
         return _SANDBOX_MAP.get(mode, "workspace-write")
 
-    def _resolve_approval(self, mode: str) -> str:
+    def _resolve_approval(self, mode: str, *, task_driven: bool = False) -> str:
         if self._config.codex_approval:
             return self._config.codex_approval
+        if task_driven and mode == "plan":
+            return "never"
         return _APPROVAL_MAP.get(mode, "on-request")
 
     def _resolve_model(self, settings: RuntimeSettings | None = None) -> str:
@@ -205,8 +212,9 @@ class CodexAgent:
         from codex_sdk import ThreadOptions
 
         model = self._resolve_model(settings)
-        sandbox = self._resolve_sandbox(session.mode)
-        approval = self._resolve_approval(session.mode)
+        task_driven = bool(session.task_run_id)
+        sandbox = self._resolve_sandbox(session.mode, task_driven=task_driven)
+        approval = self._resolve_approval(session.mode, task_driven=task_driven)
 
         opts = ThreadOptions(
             model=model,
@@ -244,7 +252,7 @@ class CodexAgent:
             f"Session mode: {session.mode}",
         ]
 
-        if session.mode == "plan":
+        if session.mode == "plan" and session.task_run_id is None:
             lines.append(f"\n{_PLAN_MODE_INSTRUCTION}")
         elif session.mode in ("auto", "edit"):
             lines.append(f"\n{_AUTO_MODE_INSTRUCTION}")

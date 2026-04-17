@@ -661,3 +661,295 @@ class TestConfigPutEndpoint:
         )
         assert resp.status_code == 400
         assert "max_tool_calls" in resp.json()["reason"]
+
+
+class TestPutDirectorySettings:
+    def test_happy_path_calls_setter_and_signals_reload(self, client):
+        with (
+            patch("leashd.web.routes.set_directory_setting") as mock_set,
+            patch("leashd.web.routes.signal_reload", return_value=True) as mock_reload,
+        ):
+            resp = client.put(
+                "/api/config/directory-settings",
+                headers=_AUTH_HEADER,
+                json={"path": "/tmp/proj", "effort": "high"},
+            )
+        assert resp.status_code == 200
+        assert resp.json() == {"success": True}
+        mock_set.assert_called_once_with(
+            "/tmp/proj",
+            effort="high",
+            claude_model=None,
+            codex_model=None,
+            replace=False,
+        )
+        mock_reload.assert_called_once()
+
+    def test_replace_true_forwards_flag(self, client):
+        with (
+            patch("leashd.web.routes.set_directory_setting") as mock_set,
+            patch("leashd.web.routes.signal_reload", return_value=True),
+        ):
+            client.put(
+                "/api/config/directory-settings",
+                headers=_AUTH_HEADER,
+                json={
+                    "path": "/tmp/proj",
+                    "claude_model": "claude-sonnet-4-6",
+                    "replace": True,
+                },
+            )
+        # The endpoint must coerce to bool and pass through.
+        kwargs = mock_set.call_args.kwargs
+        assert kwargs["replace"] is True
+        assert kwargs["claude_model"] == "claude-sonnet-4-6"
+
+    def test_rejects_invalid_effort(self, client):
+        resp = client.put(
+            "/api/config/directory-settings",
+            headers=_AUTH_HEADER,
+            json={"path": "/tmp/proj", "effort": "crazy"},
+        )
+        assert resp.status_code == 400
+        body = resp.json()
+        assert body["success"] is False
+        assert "effort" in body["reason"]
+
+    def test_rejects_non_string_claude_model(self, client):
+        resp = client.put(
+            "/api/config/directory-settings",
+            headers=_AUTH_HEADER,
+            json={"path": "/tmp/proj", "claude_model": 123},
+        )
+        assert resp.status_code == 400
+        assert "claude_model" in resp.json()["reason"]
+
+    def test_missing_path_returns_400(self, client):
+        resp = client.put(
+            "/api/config/directory-settings",
+            headers=_AUTH_HEADER,
+            json={"effort": "low"},
+        )
+        assert resp.status_code == 400
+        assert resp.json()["reason"] == "path is required"
+
+    def test_empty_path_returns_400(self, client):
+        resp = client.put(
+            "/api/config/directory-settings",
+            headers=_AUTH_HEADER,
+            json={"path": "", "effort": "low"},
+        )
+        assert resp.status_code == 400
+
+    def test_requires_auth(self, client):
+        resp = client.put(
+            "/api/config/directory-settings",
+            json={"path": "/tmp/proj", "effort": "low"},
+        )
+        assert resp.status_code == 401
+        assert resp.json()["success"] is False
+
+
+class TestDeleteDirectorySettings:
+    def test_full_entry_delete_returns_store_status(self, client):
+        with (
+            patch(
+                "leashd.web.routes.clear_directory_setting", return_value=True
+            ) as mock_clear,
+            patch("leashd.web.routes.signal_reload", return_value=True),
+        ):
+            resp = client.request(
+                "DELETE",
+                "/api/config/directory-settings",
+                headers=_AUTH_HEADER,
+                json={"path": "/tmp/proj"},
+            )
+        assert resp.status_code == 200
+        assert resp.json() == {"success": True}
+        mock_clear.assert_called_once_with("/tmp/proj", field=None)
+
+    def test_single_field_delete(self, client):
+        with (
+            patch(
+                "leashd.web.routes.clear_directory_setting", return_value=True
+            ) as mock_clear,
+            patch("leashd.web.routes.signal_reload", return_value=True),
+        ):
+            client.request(
+                "DELETE",
+                "/api/config/directory-settings",
+                headers=_AUTH_HEADER,
+                json={"path": "/tmp/proj", "field": "effort"},
+            )
+        mock_clear.assert_called_once_with("/tmp/proj", field="effort")
+
+    def test_nonexistent_returns_success_false(self, client):
+        with (
+            patch("leashd.web.routes.clear_directory_setting", return_value=False),
+            patch("leashd.web.routes.signal_reload", return_value=False),
+        ):
+            resp = client.request(
+                "DELETE",
+                "/api/config/directory-settings",
+                headers=_AUTH_HEADER,
+                json={"path": "/tmp/ghost"},
+            )
+        assert resp.status_code == 200
+        assert resp.json() == {"success": False}
+
+    def test_rejects_unknown_field(self, client):
+        resp = client.request(
+            "DELETE",
+            "/api/config/directory-settings",
+            headers=_AUTH_HEADER,
+            json={"path": "/tmp/proj", "field": "nonsense"},
+        )
+        assert resp.status_code == 400
+        assert "unknown field" in resp.json()["reason"]
+
+    def test_missing_path_returns_400(self, client):
+        resp = client.request(
+            "DELETE",
+            "/api/config/directory-settings",
+            headers=_AUTH_HEADER,
+            json={},
+        )
+        assert resp.status_code == 400
+
+
+class TestPutWorkspaceSettings:
+    def test_happy_path(self, client):
+        with (
+            patch(
+                "leashd.web.routes.set_workspace_settings", return_value=True
+            ) as mock_set,
+            patch("leashd.web.routes.signal_reload", return_value=True),
+        ):
+            resp = client.put(
+                "/api/config/workspace-settings",
+                headers=_AUTH_HEADER,
+                json={"name": "my-ws", "effort": "high"},
+            )
+        assert resp.status_code == 200
+        assert resp.json() == {"success": True}
+        mock_set.assert_called_once_with(
+            "my-ws",
+            effort="high",
+            claude_model=None,
+            codex_model=None,
+            replace=False,
+        )
+
+    def test_nonexistent_workspace_returns_404(self, client):
+        with patch("leashd.web.routes.set_workspace_settings", return_value=False):
+            resp = client.put(
+                "/api/config/workspace-settings",
+                headers=_AUTH_HEADER,
+                json={"name": "ghost", "effort": "low"},
+            )
+        assert resp.status_code == 404
+        body = resp.json()
+        assert body["success"] is False
+        assert "ghost" in body["reason"]
+
+    def test_missing_name_returns_400(self, client):
+        resp = client.put(
+            "/api/config/workspace-settings",
+            headers=_AUTH_HEADER,
+            json={"effort": "low"},
+        )
+        assert resp.status_code == 400
+        assert resp.json()["reason"] == "name is required"
+
+    def test_rejects_invalid_effort(self, client):
+        resp = client.put(
+            "/api/config/workspace-settings",
+            headers=_AUTH_HEADER,
+            json={"name": "my-ws", "effort": "ultra"},
+        )
+        assert resp.status_code == 400
+        assert "effort" in resp.json()["reason"]
+
+    def test_replace_true_forwarded(self, client):
+        with (
+            patch(
+                "leashd.web.routes.set_workspace_settings", return_value=True
+            ) as mock_set,
+            patch("leashd.web.routes.signal_reload", return_value=True),
+        ):
+            client.put(
+                "/api/config/workspace-settings",
+                headers=_AUTH_HEADER,
+                json={"name": "my-ws", "effort": "low", "replace": True},
+            )
+        assert mock_set.call_args.kwargs["replace"] is True
+
+
+class TestDeleteWorkspaceSettings:
+    def test_full_block_delete(self, client):
+        with (
+            patch(
+                "leashd.web.routes.clear_workspace_settings", return_value=True
+            ) as mock_clear,
+            patch("leashd.web.routes.signal_reload", return_value=True),
+        ):
+            resp = client.request(
+                "DELETE",
+                "/api/config/workspace-settings",
+                headers=_AUTH_HEADER,
+                json={"name": "my-ws"},
+            )
+        assert resp.status_code == 200
+        assert resp.json() == {"success": True}
+        mock_clear.assert_called_once_with("my-ws", field=None)
+
+    def test_single_field_delete(self, client):
+        with (
+            patch(
+                "leashd.web.routes.clear_workspace_settings", return_value=False
+            ) as mock_clear,
+            patch("leashd.web.routes.signal_reload", return_value=False),
+        ):
+            resp = client.request(
+                "DELETE",
+                "/api/config/workspace-settings",
+                headers=_AUTH_HEADER,
+                json={"name": "my-ws", "field": "claude_model"},
+            )
+        assert resp.status_code == 200
+        # `removed` False → success False propagates to client.
+        assert resp.json() == {"success": False}
+        mock_clear.assert_called_once_with("my-ws", field="claude_model")
+
+    def test_rejects_unknown_field(self, client):
+        resp = client.request(
+            "DELETE",
+            "/api/config/workspace-settings",
+            headers=_AUTH_HEADER,
+            json={"name": "my-ws", "field": "nope"},
+        )
+        assert resp.status_code == 400
+
+    def test_missing_name_returns_400(self, client):
+        resp = client.request(
+            "DELETE",
+            "/api/config/workspace-settings",
+            headers=_AUTH_HEADER,
+            json={"field": "effort"},
+        )
+        assert resp.status_code == 400
+
+
+class TestRuntimeSettingsListEndpoints:
+    def test_list_directory_settings_returns_map(self, client):
+        with patch(
+            "leashd.web.routes.get_all_directory_settings",
+            return_value={"/tmp/proj": {"effort": "high"}},
+        ):
+            resp = client.get("/api/config/directory-settings", headers=_AUTH_HEADER)
+        assert resp.status_code == 200
+        assert resp.json() == {"directory_settings": {"/tmp/proj": {"effort": "high"}}}
+
+    def test_list_directory_settings_requires_auth(self, client):
+        resp = client.get("/api/config/directory-settings")
+        assert resp.status_code == 401

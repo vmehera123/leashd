@@ -213,6 +213,13 @@ class TestPrompts:
         p = review_prompt("abc")
         assert "Severity:" in p
 
+    def test_review_prompt_authorizes_task_memory_edit(self):
+        p = review_prompt("abc")
+        assert "Edit" in p
+        assert ".leashd/tasks/abc.md" in p
+        assert '"## Review"' in p
+        assert "Do NOT edit files." not in p
+
     def test_review_prompt_carries_base_branch(self):
         p = review_prompt("abc", base_branch="develop")
         assert "git diff develop...HEAD" in p

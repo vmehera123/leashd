@@ -203,9 +203,11 @@ def review_prompt(
         "adherence, convention fit, security, leftover debug code, missing\n"
         "edge cases.\n"
         "\n"
-        'Do NOT edit files. Write findings to "## Review" classified as\n'
-        "OK, MINOR, or CRITICAL — the first line MUST be\n"
-        '"Severity: <level>" so the orchestrator can parse it.'
+        "Do NOT edit source code or tests. Your ONLY write is to replace\n"
+        f'the "## Review" section of `.leashd/tasks/{run_id}.md` (use the\n'
+        "Edit tool) with findings classified OK, MINOR, or CRITICAL — the\n"
+        'first line of that section MUST be "Severity: <level>" so the\n'
+        "orchestrator can parse it."
     )
     prompt = _append(
         prompt,

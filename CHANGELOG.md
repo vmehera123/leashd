@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.15.1] - 2026-04-17
+
+- **fixed**: v3 review prompt disambiguated — "Do NOT edit files" was taken literally by review agents, so they'd print findings inline and leave the `## Review` section as the placeholder template, tripping `_parse_severity` and escalating. Prompt now says "Do NOT edit source code or tests" and explicitly authorizes the `Edit` call on the task memory file.
+- **fixed**: v3 task phases can no longer be hijacked into plan mode — engine `auto_plan` gate now skips sessions with `task_run_id` set, all three runtimes (`claude-cli`, `claude-code`, `codex`) downgrade `permission_mode=plan` / `sandbox=read-only` to their permissive defaults when `task_run_id` is set, and stale plan files from prior hijacked turns are rejected by an mtime floor — eliminates "Implement phase produced no summary" escalations
+
+
 ## [0.15.0] - 2026-04-12
 
 - **added**: Task orchestrator v3 — linear `plan → implement → verify → review` pipeline with a fresh Claude Code session per phase, bridged via `.leashd/tasks/{run_id}.md`; opt-in via new `leashd task version {show,set}` CLI

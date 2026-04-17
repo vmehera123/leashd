@@ -350,6 +350,12 @@ class TestClaudeCodeAgent:
         opts = agent._build_options(session, can_use_tool=None)
         assert opts.system_prompt == _PLAN_MODE_INSTRUCTION
 
+    def test_plan_mode_instruction_skipped_for_task_session(self, agent, session):
+        session.mode = "plan"
+        session.task_run_id = "abc123"
+        opts = agent._build_options(session, can_use_tool=None)
+        assert _PLAN_MODE_INSTRUCTION not in (opts.system_prompt or "")
+
     def test_plan_mode_with_existing_system_prompt(self, tmp_path):
         config = LeashdConfig(
             approved_directories=[tmp_path],
@@ -423,6 +429,16 @@ class TestClaudeCodeAgent:
         session.mode = "plan"
         opts = agent._build_options(session, can_use_tool=None)
         assert opts.permission_mode == "plan"
+
+    def test_build_options_plan_mode_downgrades_for_task_session(self, agent, session):
+        # Defense in depth: v3 task phases must never run with permission_mode="plan"
+        # (caused "Implement phase produced no summary" escalations) even if
+        # something mis-sets session.mode to "plan" — task_run_id being set
+        # is the authoritative signal that the orchestrator owns phase gating.
+        session.mode = "plan"
+        session.task_run_id = "abc123"
+        opts = agent._build_options(session, can_use_tool=None)
+        assert opts.permission_mode == "default"
 
     def test_build_options_default_mode_sets_default_permission(self, agent, session):
         session.mode = "default"

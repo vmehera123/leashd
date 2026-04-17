@@ -153,6 +153,7 @@ class _ToolCallbackState:
         "plan_file_path",
         "plan_review_shown",
         "proceed_in_context",
+        "request_started_at",
         "target_mode",
         "tool_call_count",
     )
@@ -167,6 +168,10 @@ class _ToolCallbackState:
         self.proceed_in_context = False
         self.plan_file_content: str | None = None
         self.plan_file_path: str | None = None
+        # Wall-clock time (epoch seconds) when this request entered handle_message.
+        # Used to filter stale plan files discovered on disk so that ExitPlanMode
+        # only accepts plans written during the current turn.
+        self.request_started_at: float = time.time()
         self.target_mode: str = "edit"
         self.tool_call_count: int = 0
 
@@ -906,6 +911,7 @@ class Engine:
             and session.mode == "auto"
             and session.agent_resume_token is None
             and session.plan_origin is None
+            and session.task_run_id is None
             and not _skip_auto_plan
         ):
             session.mode = "plan"
@@ -915,6 +921,7 @@ class Engine:
                 "auto_plan_mode_activated",
                 session_id=session.session_id,
                 chat_id=chat_id,
+                task_run_id=session.task_run_id,
             )
 
         responder = None
@@ -2105,8 +2112,17 @@ class Engine:
         return ""
 
     @staticmethod
-    def _discover_plan_file(working_directory: str | None = None) -> str | None:
-        """Scan ~/.claude/plans/ and project-local .claude/plans/ for a recently-modified .md file."""
+    def _discover_plan_file(
+        working_directory: str | None = None,
+        newer_than: float | None = None,
+    ) -> str | None:
+        """Scan ~/.claude/plans/ and project-local .claude/plans/ for a recently-modified .md file.
+
+        ``newer_than`` is an optional epoch-seconds floor: files whose mtime
+        predates it are skipped. Callers thread in the current request's
+        start time so a stale plan from a previous session or a botched
+        earlier phase cannot be resurrected as the "current" plan.
+        """
         candidates: list[Path] = []
         home_plans = Path.home() / ".claude" / "plans"
         if home_plans.exists():
@@ -2119,7 +2135,10 @@ class Engine:
             return None
         candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
         newest = candidates[0]
-        age = time.time() - newest.stat().st_mtime
+        mtime = newest.stat().st_mtime
+        if newer_than is not None and mtime < newer_than:
+            return None
+        age = time.time() - mtime
         if age < 600:
             logger.info(
                 "plan_file_discovered_from_disk",
@@ -2136,7 +2155,9 @@ class Engine:
         working_directory: str | None = None,
     ) -> str:
         if not state.plan_file_path:
-            discovered = self._discover_plan_file(working_directory)
+            discovered = self._discover_plan_file(
+                working_directory, newer_than=state.request_started_at
+            )
             if discovered:
                 state.plan_file_path = discovered
         plan_path = state.plan_file_path
@@ -2268,10 +2289,16 @@ class Engine:
                 is_plan_file = (
                     file_path.endswith(".plan") or ".claude/plans/" in file_path
                 )
+                # v3 task-memory file is the plan file in v3's model — the
+                # orchestrator reads it directly, so we don't mirror into
+                # plan_file_path (that channel is for the AutoPlanReviewer flow).
+                is_task_memory_file = "/.leashd/tasks/" in file_path
                 if is_plan_file:
                     state.plan_file_path = file_path
                     if tool_name == "Write":
                         state.plan_file_content = tool_input.get("content")
+                elif is_task_memory_file:
+                    pass
                 elif session.mode == "plan" and not state.plan_approved:
                     return PermissionDeny(
                         message="In plan mode — create a plan first, then call ExitPlanMode."
@@ -2298,7 +2325,10 @@ class Engine:
                 if responder:
                     await responder.on_activity(None)
                 if not state.plan_file_path:
-                    discovered = self._discover_plan_file(session.working_directory)
+                    discovered = self._discover_plan_file(
+                        session.working_directory,
+                        newer_than=state.request_started_at,
+                    )
                     if discovered:
                         state.plan_file_path = discovered
                 plan_content = None

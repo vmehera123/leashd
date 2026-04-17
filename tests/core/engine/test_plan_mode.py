@@ -173,7 +173,9 @@ class TestPlanContentInEngine:
         config.streaming_enabled = True
         # Prevent discovery of real plan files on the test machine
         monkeypatch.setattr(
-            Engine, "_discover_plan_file", staticmethod(lambda wd=None: None)
+            Engine,
+            "_discover_plan_file",
+            staticmethod(lambda wd=None, newer_than=None: None),
         )
 
         class NoPlanFileAgent(BaseAgent):
@@ -805,6 +807,32 @@ class TestPlanFileDiscoveryFromDisk:
         result = Engine._discover_plan_file()
         assert result is None
 
+    async def test_discover_plan_file_skips_files_older_than_floor(
+        self, tmp_path, monkeypatch
+    ):
+        """newer_than floor prevents a stale plan from a prior turn being
+        resurrected as the current turn's plan. Regression for the task v3
+        exit-plan-mode bug where a plan written during a hijacked implement
+        phase was picked up by the next user turn."""
+        import os
+
+        plans_dir = tmp_path / ".claude" / "plans"
+        plans_dir.mkdir(parents=True)
+        plan_file = plans_dir / "prior-turn-plan.md"
+        plan_file.write_text("# Stale Plan")
+        # File mtime is 60s old but within the 600s window.
+        stale_time = time.time() - 60
+        os.utime(plan_file, (stale_time, stale_time))
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+        # Floor is "now" — plan was written before this turn started.
+        floor = time.time()
+        result = Engine._discover_plan_file(newer_than=floor)
+        assert result is None
+
+        # Without the floor, the plan is still discoverable (age < 600s).
+        assert Engine._discover_plan_file() == str(plan_file)
+
     async def test_exit_plan_mode_uses_discovered_file(
         self, config, policy_engine, audit_logger, mock_connector, tmp_path, monkeypatch
     ):
@@ -817,7 +845,7 @@ class TestPlanFileDiscoveryFromDisk:
         monkeypatch.setattr(
             Engine,
             "_discover_plan_file",
-            staticmethod(lambda wd=None: str(plan_file)),
+            staticmethod(lambda wd=None, newer_than=None: str(plan_file)),
         )
 
         coordinator = InteractionCoordinator(mock_connector, config)
@@ -876,7 +904,7 @@ class TestPlanFileDiscoveryFromDisk:
         monkeypatch.setattr(
             Engine,
             "_discover_plan_file",
-            staticmethod(lambda wd=None: str(plan_file)),
+            staticmethod(lambda wd=None, newer_than=None: str(plan_file)),
         )
 
         coordinator = InteractionCoordinator(mock_connector, config)
@@ -1011,7 +1039,9 @@ class TestDirectoryPersistenceThroughPlanMode:
     ):
         """ExitPlanMode → 'clean_edit': dir survives _exit_plan_mode + recursive handle_message."""
         monkeypatch.setattr(
-            Engine, "_discover_plan_file", staticmethod(lambda wd=None: None)
+            Engine,
+            "_discover_plan_file",
+            staticmethod(lambda wd=None, newer_than=None: None),
         )
         d1 = tmp_path / "project"
         d2 = tmp_path / "api"
@@ -1085,7 +1115,9 @@ class TestDirectoryPersistenceThroughPlanMode:
     ):
         """ExitPlanMode → 'edit': cancel+restart with fresh timeout, dir preserved."""
         monkeypatch.setattr(
-            Engine, "_discover_plan_file", staticmethod(lambda wd=None: None)
+            Engine,
+            "_discover_plan_file",
+            staticmethod(lambda wd=None, newer_than=None: None),
         )
         d1 = tmp_path / "project"
         d2 = tmp_path / "api"
@@ -1157,7 +1189,9 @@ class TestDirectoryPersistenceThroughPlanMode:
     ):
         """Fallback plan review → 'edit': dir survives _exit_plan_mode."""
         monkeypatch.setattr(
-            Engine, "_discover_plan_file", staticmethod(lambda wd=None: None)
+            Engine,
+            "_discover_plan_file",
+            staticmethod(lambda wd=None, newer_than=None: None),
         )
         d1 = tmp_path / "project"
         d2 = tmp_path / "api"
@@ -1234,7 +1268,9 @@ class TestDirectoryPersistenceThroughPlanMode:
     ):
         """Fallback plan review → 'default': dir survives, mode becomes 'default'."""
         monkeypatch.setattr(
-            Engine, "_discover_plan_file", staticmethod(lambda wd=None: None)
+            Engine,
+            "_discover_plan_file",
+            staticmethod(lambda wd=None, newer_than=None: None),
         )
         d1 = tmp_path / "project"
         d2 = tmp_path / "api"
@@ -1309,7 +1345,9 @@ class TestDirectoryPersistenceThroughPlanMode:
     ):
         """Two full plan→implement cycles preserve directory throughout."""
         monkeypatch.setattr(
-            Engine, "_discover_plan_file", staticmethod(lambda wd=None: None)
+            Engine,
+            "_discover_plan_file",
+            staticmethod(lambda wd=None, newer_than=None: None),
         )
         d1 = tmp_path / "project"
         d2 = tmp_path / "api"
@@ -1386,7 +1424,9 @@ class TestDirectoryPersistenceThroughPlanMode:
         from leashd.storage.sqlite import SqliteSessionStore
 
         monkeypatch.setattr(
-            Engine, "_discover_plan_file", staticmethod(lambda wd=None: None)
+            Engine,
+            "_discover_plan_file",
+            staticmethod(lambda wd=None, newer_than=None: None),
         )
         d1 = tmp_path / "project"
         d2 = tmp_path / "api"
@@ -1600,6 +1640,39 @@ class TestPlanModeRegression:
             None,
         )
         # Should NOT be the plan-mode deny — may still be denied by sandbox/policy
+        assert not (
+            isinstance(result, PermissionDeny) and "plan mode" in result.message.lower()
+        )
+
+    async def test_task_memory_file_allowed_in_plan_mode(
+        self, config, audit_logger, policy_engine
+    ):
+        # v3 plan phase drives the session in plan mode and expects the
+        # agent to write its plan into .leashd/tasks/{run_id}.md. The
+        # gatekeeper must not block that write with the plan-mode message.
+        agent = FakeAgent()
+        eng = Engine(
+            connector=None,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_message("user1", "hello", "chat1")
+        session = eng.session_manager.get("user1", "chat1")
+        session.mode = "plan"
+
+        hook = agent.last_can_use_tool
+        result = await hook(
+            "Write",
+            {
+                "file_path": "/tmp/project/.leashd/tasks/abc123.md",
+                "content": "## Plan\n1. Do thing",
+            },
+            None,
+        )
         assert not (
             isinstance(result, PermissionDeny) and "plan mode" in result.message.lower()
         )
@@ -2888,6 +2961,204 @@ class TestNoAutoApproveBeforePlanExit:
 
         # Verify auto-approve WAS eventually called (Write + Edit)
         assert len(auto_approve_calls) >= 2
+
+
+class TestAutoPlanSkippedForTaskSessions:
+    """Regression for the v3 implement-phase hijack bug.
+
+    The task orchestrator (v2 and v3) calls ``begin_phase_session`` which sets
+    ``session.mode``, ``session.plan_origin``, and ``session.task_run_id`` per
+    phase. For non-plan phases v3 sets ``plan_origin=None`` — that combination
+    used to satisfy the engine's ``auto_plan`` activation gate, flipping the
+    mode to ``plan`` before the agent ran. The agent then wrote a plan file
+    to ``~/.claude/plans/`` instead of code, the implement phase produced no
+    summary, and the orchestrator escalated with
+    ``Implement phase produced no summary``.
+
+    These tests exercise the full path (real ``begin_phase_session`` +
+    ``handle_message``) and assert four things the old bug violated:
+
+    1. The agent observes ``session.mode == "auto"`` at the moment ``execute``
+       is called (not just after the turn ends).
+    2. A routine ``Write`` to a source file during the implement phase is
+       allowed by the plan-mode Write/Edit guard (old bug: denied with
+       "In plan mode — create a plan first").
+    3. Stale plan files left behind by a prior broken phase are NOT picked
+       up on the next turn as the "current" plan.
+    4. ``auto_plan`` still activates when no task is driving the session
+       (no silent regression of the feature for normal users).
+    """
+
+    async def test_begin_phase_session_implement_preserves_mode_through_handle_message(
+        self, config, policy_engine, audit_logger, mock_connector
+    ):
+        config.auto_plan = True
+
+        observed: dict[str, object] = {}
+        write_results: list[object] = []
+
+        class RecordingAgent(BaseAgent):
+            async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
+                observed["mode_during_execute"] = session.mode
+                observed["plan_origin_during_execute"] = session.plan_origin
+                observed["task_run_id_during_execute"] = session.task_run_id
+                result = await can_use_tool(
+                    "Write",
+                    {
+                        "file_path": str(
+                            config.approved_directories[0] / "src" / "feature.py"
+                        ),
+                        "content": "def feature():\n    return 42\n",
+                    },
+                    None,
+                )
+                write_results.append(result)
+                return AgentResponse(content="implemented", session_id="sid", cost=0.01)
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        sm = SessionManager()
+        eng = Engine(
+            connector=mock_connector,
+            agent=RecordingAgent(),
+            config=config,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        # Seed the session the way a /task command would, then transition to
+        # the implement phase exactly like TaskV3 does.
+        await sm.get_or_create("user1", "chat1", str(config.approved_directories[0]))
+        await sm.begin_phase_session(
+            "user1",
+            "chat1",
+            phase="implement",
+            task_run_id="task-run-xyz",
+            mode="auto",
+        )
+
+        await eng.handle_message("user1", "implement the feature", "chat1")
+
+        # The agent must have seen a non-plan mode at execute time. This is
+        # the core assertion that fails on the old code: auto_plan would flip
+        # mode to "plan" before the agent ran.
+        assert observed["mode_during_execute"] == "auto", (
+            f"auto_plan hijacked the implement phase — agent saw mode="
+            f"{observed['mode_during_execute']!r}"
+        )
+        assert observed["plan_origin_during_execute"] is None
+        assert observed["task_run_id_during_execute"] == "task-run-xyz"
+
+        # The Write may still be gated by policy (require_approval), but it
+        # must NOT be denied by the plan-mode Write/Edit guard. That guard
+        # returns the specific "In plan mode — create a plan first" message.
+        assert len(write_results) == 1
+        result = write_results[0]
+        deny_msg = getattr(result, "message", "") or ""
+        assert "plan mode" not in deny_msg.lower(), (
+            f"implement-phase Write was rejected by the plan-mode guard: "
+            f"{deny_msg!r} (auto_plan flipped the session into plan mode)"
+        )
+
+        # After the turn, the session is still task-owned with non-plan mode.
+        session = sm.get("user1", "chat1")
+        assert session.mode == "auto"
+        assert session.plan_origin is None
+        assert session.task_run_id == "task-run-xyz"
+
+    async def test_begin_phase_session_plan_still_routes_through_plan_review(
+        self, config, policy_engine, audit_logger, mock_connector
+    ):
+        """Sanity check: when the orchestrator genuinely starts a plan phase
+        (mode='plan'), ``plan_origin`` is set to ``'task'`` and the engine
+        should NOT re-flag it as an ``auto`` origin (which would mis-route
+        ExitPlanMode to the wrong reviewer)."""
+        config.auto_plan = True
+        agent = FakeAgent()
+        sm = SessionManager()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await sm.get_or_create("user1", "chat1", str(config.approved_directories[0]))
+        await sm.begin_phase_session(
+            "user1",
+            "chat1",
+            phase="plan",
+            task_run_id="task-run-plan",
+            mode="plan",
+        )
+
+        await eng.handle_message("user1", "produce a plan", "chat1")
+
+        session = sm.get("user1", "chat1")
+        assert session.mode == "plan"
+        assert session.plan_origin == "task"
+
+    async def test_stale_plan_from_prior_phase_not_resurrected_on_next_turn(
+        self, config, policy_engine, audit_logger, mock_connector, tmp_path
+    ):
+        """Regression for Fix 2.
+
+        Reproduces the second half of the production incident: a plan file
+        left over in ``~/.claude/plans/`` from a hijacked prior phase was
+        picked up by the *next* user turn's ``ExitPlanMode`` discovery. The
+        ``newer_than`` floor must reject anything written before the current
+        request started."""
+        import os
+
+        plans_dir = tmp_path / ".claude" / "plans"
+        plans_dir.mkdir(parents=True)
+        stale_plan = plans_dir / "hijacked-prior-phase.md"
+        stale_plan.write_text("# Stale plan from broken phase")
+        stale_time = time.time() - 120  # 2 minutes ago
+        os.utime(stale_plan, (stale_time, stale_time))
+
+        with patch("pathlib.Path.home", lambda: tmp_path):
+            # Request that starts "now" must not see plans written 2 min ago.
+            assert Engine._discover_plan_file(newer_than=time.time()) is None
+            # But without the floor, the same stale plan *would* surface.
+            assert Engine._discover_plan_file() == str(stale_plan)
+
+    async def test_auto_plan_still_activates_without_task_run_id(
+        self, config, policy_engine, audit_logger, mock_connector
+    ):
+        """Guard against over-broad fix: normal sessions still get auto_plan."""
+        config.auto_plan = True
+        agent = FakeAgent()
+        sm = SessionManager()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=sm,
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        session = await sm.get_or_create(
+            "user1", "chat1", str(config.approved_directories[0])
+        )
+        session.mode = "auto"
+        session.plan_origin = None
+        session.task_run_id = None
+        await sm.save(session)
+
+        await eng.handle_message("user1", "build something", "chat1")
+
+        session = sm.get("user1", "chat1")
+        assert session.mode == "plan"
+        assert session.plan_origin == "auto"
 
 
 class TestExitPlanModeDeniedForTaskSessions:

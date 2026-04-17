@@ -9,11 +9,16 @@ import pytest
 from leashd.config_store import (
     add_approved_directory,
     add_workspace,
+    clear_directory_setting,
+    clear_workspace_settings,
     config_path,
+    get_all_directory_settings,
     get_approved_directories,
     get_browser_config,
+    get_directory_settings,
     get_skills_config,
     get_web_config,
+    get_workspace_settings,
     get_workspaces,
     inject_global_config_as_env,
     load_global_config,
@@ -26,6 +31,8 @@ from leashd.config_store import (
     save_global_config,
     save_skill_metadata,
     save_workspaces_config,
+    set_directory_setting,
+    set_workspace_settings,
     update_config_sections,
     workspaces_path,
 )
@@ -923,3 +930,176 @@ class TestUpdateConfigSections:
         update_config_sections({"agent": {"effort": "high"}})
         data = load_global_config()
         assert data["effort"] == "high"
+
+
+class TestUpdateConfigSectionsCodexModel:
+    def test_set_codex_model_in_agent_section(self, fake_config_dir):
+        update_config_sections({"agent": {"codex_model": "gpt-5-codex"}})
+        data = load_global_config()
+        assert data["codex_model"] == "gpt-5-codex"
+
+    def test_clear_codex_model_with_none_removes_key(self, fake_config_dir):
+        save_global_config({"codex_model": "old-codex"})
+        update_config_sections({"agent": {"codex_model": None}})
+        data = load_global_config()
+        assert "codex_model" not in data
+
+    def test_clear_codex_model_with_empty_string_removes_key(self, fake_config_dir):
+        save_global_config({"codex_model": "old-codex"})
+        update_config_sections({"agent": {"codex_model": ""}})
+        data = load_global_config()
+        assert "codex_model" not in data
+
+
+class TestClearDirectorySetting:
+    def test_clear_entire_entry_removes_directory_block(
+        self, fake_config_dir, tmp_path
+    ):
+        target = tmp_path / "proj"
+        target.mkdir()
+        set_directory_setting(target, effort="high", claude_model="claude-sonnet-4-6")
+        assert get_directory_settings(target) != {}
+
+        removed = clear_directory_setting(target, field=None)
+        assert removed is True
+        assert get_directory_settings(target) == {}
+        # No `directory_settings` key should remain in config when last entry removed.
+        data = load_global_config()
+        assert "directory_settings" not in data
+
+    def test_clear_single_field_preserves_others(self, fake_config_dir, tmp_path):
+        target = tmp_path / "proj"
+        target.mkdir()
+        set_directory_setting(target, effort="medium", claude_model="claude-sonnet-4-6")
+
+        removed = clear_directory_setting(target, field="effort")
+        assert removed is True
+        remaining = get_directory_settings(target)
+        assert remaining == {"claude_model": "claude-sonnet-4-6"}
+
+    def test_clear_nonexistent_directory_returns_false(self, fake_config_dir, tmp_path):
+        target = tmp_path / "ghost"
+        target.mkdir()
+        assert clear_directory_setting(target, field=None) is False
+
+    def test_clear_nonexistent_field_returns_false(self, fake_config_dir, tmp_path):
+        target = tmp_path / "proj"
+        target.mkdir()
+        set_directory_setting(target, effort="medium")
+        assert clear_directory_setting(target, field="claude_model") is False
+        # The original value is intact.
+        assert get_directory_settings(target) == {"effort": "medium"}
+
+    def test_clear_tolerates_non_dict_directory_settings(self, fake_config_dir):
+        # If the YAML is corrupted (directory_settings is a list), don't crash.
+        save_global_config({"directory_settings": ["not-a-dict"]})
+        assert clear_directory_setting("/tmp/anything", field=None) is False
+
+
+class TestSetWorkspaceSettingsAdvanced:
+    def _seed_workspace(self, tmp_path, name="my-ws"):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        add_workspace(name, [str(repo)])
+        return name
+
+    def test_merge_adds_new_field_to_existing_settings(self, fake_config_dir, tmp_path):
+        name = self._seed_workspace(tmp_path)
+        assert set_workspace_settings(name, effort="low") is True
+        # Merge a second field.
+        assert set_workspace_settings(name, claude_model="claude-sonnet-4-6") is True
+
+        result = get_workspace_settings(name)
+        assert result == {"effort": "low", "claude_model": "claude-sonnet-4-6"}
+
+    def test_replace_mode_drops_old_fields(self, fake_config_dir, tmp_path):
+        name = self._seed_workspace(tmp_path)
+        set_workspace_settings(name, effort="low", claude_model="claude-sonnet-4-6")
+
+        # replace=True wipes the block before applying new values.
+        assert set_workspace_settings(name, effort="high", replace=True) is True
+        result = get_workspace_settings(name)
+        assert result == {"effort": "high"}
+
+    def test_nonexistent_workspace_returns_false(self, fake_config_dir):
+        assert set_workspace_settings("does-not-exist", effort="low") is False
+        # And the workspaces file is unchanged.
+        assert load_workspaces_config().get("workspaces", {}) == {}
+
+    def test_codex_model_persisted(self, fake_config_dir, tmp_path):
+        name = self._seed_workspace(tmp_path)
+        assert set_workspace_settings(name, codex_model="gpt-5-codex") is True
+        assert get_workspace_settings(name) == {"codex_model": "gpt-5-codex"}
+
+
+class TestClearWorkspaceSettings:
+    def _seed_workspace_with_settings(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        add_workspace("my-ws", [str(repo)])
+        set_workspace_settings(
+            "my-ws", effort="medium", claude_model="claude-sonnet-4-6"
+        )
+        return "my-ws"
+
+    def test_clear_entire_settings_block(self, fake_config_dir, tmp_path):
+        name = self._seed_workspace_with_settings(tmp_path)
+        assert clear_workspace_settings(name, field=None) is True
+        assert get_workspace_settings(name) == {}
+        # Workspace itself still exists.
+        assert name in load_workspaces_config().get("workspaces", {})
+
+    def test_clear_single_field_preserves_others(self, fake_config_dir, tmp_path):
+        name = self._seed_workspace_with_settings(tmp_path)
+        assert clear_workspace_settings(name, field="effort") is True
+        assert get_workspace_settings(name) == {"claude_model": "claude-sonnet-4-6"}
+
+    def test_clear_last_field_removes_settings_block(self, fake_config_dir, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        add_workspace("solo-ws", [str(repo)])
+        set_workspace_settings("solo-ws", effort="medium")
+
+        assert clear_workspace_settings("solo-ws", field="effort") is True
+        # The settings sub-key should be gone, not just empty.
+        ws = load_workspaces_config()["workspaces"]["solo-ws"]
+        assert "settings" not in ws
+
+    def test_clear_nonexistent_workspace_returns_false(self, fake_config_dir):
+        assert clear_workspace_settings("ghost-ws", field=None) is False
+
+    def test_clear_nonexistent_field_returns_false(self, fake_config_dir, tmp_path):
+        name = self._seed_workspace_with_settings(tmp_path)
+        assert clear_workspace_settings(name, field="codex_model") is False
+        # Existing fields intact.
+        assert get_workspace_settings(name) == {
+            "effort": "medium",
+            "claude_model": "claude-sonnet-4-6",
+        }
+
+    def test_clear_workspace_with_no_settings_returns_false(
+        self, fake_config_dir, tmp_path
+    ):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        add_workspace("plain-ws", [str(repo)])
+        assert clear_workspace_settings("plain-ws", field=None) is False
+
+
+class TestGetAllDirectorySettingsHardening:
+    def test_strips_unknown_fields(self, fake_config_dir, tmp_path):
+        # Hand-craft a config with extraneous keys to ensure they're filtered.
+        target = str((tmp_path / "proj").resolve())
+        (tmp_path / "proj").mkdir()
+        save_global_config(
+            {
+                "directory_settings": {
+                    target: {
+                        "effort": "medium",
+                        "rogue_field": "ignored",
+                    }
+                }
+            }
+        )
+        result = get_all_directory_settings()
+        assert result[target] == {"effort": "medium"}

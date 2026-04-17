@@ -747,7 +747,9 @@ class TestSessionPersistenceOnDirSwitch:
         from unittest.mock import MagicMock
 
         monkeypatch.setattr(
-            Engine, "_discover_plan_file", staticmethod(lambda wd=None: None)
+            Engine,
+            "_discover_plan_file",
+            staticmethod(lambda wd=None, newer_than=None: None),
         )
         config = LeashdConfig(
             approved_directories=[tmp_path],

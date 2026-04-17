@@ -1307,3 +1307,541 @@ class TestCapturePlanToMemory:
         assert content is not None
         assert "STALE" not in content
         assert "(no plan yet)" in content
+
+
+class TestOnSessionCompletedAdvanced:
+    """Exercise the phase-completion handler: cost aggregation, git checkpoint,
+    memory updates, and background advance queuing."""
+
+    async def _orchestrator(self, tmp_path):
+        orch = AgenticOrchestrator(
+            db_path=str(tmp_path / "test.db"),
+            max_retries=3,
+            auto_pr=False,
+        )
+        await orch.start()
+        engine = _MockEngine()
+        orch._engine = engine
+        return orch
+
+    async def test_aggregates_cost_across_phases_and_masks_output(self, tmp_path):
+        from leashd.core.events import SESSION_COMPLETED
+
+        orch = await self._orchestrator(tmp_path)
+        task = _make_task(working_dir=str(tmp_path))
+        task.transition_to("implement")
+        orch._active_tasks["c1"] = task
+        task_memory.seed(task.run_id, task.task, str(tmp_path))
+
+        session = _MockSession()
+        session.task_run_id = task.run_id
+
+        # Patch git helpers so the test doesn't depend on a real repo.
+        with (
+            patch(
+                "leashd.plugins.builtin.agentic_orchestrator.git_checkpoint",
+                new_callable=AsyncMock,
+                return_value="abc123def",
+            ),
+            patch(
+                "leashd.plugins.builtin.agentic_orchestrator._git_diff_stat",
+                new_callable=AsyncMock,
+                return_value=" leashd/x.py | 3 +++\n 1 file changed, 3 insertions(+)",
+            ),
+            patch(
+                "leashd.plugins.builtin.agentic_orchestrator.decide_next_action",
+                new_callable=AsyncMock,
+                return_value=ConductorDecision(
+                    action="escalate",
+                    reason="stop here",
+                    instruction="",
+                ),
+            ),
+        ):
+            await orch._on_session_completed(
+                Event(
+                    name=SESSION_COMPLETED,
+                    data={
+                        "session": session,
+                        "chat_id": "c1",
+                        "response_content": "compiled ok",
+                        "cost": 0.05,
+                    },
+                )
+            )
+
+            # Fire a second phase to verify cumulative cost tracking.
+            task.transition_to("test")
+            await orch._on_session_completed(
+                Event(
+                    name=SESSION_COMPLETED,
+                    data={
+                        "session": session,
+                        "chat_id": "c1",
+                        "response_content": "tests green",
+                        "cost": 0.02,
+                    },
+                )
+            )
+
+            # Let the spawned advance finish before asserting.
+            await asyncio.sleep(0.05)
+
+        assert task.total_cost == pytest.approx(0.07)
+        assert task.phase_costs.get("implement") == pytest.approx(0.05)
+        assert task.phase_costs.get("test") == pytest.approx(0.02)
+        assert task.phase_context["implement_checkpoint"] == "abc123def"
+        assert "compiled ok" in task.phase_context["implement_output"]
+        await orch.stop()
+
+    async def test_implement_phase_records_diff_stat_in_memory(self, tmp_path):
+        from leashd.core.events import SESSION_COMPLETED
+
+        orch = await self._orchestrator(tmp_path)
+        task = _make_task(working_dir=str(tmp_path))
+        task.transition_to("implement")
+        orch._active_tasks["c1"] = task
+        task_memory.seed(task.run_id, task.task, str(tmp_path))
+
+        session = _MockSession()
+        session.task_run_id = task.run_id
+
+        diff = " leashd/x.py | 5 +++++\n 1 file changed, 5 insertions(+)"
+        with (
+            patch(
+                "leashd.plugins.builtin.agentic_orchestrator.git_checkpoint",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "leashd.plugins.builtin.agentic_orchestrator._git_diff_stat",
+                new_callable=AsyncMock,
+                return_value=diff,
+            ),
+            patch(
+                "leashd.plugins.builtin.agentic_orchestrator.decide_next_action",
+                new_callable=AsyncMock,
+                return_value=ConductorDecision(
+                    action="escalate", reason="stop", instruction=""
+                ),
+            ),
+        ):
+            await orch._on_session_completed(
+                Event(
+                    name=SESSION_COMPLETED,
+                    data={
+                        "session": session,
+                        "chat_id": "c1",
+                        "response_content": "done",
+                        "cost": 0.0,
+                    },
+                )
+            )
+            await asyncio.sleep(0.05)
+
+        memory = task_memory.read(task.run_id, str(tmp_path))
+        assert memory is not None
+        assert "file changed" in memory
+        await orch.stop()
+
+    async def test_wrong_task_run_id_is_ignored(self, tmp_path):
+        """SESSION_COMPLETED from a sibling session must not mutate the task."""
+        from leashd.core.events import SESSION_COMPLETED
+
+        orch = await self._orchestrator(tmp_path)
+        task = _make_task(working_dir=str(tmp_path))
+        task.transition_to("implement")
+        orch._active_tasks["c1"] = task
+
+        session = _MockSession()
+        session.task_run_id = "some-other-run-id"
+
+        await orch._on_session_completed(
+            Event(
+                name=SESSION_COMPLETED,
+                data={
+                    "session": session,
+                    "chat_id": "c1",
+                    "response_content": "not ours",
+                    "cost": 0.99,
+                },
+            )
+        )
+
+        assert task.total_cost == 0.0
+        assert "implement_output" not in task.phase_context
+        await orch.stop()
+
+
+class TestResumeTask:
+    """Exercise restart recovery: checkpoint fast-path, conductor slow-path,
+    and fresh-advance fallback."""
+
+    async def _orchestrator(self, tmp_path):
+        orch = AgenticOrchestrator(
+            db_path=str(tmp_path / "test.db"),
+            max_retries=3,
+            auto_pr=False,
+        )
+        await orch.start()
+        engine = _MockEngine()
+        orch._engine = engine
+        orch._event_bus = EventBus()
+        orch._connector = AsyncMock()
+        return orch
+
+    async def test_fast_path_skips_conductor_and_notifies_connector(self, tmp_path):
+        from leashd.core.events import TASK_RESUMED
+
+        orch = await self._orchestrator(tmp_path)
+        task = _make_task(working_dir=str(tmp_path))
+        task.transition_to("implement")
+        orch._active_tasks["c1"] = task
+        task_memory.seed(task.run_id, task.task, str(tmp_path))
+        # Seed a checkpoint pointing to a known action.
+        task_memory.update_checkpoint(
+            task.run_id,
+            str(tmp_path),
+            next_phase="implement",
+            retries=0,
+            git_hash=None,
+            completed_phases=[],
+            pending_phases=["implement"],
+        )
+
+        received_events = []
+
+        async def _spy_emit(event):
+            received_events.append(event)
+
+        orch._event_bus.emit = _spy_emit  # type: ignore[assignment]
+
+        with (
+            patch.object(orch, "_execute_action", new_callable=AsyncMock) as mock_exec,
+            patch(
+                "leashd.plugins.builtin.agentic_orchestrator.decide_next_action",
+                new_callable=AsyncMock,
+            ) as mock_decide,
+        ):
+            await orch._resume_task(task)
+            await asyncio.sleep(0.05)
+
+        mock_decide.assert_not_called()
+        mock_exec.assert_awaited_once()
+        # The decision passed in should match the checkpoint target.
+        decision_arg = mock_exec.call_args.args[1]
+        assert decision_arg.action == "implement"
+        assert "checkpoint" in decision_arg.reason
+
+        # Connector gets the "Daemon restarted" notification + event fires.
+        orch._connector.send_message.assert_awaited()
+        assert any(e.name == TASK_RESUMED for e in received_events)
+        await orch.stop()
+
+    async def test_conductor_path_when_memory_but_no_checkpoint(self, tmp_path):
+        orch = await self._orchestrator(tmp_path)
+        task = _make_task(working_dir=str(tmp_path))
+        task.transition_to("implement")
+        orch._active_tasks["c1"] = task
+        task_memory.seed(task.run_id, task.task, str(tmp_path))
+        # DO NOT write a checkpoint — the memory file has no next_phase.
+
+        with (
+            patch.object(orch, "_execute_action", new_callable=AsyncMock) as mock_exec,
+            patch(
+                "leashd.plugins.builtin.agentic_orchestrator.decide_next_action",
+                new_callable=AsyncMock,
+                return_value=ConductorDecision(
+                    action="fix", reason="resumed", instruction="continue"
+                ),
+            ) as mock_decide,
+        ):
+            await orch._resume_task(task)
+            await asyncio.sleep(0.05)
+
+        mock_decide.assert_awaited_once()
+        mock_exec.assert_awaited_once()
+        assert mock_exec.call_args.args[1].action == "fix"
+        await orch.stop()
+
+    async def test_fresh_advance_when_no_memory_or_checkpoint(self, tmp_path):
+        orch = await self._orchestrator(tmp_path)
+        task = _make_task(working_dir=str(tmp_path))
+        task.transition_to("implement")
+        orch._active_tasks["c1"] = task
+        # Explicitly no task_memory.seed — no memory exists.
+
+        with (
+            patch.object(orch, "_advance", new_callable=AsyncMock) as mock_adv,
+            patch(
+                "leashd.plugins.builtin.agentic_orchestrator.decide_next_action",
+                new_callable=AsyncMock,
+            ) as mock_decide,
+        ):
+            await orch._resume_task(task)
+            await asyncio.sleep(0.05)
+
+        # Neither the fast path nor the conductor path — straight to _advance.
+        mock_decide.assert_not_called()
+        mock_adv.assert_awaited_once()
+        await orch.stop()
+
+
+class TestConductorEscalation:
+    """Verify the 3-strike escalation rules for parse/timeout/CLI failures."""
+
+    async def _orchestrator(self, tmp_path):
+        orch = AgenticOrchestrator(
+            db_path=str(tmp_path / "test.db"),
+            max_retries=3,
+            auto_pr=False,
+        )
+        await orch.start()
+        orch._engine = _MockEngine()
+        orch._connector = AsyncMock()
+        return orch
+
+    async def test_escalates_after_three_parse_failures(self, tmp_path):
+        orch = await self._orchestrator(tmp_path)
+        task = _make_task(working_dir=str(tmp_path))
+        orch._active_tasks["c1"] = task
+        task_memory.seed(task.run_id, task.task, str(tmp_path))
+
+        parse_fail = ConductorDecision(
+            action="implement",
+            reason="conductor produced unparseable response",
+            instruction="",
+        )
+
+        with patch(
+            "leashd.plugins.builtin.agentic_orchestrator.decide_next_action",
+            new_callable=AsyncMock,
+            return_value=parse_fail,
+        ):
+            # Run three times — the third must escalate.
+            await orch._do_advance(task)
+            assert task.phase_context.get("_conductor_parse_failures") == 1
+            assert not task.is_terminal()
+
+            await orch._do_advance(task)
+            assert task.phase_context.get("_conductor_parse_failures") == 2
+            assert not task.is_terminal()
+
+            await orch._do_advance(task)
+
+        assert task.phase == "escalated"
+        assert task.error_message is not None
+        assert "3 consecutive" in task.error_message
+        await orch.stop()
+
+    async def test_escalates_after_three_timeout_failures(self, tmp_path):
+        orch = await self._orchestrator(tmp_path)
+        task = _make_task(working_dir=str(tmp_path))
+        orch._active_tasks["c1"] = task
+        task_memory.seed(task.run_id, task.task, str(tmp_path))
+
+        timeout_fail = ConductorDecision(
+            action="implement",
+            reason="conductor timed out after 45s",
+            instruction="",
+        )
+
+        with patch(
+            "leashd.plugins.builtin.agentic_orchestrator.decide_next_action",
+            new_callable=AsyncMock,
+            return_value=timeout_fail,
+        ):
+            await orch._do_advance(task)
+            await orch._do_advance(task)
+            await orch._do_advance(task)
+
+        assert task.phase == "escalated"
+        assert "timed out 3" in (task.error_message or "")
+        await orch.stop()
+
+    async def test_mode_switch_resets_counters(self, tmp_path):
+        """Two parse failures + one timeout must NOT escalate (counter reset)."""
+        orch = await self._orchestrator(tmp_path)
+        task = _make_task(working_dir=str(tmp_path))
+        orch._active_tasks["c1"] = task
+        task_memory.seed(task.run_id, task.task, str(tmp_path))
+
+        parse_fail = ConductorDecision(
+            action="implement",
+            reason="conductor produced unparseable response",
+            instruction="",
+        )
+        timeout_fail = ConductorDecision(
+            action="implement",
+            reason="conductor timed out after 45s",
+            instruction="",
+        )
+
+        with patch(
+            "leashd.plugins.builtin.agentic_orchestrator.decide_next_action",
+            new_callable=AsyncMock,
+            side_effect=[parse_fail, parse_fail, timeout_fail],
+        ):
+            await orch._do_advance(task)
+            await orch._do_advance(task)
+            await orch._do_advance(task)
+
+        # Parse counter reset when a timeout hits; timeout counter is 1.
+        assert "_conductor_parse_failures" not in task.phase_context
+        assert task.phase_context.get("_conductor_timeout_failures") == 1
+        assert not task.is_terminal()
+        await orch.stop()
+
+
+class TestProfileActionGating:
+    """Verify disabled-action rewrites (profile.is_action_enabled == False)."""
+
+    async def _orchestrator(self, tmp_path, enabled_actions):
+        from leashd.core.task_profile import TaskProfile
+
+        profile = TaskProfile(enabled_actions=frozenset(enabled_actions))
+        orch = AgenticOrchestrator(
+            db_path=str(tmp_path / "test.db"),
+            max_retries=3,
+            auto_pr=False,
+            profile=profile,
+        )
+        await orch.start()
+        orch._engine = _MockEngine()
+        orch._connector = AsyncMock()
+        return orch
+
+    async def test_disabled_verify_rewrites_to_review(self, tmp_path):
+        orch = await self._orchestrator(
+            tmp_path,
+            {"plan", "implement", "test", "review", "complete", "escalate"},
+        )
+        task = _make_task(working_dir=str(tmp_path))
+        # Pretend test has already run so the "review must run test first" re-ask
+        # doesn't fire and re-call the conductor.
+        task.phase_context["test_output"] = "all tests passed"
+        orch._active_tasks["c1"] = task
+        task_memory.seed(task.run_id, task.task, str(tmp_path))
+
+        verify_decision = ConductorDecision(
+            action="verify", reason="ready to check UI", instruction="verify app"
+        )
+        captured_decisions = []
+
+        async def _spy_exec(task, decision, memory):
+            captured_decisions.append(decision)
+
+        with (
+            patch(
+                "leashd.plugins.builtin.agentic_orchestrator.decide_next_action",
+                new_callable=AsyncMock,
+                return_value=verify_decision,
+            ),
+            patch.object(orch, "_execute_action", side_effect=_spy_exec),
+        ):
+            await orch._do_advance(task)
+
+        assert len(captured_decisions) == 1
+        assert captured_decisions[0].action == "review"
+        assert "verify disabled by profile" in captured_decisions[0].reason
+        await orch.stop()
+
+    async def test_disabled_pr_rewrites_to_complete(self, tmp_path):
+        orch = await self._orchestrator(
+            tmp_path,
+            {"plan", "implement", "test", "verify", "review", "complete", "escalate"},
+        )
+        task = _make_task(working_dir=str(tmp_path))
+        orch._active_tasks["c1"] = task
+        task_memory.seed(task.run_id, task.task, str(tmp_path))
+
+        pr_decision = ConductorDecision(
+            action="pr", reason="ready to ship", instruction="create PR"
+        )
+
+        with patch(
+            "leashd.plugins.builtin.agentic_orchestrator.decide_next_action",
+            new_callable=AsyncMock,
+            return_value=pr_decision,
+        ):
+            await orch._do_advance(task)
+
+        # The PR decision triggered the "pr disabled → complete" rewrite,
+        # which completes the task terminal path.
+        assert task.phase == "completed"
+        assert task.outcome == "ok"
+        await orch.stop()
+
+
+class TestCleanupStale:
+    async def test_marks_old_tasks_failed(self, tmp_path):
+        from datetime import datetime, timedelta, timezone
+
+        orch = AgenticOrchestrator(
+            db_path=str(tmp_path / "test.db"),
+            max_retries=3,
+        )
+        await orch.start()
+
+        task = _make_task(working_dir=str(tmp_path))
+        task.transition_to("implement")
+        # Backdate so it looks stale.
+        task.last_updated = datetime.now(timezone.utc) - timedelta(hours=50)
+        await orch.store.save(task)
+        orch._active_tasks[task.chat_id] = task
+
+        cleaned = await orch.cleanup_stale(max_age_hours=24)
+        assert cleaned == 1
+        reloaded = await orch.store.load(task.run_id)
+        assert reloaded is not None
+        assert reloaded.phase == "failed"
+        assert reloaded.outcome == "timeout"
+        assert task.chat_id not in orch._active_tasks
+        await orch.stop()
+
+    async def test_ignores_recent_tasks(self, tmp_path):
+        orch = AgenticOrchestrator(
+            db_path=str(tmp_path / "test.db"),
+            max_retries=3,
+        )
+        await orch.start()
+
+        task = _make_task(working_dir=str(tmp_path))
+        task.transition_to("implement")
+        await orch.store.save(task)
+        orch._active_tasks[task.chat_id] = task
+
+        cleaned = await orch.cleanup_stale(max_age_hours=24)
+        assert cleaned == 0
+        assert task.chat_id in orch._active_tasks
+        await orch.stop()
+
+
+class TestExecuteActionExceptionHandling:
+    async def test_runtime_error_transitions_task_to_failed(self, tmp_path):
+        orch = AgenticOrchestrator(
+            db_path=str(tmp_path / "test.db"),
+            max_retries=3,
+        )
+        await orch.start()
+        engine = _MockEngine()
+        engine._handle_message_mock = AsyncMock(side_effect=RuntimeError("boom"))
+        orch._engine = engine
+        orch._connector = AsyncMock()
+
+        task = _make_task(working_dir=str(tmp_path))
+        task.transition_to("implement")
+        orch._active_tasks[task.chat_id] = task
+        task_memory.seed(task.run_id, task.task, str(tmp_path))
+
+        decision = ConductorDecision(
+            action="implement", reason="ready", instruction="code it"
+        )
+        await orch._execute_action(task, decision, None)
+
+        assert task.phase == "failed"
+        assert task.outcome == "error"
+        assert "runtime error" in (task.error_message or "")
+        # Terminal cleanup ran and removed the task from active.
+        assert task.chat_id not in orch._active_tasks
+        await orch.stop()

@@ -252,6 +252,16 @@ class TestResolveConfig:
     def test_interactive_modes_are_correct(self):
         assert {"default", "web"} == _INTERACTIVE_MODES
 
+    def test_sandbox_plan_mode_upgrades_for_task_session(self, agent):
+        # Defense in depth against the "Implement phase produced no summary"
+        # bug: if session.mode is "plan" during a v3 task phase, the codex
+        # sandbox must NOT collapse to read-only — the orchestrator owns
+        # plan gating and the subprocess needs to write files.
+        assert agent._resolve_sandbox("plan", task_driven=True) == "workspace-write"
+
+    def test_approval_plan_mode_task_driven(self, agent):
+        assert agent._resolve_approval("plan", task_driven=True) == "never"
+
 
 # ---------------------------------------------------------------------------
 # Thread options building
@@ -349,6 +359,15 @@ class TestWriteInstructions:
         agent._write_instructions(session)
         content = (tmp_path / "AGENTS.md").read_text()
         assert _PLAN_MODE_INSTRUCTION in content
+
+    def test_plan_mode_instruction_skipped_for_task_session(
+        self, agent, session, tmp_path
+    ):
+        session.mode = "plan"
+        session.task_run_id = "abc123"
+        agent._write_instructions(session)
+        content = (tmp_path / "AGENTS.md").read_text()
+        assert _PLAN_MODE_INSTRUCTION not in content
 
     def test_auto_mode_instruction(self, agent, session, tmp_path):
         session.mode = "auto"

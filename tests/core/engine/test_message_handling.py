@@ -650,6 +650,45 @@ class TestAutoPlanActivation:
         session = eng.session_manager.get("u1", "c1")
         assert session.mode == "default"
 
+    async def test_auto_plan_skipped_when_task_run_id_set(
+        self, audit_logger, policy_engine, tmp_path
+    ):
+        """Task orchestrator phase sessions must not get hijacked into plan mode.
+
+        Regression: task_v3 implement phase calls begin_phase_session with
+        mode='auto' and plan_origin=None. auto_plan used to satisfy its
+        condition and flip the implement phase into plan mode, so the agent
+        only produced a plan, no Implementation Summary was written, and the
+        task escalated with 'Implement phase produced no summary'.
+        """
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            auto_plan=True,
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        agent = FakeAgent()
+        eng = Engine(
+            connector=None,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        session = await eng.session_manager.get_or_create("u1", "c1", str(tmp_path))
+        session.mode = "auto"
+        session.task_run_id = "task-run-abc"
+        await eng.session_manager.save(session)
+
+        await eng.handle_message("u1", "implement the thing", "c1")
+
+        session = eng.session_manager.get("u1", "c1")
+        assert session.mode == "auto", (
+            "auto_plan must not flip a task-driven session into plan mode"
+        )
+        assert session.plan_origin is None
+
     async def test_exit_plan_mode_skips_auto_plan_reentry(
         self, audit_logger, policy_engine, tmp_path
     ):
