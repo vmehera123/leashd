@@ -2895,7 +2895,7 @@ const SettingsManager = {
   },
 
   _renderAgentSection(agent) {
-    const effort = agent.effort || "medium";
+    const effort = agent.effort || "xhigh";
     const runtime = agent.runtime || "claude-code";
     const mode = agent.default_mode || "default";
     const claudeModel = agent.claude_model || "";
@@ -2906,7 +2906,7 @@ const SettingsManager = {
       <div class="setting-row">
         <div><div class="setting-label">Effort</div></div>
         <div class="segmented-control" data-setting="agent.effort">
-          ${["low", "medium", "high", "max"].map(v =>
+          ${["low", "medium", "high", "xhigh", "max"].map(v =>
             `<button data-value="${v}" class="${effort === v ? 'active' : ''}">${v}</button>`
           ).join("")}
         </div>
@@ -2991,7 +2991,7 @@ const SettingsManager = {
     const effort = entry.effort || "";
     const claudeModel = entry.claude_model || "";
     const codexModel = entry.codex_model || "";
-    const efforts = ["", "low", "medium", "high", "max"];
+    const efforts = ["", "low", "medium", "high", "xhigh", "max"];
     return `<div class="setting-row" data-scoped-row="${scope}" data-scoped-key="${escapeHtml(key)}" style="flex-wrap:wrap; gap:6px; border-bottom:1px solid var(--border-subtle); padding-bottom:8px;">
       <div style="flex-basis:100%;"><div class="setting-label">${escapeHtml(label)}</div></div>
       <select class="select-control" data-scoped-field="effort" style="flex:1 1 80px;">
@@ -3075,7 +3075,7 @@ const SettingsManager = {
         const res = await authFetch("/api/config/directory-settings", {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ path, effort: "medium", replace: true }),
+          body: JSON.stringify({ path, effort: "xhigh", replace: true }),
         });
         const data = await res.json();
         if (data.success) {

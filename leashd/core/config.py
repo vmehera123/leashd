@@ -75,7 +75,7 @@ class LeashdConfig(BaseSettings):
     disallowed_tools: list[str] = []
     mcp_servers: dict[str, Any] = {}
     codebase_memory_enabled: bool = True
-    effort: Literal["low", "medium", "high", "max"] | None = "medium"
+    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = "xhigh"
 
     # Claude agent settings (apply when agent_runtime="claude-cli" or "claude-code")
     claude_model: str | None = None

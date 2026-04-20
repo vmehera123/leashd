@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from leashd.core.config import LeashdConfig
     from leashd.storage.base import MessageStore
 
-_VALID_EFFORTS = {"low", "medium", "high", "max"}
+_VALID_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 _VALID_RUNTIMES = {"claude-cli", "claude-code", "codex"}
 _VALID_MODES = {"default", "plan", "auto"}
 _VALID_BROWSER_BACKENDS = {"playwright", "agent-browser"}
@@ -236,7 +236,7 @@ def create_rest_router(
         return JSONResponse(
             content={
                 "agent": {
-                    "effort": raw.get("effort", "medium"),
+                    "effort": raw.get("effort", "xhigh"),
                     "runtime": raw.get("agent_runtime", "claude-code"),
                     "default_mode": raw.get("default_mode", "default"),
                     "max_turns": raw.get("max_turns", 250),

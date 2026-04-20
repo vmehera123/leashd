@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.15.2] - 2026-04-20
+- **added**: New `xhigh` effort level between `high` and `max`; Claude runtimes saturate `xhigh` to `max`, Codex maps both `xhigh` and `max` to its own `xhigh`
+- **changed**: Default effort is now `xhigh` (was `medium`) — both for fresh configs and the WebUI "add directory override" action
+
+
 ## [0.15.1] - 2026-04-17
 
 - **fixed**: v3 review prompt disambiguated — "Do NOT edit files" was taken literally by review agents, so they'd print findings inline and leave the `## Review` section as the placeholder template, tripping `_parse_severity` and escalating. Prompt now says "Do NOT edit source code or tests" and explicitly authorizes the `Edit` call on the task memory file.

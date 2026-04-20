@@ -40,6 +40,7 @@ from leashd.agents.runtimes._helpers import (
     safe_callback,
 )
 from leashd.agents.types import PermissionAllow, PermissionDeny
+from leashd.core.runtime_settings import to_claude_effort
 from leashd.exceptions import AgentError
 
 if TYPE_CHECKING:
@@ -161,7 +162,9 @@ class ClaudeCliAgent(BaseAgent):
                 ),
             ]
         )
-        effort = (settings.effort if settings else None) or self._config.effort
+        effort = to_claude_effort(
+            (settings.effort if settings else None) or self._config.effort
+        )
         if effort:
             cmd.extend(["--effort", effort])
 

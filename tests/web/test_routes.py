@@ -441,7 +441,7 @@ class TestConfigGetEndpoint:
             mock_load.return_value = {}
             resp = client.get("/api/config", headers=_AUTH_HEADER)
             data = resp.json()
-            assert data["agent"]["effort"] == "medium"
+            assert data["agent"]["effort"] == "xhigh"
             assert data["agent"]["runtime"] == "claude-code"
             assert data["autonomous"]["enabled"] is False
             assert data["browser"]["backend"] == "playwright"

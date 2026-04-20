@@ -55,6 +55,7 @@ from leashd.agents.runtimes._helpers import (
     safe_callback,
 )
 from leashd.agents.types import PermissionAllow, PermissionDeny
+from leashd.core.runtime_settings import to_claude_effort
 from leashd.exceptions import AgentError
 
 if TYPE_CHECKING:
@@ -222,7 +223,9 @@ class ClaudeCodeAgent(BaseAgent):
             max_buffer_size=MAX_BUFFER_SIZE,
             include_partial_messages=True,
         )
-        effort = (settings.effort if settings else None) or self._config.effort
+        effort = to_claude_effort(
+            (settings.effort if settings else None) or self._config.effort
+        )
         opts.effort = effort
 
         model = (

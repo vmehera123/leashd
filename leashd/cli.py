@@ -212,7 +212,7 @@ def _print_yaml_only_config(yaml_data: dict[str, Any]) -> None:
     else:
         print("\nTelegram: not configured")
 
-    effort = yaml_data.get("effort", "medium")
+    effort = yaml_data.get("effort", "xhigh")
     print(f"\nThinking effort: {effort}")
 
     runtime = yaml_data.get("agent_runtime", "claude-code")
@@ -755,7 +755,7 @@ def _handle_effort(args: argparse.Namespace) -> None:
 def _handle_effort_show() -> None:
     """Display resolved effort defaults across all scopes."""
     data = load_global_config()
-    global_level = data.get("effort", "medium")
+    global_level = data.get("effort", "xhigh")
     print(f"Thinking effort (global): {global_level}")
 
     dir_settings = get_all_directory_settings()
@@ -1860,7 +1860,7 @@ def main() -> None:
         help="Show current effort level and per-scope overrides (default)",
     )
     effort_set = effort_sub.add_parser("set", help="Set thinking effort level")
-    effort_set.add_argument("level", choices=["low", "medium", "high", "max"])
+    effort_set.add_argument("level", choices=["low", "medium", "high", "xhigh", "max"])
     effort_set.add_argument(
         "--dir",
         help="Apply to a specific approved directory (absolute path). Omit for global.",

@@ -6,10 +6,12 @@ import pytest
 
 from leashd.core.config import LeashdConfig
 from leashd.core.runtime_settings import (
+    VALID_EFFORTS,
     RuntimeSettings,
     classify_model,
     resolve_scope_sources,
     resolve_settings,
+    to_claude_effort,
 )
 from leashd.core.workspace import Workspace
 
@@ -49,8 +51,8 @@ class TestRuntimeSettings:
 class TestResolveSettings:
     def test_global_only(self, base_config) -> None:
         settings = resolve_settings(global_cfg=base_config)
-        # Default global effort is "medium" per LeashdConfig.
-        assert settings.effort == "medium"
+        # Default global effort is "xhigh" per LeashdConfig.
+        assert settings.effort == "xhigh"
         assert settings.claude_model is None
         assert settings.codex_model is None
 
@@ -118,7 +120,7 @@ class TestResolveSettings:
             directory="/path/to/project",
             directory_settings=directory_settings,
         )
-        assert settings.effort == "medium"  # global default
+        assert settings.effort == "xhigh"  # global default
 
     def test_invalid_effort_in_dir_entry_is_dropped(self, base_config) -> None:
         directory_settings = {"/path": {"effort": "nonsense"}}
@@ -127,7 +129,7 @@ class TestResolveSettings:
             directory="/path",
             directory_settings=directory_settings,
         )
-        assert settings.effort == "medium"  # falls back to global
+        assert settings.effort == "xhigh"  # falls back to global
 
 
 class TestResolveScopeSources:
@@ -168,3 +170,24 @@ class TestClassifyModel:
     )
     def test_classification(self, value: str, expected: str | None) -> None:
         assert classify_model(value) == expected
+
+
+class TestEffortLevels:
+    def test_valid_efforts_contains_all_five(self) -> None:
+        assert {"low", "medium", "high", "xhigh", "max"} == VALID_EFFORTS
+
+    @pytest.mark.parametrize(
+        ("given", "expected"),
+        [
+            ("low", "low"),
+            ("medium", "medium"),
+            ("high", "high"),
+            ("max", "max"),
+            ("xhigh", "max"),
+            (None, None),
+        ],
+    )
+    def test_to_claude_effort_saturates_xhigh(
+        self, given: str | None, expected: str | None
+    ) -> None:
+        assert to_claude_effort(given) == expected

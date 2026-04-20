@@ -1098,7 +1098,8 @@ class TestClaudeCodeAgent:
 
     def test_build_options_effort_default(self, agent, session):
         opts = agent._build_options(session, can_use_tool=None)
-        assert opts.effort == "medium"
+        # Global default is "xhigh" which saturates to "max" for Claude.
+        assert opts.effort == "max"
 
     def test_build_options_effort_high(self, tmp_path):
         config = LeashdConfig(approved_directories=[tmp_path], effort="high")
@@ -1111,6 +1112,18 @@ class TestClaudeCodeAgent:
         )
         opts = high_agent._build_options(session, can_use_tool=None)
         assert opts.effort == "high"
+
+    def test_build_options_effort_xhigh_saturates_to_max(self, tmp_path):
+        config = LeashdConfig(approved_directories=[tmp_path], effort="xhigh")
+        xhigh_agent = ClaudeCodeAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=str(tmp_path),
+        )
+        opts = xhigh_agent._build_options(session, can_use_tool=None)
+        assert opts.effort == "max"
 
     def test_build_options_effort_none(self, tmp_path):
         config = LeashdConfig(approved_directories=[tmp_path], effort=None)

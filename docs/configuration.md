@@ -46,7 +46,7 @@ Each layer overrides the one before it: `~/.leashd/config.yaml` → `.env` → e
 | `LEASHD_ALLOWED_TOOLS` | `list[str]` | `[]` | Whitelist of tools the agent can use (empty = all) |
 | `LEASHD_DISALLOWED_TOOLS` | `list[str]` | `[]` | Blacklist of tools the agent cannot use |
 | `LEASHD_MCP_SERVERS` | `dict` | `{}` | JSON dict of MCP server configurations |
-| `LEASHD_EFFORT` | `Literal["low", "medium", "high", "max"] \| None` | `"medium"` | Thinking depth for the Claude agent |
+| `LEASHD_EFFORT` | `Literal["low", "medium", "high", "xhigh", "max"] \| None` | `"xhigh"` | Thinking depth for the agent. `xhigh` sits between `high` and `max`; Claude runtimes saturate `xhigh` to `max` (no native rung), Codex maps both `xhigh` and `max` to its own `xhigh` |
 
 ### Safety Settings
 

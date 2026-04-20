@@ -83,6 +83,7 @@ _EFFORT_MAP: dict[str, str] = {
     "low": "low",
     "medium": "medium",
     "high": "high",
+    "xhigh": "xhigh",
     "max": "xhigh",
 }
 

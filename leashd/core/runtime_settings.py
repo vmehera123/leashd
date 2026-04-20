@@ -22,9 +22,26 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
-EffortLevel = Literal["low", "medium", "high", "max"]
+EffortLevel = Literal["low", "medium", "high", "xhigh", "max"]
+ClaudeEffortLevel = Literal["low", "medium", "high", "max"]
 
-VALID_EFFORTS: frozenset[str] = frozenset({"low", "medium", "high", "max"})
+VALID_EFFORTS: frozenset[str] = frozenset({"low", "medium", "high", "xhigh", "max"})
+
+EFFORT_LEVELS: tuple[EffortLevel, ...] = ("low", "medium", "high", "xhigh", "max")
+
+
+def to_claude_effort(effort: EffortLevel | None) -> ClaudeEffortLevel | None:
+    """Translate a leashd effort level to the set Claude runtimes accept.
+
+    Claude's ladder is ``low|medium|high|max`` — leashd's ``xhigh`` saturates
+    up to ``max`` since there is no rung between ``high`` and ``max``.
+    """
+    if effort is None:
+        return None
+    if effort == "xhigh":
+        return "max"
+    return effort
+
 
 _CLAUDE_MODEL_PREFIXES = ("claude-", "sonnet", "opus", "haiku")
 _CODEX_MODEL_PREFIXES = ("gpt-", "o1", "o3", "o4", "codex-")

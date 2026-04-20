@@ -317,6 +317,23 @@ class TestBuildCommand:
         idx = cmd.index("--effort")
         assert cmd[idx + 1] == "high"
 
+    def test_effort_flag_xhigh_saturates_to_max(self, tmp_path):
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            effort="xhigh",
+        )
+        with patch.object(ClaudeCliAgent, "_find_cli", return_value="/usr/bin/claude"):
+            agent = ClaudeCliAgent(config)
+        session = Session(
+            session_id="s1",
+            user_id="u1",
+            chat_id="c1",
+            working_directory=str(tmp_path),
+        )
+        cmd = agent._build_command(session)
+        idx = cmd.index("--effort")
+        assert cmd[idx + 1] == "max"
+
     def test_allowed_tools(self, tmp_path):
         config = LeashdConfig(
             approved_directories=[tmp_path],

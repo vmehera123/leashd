@@ -316,7 +316,7 @@ Restart the daemon (`leashd restart`) to pick up the new version.
 
 ```bash
 leashd effort show       # display current effort level
-leashd effort set high   # set effort level (low, medium, high, max)
+leashd effort set high   # set effort level (low, medium, high, xhigh, max — default: xhigh)
 ```
 
 ### Plugins

@@ -1444,7 +1444,7 @@ class TestEffort:
 
         _handle_effort_show()
         captured = capsys.readouterr()
-        assert "medium" in captured.out
+        assert "xhigh" in captured.out
 
     def test_effort_show_custom(self, fake_config_dir, capsys):
         from leashd.cli import _handle_effort_show

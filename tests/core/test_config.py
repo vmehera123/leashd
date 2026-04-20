@@ -364,12 +364,12 @@ class TestEnsureleashdDir:
 
 
 class TestEffortConfig:
-    def test_effort_default_medium(self, tmp_path):
+    def test_effort_default_xhigh(self, tmp_path):
         config = LeashdConfig(approved_directories=[tmp_path])
-        assert config.effort == "medium"
+        assert config.effort == "xhigh"
 
     def test_effort_custom_values(self, tmp_path):
-        for level in ("low", "high", "max"):
+        for level in ("low", "medium", "high", "xhigh", "max"):
             config = LeashdConfig(approved_directories=[tmp_path], effort=level)
             assert config.effort == level
 
