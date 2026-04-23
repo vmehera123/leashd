@@ -173,6 +173,7 @@ def create_builtin_plugins(
                 db_path=session_db_path,
                 profile=profile,
                 phase_timeout_seconds=config.task_phase_timeout_seconds,
+                implement_max_retries=config.task_implement_max_retries,
                 verify_max_retries=config.task_verify_max_retries,
                 review_max_loopbacks=config.task_review_max_loopbacks,
             )

@@ -916,3 +916,30 @@ class TestAgentBrowserPolicyRules:
         c = engine.classify("Bash", {"command": "agent-browser scrollintoview @e5"})
         assert engine.evaluate(c) == PolicyDecision.REQUIRE_APPROVAL
         assert c.category == "agent-browser-mutations"
+
+    def test_default_classifies_mutation_behind_session_flag(self):
+        # Regression: agent-browser --session <id> click @e5 used to fall
+        # through to the generic "unmatched" Bash rule and request human
+        # approval. Matcher now flag-strips, so the rule matches cleanly.
+        engine = PolicyEngine([self.POLICIES_DIR / "default.yaml"])
+        c = engine.classify(
+            "Bash", {"command": "agent-browser --session foo click @e5"}
+        )
+        assert engine.evaluate(c) == PolicyDecision.REQUIRE_APPROVAL
+        assert c.category == "agent-browser-mutations"
+
+    def test_default_classifies_readonly_behind_flags(self):
+        engine = PolicyEngine([self.POLICIES_DIR / "default.yaml"])
+        c = engine.classify(
+            "Bash", {"command": "agent-browser --headless --session bar snapshot"}
+        )
+        assert engine.evaluate(c) == PolicyDecision.ALLOW
+        assert c.category == "agent-browser-readonly"
+
+    def test_autonomous_classifies_mutation_behind_flag(self):
+        engine = PolicyEngine([self.POLICIES_DIR / "autonomous.yaml"])
+        c = engine.classify(
+            "Bash", {"command": "agent-browser -p browserbase fill @e1 hi"}
+        )
+        assert engine.evaluate(c) == PolicyDecision.REQUIRE_APPROVAL
+        assert c.category == "agent-browser-mutations"

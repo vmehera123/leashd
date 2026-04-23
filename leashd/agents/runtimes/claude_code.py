@@ -238,7 +238,7 @@ class ClaudeCodeAgent(BaseAgent):
             system_prompt = prepend_instruction(PLAN_MODE_INSTRUCTION, system_prompt)
         elif session.mode in ("auto", "edit"):
             system_prompt = prepend_instruction(AUTO_MODE_INSTRUCTION, system_prompt)
-        elif session.mode_instruction:
+        if session.mode_instruction:
             system_prompt = prepend_instruction(session.mode_instruction, system_prompt)
         if session.workspace_directories:
             ws_ctx = build_workspace_context(

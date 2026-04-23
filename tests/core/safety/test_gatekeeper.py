@@ -615,6 +615,45 @@ class TestApprovalKeyExtraction:
         assert _approval_key("Bash", {"command": "git -C /path status"}) == "Bash::git"
         assert _approval_key("Bash", {"command": "ls -la"}) == "Bash::ls"
 
+    def test_bash_agent_browser_with_long_flag(self):
+        # Regression: agent-browser --session <id> click @e5 used to key as
+        # Bash::agent-browser (bare), missing the AGENT_BROWSER_AUTO_APPROVE
+        # allowlist entry Bash::agent-browser click. Now the third @-token is
+        # also kept in the key, but matching against the stored 2-token
+        # allowlist entry still works via the prefix-with-word-boundary
+        # check in _matches_auto_approved.
+        key = _approval_key(
+            "Bash", {"command": "agent-browser --session foo click @e5"}
+        )
+        assert key.startswith("Bash::agent-browser click")
+
+    def test_bash_agent_browser_with_equals_flag(self):
+        assert (
+            _approval_key("Bash", {"command": "agent-browser --session=foo screenshot"})
+            == "Bash::agent-browser screenshot"
+        )
+
+    def test_bash_agent_browser_with_short_flag(self):
+        assert (
+            _approval_key("Bash", {"command": "agent-browser -p browserbase click"})
+            == "Bash::agent-browser click"
+        )
+
+    def test_bash_agent_browser_behind_cd(self):
+        assert (
+            _approval_key(
+                "Bash",
+                {"command": "cd /tmp && agent-browser --headless screenshot"},
+            )
+            == "Bash::agent-browser screenshot"
+        )
+
+    def test_bash_agent_browser_no_flags_still_works(self):
+        # Unchanged behaviour: 3-token key, matches the 2-token stored
+        # allowlist entry via _matches_auto_approved prefix logic.
+        key = _approval_key("Bash", {"command": "agent-browser click @e5"})
+        assert key.startswith("Bash::agent-browser click")
+
     def test_bash_with_path_second_token(self):
         assert (
             _approval_key("Bash", {"command": "python /path/script.py"})
@@ -1057,6 +1096,23 @@ class TestHierarchicalAutoApprove:
         assert result.behavior == "allow"
         assert len(mock_connector.approval_requests) == 0
 
+    async def test_agent_browser_with_session_flag_auto_approved(
+        self, gk, mock_connector, mock_audit
+    ):
+        """Regression: /test used to enable ``Bash::agent-browser click`` yet
+        still prompt for human approval when the agent invoked
+        ``agent-browser --session <id> click @e5`` because the approval key
+        degraded to bare ``Bash::agent-browser``."""
+        gk.enable_tool_auto_approve("c1", "Bash::agent-browser click")
+        result = await gk.check(
+            "Bash",
+            {"command": "agent-browser --session foo click @e5"},
+            "s1",
+            "c1",
+        )
+        assert result.behavior == "allow"
+        assert len(mock_connector.approval_requests) == 0
+
 
 class TestMCPToolNameNormalization:
     """Tests for MCP tool name prefix stripping."""
@@ -1209,8 +1265,8 @@ class TestGatekeeperAutoApproverIntegration:
             task_description="Fix the login bug",
             session_mode="auto",
         )
-        call_kwargs = gk._auto_approver.evaluate.call_args[1]
-        assert call_kwargs["task_description"] == "Fix the login bug"
+        ctx = gk._auto_approver.evaluate.call_args[1]["context"]
+        assert ctx.task_description == "Fix the login bug"
 
     async def test_audit_summary_forwarded(self, ai_gatekeeper, mock_audit, tmp_dir):
         mock_audit.get_recent_entries = MagicMock(
@@ -1226,8 +1282,8 @@ class TestGatekeeperAutoApproverIntegration:
             "c1",
             session_mode="auto",
         )
-        call_kwargs = ai_gatekeeper._auto_approver.evaluate.call_args[1]
-        assert "Read" in call_kwargs["audit_summary"]
+        ctx = ai_gatekeeper._auto_approver.evaluate.call_args[1]["context"]
+        assert "Read" in ctx.audit_summary
 
     async def test_session_mode_forwarded_to_audit(
         self, ai_gatekeeper, mock_audit, tmp_dir
@@ -1708,6 +1764,150 @@ class TestGatekeeperAutoApproverIntegration:
         assert result.behavior == "allow"
         auto_approver.evaluate.assert_not_called()
         coordinator.request_approval.assert_called_once()
+
+    async def test_provider_none_falls_back_to_minimal_context(
+        self, ai_gatekeeper, tmp_dir
+    ):
+        """Provider returning None → approver gets minimal context from the
+        legacy task_description kwarg (no regression)."""
+        ai_gatekeeper.set_approval_context_provider(lambda _s, _c: None)
+        await ai_gatekeeper.check(
+            "Write",
+            {"file_path": str(tmp_dir / "main.py")},
+            "s1",
+            "c1",
+            task_description="Ship the thing",
+            session_mode="auto",
+        )
+        ctx = ai_gatekeeper._auto_approver.evaluate.call_args[1]["context"]
+        assert ctx.task_description == "Ship the thing"
+        # Provider didn't supply these — stay empty:
+        assert ctx.working_directory == ""
+        assert ctx.phase is None
+
+    async def test_provider_context_surfaces_through(self, ai_gatekeeper, tmp_dir):
+        """Provider returning a populated ApprovalContext → its fields reach
+        the approver (working directory, phase, plan excerpt all present)."""
+        from leashd.plugins.builtin.auto_approver import ApprovalContext
+
+        def provider(_session_id: str, _chat_id: str) -> ApprovalContext:
+            return ApprovalContext(
+                task_description="Apply redesign",
+                working_directory="/Users/me/projects/site",
+                phase="implement",
+                plan_excerpt="Step 1: update colors\nStep 2: verify on mobile",
+            )
+
+        ai_gatekeeper.set_approval_context_provider(provider)
+        await ai_gatekeeper.check(
+            "Write",
+            {"file_path": str(tmp_dir / "main.py")},
+            "s1",
+            "c1",
+            # fallback_description must be ignored when provider returns one:
+            task_description="ignored phase prompt",
+            session_mode="auto",
+        )
+        ctx = ai_gatekeeper._auto_approver.evaluate.call_args[1]["context"]
+        assert ctx.task_description == "Apply redesign"
+        assert ctx.working_directory == "/Users/me/projects/site"
+        assert ctx.phase == "implement"
+        assert "mobile" in ctx.plan_excerpt
+
+    async def test_provider_context_gets_audit_summary_merged(
+        self, ai_gatekeeper, mock_audit, tmp_dir
+    ):
+        """Provider can't see session audit state, so the gatekeeper merges
+        the current audit_summary into the returned ApprovalContext."""
+        from leashd.plugins.builtin.auto_approver import ApprovalContext
+
+        mock_audit.get_recent_entries = MagicMock(
+            return_value=[
+                {"event": "tool_attempt", "tool_name": "Read", "decision": "allow"},
+            ]
+        )
+        mock_audit.summarize_entries = MagicMock(return_value="Read → allow")
+
+        ai_gatekeeper.set_approval_context_provider(
+            lambda _s, _c: ApprovalContext(
+                task_description="Do X",
+                working_directory="/w",
+                phase="implement",
+            )
+        )
+        await ai_gatekeeper.check(
+            "Write",
+            {"file_path": str(tmp_dir / "main.py")},
+            "s1",
+            "c1",
+            session_mode="auto",
+        )
+        ctx = ai_gatekeeper._auto_approver.evaluate.call_args[1]["context"]
+        # Provider fields preserved:
+        assert ctx.task_description == "Do X"
+        assert ctx.working_directory == "/w"
+        # Audit summary injected by the gatekeeper:
+        assert "Read" in ctx.audit_summary
+
+    async def test_provider_exception_falls_back_safely(self, ai_gatekeeper, tmp_dir):
+        """A misbehaving provider must never block the approval pipeline —
+        gatekeeper logs and falls through to minimal context."""
+
+        def broken_provider(_session_id: str, _chat_id: str):
+            raise RuntimeError("provider is buggy")
+
+        ai_gatekeeper.set_approval_context_provider(broken_provider)
+        result = await ai_gatekeeper.check(
+            "Write",
+            {"file_path": str(tmp_dir / "main.py")},
+            "s1",
+            "c1",
+            task_description="Ship it",
+            session_mode="auto",
+        )
+        # Provider exception must not break the flow; evaluate still ran.
+        assert result.behavior == "allow"
+        ctx = ai_gatekeeper._auto_approver.evaluate.call_args[1]["context"]
+        assert ctx.task_description == "Ship it"
+
+    async def test_set_approval_context_provider_late_binding(
+        self, sandbox, mock_audit, event_bus, policy_engine, tmp_dir
+    ):
+        """set_approval_context_provider registered after construction still
+        takes effect on the next approval."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from leashd.core.safety.approvals import ApprovalResult
+        from leashd.plugins.builtin.auto_approver import ApprovalContext
+
+        auto_approver = MagicMock()
+        auto_approver.evaluate = AsyncMock(
+            return_value=ApprovalResult(approved=True, reason="ok")
+        )
+        gk = ToolGatekeeper(
+            sandbox=sandbox,
+            audit=mock_audit,
+            event_bus=event_bus,
+            policy_engine=policy_engine,
+            auto_approver=auto_approver,
+        )
+        # No provider at construction time — late-bind it:
+        gk.set_approval_context_provider(
+            lambda _s, _c: ApprovalContext(
+                task_description="late-bound", working_directory="/x"
+            )
+        )
+
+        await gk.check(
+            "Write",
+            {"file_path": str(tmp_dir / "main.py")},
+            "s1",
+            "c1",
+            session_mode="auto",
+        )
+        ctx = auto_approver.evaluate.call_args[1]["context"]
+        assert ctx.task_description == "late-bound"
+        assert ctx.working_directory == "/x"
 
 
 class TestGatekeeperSafetyInvariantsExtended:

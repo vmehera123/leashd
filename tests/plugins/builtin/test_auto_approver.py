@@ -12,7 +12,7 @@ from leashd.core.events import EventBus
 from leashd.core.safety.audit import AuditLogger
 from leashd.plugins.base import PluginContext
 from leashd.plugins.builtin._cli_evaluator import sanitize_for_prompt
-from leashd.plugins.builtin.auto_approver import AutoApprover
+from leashd.plugins.builtin.auto_approver import ApprovalContext, AutoApprover
 from tests.plugins.builtin.conftest import mock_cli_process
 
 _PATCH_SUBPROCESS = (
@@ -48,7 +48,7 @@ class TestAutoApproverEvaluate:
                 tool_input={"file_path": "/project/main.py"},
                 session_id="sess-1",
                 chat_id="chat-1",
-                task_description="Fix the login bug",
+                context=ApprovalContext(task_description="Fix the login bug"),
             )
 
         assert result.approved is True
@@ -252,22 +252,24 @@ class TestAutoApproverPromptBuilding:
         msg = AutoApprover._build_user_message(
             "Write",
             {"file_path": "/project/main.py", "content": "hello"},
-            "Fix the login bug",
-            "",
+            ApprovalContext(task_description="Fix the login bug"),
         )
         assert "<tool_call>" in msg
         assert "Tool: Write" in msg
         assert "</tool_call>" in msg
+        assert "<task>" in msg
         assert "Fix the login bug" in msg
 
     def test_build_user_message_with_audit_summary(self):
         msg = AutoApprover._build_user_message(
             "Bash",
             {"command": "git push origin feat"},
-            "Deploy feature",
-            "1. Read main.py\n2. Edit main.py",
+            ApprovalContext(
+                task_description="Deploy feature",
+                audit_summary="1. Read main.py\n2. Edit main.py",
+            ),
         )
-        assert "Actions taken so far" in msg
+        assert "<audit>" in msg
         assert "Read main.py" in msg
 
     def test_build_user_message_truncates_large_input(self):
@@ -275,16 +277,87 @@ class TestAutoApproverPromptBuilding:
         msg = AutoApprover._build_user_message(
             "Write",
             {"file_path": "/project/big.py", "content": large_content},
-            "task",
-            "",
+            ApprovalContext(task_description="task"),
         )
         assert "...[truncated]" in msg
 
     def test_build_user_message_no_task(self):
         msg = AutoApprover._build_user_message(
-            "Write", {"file_path": "/project/f.py"}, "", ""
+            "Write", {"file_path": "/project/f.py"}, ApprovalContext()
         )
         assert "(no description)" in msg
+
+    def test_build_user_message_includes_working_directory(self):
+        msg = AutoApprover._build_user_message(
+            "Bash",
+            {"command": "npm run build"},
+            ApprovalContext(
+                task_description="Apply redesign",
+                working_directory="/Users/me/projects/site",
+                phase="implement",
+            ),
+        )
+        assert "<working_directory>" in msg
+        assert "/Users/me/projects/site" in msg
+        assert "<phase>implement</phase>" in msg
+
+    def test_build_user_message_renders_plan_excerpt(self):
+        plan = "Step 1: update colors\nStep 2: verify in browser on mobile"
+        msg = AutoApprover._build_user_message(
+            "Bash",
+            {"command": "agent-browser screenshot"},
+            ApprovalContext(
+                task_description="Apply redesign",
+                phase="implement",
+                plan_excerpt=plan,
+            ),
+        )
+        assert "<plan>" in msg
+        assert "verify in browser on mobile" in msg
+
+    def test_build_user_message_omits_empty_sections(self):
+        """Empty fields are omitted so the model isn't distracted by placeholders."""
+        msg = AutoApprover._build_user_message(
+            "Write",
+            {"file_path": "/project/main.py"},
+            ApprovalContext(task_description="Fix bug"),
+        )
+        # Non-empty sections present:
+        assert "<task>" in msg
+        assert "<tool_call>" in msg
+        # Empty sections omitted:
+        assert "<working_directory>" not in msg
+        assert "<phase>" not in msg
+        assert "<plan>" not in msg
+        assert "<audit>" not in msg
+
+
+class TestApprovalContextModel:
+    def test_defaults(self):
+        ctx = ApprovalContext()
+        assert ctx.task_description == ""
+        assert ctx.working_directory == ""
+        assert ctx.phase is None
+        assert ctx.plan_excerpt == ""
+        assert ctx.audit_summary == ""
+
+    def test_frozen(self):
+        from pydantic import ValidationError
+
+        ctx = ApprovalContext(task_description="x")
+        with pytest.raises(ValidationError, match="frozen"):
+            ctx.task_description = "y"  # type: ignore[misc]
+
+    def test_model_copy_update_for_audit_merge(self):
+        """Gatekeeper uses model_copy to inject audit_summary into a provider context."""
+        base = ApprovalContext(
+            task_description="Do X", working_directory="/p", phase="implement"
+        )
+        merged = base.model_copy(update={"audit_summary": "1. Read foo"})
+        assert merged.task_description == "Do X"
+        assert merged.working_directory == "/p"
+        assert merged.phase == "implement"
+        assert merged.audit_summary == "1. Read foo"
 
 
 class TestSanitizeForPrompt:
@@ -322,8 +395,7 @@ class TestBuildUserMessageSanitizes:
         msg = AutoApprover._build_user_message(
             "Write",
             {"file_path": "/project/main.py", "content": "code\x00here\u200b"},
-            "task",
-            "",
+            ApprovalContext(task_description="task"),
         )
         assert "\x00" not in msg
         assert "\u200b" not in msg

@@ -144,7 +144,8 @@ class LeashdConfig(BaseSettings):
     task_memory_max_chars: int = 8000
     task_profile: str = "standalone"
     task_conductor_instructions: str = ""
-    # v3-specific retry caps — both default to 1 (same as hardcoded v2 behaviour)
+    # v3-specific retry caps — all default to 1 (same as hardcoded v2 behaviour)
+    task_implement_max_retries: int = 1
     task_verify_max_retries: int = 1
     task_review_max_loopbacks: int = 1
 

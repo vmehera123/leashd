@@ -24,6 +24,7 @@ from leashd.plugins.builtin.browser_tools import (
     is_agent_browser_command,
     is_browser_tool,
     parse_agent_browser_command,
+    strip_agent_browser_flags,
 )
 
 
@@ -350,6 +351,84 @@ class TestParseAgentBrowserCommand:
 
     def test_empty_string_returns_none(self):
         assert parse_agent_browser_command("") is None
+
+    def test_with_long_flag_value(self):
+        # Regression: agent-browser --session <id> click @e5 used to return
+        # None because --session isn't in the subcommand sets, so /test
+        # callers were stuck asking for human approval.
+        result = parse_agent_browser_command("agent-browser --session foo click @e5")
+        assert result == ("click", True)
+
+    def test_with_equals_flag(self):
+        result = parse_agent_browser_command("agent-browser --session=foo screenshot")
+        assert result == ("screenshot", False)
+
+    def test_with_short_flag_value(self):
+        result = parse_agent_browser_command("agent-browser -p browserbase click")
+        assert result == ("click", True)
+
+    def test_boolean_flag_before_subcommand(self):
+        # --headless has no value; the subcommand set tells us click is a
+        # verb, not a flag value.
+        result = parse_agent_browser_command("agent-browser --headless click")
+        assert result == ("click", True)
+
+    def test_multiple_flags(self):
+        result = parse_agent_browser_command(
+            "agent-browser --session foo --headless --timeout 5000 fill @e1 hi"
+        )
+        assert result == ("fill", True)
+
+
+class TestStripAgentBrowserFlags:
+    def test_non_agent_browser_unchanged(self):
+        assert strip_agent_browser_flags("ls -la") == "ls -la"
+        assert strip_agent_browser_flags("git -C /p status") == "git -C /p status"
+        assert strip_agent_browser_flags("") == ""
+
+    def test_no_flags_unchanged(self):
+        assert (
+            strip_agent_browser_flags("agent-browser click @e5")
+            == "agent-browser click @e5"
+        )
+
+    def test_long_flag_with_value(self):
+        assert (
+            strip_agent_browser_flags("agent-browser --session foo click @e5")
+            == "agent-browser click @e5"
+        )
+
+    def test_long_flag_equals_value(self):
+        assert (
+            strip_agent_browser_flags("agent-browser --session=foo click @e5")
+            == "agent-browser click @e5"
+        )
+
+    def test_short_flag_with_value(self):
+        assert (
+            strip_agent_browser_flags("agent-browser -p browserbase click")
+            == "agent-browser click"
+        )
+
+    def test_boolean_flag_preserves_subcommand(self):
+        # Known subcommand names are never eaten as a flag's value, so bool
+        # flags like --headless don't swallow the verb.
+        assert (
+            strip_agent_browser_flags("agent-browser --headless click @e5")
+            == "agent-browser click @e5"
+        )
+
+    def test_multiple_flags_chained(self):
+        assert (
+            strip_agent_browser_flags(
+                "agent-browser --session foo --headless --timeout 5000 fill @e1 hi"
+            )
+            == "agent-browser fill @e1 hi"
+        )
+
+    def test_only_flags_no_subcommand(self):
+        # Edge: --verbose at end of tokens; helper returns bare agent-browser.
+        assert strip_agent_browser_flags("agent-browser --verbose") == "agent-browser"
 
 
 class TestIsAgentBrowserCommand:

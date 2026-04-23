@@ -63,6 +63,7 @@ def mock_engine():
     engine.enable_tool_auto_approve = MagicMock()
     engine.disable_auto_approve = MagicMock()
     engine.get_executing_session_id = MagicMock(return_value=None)
+    engine.set_approval_context_provider = MagicMock()
     return engine
 
 
@@ -199,10 +200,20 @@ class TestPrompts:
         with pytest.raises(TypeError):
             plan_prompt("abc", revision_feedback="should not be accepted")  # type: ignore[call-arg]
 
+    def test_plan_prompt_steers_away_from_bash_discovery(self):
+        p = " ".join(plan_prompt("abc").split())
+        assert "Read, Grep, and Glob" in p
+        assert "never Bash grep/sed/find/for-loops for discovery" in p
+
     def test_implement_prompt_with_review_feedback(self):
         p = implement_prompt("abc", review_feedback="Fix the XSS issue")
         assert "REVIEW FEEDBACK" in p
         assert "Fix the XSS issue" in p
+
+    def test_implement_prompt_steers_away_from_bash_discovery(self):
+        p = " ".join(implement_prompt("abc").split())
+        assert "Read, Grep, and Glob" in p
+        assert "never Bash grep/sed/find/for-loops for discovery" in p
 
     def test_verify_prompt_with_prior_failure(self):
         p = verify_prompt("abc", prior_failure_tail="pytest failed: test_foo")
@@ -425,6 +436,43 @@ class TestAdvancement:
         loaded = await task_store.load(task.run_id)
         assert loaded is not None
         assert loaded.phase == "implement"
+
+    async def test_session_completed_with_is_error_retries_implement(
+        self, orchestrator, event_bus, task_store, tmp_path
+    ):
+        """End-to-end: SESSION_COMPLETED with is_error=true during implement
+        captures the CLI error into phase_context and retries instead of
+        escalating. Regression: task 4958256b escalated silently because the
+        engine wasn't propagating is_error through to the orchestrator."""
+        task = _make_task(tmp_path, phase="implement")
+        task.phase_pipeline = ["plan", "implement", "verify", "review", "completed"]
+        await task_store.save(task)
+        orchestrator._active_tasks["c1"] = task
+        task_memory.seed(task.run_id, task.task, str(tmp_path), version="v3")
+        # Implementation Summary stays at placeholder — CLI died mid-work.
+
+        session = MagicMock()
+        session.chat_id = "c1"
+        session.task_run_id = task.run_id
+        await event_bus.emit(
+            Event(
+                name=SESSION_COMPLETED,
+                data={
+                    "session": session,
+                    "chat_id": "c1",
+                    "response_content": "Prompt is too long",
+                    "cost": 4.56,
+                    "is_error": True,
+                },
+            )
+        )
+        await asyncio.sleep(0.05)
+
+        loaded = await task_store.load(task.run_id)
+        assert loaded is not None
+        assert loaded.phase == "implement"
+        assert loaded.phase_context["implement_retry_count"] == 1
+        assert loaded.phase_costs.get("implement") == pytest.approx(4.56)
 
     async def test_session_failed_escalates_v3_task(
         self, orchestrator, event_bus, task_store, tmp_path
@@ -852,6 +900,30 @@ class TestPhaseExecution:
         assert call.kwargs["phase"] == "plan"
         assert call.kwargs["mode"] == "plan"
         assert call.kwargs["task_run_id"] == task.run_id
+        # Discovery guidance must reach the system prompt for plan+implement
+        # so Claude does not fall back to Bash for/grep/sed loops.
+        mode_instruction = call.kwargs["mode_instruction"]
+        assert mode_instruction is not None
+        assert "Read, Grep, and Glob" in mode_instruction
+        assert "NEVER Bash" in mode_instruction
+
+    @pytest.mark.parametrize(
+        ("phase", "expect_instruction"),
+        [("plan", True), ("implement", True), ("verify", False), ("review", False)],
+    )
+    async def test_execute_phase_mode_instruction_by_phase(
+        self, orchestrator, mock_engine, tmp_path, phase, expect_instruction
+    ):
+        task = _make_task(tmp_path, phase=phase)
+        task_memory.seed(task.run_id, task.task, str(tmp_path), version="v3")
+
+        await orchestrator._execute_phase(task)
+
+        call = mock_engine.session_manager.begin_phase_session.await_args
+        if expect_instruction:
+            assert call.kwargs["mode_instruction"] is not None
+        else:
+            assert call.kwargs["mode_instruction"] is None
 
     async def test_execute_phase_passes_task_settings_override(
         self, orchestrator, mock_engine, tmp_path
@@ -1432,10 +1504,100 @@ class TestVerifyReviewBranches:
         await task_store.save(task)
         task_memory.seed(task.run_id, task.task, str(tmp_path), version="v3")
         # Implementation Summary stays at the seeded placeholder.
+        # No CLI error in phase_context → escalate immediately without retry.
 
         next_phase = orchestrator._choose_next_phase(task)
         assert next_phase == "escalated"
         assert "no summary" in (task.error_message or "")
+        assert task.phase_context.get("implement_retry_count", 0) == 0
+
+    async def test_implement_no_summary_with_cli_error_retries(
+        self, orchestrator, task_store, tmp_path
+    ):
+        """Missing summary + CLI is_error=true → retry the implement phase."""
+        task = _make_task(tmp_path, phase="implement")
+        task.phase_pipeline = ["plan", "implement", "verify", "review", "completed"]
+        task.phase_context["implement_cli_error"] = "Prompt is too long"
+        await task_store.save(task)
+        task_memory.seed(task.run_id, task.task, str(tmp_path), version="v3")
+
+        next_phase = orchestrator._choose_next_phase(task)
+
+        assert next_phase == "implement"
+        assert task.phase_context["implement_retry_count"] == 1
+        # Error marker cleared so the next run starts clean.
+        assert "implement_cli_error" not in task.phase_context
+        assert task.error_message in (None, "")
+
+    async def test_implement_retry_exhausted_escalates_with_error(
+        self, task_store, mock_connector, mock_engine, event_bus, tmp_path
+    ):
+        """At implement_max_retries, escalate with the CLI error preview in
+        error_message so post-mortems see the real reason."""
+        orch = TaskV3Orchestrator(
+            task_store=task_store,
+            connector=mock_connector,
+            implement_max_retries=1,
+        )
+        orch.set_engine(mock_engine)
+        config = LeashdConfig(approved_directories=[tmp_path])
+        ctx = PluginContext(event_bus=event_bus, config=config)
+        await orch.initialize(ctx)
+        try:
+            task = _make_task(tmp_path, phase="implement")
+            task.phase_pipeline = [
+                "plan",
+                "implement",
+                "verify",
+                "review",
+                "completed",
+            ]
+            task.phase_context["implement_cli_error"] = "API Error: context exhausted"
+            task.phase_context["implement_retry_count"] = 1  # retry already used
+            await task_store.save(task)
+            task_memory.seed(task.run_id, task.task, str(tmp_path), version="v3")
+
+            next_phase = orch._choose_next_phase(task)
+
+            assert next_phase == "escalated"
+            assert "no summary" in (task.error_message or "")
+            assert "context exhausted" in (task.error_message or "")
+        finally:
+            await orch.stop()
+
+    async def test_implement_retry_config_allows_multiple_retries(
+        self, task_store, mock_connector, mock_engine, event_bus, tmp_path
+    ):
+        """implement_max_retries=2 permits a second retry before escalating."""
+        orch = TaskV3Orchestrator(
+            task_store=task_store,
+            connector=mock_connector,
+            implement_max_retries=2,
+        )
+        orch.set_engine(mock_engine)
+        config = LeashdConfig(approved_directories=[tmp_path])
+        ctx = PluginContext(event_bus=event_bus, config=config)
+        await orch.initialize(ctx)
+        try:
+            task = _make_task(tmp_path, phase="implement")
+            task.phase_pipeline = [
+                "plan",
+                "implement",
+                "verify",
+                "review",
+                "completed",
+            ]
+            task.phase_context["implement_cli_error"] = "Stream disconnected"
+            task.phase_context["implement_retry_count"] = 1  # first retry consumed
+            await task_store.save(task)
+            task_memory.seed(task.run_id, task.task, str(tmp_path), version="v3")
+
+            next_phase = orch._choose_next_phase(task)
+
+            assert next_phase == "implement"
+            assert task.phase_context["implement_retry_count"] == 2
+        finally:
+            await orch.stop()
 
 
 class TestHandleTerminalSessionCleanup:
@@ -1461,3 +1623,81 @@ class TestHandleTerminalSessionCleanup:
         assert session.plan_origin is None
         mock_engine.session_manager.save.assert_awaited_with(session)
         mock_engine.disable_auto_approve.assert_called_with(task.chat_id)
+
+
+class TestApprovalContextProvider:
+    """v3 provides working_directory, phase, and plan excerpt to the AI
+    auto-approver so it can judge relevance against the real task context
+    instead of guessing from the generic phase prompt.
+    """
+
+    async def test_set_engine_registers_provider(self, mock_engine, task_store):
+        orch = TaskV3Orchestrator(task_store=task_store)
+        orch.set_engine(mock_engine)
+        mock_engine.set_approval_context_provider.assert_called_once_with(
+            orch._build_approval_context
+        )
+
+    def test_returns_none_when_no_active_task(self, orchestrator):
+        """Non-task sessions must yield None so the gatekeeper falls back
+        to minimal context — don't leak stale context across chats."""
+        assert orchestrator._build_approval_context("s1", "unknown-chat") is None
+
+    def test_returns_none_when_task_is_terminal(self, orchestrator, tmp_path):
+        task = _make_task(tmp_path, phase="completed")
+        orchestrator._active_tasks[task.chat_id] = task
+        assert (
+            orchestrator._build_approval_context(task.session_id, task.chat_id) is None
+        )
+
+    def test_populates_context_from_active_task(self, orchestrator, tmp_path):
+        task = _make_task(
+            tmp_path,
+            phase="implement",
+            task="please apply redesign_v4 and verify mobile",
+        )
+        orchestrator._active_tasks[task.chat_id] = task
+        task_memory.seed(task.run_id, task.task, str(tmp_path), version="v3")
+        task_memory.update_section(
+            task.run_id,
+            str(tmp_path),
+            section="Plan",
+            content="Step 1: apply CSS\nStep 2: browser check at 375x667",
+        )
+
+        ctx = orchestrator._build_approval_context(task.session_id, task.chat_id)
+
+        assert ctx is not None
+        assert ctx.task_description == "please apply redesign_v4 and verify mobile"
+        assert ctx.working_directory == str(tmp_path)
+        assert ctx.phase == "implement"
+        assert "browser check" in ctx.plan_excerpt
+
+    def test_plan_excerpt_truncated_to_1500_chars(self, orchestrator, tmp_path):
+        task = _make_task(tmp_path, phase="implement")
+        orchestrator._active_tasks[task.chat_id] = task
+        task_memory.seed(task.run_id, task.task, str(tmp_path), version="v3")
+        huge_plan = "A" * 5000
+        task_memory.update_section(
+            task.run_id, str(tmp_path), section="Plan", content=huge_plan
+        )
+
+        ctx = orchestrator._build_approval_context(task.session_id, task.chat_id)
+
+        assert ctx is not None
+        assert len(ctx.plan_excerpt) <= 1500
+
+    def test_empty_plan_section_yields_empty_excerpt(self, orchestrator, tmp_path):
+        """Plan phase hasn't run yet — excerpt is empty but context still
+        carries working_directory and phase."""
+        task = _make_task(tmp_path, phase="plan")
+        orchestrator._active_tasks[task.chat_id] = task
+        task_memory.seed(task.run_id, task.task, str(tmp_path), version="v3")
+        # Deliberately do NOT populate the Plan section.
+
+        ctx = orchestrator._build_approval_context(task.session_id, task.chat_id)
+
+        assert ctx is not None
+        assert ctx.working_directory == str(tmp_path)
+        assert ctx.phase == "plan"
+        assert ctx.plan_excerpt == ""

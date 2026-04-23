@@ -36,16 +36,27 @@ Before exploring the codebase, read the relevant spec in `specs/app/`. Start wit
 
 ## Code Exploration (codebase-memory-mcp)
 
-When exploring or planning, consider starting with `codebase-memory-mcp` tools to quickly understand code structure before diving into raw file reads:
+**For the initial observation pass, use `codebase-memory-mcp` first.** It is a fast structural index over the codebase graph and answers "where does this live, what calls it, what shape is it" without blind `Grep` sweeps.
+
+**`Read`, `Grep`, `Glob`, `Edit`, and `Write` remain fully available and are the right tools once you know where to look.** The graph tells you *where*; the file tools let you actually *read, verify, and change* code. The graph can be stale, partial, or out of date with the working tree — never treat it as a substitute for reading the file before you edit.
+
+**Typical flow:** graph lookup (first pass) → `Read` the file to validate against current disk state → `Edit`. The validation step is mandatory for any non-trivial change.
+
+Primary `codebase-memory-mcp` tools (first-pass only):
 
 1. **`search_graph(name_pattern=..., label=..., qn_pattern=...)`** — find functions, classes, routes, or modules by name or label
-2. **`get_code_snippet(qualified_name=...)`** — read source code for a specific symbol (use instead of `Read` for code)
+2. **`get_code_snippet(qualified_name=...)`** — fast first glance at a specific symbol's source (follow up with `Read` if you need surrounding context or to confirm against disk)
 3. **`trace_path(function_name=..., mode="calls|data_flow|cross_service")`** — trace call chains, data flow, or cross-service paths
-4. **`get_architecture(aspects=...)`** — get high-level project structure and architecture
-5. **`query_graph(query=...)`** — run Cypher queries for complex structural patterns
+4. **`get_architecture(aspects=...)`** — high-level project structure
+5. **`query_graph(query=...)`** — Cypher queries for complex structural patterns
 6. **`search_code(pattern=...)`** — graph-augmented text search
 
-Fall back to `Grep`/`Glob`/`Read` only for non-code files (configs, YAML, text content, etc.). If the project is not indexed yet, run `index_repository` first.
+Go straight to `Read`/`Grep`/`Glob` (skip the graph) when:
+
+- Working with non-code files — Markdown, YAML, `.env`, `pyproject.toml`, docs, configs. The graph doesn't index these.
+- You already know the exact file path and just want its current content.
+- Verifying a symbol the graph returned (signature, surrounding context, current disk state).
+- The project isn't indexed yet — either run `index_repository` first if you need the graph, or just read directly.
 
 ## Mandatory Post-Implementation Check
 

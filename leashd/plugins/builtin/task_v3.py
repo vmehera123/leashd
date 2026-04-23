@@ -10,9 +10,11 @@ Phases coordinate via a single ``.leashd/tasks/{run_id}.md`` file — the
 agent reads the relevant prior sections, writes its own section, and
 the orchestrator reads back to decide the next phase.
 
-Retry policy (configurable via ``task_verify_max_retries`` and
-``task_review_max_loopbacks`` in config; default 1 each):
+Retry policy (configurable via ``task_implement_max_retries``,
+``task_verify_max_retries``, and ``task_review_max_loopbacks`` in
+config; default 1 each):
 
+- Implement with ``is_error=true`` and no summary → retry, then escalate
 - Verify ``Status: FAIL`` → retry verify, then escalate
 - Review ``Severity: CRITICAL`` → loop back to implement, then escalate
 - Review ``Severity: MINOR`` / ``OK`` → completed
@@ -72,6 +74,7 @@ from leashd.plugins.builtin._task_v3_prompts import (
     review_prompt,
     verify_prompt,
 )
+from leashd.plugins.builtin.auto_approver import ApprovalContext
 from leashd.plugins.builtin.browser_tools import (
     AGENT_BROWSER_AUTO_APPROVE,
     BROWSER_MUTATION_TOOLS,
@@ -81,6 +84,7 @@ from leashd.plugins.builtin.task_orchestrator import IMPLEMENT_BASH_AUTO_APPROVE
 from leashd.plugins.builtin.test_runner import TEST_BASH_AUTO_APPROVE
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from typing import Protocol
 
     from leashd.connectors.base import BaseConnector
@@ -101,6 +105,10 @@ if TYPE_CHECKING:
 
         def get_executing_session_id(self, chat_id: str) -> str | None: ...
 
+        def set_approval_context_provider(
+            self, provider: Callable[[str, str], Any]
+        ) -> None: ...
+
 
 logger = structlog.get_logger()
 
@@ -115,6 +123,26 @@ _V3_PHASE_TO_MODE: dict[TaskPhase, str] = {
     "implement": "auto",
     "verify": "test",
     "review": "default",
+}
+
+# System-prompt instruction prepended to plan and implement phase sessions.
+# These phases would otherwise inherit no mode instruction (PLAN_MODE_INSTRUCTION
+# is skipped when task_run_id is set, and AUTO_MODE_INSTRUCTION fires for
+# implement but says nothing about discovery). Without this, Claude defaults
+# to Bash for/grep/sed loops when a target repo's CLAUDE.md has no guidance.
+_V3_DISCOVERY_INSTRUCTION: str = (
+    "For reading, searching, or listing files in this task phase, use the "
+    "Read, Grep, and Glob tools — NEVER Bash grep/sed/find/awk/ls/cat/for-loops. "
+    "For broad multi-file exploration, use the Agent tool (subagents). Bash "
+    "is reserved for running the project's own commands — tests, linters, "
+    "build steps, git — not for discovery or file I/O."
+)
+
+_V3_PHASE_TO_MODE_INSTRUCTION: dict[TaskPhase, str | None] = {
+    "plan": _V3_DISCOVERY_INSTRUCTION,
+    "implement": _V3_DISCOVERY_INSTRUCTION,
+    "verify": None,
+    "review": None,
 }
 
 # Memory-file section the agent must populate during each phase.
@@ -254,6 +282,7 @@ class TaskV3Orchestrator(LeashdPlugin):
         db_path: str | None = None,
         profile: TaskProfile | None = None,
         phase_timeout_seconds: int = 1800,
+        implement_max_retries: int = 1,
         verify_max_retries: int = 1,
         review_max_loopbacks: int = 1,
     ) -> None:
@@ -263,6 +292,7 @@ class TaskV3Orchestrator(LeashdPlugin):
         self._connector = connector
         self._profile = profile or STANDALONE
         self._phase_timeout_seconds = phase_timeout_seconds
+        self._implement_max_retries = implement_max_retries
         self._verify_max_retries = verify_max_retries
         self._review_max_loopbacks = review_max_loopbacks
         self._active_tasks: dict[str, TaskRun] = {}
@@ -282,6 +312,41 @@ class TaskV3Orchestrator(LeashdPlugin):
 
     def set_engine(self, engine: _EngineProtocol) -> None:
         self._engine = engine
+        # Register the AI-approver context provider so the gatekeeper can
+        # enrich approval decisions with task-specific context (working
+        # directory, phase, plan excerpt) instead of guessing from the
+        # generic phase prompt.
+        engine.set_approval_context_provider(self._build_approval_context)
+
+    def _build_approval_context(
+        self, session_id: str, chat_id: str
+    ) -> ApprovalContext | None:
+        """Build AI-approver context for an active task on *chat_id*.
+
+        Returns ``None`` for non-task sessions (or terminal tasks) so the
+        gatekeeper falls back to minimal context. Reads the ``## Plan``
+        section from the task memory file; truncates to 1500 chars so the
+        approver's context stays compact.
+        """
+        del session_id  # Reserved for future cross-check against task.session_id.
+        task = self._active_tasks.get(chat_id)
+        if task is None or task.is_terminal():
+            return None
+        plan = task_memory.read_section(
+            task.run_id, task.working_directory, section="Plan"
+        )
+        # Skip the seeded ``<!-- pending:plan -->`` placeholder — showing it
+        # to the AI approver is worse than showing an empty plan, since it
+        # suggests authoritative-looking content that isn't there yet.
+        if plan and task_memory.is_placeholder(plan):
+            plan = ""
+        plan_excerpt = (plan or "")[:1500]
+        return ApprovalContext(
+            task_description=task.task,
+            working_directory=task.working_directory,
+            phase=str(task.phase),
+            plan_excerpt=plan_excerpt,
+        )
 
     # ── Plugin lifecycle ──────────────────────────────────────────────
 
@@ -417,6 +482,13 @@ class TaskV3Orchestrator(LeashdPlugin):
         if cost:
             task.total_cost += cost
             task.phase_costs[task.phase] = task.phase_costs.get(task.phase, 0.0) + cost
+
+        # Capture CLI-side errors (non-retryable is_error=true responses) so
+        # _choose_next_phase can distinguish "agent was cut off" from "agent
+        # misbehaved" and decide whether a retry is worthwhile.
+        if event.data.get("is_error"):
+            err_text = (event.data.get("response_content") or "")[:500]
+            task.phase_context[f"{task.phase}_cli_error"] = err_text
 
         task.last_updated = datetime.now(timezone.utc)
         await self.store.save(task)
@@ -579,7 +651,28 @@ class TaskV3Orchestrator(LeashdPlugin):
                 task.run_id, task.working_directory, section="Implementation Summary"
             )
             if task_memory.is_placeholder(impl_body):
-                task.error_message = "Implement phase produced no summary"
+                cli_error = task.phase_context.get("implement_cli_error")
+                retry_count = int(task.phase_context.get("implement_retry_count", 0))
+                # Only retry when the CLI errored — a clean session with no
+                # summary means the agent misbehaved (e.g. wrote a plan file
+                # instead of code); retrying burns money without fixing it.
+                if cli_error and retry_count < self._implement_max_retries:
+                    task.phase_context["implement_retry_count"] = retry_count + 1
+                    # Clear the error marker so the retry's fresh session
+                    # starts with a clean slate.
+                    task.phase_context.pop("implement_cli_error", None)
+                    logger.info(
+                        "task_v3_implement_retry",
+                        run_id=task.run_id,
+                        retry_count=retry_count + 1,
+                        max_retries=self._implement_max_retries,
+                        cli_error_preview=cli_error[:120],
+                    )
+                    return "implement"
+                msg = "Implement phase produced no summary"
+                if cli_error:
+                    msg += f" (CLI error: {cli_error[:200]})"
+                task.error_message = msg
                 return "escalated"
             return self._phase_after(pipeline, "implement")
 
@@ -722,6 +815,7 @@ class TaskV3Orchestrator(LeashdPlugin):
             phase=str(task.phase),
             task_run_id=task.run_id,
             mode=mode,
+            mode_instruction=_V3_PHASE_TO_MODE_INSTRUCTION.get(task.phase),
             settings_override=task.settings_override,
         )
 

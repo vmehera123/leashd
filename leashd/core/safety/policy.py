@@ -155,7 +155,14 @@ class PolicyEngine:
         if rule.command_patterns:
             if tool_name != "Bash":
                 return False
+            # Local import — browser_tools imports from safety modules, so
+            # defer this to call time to keep the module graph acyclic.
+            from leashd.plugins.builtin.browser_tools import (
+                strip_agent_browser_flags,
+            )
+
             command = strip_benign_prefixes(tool_input.get("command", ""))
+            command = strip_agent_browser_flags(command)
             if not any(p.search(command) for p in rule.command_patterns):
                 return False
 

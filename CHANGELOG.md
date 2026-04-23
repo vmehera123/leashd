@@ -1,5 +1,13 @@
 # Changelog
 
+
+## [0.15.3] - 2026-04-23
+- **fixed**: `claude-cli` runtime now sets `CLAUDE_CODE_ENTRYPOINT=cli` — unrecognized entrypoint values shifted the agent toward Bash loops over native Read/Grep/Glob/Edit on discovery-heavy tasks, spamming unmatched-Bash approval prompts on fresh repos
+- **fixed**: AI auto-approver now receives structured context (task description, working directory, current phase, plan excerpt) via an injected `ApprovalContext` provider — eliminates systematic "scope creep" false positives that stalled `/task` implement phases into the 30-minute phase timeout
+- **fixed**: v3 implement phase retries once on CLI errors (context exhaustion, transient API) instead of escalating immediately; configurable via new `task_implement_max_retries`
+- **fixed**: `agent-browser` commands with leading flags (e.g. `agent-browser --session <id> click @e5`) now match the auto-approve allowlist in `/test`, `/web`, and v3 verify instead of falling through to human approval
+- **changed**: `claude-cli` / `claude-code` treat `session.mode_instruction` as additive to the mode default (matching codex), so per-session guidance composes with `PLAN_MODE_INSTRUCTION` / `AUTO_MODE_INSTRUCTION`
+
 ## [0.15.2] - 2026-04-20
 - **added**: New `xhigh` effort level between `high` and `max`; Claude runtimes saturate `xhigh` to `max`, Codex maps both `xhigh` and `max` to its own `xhigh`
 - **changed**: Default effort is now `xhigh` (was `medium`) — both for fresh configs and the WebUI "add directory override" action

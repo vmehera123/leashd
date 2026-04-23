@@ -167,9 +167,56 @@ AGENT_BROWSER_AUTO_APPROVE: frozenset[str] = frozenset(
 
 _AGENT_BROWSER_CMD_RE = re.compile(r"^agent-browser\s+(\S+)(?:\s+(\S+))?")
 
+# Known subcommands used by strip_agent_browser_flags to disambiguate
+# ``--flag <value>`` from ``--bool-flag <subcommand>``.
+_AGENT_BROWSER_KNOWN_SUBS: frozenset[str] = (
+    AGENT_BROWSER_READONLY_COMMANDS
+    | AGENT_BROWSER_MUTATION_COMMANDS
+    | frozenset({"tab", "session"})
+)
+
+
+def strip_agent_browser_flags(command: str) -> str:
+    """Drop leading ``-x``/``--flag [value]`` tokens between ``agent-browser``
+    and its real subcommand.
+
+    Fixes a normalization gap where ``agent-browser --session foo click @e5``
+    collapses to a bare ``Bash::agent-browser`` key and dodges the
+    ``AGENT_BROWSER_AUTO_APPROVE`` allowlist, forcing a human approval prompt
+    even inside ``/test``. Known subcommand names are never consumed as a
+    flag's value, so boolean flags like ``--headless click`` work correctly.
+
+    Non-agent-browser commands are returned unchanged.
+    """
+    if not command.startswith("agent-browser"):
+        return command
+    tokens = command.split()
+    i = 1  # tokens[0] == "agent-browser"
+    while i < len(tokens):
+        tok = tokens[i]
+        if not tok.startswith("-"):
+            break
+        if "=" in tok:
+            # --flag=value — self-contained
+            i += 1
+            continue
+        if i + 1 < len(tokens):
+            nxt = tokens[i + 1]
+            if nxt.startswith("-") or nxt in _AGENT_BROWSER_KNOWN_SUBS:
+                i += 1  # bool flag — don't consume the next token
+            else:
+                i += 2  # --flag value
+        else:
+            i += 1
+    if i == 1:
+        return command
+    rest = tokens[i:]
+    return "agent-browser " + " ".join(rest) if rest else "agent-browser"
+
 
 def parse_agent_browser_command(command: str) -> tuple[str, bool] | None:
     """Parse Bash command → (subcommand, is_mutation) or None."""
+    command = strip_agent_browser_flags(command)
     m = _AGENT_BROWSER_CMD_RE.match(command)
     if not m:
         return None

@@ -7,6 +7,7 @@ from leashd.core.engine import Engine
 from leashd.core.events import (
     MESSAGE_IN,
     MESSAGE_OUT,
+    SESSION_COMPLETED,
     TOOL_ALLOWED,
     TOOL_DENIED,
     EventBus,
@@ -112,6 +113,83 @@ class TestEngineEvents:
 
         assert len(events) == 1
         assert events[0].data["tool_name"] == "Read"
+
+
+class TestSessionCompletedEvent:
+    """SESSION_COMPLETED must expose is_error so task_v3 can decide to retry."""
+
+    async def test_session_completed_includes_is_error_false_on_success(
+        self, config, fake_agent, audit_logger
+    ):
+        events = []
+
+        async def capture(event):
+            events.append(event)
+
+        bus = EventBus()
+        bus.subscribe(SESSION_COMPLETED, capture)
+
+        eng = Engine(
+            connector=None,
+            agent=fake_agent,
+            config=config,
+            session_manager=SessionManager(),
+            audit=audit_logger,
+            event_bus=bus,
+        )
+        await eng.handle_message("user1", "hello", "chat1")
+
+        assert len(events) == 1
+        assert events[0].data["is_error"] is False
+        assert events[0].data["response_content"] == "Echo: hello"
+
+    async def test_session_completed_propagates_is_error_true(
+        self, config, audit_logger
+    ):
+        """Regression for task 4958256b: CLI is_error=true must surface on
+        SESSION_COMPLETED so the v3 orchestrator can retry instead of
+        silently escalating."""
+
+        class ErroringAgent(BaseAgent):
+            async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
+                return AgentResponse(
+                    content="Prompt is too long",
+                    session_id="s1",
+                    cost=4.56,
+                    is_error=True,
+                )
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+            def update_config(self, config):
+                pass
+
+        events = []
+
+        async def capture(event):
+            events.append(event)
+
+        bus = EventBus()
+        bus.subscribe(SESSION_COMPLETED, capture)
+
+        eng = Engine(
+            connector=None,
+            agent=ErroringAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            audit=audit_logger,
+            event_bus=bus,
+        )
+        await eng.handle_message("user1", "hello", "chat1")
+
+        assert len(events) == 1
+        assert events[0].data["is_error"] is True
+        assert events[0].data["response_content"] == "Prompt is too long"
+        assert events[0].data["cost"] == 4.56
 
 
 class TestEngineLifecycle:

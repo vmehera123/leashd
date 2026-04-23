@@ -130,7 +130,7 @@ class ClaudeCliAgent(BaseAgent):
             system_prompt = prepend_instruction(PLAN_MODE_INSTRUCTION, system_prompt)
         elif session.mode in ("auto", "edit"):
             system_prompt = prepend_instruction(AUTO_MODE_INSTRUCTION, system_prompt)
-        elif session.mode_instruction:
+        if session.mode_instruction:
             system_prompt = prepend_instruction(session.mode_instruction, system_prompt)
 
         if session.workspace_directories:
@@ -440,7 +440,13 @@ class ClaudeCliAgent(BaseAgent):
         | None,
         attachments: list[Attachment] | None,
     ) -> AgentResponse | None:
-        env = {**os.environ, "CLAUDE_CODE_ENTRYPOINT": "leashd-cli"}
+        # Use the Claude Code CLI's canonical "cli" entrypoint identifier.
+        # Any unrecognized value (e.g. "leashd-cli") measurably shifts the
+        # agent's tool-selection heuristic toward Bash loops over the native
+        # Read/Grep/Glob/Edit tools on discovery-heavy tasks — verified by
+        # comparing tool_use streams with different entrypoints against the
+        # same prompt.
+        env = {**os.environ, "CLAUDE_CODE_ENTRYPOINT": "cli"}
         if self._config.browser_backend == "agent-browser":
             if not self._config.browser_headless:
                 env["AGENT_BROWSER_HEADED"] = "1"

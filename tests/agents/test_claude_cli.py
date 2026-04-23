@@ -677,6 +677,44 @@ class TestMaxConcurrentAgents:
             assert len(agent._active_processes) <= 3
 
 
+class TestEntrypointEnvVar:
+    """``CLAUDE_CODE_ENTRYPOINT`` must be a value the Claude Code CLI
+    recognizes — not a leashd-branded string.
+
+    Unrecognized values (e.g. the historic ``"leashd-cli"``) measurably
+    shift the agent's tool-selection heuristic toward Bash loops
+    (``for f in pages/*.html; do grep …``) instead of Read/Grep/Glob on
+    discovery-heavy tasks — verified by diffing raw tool_use streams
+    from the ``claude -p --input-format stream-json ...`` subprocess
+    with different ``CLAUDE_CODE_ENTRYPOINT`` values against the same
+    prompt on the same repo. Guard the value so that regression stays
+    caught without needing another live /task reproduction.
+    """
+
+    async def test_entrypoint_is_cli_not_leashd_cli(self, session):
+        config = LeashdConfig(approved_directories=[session.working_directory])
+        with patch.object(ClaudeCliAgent, "_find_cli", return_value="/usr/bin/claude"):
+            agent = ClaudeCliAgent(config)
+
+        mock_process = MagicMock()
+        mock_process.stdin = MagicMock()
+        mock_process.stdout = AsyncMock()
+        mock_process.stdout.readline = AsyncMock(return_value=b"")
+        mock_process.stderr = AsyncMock()
+        mock_process.returncode = 0
+        mock_process.pid = 1234
+
+        with patch(
+            "asyncio.create_subprocess_exec", new_callable=AsyncMock
+        ) as mock_exec:
+            mock_exec.return_value = mock_process
+            with pytest.raises(AgentError):
+                await agent.execute("test", session, can_use_tool=AsyncMock())
+            env = mock_exec.call_args.kwargs["env"]
+            assert env["CLAUDE_CODE_ENTRYPOINT"] == "cli"
+            assert env["CLAUDE_CODE_ENTRYPOINT"] != "leashd-cli"
+
+
 class TestCancelDuringRetry:
     """Regression for /stop bug: a cancelled session must not be retried.
 

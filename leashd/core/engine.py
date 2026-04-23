@@ -42,7 +42,7 @@ from leashd.core.runtime_settings import (
     resolve_settings,
 )
 from leashd.core.safety.audit import AuditLogger
-from leashd.core.safety.gatekeeper import ToolGatekeeper
+from leashd.core.safety.gatekeeper import ApprovalContextProvider, ToolGatekeeper
 from leashd.core.safety.policy import PolicyEngine
 from leashd.core.safety.sandbox import SandboxEnforcer
 from leashd.core.workspace import load_workspaces
@@ -555,6 +555,15 @@ class Engine:
     def get_auto_approve_status(self, chat_id: str) -> tuple[bool, set[str]]:
         """Return (blanket, per_tool) auto-approve state for a chat."""
         return self._gatekeeper.get_auto_approve_status(chat_id)
+
+    def set_approval_context_provider(self, provider: ApprovalContextProvider) -> None:
+        """Register an AI-approver context provider (plugin-facing API).
+
+        Used by the v3 task orchestrator to expose working directory,
+        phase, and plan excerpt so the AI approver can judge relevance
+        against the real task context instead of guessing.
+        """
+        self._gatekeeper.set_approval_context_provider(provider)
 
     def get_executing_session_id(self, chat_id: str) -> str | None:
         """Return the session_id currently executing for *chat_id*, or None."""
@@ -1098,6 +1107,7 @@ class Engine:
                         "user_id": user_id,
                         "response_content": response.content,
                         "cost": response.cost,
+                        "is_error": response.is_error,
                     },
                 )
             )

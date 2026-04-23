@@ -473,12 +473,18 @@ class TestClaudeCodeAgent:
         assert "Be helpful." in opts.system_prompt
         assert opts.system_prompt.startswith("You are in test mode.")
 
-    def test_plan_mode_takes_priority_over_mode_instruction(self, agent, session):
+    def test_plan_mode_composes_with_mode_instruction(self, agent, session):
+        # mode_instruction is additive — it stacks with PLAN_MODE_INSTRUCTION
+        # so the task orchestrator can inject phase-specific guidance (e.g.
+        # "use Read/Grep/Glob, never Bash for discovery") without losing the
+        # plan-mode framing. This is required by the v3 plan phase, whose
+        # task_run_id skips the normal PLAN_MODE_INSTRUCTION path anyway.
         session.mode = "plan"
-        session.mode_instruction = "This should be ignored."
+        session.task_run_id = None  # standalone /plan, not a task phase
+        session.mode_instruction = "Extra plan guidance."
         opts = agent._build_options(session, can_use_tool=None)
         assert _PLAN_MODE_INSTRUCTION in opts.system_prompt
-        assert "This should be ignored." not in opts.system_prompt
+        assert "Extra plan guidance." in opts.system_prompt
 
     def test_build_options_merges_mcp_servers(self, tmp_path):
         import json

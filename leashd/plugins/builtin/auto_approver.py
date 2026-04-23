@@ -22,6 +22,7 @@ import re
 from typing import TYPE_CHECKING, Any
 
 import structlog
+from pydantic import BaseModel, ConfigDict
 
 from leashd.core.events import APPROVAL_RESOLVED, SESSION_COMPLETED, Event
 from leashd.core.safety.approvals import ApprovalResult
@@ -40,26 +41,68 @@ logger = structlog.get_logger()
 
 _DECISION_RE = re.compile(r"^(APPROVE|DENY)\s*:\s*(.+)$", re.IGNORECASE)
 
+
+class ApprovalContext(BaseModel):
+    """Structured context passed to the AI auto-approver.
+
+    Lets the approver judge relevance against the actual task, working
+    directory, current phase, and plan instead of guessing from a generic
+    phase prompt. All fields default to empty so call sites can populate
+    only what they know; the renderer omits empty sections so the model
+    isn't distracted by placeholders.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    task_description: str = ""
+    """User's one-line task (not the phase prompt)."""
+
+    working_directory: str = ""
+    """Task's cwd — anchors "inside/outside scope" decisions."""
+
+    phase: str | None = None
+    """plan | implement | verify | review | None (non-task sessions)."""
+
+    plan_excerpt: str = ""
+    """Truncated ``## Plan`` section from the task memory file."""
+
+    audit_summary: str = ""
+    """Recent tool calls in this session, for continuity."""
+
+
 _SYSTEM_PROMPT = """\
 You are a safety reviewer for an autonomous AI coding agent.
-You will be given a tool call the agent wants to make, the original task
-description, and a summary of actions taken so far in this session.
+You will be given a tool call the agent wants to make plus structured
+context about the task: the user's task description, working directory,
+current phase, the plan, and a summary of recent actions.
 
-Your job: decide if this tool call is safe to approve, given the task context.
+Your job: decide if this tool call is safe to approve, given that context.
 
 Respond with EXACTLY one line in one of these formats:
 APPROVE: <one-line reason>
 DENY: <one-line reason>
 
-Guidelines:
-- APPROVE file writes/edits that are consistent with the stated task
-- APPROVE test runs, linting, package installs
-- APPROVE git add, git commit to feature branches
-- DENY git push to main/master
-- DENY network requests not clearly needed for the task
-- DENY anything that touches credentials, .env files, or secrets
-- DENY anything that looks like scope creep far beyond the original task
-- When uncertain: DENY and explain
+Scope rules:
+- The <plan> section (when provided) defines what is in scope for the
+  current <phase>. If the tool call serves a plan step, APPROVE it —
+  even if the command shape (browser, local HTTP server, process kill,
+  shell loop) looks unusual in isolation. The plan is authoritative.
+- The <working_directory> is the task's cwd. Commands operating inside
+  it are NOT "outside scope" — do not reject based on path heuristics
+  unless the path escapes the working directory.
+- Phases: "implement" applies changes; "verify" validates them; but the
+  plan may legitimately overlap them (e.g. an implement plan that asks
+  the agent to check the result visually). Trust the plan.
+
+Safety rules (override scope):
+- DENY anything that touches credentials, .env files, or secrets.
+- DENY git push to main/master.
+- DENY destructive system operations unrelated to the task.
+- APPROVE file writes/edits, test runs, linting, package installs,
+  git add/commit to feature branches, and any tool call clearly
+  serving a plan step.
+- When truly uncertain: DENY and explain, but do not reject merely
+  because the command "feels out of phase" — check the plan first.
 """
 
 
@@ -111,8 +154,7 @@ class AutoApprover(LeashdPlugin):
         session_id: str,
         chat_id: str,
         *,
-        task_description: str = "",
-        audit_summary: str = "",
+        context: ApprovalContext | None = None,
     ) -> ApprovalResult:
         """Evaluate a tool call and return an approval decision.
 
@@ -133,9 +175,8 @@ class AutoApprover(LeashdPlugin):
 
         self._session_call_counts[session_id] = count + 1
 
-        user_message = self._build_user_message(
-            tool_name, tool_input, task_description, audit_summary
-        )
+        ctx = context if context is not None else ApprovalContext()
+        user_message = self._build_user_message(tool_name, tool_input, ctx)
 
         try:
             raw = await evaluate_via_cli(
@@ -215,20 +256,38 @@ class AutoApprover(LeashdPlugin):
     def _build_user_message(
         tool_name: str,
         tool_input: dict[str, Any],
-        task_description: str,
-        audit_summary: str,
+        context: ApprovalContext,
     ) -> str:
-        """Build the prompt with structured delimiters to mitigate injection."""
+        """Build the prompt with structured delimiters to mitigate injection.
+
+        Each context field is rendered under its own delimiter so the
+        system prompt's references (``<plan>``, ``<working_directory>``,
+        ``<phase>``) land on real sections. Empty fields are omitted so
+        the model isn't distracted by placeholders.
+        """
         input_str = json.dumps(tool_input, indent=2, default=str)
         if len(input_str) > 2000:
             input_str = input_str[:2000] + "\n...[truncated]"
-
         input_str = sanitize_for_prompt(input_str)
 
-        parts = [f"Task: {task_description or '(no description)'}"]
+        parts: list[str] = []
+        task = context.task_description or "(no description)"
+        parts.append(f"<task>\n{sanitize_for_prompt(task)}\n</task>")
+        if context.working_directory:
+            parts.append(
+                f"<working_directory>\n{context.working_directory}\n</working_directory>"
+            )
+        if context.phase:
+            parts.append(f"<phase>{context.phase}</phase>")
+        if context.plan_excerpt:
+            parts.append(
+                f"<plan>\n{sanitize_for_prompt(context.plan_excerpt)}\n</plan>"
+            )
         parts.append(
-            f"\n<tool_call>\nTool: {tool_name}\nInput: {input_str}\n</tool_call>"
+            f"<tool_call>\nTool: {tool_name}\nInput: {input_str}\n</tool_call>"
         )
-        if audit_summary:
-            parts.append(f"\nActions taken so far:\n{audit_summary}")
+        if context.audit_summary:
+            parts.append(
+                f"<audit>\n{sanitize_for_prompt(context.audit_summary)}\n</audit>"
+            )
         return "\n".join(parts)
