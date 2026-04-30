@@ -121,11 +121,12 @@ def implement_prompt(
 
 
 _VERIFY_CODE_BODY = (
-    "Spin up the app using commands in CLAUDE.md (package.json /\n"
-    "Makefile / docker-compose — whatever this repo uses). Run the\n"
-    "unit suite, then integration/e2e. If tests fail, invoke the\n"
-    "`healer` skill once (via the Skill tool) — do not hand-fix\n"
-    "unless healing fails.\n"
+    "You are now in TEST MODE — the system prompt has the full multi-phase\n"
+    "workflow (discovery, server startup, smoke, unit/integration, backend,\n"
+    "agentic E2E with browser tools, error analysis, healing, report).\n"
+    "Scope it to the change recorded in this task: focus on the files and\n"
+    "behaviours called out in the Implementation Summary above, not the\n"
+    "whole product.\n"
 )
 
 _VERIFY_DOCS_BODY = (
@@ -154,8 +155,11 @@ def verify_prompt(
 
     ``change_shape`` tailors the instructions to what actually changed:
 
-    - ``"code"`` (default) — full spinup + test suite + healer.
-    - ``"docs_only"`` — skip spinup; verify rendering and links.
+    - ``"code"`` (default) — task-scoped pointer; the system prompt
+      injected by the orchestrator carries the full ``/test`` workflow
+      (smoke → unit → backend → agentic E2E with browser tools).
+    - ``"docs_only"`` — skip spinup; verify rendering and links. No
+      test-mode system prompt is injected for this case.
     """
     body = _VERIFY_DOCS_BODY if change_shape == "docs_only" else _VERIFY_CODE_BODY
     prompt = _base(run_id, "verify") + (

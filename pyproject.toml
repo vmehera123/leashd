@@ -1,6 +1,6 @@
 [project]
 name = "leashd"
-version = "0.15.3"
+version = "0.15.4"
 description = "Safety-first agentic coding framework with pluggable runtimes. Run Claude Code or Codex as a governed daemon — sandbox, YAML policies, human-in-the-loop approval"
 readme = "README.md"
 requires-python = ">=3.10"

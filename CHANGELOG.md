@@ -1,5 +1,8 @@
 # Changelog
 
+## [0.15.4] - 2026-04-28
+- **fixed**: v3 verify phase now injects the same multi-phase `/test` workflow as the standalone `/test` command (smoke → unit → backend → agentic E2E with browser tools), scoped via `focus=task.task` to the just-implemented change — the orchestrator was setting `mode="test"` but passing `mode_instruction=None`, so the agent received only a six-line spinup hint and silently skipped browser-driven verification; docs-only diffs continue to use the lightweight render/link-check body
+
 
 ## [0.15.3] - 2026-04-23
 - **fixed**: `claude-cli` runtime now sets `CLAUDE_CODE_ENTRYPOINT=cli` — unrecognized entrypoint values shifted the agent toward Bash loops over native Read/Grep/Glob/Edit on discovery-heavy tasks, spamming unmatched-Bash approval prompts on fresh repos

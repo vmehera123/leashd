@@ -81,7 +81,16 @@ from leashd.plugins.builtin.browser_tools import (
     BROWSER_READONLY_TOOLS,
 )
 from leashd.plugins.builtin.task_orchestrator import IMPLEMENT_BASH_AUTO_APPROVE
-from leashd.plugins.builtin.test_runner import TEST_BASH_AUTO_APPROVE
+from leashd.plugins.builtin.test_config_loader import (
+    discover_api_specs,
+    load_project_test_config,
+)
+from leashd.plugins.builtin.test_runner import (
+    TEST_BASH_AUTO_APPROVE,
+    TestConfig,
+    build_test_instruction,
+    merge_project_config,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -114,6 +123,11 @@ logger = structlog.get_logger()
 
 _STALE_TASK_HOURS = 24
 
+# Cap on the task-description ``focus`` injected into the verify-phase system
+# prompt. ``build_test_instruction`` interpolates focus verbatim into USER HINTS;
+# without a cap a long task description balloons the system prompt budget.
+_VERIFY_FOCUS_MAX_CHARS = 500
+
 # Ordered list of phases v3 can drive.  Terminal states are appended by
 # ``transition_to`` when appropriate.
 _V3_PHASES: tuple[TaskPhase, ...] = ("plan", "implement", "verify", "review")
@@ -138,10 +152,13 @@ _V3_DISCOVERY_INSTRUCTION: str = (
     "build steps, git — not for discovery or file I/O."
 )
 
+# Verify intentionally absent — its mode instruction is built dynamically
+# per-task by ``_build_verify_mode_instruction`` so the agent runs the same
+# multi-phase ``/test`` workflow (smoke → unit → backend → agentic E2E)
+# instead of the thin spinup-and-run-tests fallback v3 used to emit.
 _V3_PHASE_TO_MODE_INSTRUCTION: dict[TaskPhase, str | None] = {
     "plan": _V3_DISCOVERY_INSTRUCTION,
     "implement": _V3_DISCOVERY_INSTRUCTION,
-    "verify": None,
     "review": None,
 }
 
@@ -303,6 +320,10 @@ class TaskV3Orchestrator(LeashdPlugin):
         self._engine: _EngineProtocol | None = None
         self._event_bus: EventBus | None = None
         self._subscriptions: list[tuple[str, Any]] = []
+        # Captured at initialize() so verify's build_test_instruction can pick
+        # the right toolset (agent-browser vs Playwright MCP) without reaching
+        # back into the engine for config.
+        self._browser_backend: str = "agent-browser"
 
     @property
     def store(self) -> TaskStore:
@@ -352,6 +373,7 @@ class TaskV3Orchestrator(LeashdPlugin):
 
     async def initialize(self, context: PluginContext) -> None:
         self._event_bus = context.event_bus
+        self._browser_backend = context.config.browser_backend
         self._subscriptions = [
             (TASK_SUBMITTED, self._on_task_submitted),
             (SESSION_COMPLETED, self._on_session_completed),
@@ -808,6 +830,15 @@ class TaskV3Orchestrator(LeashdPlugin):
             session.workspace_name = task.workspace_name
             session.workspace_directories = list(task.workspace_directories)
 
+        # Verify is dynamic — it injects the same multi-phase ``/test``
+        # workflow the standalone ``/test`` command uses, scoped via
+        # ``focus=task.task`` to the change recorded in this task. Other
+        # phases use the static dict.
+        if task.phase == "verify":
+            mode_instruction = self._build_verify_mode_instruction(task)
+        else:
+            mode_instruction = _V3_PHASE_TO_MODE_INSTRUCTION.get(task.phase)
+
         # Force a fresh Claude Code session for this phase.
         await self._engine.session_manager.begin_phase_session(
             task.user_id,
@@ -815,7 +846,7 @@ class TaskV3Orchestrator(LeashdPlugin):
             phase=str(task.phase),
             task_run_id=task.run_id,
             mode=mode,
-            mode_instruction=_V3_PHASE_TO_MODE_INSTRUCTION.get(task.phase),
+            mode_instruction=mode_instruction,
             settings_override=task.settings_override,
         )
 
@@ -867,6 +898,54 @@ class TaskV3Orchestrator(LeashdPlugin):
             task.outcome = "error"
             await self.store.save(task)
             await self._handle_terminal(task)
+
+    def _build_verify_mode_instruction(self, task: TaskRun) -> str | None:
+        """Return the verify-phase system prompt — the same multi-phase
+        ``/test`` workflow the standalone ``/test`` command uses, scoped
+        via ``focus`` to this task. Returns ``None`` for docs-only diffs
+        (no spinup needed) or if config / spec discovery fails (the agent
+        still gets ``verify_prompt`` body — partial degradation beats
+        a hard task failure on a transient filesystem hiccup).
+        """
+        impl_summary = task_memory.read_section(
+            task.run_id,
+            task.working_directory,
+            section="Implementation Summary",
+        )
+        if _classify_change_shape(impl_summary) == "docs_only":
+            return None
+
+        # Mirrors v2's _setup_test_phase / agentic_orchestrator's verify path.
+        # ``focus`` is capped — task descriptions can be arbitrarily long and
+        # build_test_instruction interpolates them verbatim into USER HINTS.
+        config = TestConfig(
+            include_e2e=True,
+            include_unit=True,
+            include_backend=True,
+            focus=task.task[:_VERIFY_FOCUS_MAX_CHARS],
+        )
+
+        try:
+            project_config = load_project_test_config(task.working_directory)
+            if project_config:
+                config = merge_project_config(config, project_config)
+
+            explicit_specs = project_config.api_specs if project_config else None
+            api_specs = discover_api_specs(
+                task.working_directory,
+                explicit_paths=explicit_specs or None,
+            )
+            return build_test_instruction(
+                config,
+                project_config=project_config,
+                api_specs=api_specs or None,
+                browser_backend=self._browser_backend,
+            )
+        except Exception:
+            logger.exception(
+                "task_v3_verify_instruction_build_failed", run_id=task.run_id
+            )
+            return None
 
     def _build_prompt_for(self, task: TaskRun) -> str:
         extra = _profile_instruction(self._profile, str(task.phase))

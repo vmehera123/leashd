@@ -246,9 +246,24 @@ class TestPrompts:
         # Sanity: mentions doc-verification specifics
         assert "links" in p.lower() or "render" in p.lower()
 
-    def test_verify_prompt_code_default_includes_spinup(self):
+    def test_verify_prompt_code_default_points_at_test_mode(self):
+        # The full multi-phase test workflow now lives in the system prompt
+        # (build_test_instruction), so verify_prompt only carries a pointer
+        # to it plus the task-memory contract — not the spinup recipe itself.
         p = verify_prompt("abc")
-        assert "healer" in p
+        assert "TEST MODE" in p
+        assert "Implementation Summary" in p
+        # Workflow body should NOT be duplicated in the user prompt.
+        assert "healer" not in p
+        assert "docker-compose" not in p
+
+    def test_verify_prompt_docs_only_does_not_reference_test_mode(self):
+        # Docs-only path keeps the lightweight rendering / link check body
+        # and does NOT advertise TEST MODE since no test-mode system prompt
+        # is injected for documentation-only diffs.
+        p = verify_prompt("abc", change_shape="docs_only")
+        assert "TEST MODE" not in p
+        assert "links" in p.lower() or "render" in p.lower()
 
     def test_profile_instruction_appended_to_all_phases(self):
         extra = "Extra guidance from profile"
@@ -273,6 +288,97 @@ class TestChangeShapeClassifier:
     def test_prose_without_paths_defaults_to_code(self):
         summary = "Refactored the authentication flow to use JWT."
         assert _classify_change_shape(summary) == "code"
+
+
+class TestVerifyModeInstruction:
+    """``_build_verify_mode_instruction`` injects the same multi-phase
+    ``/test`` workflow as the standalone ``/test`` command — gated by
+    change shape so docs-only diffs skip spinup."""
+
+    async def test_code_shape_returns_test_workflow_with_task_focus(
+        self, orchestrator, tmp_path
+    ):
+        task = _make_task(tmp_path, task="Add a /healthz endpoint")
+        task_memory.seed(task.run_id, task.task, task.working_directory, version="v3")
+        task_memory.update_section(
+            task.run_id,
+            task.working_directory,
+            section="Implementation Summary",
+            content="Edited app/routes.py to add /healthz returning 200.",
+        )
+
+        instruction = orchestrator._build_verify_mode_instruction(task)
+
+        assert instruction is not None
+        # System prompt now carries the agentic E2E workflow that v3 used to
+        # silently drop on the floor.
+        assert "PHASE 6 — AGENTIC E2E TESTING" in instruction
+        assert "TEST MODE" in instruction
+        # Task description threads through as the agent's focus area so the
+        # workflow is scoped to what was just implemented, not the whole app.
+        assert "Add a /healthz endpoint" in instruction
+
+    async def test_docs_only_returns_none(self, orchestrator, tmp_path):
+        task = _make_task(tmp_path, task="Fix typos in README")
+        task_memory.seed(task.run_id, task.task, task.working_directory, version="v3")
+        task_memory.update_section(
+            task.run_id,
+            task.working_directory,
+            section="Implementation Summary",
+            content="Updated README.md and docs/architecture.md only.",
+        )
+
+        instruction = orchestrator._build_verify_mode_instruction(task)
+
+        assert instruction is None
+
+    async def test_no_summary_defaults_to_code_shape(self, orchestrator, tmp_path):
+        # Defensive: if implement crashes before writing the summary, verify
+        # should still get the heavy test workflow (safer than skipping).
+        task = _make_task(tmp_path, task="Add login flow")
+        task_memory.seed(task.run_id, task.task, task.working_directory, version="v3")
+
+        instruction = orchestrator._build_verify_mode_instruction(task)
+
+        assert instruction is not None
+        assert "TEST MODE" in instruction
+
+    async def test_focus_is_capped(self, orchestrator, tmp_path):
+        # build_test_instruction interpolates focus verbatim, so an
+        # unbounded task description would balloon the system prompt.
+        long_task = "describe the change " * 200  # ~4000 chars
+        task = _make_task(tmp_path, task=long_task)
+        task_memory.seed(task.run_id, task.task, task.working_directory, version="v3")
+
+        instruction = orchestrator._build_verify_mode_instruction(task)
+
+        assert instruction is not None
+        # "Focus area:" is rendered once with the (capped) task; the cap is
+        # tighter than the raw description.
+        focus_lines = [
+            line for line in instruction.splitlines() if line.startswith("- Focus")
+        ]
+        assert focus_lines, "expected a 'Focus area:' line"
+        assert len(focus_lines[0]) < len(long_task)
+
+    async def test_rebuild_is_deterministic(self, orchestrator, tmp_path):
+        # On verify retry / daemon resume the orchestrator rebuilds the
+        # instruction from disk; two consecutive rebuilds must match so the
+        # second attempt sees the same workflow + focus.
+        task = _make_task(tmp_path, task="Add /healthz")
+        task_memory.seed(task.run_id, task.task, task.working_directory, version="v3")
+        task_memory.update_section(
+            task.run_id,
+            task.working_directory,
+            section="Implementation Summary",
+            content="Edited app/routes.py.",
+        )
+
+        first = orchestrator._build_verify_mode_instruction(task)
+        second = orchestrator._build_verify_mode_instruction(task)
+
+        assert first == second
+        assert first is not None
 
 
 # ── Submission and advancement tests ────────────────────────────
@@ -909,7 +1015,10 @@ class TestPhaseExecution:
 
     @pytest.mark.parametrize(
         ("phase", "expect_instruction"),
-        [("plan", True), ("implement", True), ("verify", False), ("review", False)],
+        # Verify defaults to ``code`` shape when no Implementation Summary is
+        # present, which yields the full ``/test`` workflow instruction —
+        # see ``TestVerifyModeInstruction`` for the docs-only / code split.
+        [("plan", True), ("implement", True), ("verify", True), ("review", False)],
     )
     async def test_execute_phase_mode_instruction_by_phase(
         self, orchestrator, mock_engine, tmp_path, phase, expect_instruction
@@ -924,6 +1033,49 @@ class TestPhaseExecution:
             assert call.kwargs["mode_instruction"] is not None
         else:
             assert call.kwargs["mode_instruction"] is None
+
+    async def test_execute_phase_verify_injects_test_workflow(
+        self, orchestrator, mock_engine, tmp_path
+    ):
+        # End-to-end check that ``_execute_phase`` actually threads the rich
+        # test instruction through to ``begin_phase_session`` for verify on a
+        # code-shape task — the regression that motivated this test class.
+        task = _make_task(tmp_path, phase="verify", task="Add /healthz route")
+        task_memory.seed(task.run_id, task.task, str(tmp_path), version="v3")
+        task_memory.update_section(
+            task.run_id,
+            str(tmp_path),
+            section="Implementation Summary",
+            content="Edited app/routes.py to add /healthz returning 200.",
+        )
+
+        await orchestrator._execute_phase(task)
+
+        call = mock_engine.session_manager.begin_phase_session.await_args
+        assert call.kwargs["mode"] == "test"
+        instruction = call.kwargs["mode_instruction"]
+        assert instruction is not None
+        assert "PHASE 6 — AGENTIC E2E TESTING" in instruction
+        assert "Add /healthz route" in instruction
+
+    async def test_execute_phase_verify_docs_only_skips_test_workflow(
+        self, orchestrator, mock_engine, tmp_path
+    ):
+        task = _make_task(tmp_path, phase="verify", task="Fix README typos")
+        task_memory.seed(task.run_id, task.task, str(tmp_path), version="v3")
+        task_memory.update_section(
+            task.run_id,
+            str(tmp_path),
+            section="Implementation Summary",
+            content="Updated README.md only.",
+        )
+
+        await orchestrator._execute_phase(task)
+
+        call = mock_engine.session_manager.begin_phase_session.await_args
+        # Docs-only diff: no test mode prompt — the user-facing verify_prompt
+        # already carries the link/render-check body.
+        assert call.kwargs["mode_instruction"] is None
 
     async def test_execute_phase_passes_task_settings_override(
         self, orchestrator, mock_engine, tmp_path
