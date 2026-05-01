@@ -152,13 +152,16 @@ _V3_DISCOVERY_INSTRUCTION: str = (
     "build steps, git — not for discovery or file I/O."
 )
 
-# Verify intentionally absent — its mode instruction is built dynamically
-# per-task by ``_build_verify_mode_instruction`` so the agent runs the same
-# multi-phase ``/test`` workflow (smoke → unit → backend → agentic E2E)
-# instead of the thin spinup-and-run-tests fallback v3 used to emit.
+# Verify defaults to ``None`` here — the verify_prompt body is self-contained
+# (spinup + tests + healer). When ``verify_test_mode`` is enabled, the
+# orchestrator overrides this with a dynamic multi-phase ``/test`` workflow
+# built per-task by ``_build_verify_mode_instruction``; that path requires
+# a dev server, agent-browser, and other infrastructure that isn't present
+# in sandboxed environments, so the dynamic prompt is opt-in.
 _V3_PHASE_TO_MODE_INSTRUCTION: dict[TaskPhase, str | None] = {
     "plan": _V3_DISCOVERY_INSTRUCTION,
     "implement": _V3_DISCOVERY_INSTRUCTION,
+    "verify": None,
     "review": None,
 }
 
@@ -298,10 +301,12 @@ class TaskV3Orchestrator(LeashdPlugin):
         *,
         db_path: str | None = None,
         profile: TaskProfile | None = None,
-        phase_timeout_seconds: int = 1800,
+        phase_timeout_seconds: int = 3600,
+        plan_max_retries: int = 1,
         implement_max_retries: int = 1,
         verify_max_retries: int = 1,
         review_max_loopbacks: int = 1,
+        verify_test_mode: bool = False,
     ) -> None:
         self._store = task_store
         self._db_path = db_path
@@ -309,9 +314,11 @@ class TaskV3Orchestrator(LeashdPlugin):
         self._connector = connector
         self._profile = profile or STANDALONE
         self._phase_timeout_seconds = phase_timeout_seconds
+        self._plan_max_retries = plan_max_retries
         self._implement_max_retries = implement_max_retries
         self._verify_max_retries = verify_max_retries
         self._review_max_loopbacks = review_max_loopbacks
+        self._verify_test_mode = verify_test_mode
         self._active_tasks: dict[str, TaskRun] = {}
         self._queue = KeyedAsyncQueue()
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
@@ -607,7 +614,7 @@ class TaskV3Orchestrator(LeashdPlugin):
         await self._queue.enqueue(task.chat_id, _do_advance)
 
     async def _advance_inner(self, task: TaskRun) -> None:
-        next_phase = self._choose_next_phase(task)
+        next_phase = await self._choose_next_phase(task)
 
         if next_phase == task.phase and next_phase in _V3_PHASES:
             # Same-phase retry (verify).  Skip transition_to (which
@@ -653,7 +660,7 @@ class TaskV3Orchestrator(LeashdPlugin):
 
         await self._execute_phase(task)
 
-    def _choose_next_phase(self, task: TaskRun) -> TaskPhase:
+    async def _choose_next_phase(self, task: TaskRun) -> TaskPhase:
         pipeline = _resolve_pipeline(self._profile)
 
         if task.phase == "pending":
@@ -664,6 +671,21 @@ class TaskV3Orchestrator(LeashdPlugin):
                 task.run_id, task.working_directory, section="Plan"
             )
             if task_memory.is_placeholder(plan_body):
+                # Empty plan can come from a transient daemon-restart race or
+                # a silent SDK error mid-write — give it one fresh session
+                # before declaring the task stalled. Unlike implement, there
+                # is no CLI-error signal to gate on, so the retry is
+                # unconditional within the cap.
+                retry_count = int(task.phase_context.get("plan_retry_count", 0))
+                if retry_count < self._plan_max_retries:
+                    task.phase_context["plan_retry_count"] = retry_count + 1
+                    logger.info(
+                        "task_v3_plan_retry",
+                        run_id=task.run_id,
+                        retry_count=retry_count + 1,
+                        max_retries=self._plan_max_retries,
+                    )
+                    return "plan"
                 task.error_message = "Plan phase produced no plan content"
                 return "escalated"
             return self._phase_after(pipeline, "plan")
@@ -672,6 +694,17 @@ class TaskV3Orchestrator(LeashdPlugin):
             impl_body = task_memory.read_section(
                 task.run_id, task.working_directory, section="Implementation Summary"
             )
+            if task_memory.is_placeholder(impl_body):
+                # Cheap defense against a write/read race: the agent's last
+                # tool call may have returned before the OS flushed the file.
+                # One short backoff + re-read recovers without burning a full
+                # retry session.
+                await asyncio.sleep(0.2)
+                impl_body = task_memory.read_section(
+                    task.run_id,
+                    task.working_directory,
+                    section="Implementation Summary",
+                )
             if task_memory.is_placeholder(impl_body):
                 cli_error = task.phase_context.get("implement_cli_error")
                 retry_count = int(task.phase_context.get("implement_retry_count", 0))
@@ -830,11 +863,12 @@ class TaskV3Orchestrator(LeashdPlugin):
             session.workspace_name = task.workspace_name
             session.workspace_directories = list(task.workspace_directories)
 
-        # Verify is dynamic — it injects the same multi-phase ``/test``
-        # workflow the standalone ``/test`` command uses, scoped via
-        # ``focus=task.task`` to the change recorded in this task. Other
-        # phases use the static dict.
-        if task.phase == "verify":
+        # Verify is opt-in dynamic — when ``verify_test_mode`` is enabled the
+        # orchestrator injects the multi-phase ``/test`` workflow (smoke →
+        # unit → backend → agentic E2E) as the system prompt. Default OFF
+        # because that workflow demands infrastructure not present in
+        # sandboxed/CI envs and would cause every verify to escalate.
+        if task.phase == "verify" and self._verify_test_mode:
             mode_instruction = self._build_verify_mode_instruction(task)
         else:
             mode_instruction = _V3_PHASE_TO_MODE_INSTRUCTION.get(task.phase)
@@ -869,10 +903,21 @@ class TaskV3Orchestrator(LeashdPlugin):
                 timeout_seconds=self._phase_timeout_seconds,
             )
             # Best-effort: cancel any in-flight CLI session for this chat.
+            # Bound the cancel itself — if the runtime doesn't release within
+            # 10s the orchestrator should still proceed; the runtime owns
+            # subprocess reaping for its child processes.
             session_id = self._engine.get_executing_session_id(task.chat_id)
             if session_id:
                 try:
-                    await self._engine.agent.cancel(session_id)
+                    await asyncio.wait_for(
+                        self._engine.agent.cancel(session_id), timeout=10.0
+                    )
+                except TimeoutError:
+                    logger.warning(
+                        "task_v3_cancel_on_timeout_slow",
+                        run_id=task.run_id,
+                        session_id=session_id,
+                    )
                 except Exception:
                     logger.exception(
                         "task_v3_cancel_on_timeout_failed",
@@ -941,9 +986,19 @@ class TaskV3Orchestrator(LeashdPlugin):
                 api_specs=api_specs or None,
                 browser_backend=self._browser_backend,
             )
-        except Exception:
+        except Exception as exc:
+            # Surface the failure into phase_context so the audit trail and
+            # post-mortem queries can see *why* verify ran without a TEST MODE
+            # system prompt — silent fallback was the original 0.15.4 bug.
+            # The verify_prompt body is self-contained, so verification still
+            # runs; this is degraded-but-functional, not a fatal escalation.
+            task.phase_context["verify_instruction_build_failed"] = (
+                f"{type(exc).__name__}: {exc!s}"[:300]
+            )
             logger.exception(
-                "task_v3_verify_instruction_build_failed", run_id=task.run_id
+                "task_v3_verify_instruction_build_failed",
+                run_id=task.run_id,
+                error_type=type(exc).__name__,
             )
             return None
 
@@ -1204,6 +1259,7 @@ class TaskV3Orchestrator(LeashdPlugin):
                             "run_id": task.run_id,
                             "chat_id": task.chat_id,
                             "retry_count": task.retry_count,
+                            "reason": task.error_message,
                         },
                     )
                 )

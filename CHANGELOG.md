@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.15.5] - 2026-05-01
+- **fixed**: `TASK_ESCALATED` event now carries `reason=task.error_message` so downstream subscribers (e.g. unleashd bridge) receive the actual escalation cause instead of falling back to a generic string
+- **fixed**: v3 plan phase now retries once on an empty `## Plan` section (was terminal on first miss); configurable via `task_plan_max_retries`
+- **fixed**: v3 implement-summary placeholder check re-reads after a 200ms backoff to tolerate write/read races between the agent's last write and the validator's read
+- **changed**: default v3 phase timeout raised from 30 min to 60 min (`LEASHD_TASK_PHASE_TIMEOUT_SECONDS=3600`); on timeout the orchestrator's `engine.agent.cancel(...)` is now bounded by a 10s grace window so a stuck runtime can't hold the task
+- **fixed**: v3 `_VERIFY_CODE_BODY` is self-contained again — 0.15.4 made it a one-line pointer to a TEST MODE system prompt, but `_build_verify_mode_instruction` silently returns `None` on any exception (sandbox FS quirks, missing test config), leaving the agent with no actionable verify instructions and escalating every task with `"Verify phase output missing Status: line"`. Body now carries the spinup/test/healer recipe inline and defers to the system prompt only when one is actually injected; build failures record the underlying exception in `task.phase_context["verify_instruction_build_failed"]` for audit visibility
+- **fixed**: v3 verify-phase TEST MODE system prompt is now opt-in via `task_v3_verify_test_mode` (default OFF). 0.15.4 unconditionally injected a multi-phase `/test` workflow (smoke → unit → backend → agentic E2E with browser tools) as the verify system prompt; in sandboxed/CI environments the agent can't complete the agentic-E2E or dev-server-spinup phases, never writes a `Status: PASS`/`FAIL` line, and escalates every task. Default OFF restores the 0.15.3 working behavior (self-contained verify_prompt body); flip the flag for full-fat dev environments that have agent-browser and a runnable dev server
+
 ## [0.15.4] - 2026-04-28
 - **fixed**: v3 verify phase now injects the same multi-phase `/test` workflow as the standalone `/test` command (smoke → unit → backend → agentic E2E with browser tools), scoped via `focus=task.task` to the just-implemented change — the orchestrator was setting `mode="test"` but passing `mode_instruction=None`, so the agent received only a six-line spinup hint and silently skipped browser-driven verification; docs-only diffs continue to use the lightweight render/link-check body
 

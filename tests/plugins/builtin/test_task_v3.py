@@ -12,6 +12,7 @@ from leashd.core.config import LeashdConfig
 from leashd.core.events import (
     SESSION_COMPLETED,
     SESSION_FAILED,
+    TASK_ESCALATED,
     TASK_SUBMITTED,
     Event,
     EventBus,
@@ -246,16 +247,21 @@ class TestPrompts:
         # Sanity: mentions doc-verification specifics
         assert "links" in p.lower() or "render" in p.lower()
 
-    def test_verify_prompt_code_default_points_at_test_mode(self):
-        # The full multi-phase test workflow now lives in the system prompt
-        # (build_test_instruction), so verify_prompt only carries a pointer
-        # to it plus the task-memory contract — not the spinup recipe itself.
+    def test_verify_prompt_code_default_is_self_contained(self):
+        # Regression: 0.15.4 removed the spinup/healer body and pointed the
+        # agent at the TEST MODE system prompt. When that system prompt
+        # silently failed to build (sandbox FS quirks, missing config),
+        # the agent had zero actionable instructions and verify always
+        # escalated. Body is now self-contained AND defers to the system
+        # prompt when present.
         p = verify_prompt("abc")
-        assert "TEST MODE" in p
+        # Self-contained spinup + test + healer instructions
+        assert "Spin up" in p
+        assert "healer" in p
         assert "Implementation Summary" in p
-        # Workflow body should NOT be duplicated in the user prompt.
-        assert "healer" not in p
-        assert "docker-compose" not in p
+        # And still references the TEST MODE workflow as authoritative
+        # when injected — otherwise the body alone is enough.
+        assert "TEST MODE" in p
 
     def test_verify_prompt_docs_only_does_not_reference_test_mode(self):
         # Docs-only path keeps the lightweight rendering / link check body
@@ -380,6 +386,38 @@ class TestVerifyModeInstruction:
         assert first == second
         assert first is not None
 
+    async def test_build_failure_recorded_in_phase_context(
+        self, orchestrator, tmp_path, monkeypatch
+    ):
+        """Regression: 0.15.4's silent fallback to ``None`` left the agent
+        with a verify_prompt body that pointed at a system prompt that
+        wasn't there. The body is now self-contained, but the failure
+        must still be visible in ``phase_context`` so post-mortems can
+        explain why verify ran without the TEST MODE workflow."""
+        task = _make_task(tmp_path, task="Add /healthz")
+        task_memory.seed(task.run_id, task.task, task.working_directory, version="v3")
+        task_memory.update_section(
+            task.run_id,
+            task.working_directory,
+            section="Implementation Summary",
+            content="Edited app/routes.py.",
+        )
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("simulated sandbox FS failure")
+
+        monkeypatch.setattr(
+            "leashd.plugins.builtin.task_v3.load_project_test_config", _boom
+        )
+
+        instruction = orchestrator._build_verify_mode_instruction(task)
+
+        assert instruction is None  # silent fallback preserved
+        recorded = task.phase_context.get("verify_instruction_build_failed")
+        assert recorded is not None
+        assert "RuntimeError" in recorded
+        assert "simulated sandbox FS failure" in recorded
+
 
 # ── Submission and advancement tests ────────────────────────────
 
@@ -480,8 +518,12 @@ class TestAdvancement:
     async def test_plan_with_empty_section_escalates(
         self, orchestrator, event_bus, task_store, tmp_path
     ):
+        """After plan_max_retries is exhausted, an empty Plan section escalates."""
         task = _make_task(tmp_path, phase="plan")
         task.phase_pipeline = ["plan", "implement", "verify", "review", "completed"]
+        # Pre-set retry counter at the cap so this single SESSION_COMPLETED
+        # triggers escalation instead of another retry.
+        task.phase_context["plan_retry_count"] = orchestrator._plan_max_retries
         await task_store.save(task)
         orchestrator._active_tasks["c1"] = task
         # Seed markdown but do NOT populate the Plan section
@@ -506,6 +548,132 @@ class TestAdvancement:
         loaded = await task_store.load(task.run_id)
         assert loaded is not None
         assert loaded.phase == "escalated"
+        assert loaded.error_message == "Plan phase produced no plan content"
+
+    async def test_plan_empty_retries_before_escalating(
+        self, orchestrator, event_bus, task_store, tmp_path
+    ):
+        """First empty Plan section retries the plan phase instead of escalating."""
+        task = _make_task(tmp_path, phase="plan")
+        task.phase_pipeline = ["plan", "implement", "verify", "review", "completed"]
+        await task_store.save(task)
+        orchestrator._active_tasks["c1"] = task
+        task_memory.seed(task.run_id, task.task, str(tmp_path), version="v3")
+
+        session = MagicMock()
+        session.chat_id = "c1"
+        session.task_run_id = task.run_id
+        await event_bus.emit(
+            Event(
+                name=SESSION_COMPLETED,
+                data={
+                    "session": session,
+                    "chat_id": "c1",
+                    "response_content": "done",
+                    "cost": 0.0,
+                },
+            )
+        )
+        await asyncio.sleep(0.05)
+
+        loaded = await task_store.load(task.run_id)
+        assert loaded is not None
+        assert loaded.phase == "plan"  # retried, not escalated
+        assert loaded.phase_context["plan_retry_count"] == 1
+
+    async def test_escalation_event_includes_reason(
+        self, orchestrator, event_bus, task_store, tmp_path
+    ):
+        """Regression: TASK_ESCALATED event payload must carry task.error_message
+        so downstream subscribers (e.g. unleashd bridge) get the real cause
+        instead of falling back to a generic string."""
+        captured: list[Event] = []
+
+        async def _capture(event: Event) -> None:
+            captured.append(event)
+
+        event_bus.subscribe(TASK_ESCALATED, _capture)
+
+        task = _make_task(tmp_path, phase="plan")
+        task.phase_pipeline = ["plan", "implement", "verify", "review", "completed"]
+        task.phase_context["plan_retry_count"] = orchestrator._plan_max_retries
+        await task_store.save(task)
+        orchestrator._active_tasks["c1"] = task
+        task_memory.seed(task.run_id, task.task, str(tmp_path), version="v3")
+
+        session = MagicMock()
+        session.chat_id = "c1"
+        session.task_run_id = task.run_id
+        await event_bus.emit(
+            Event(
+                name=SESSION_COMPLETED,
+                data={
+                    "session": session,
+                    "chat_id": "c1",
+                    "response_content": "done",
+                    "cost": 0.0,
+                },
+            )
+        )
+        await asyncio.sleep(0.05)
+
+        assert len(captured) == 1
+        assert captured[0].data["reason"] == "Plan phase produced no plan content"
+        assert captured[0].data["run_id"] == task.run_id
+        assert captured[0].data["chat_id"] == "c1"
+
+    async def test_implement_summary_read_retry_recovers_from_race(
+        self, orchestrator, event_bus, task_store, tmp_path, monkeypatch
+    ):
+        """Write/read race: first read_section returns placeholder, second
+        returns real content after the 200ms backoff. Task must advance to
+        verify, not escalate."""
+        task = _make_task(tmp_path, phase="implement")
+        task.phase_pipeline = ["plan", "implement", "verify", "review", "completed"]
+        await task_store.save(task)
+        orchestrator._active_tasks["c1"] = task
+        task_memory.seed(task.run_id, task.task, str(tmp_path), version="v3")
+
+        # First read returns the placeholder (race), second returns content.
+        real_read = task_memory.read_section
+        calls = {"n": 0}
+
+        def _flaky_read(run_id, working_dir, *, section):
+            calls["n"] += 1
+            if section == "Implementation Summary" and calls["n"] == 1:
+                return "<!-- pending:implement --> (written by implement phase)"
+            return real_read(run_id, working_dir, section=section)
+
+        # Populate the section so the second (real) read sees content.
+        task_memory.update_section(
+            task.run_id,
+            str(tmp_path),
+            section="Implementation Summary",
+            content="Added /health endpoint; touched 2 files; tests green.",
+        )
+        monkeypatch.setattr(
+            "leashd.plugins.builtin.task_v3.task_memory.read_section", _flaky_read
+        )
+
+        session = MagicMock()
+        session.chat_id = "c1"
+        session.task_run_id = task.run_id
+        await event_bus.emit(
+            Event(
+                name=SESSION_COMPLETED,
+                data={
+                    "session": session,
+                    "chat_id": "c1",
+                    "response_content": "done",
+                    "cost": 0.0,
+                },
+            )
+        )
+        await asyncio.sleep(0.5)
+
+        loaded = await task_store.load(task.run_id)
+        assert loaded is not None
+        assert loaded.phase == "verify"  # advanced, not escalated
 
     async def test_plan_starting_with_parenthesis_is_not_placeholder(
         self, orchestrator, event_bus, task_store, tmp_path
@@ -572,7 +740,8 @@ class TestAdvancement:
                 },
             )
         )
-        await asyncio.sleep(0.05)
+        # Slightly longer than the 200ms read-race backoff in _choose_next_phase.
+        await asyncio.sleep(0.5)
 
         loaded = await task_store.load(task.run_id)
         assert loaded is not None
@@ -1015,10 +1184,11 @@ class TestPhaseExecution:
 
     @pytest.mark.parametrize(
         ("phase", "expect_instruction"),
-        # Verify defaults to ``code`` shape when no Implementation Summary is
-        # present, which yields the full ``/test`` workflow instruction —
-        # see ``TestVerifyModeInstruction`` for the docs-only / code split.
-        [("plan", True), ("implement", True), ("verify", True), ("review", False)],
+        # Verify defaults to ``None`` mode_instruction — the verify_prompt
+        # body is self-contained and the TEST MODE workflow is opt-in via
+        # ``verify_test_mode``. See ``TestVerifyModeInstruction`` for the
+        # opt-in path.
+        [("plan", True), ("implement", True), ("verify", False), ("review", False)],
     )
     async def test_execute_phase_mode_instruction_by_phase(
         self, orchestrator, mock_engine, tmp_path, phase, expect_instruction
@@ -1034,12 +1204,15 @@ class TestPhaseExecution:
         else:
             assert call.kwargs["mode_instruction"] is None
 
-    async def test_execute_phase_verify_injects_test_workflow(
+    async def test_execute_phase_verify_injects_test_workflow_when_opted_in(
         self, orchestrator, mock_engine, tmp_path
     ):
-        # End-to-end check that ``_execute_phase`` actually threads the rich
-        # test instruction through to ``begin_phase_session`` for verify on a
-        # code-shape task — the regression that motivated this test class.
+        # End-to-end check that ``_execute_phase`` threads the rich test
+        # instruction through to ``begin_phase_session`` for verify on a
+        # code-shape task WHEN ``verify_test_mode`` is enabled. Default OFF
+        # was deliberately chosen — see ``test_execute_phase_verify_default_no_test_workflow``
+        # for the safe-default case.
+        orchestrator._verify_test_mode = True
         task = _make_task(tmp_path, phase="verify", task="Add /healthz route")
         task_memory.seed(task.run_id, task.task, str(tmp_path), version="v3")
         task_memory.update_section(
@@ -1057,6 +1230,32 @@ class TestPhaseExecution:
         assert instruction is not None
         assert "PHASE 6 — AGENTIC E2E TESTING" in instruction
         assert "Add /healthz route" in instruction
+
+    async def test_execute_phase_verify_default_no_test_workflow(
+        self, orchestrator, mock_engine, tmp_path
+    ):
+        # Regression guard for the b9fb0d7 → 0.15.5 fix: by default
+        # ``_execute_phase`` for verify must pass ``mode_instruction=None``
+        # so the agent runs the self-contained verify_prompt body instead
+        # of a multi-phase TEST MODE workflow that demands infrastructure
+        # (dev server, agent-browser) absent from sandboxed environments.
+        # Without this guard, every verify in unleashd's sandbox escalates
+        # with "Verify phase output missing Status: line".
+        assert orchestrator._verify_test_mode is False
+        task = _make_task(tmp_path, phase="verify", task="Add /healthz route")
+        task_memory.seed(task.run_id, task.task, str(tmp_path), version="v3")
+        task_memory.update_section(
+            task.run_id,
+            str(tmp_path),
+            section="Implementation Summary",
+            content="Edited app/routes.py to add /healthz returning 200.",
+        )
+
+        await orchestrator._execute_phase(task)
+
+        call = mock_engine.session_manager.begin_phase_session.await_args
+        assert call.kwargs["mode"] == "test"
+        assert call.kwargs["mode_instruction"] is None
 
     async def test_execute_phase_verify_docs_only_skips_test_workflow(
         self, orchestrator, mock_engine, tmp_path
@@ -1605,7 +1804,7 @@ class TestVerifyReviewBranches:
             content="Ran stuff, nothing conclusive.",
         )
 
-        next_phase = orchestrator._choose_next_phase(task)
+        next_phase = await orchestrator._choose_next_phase(task)
         assert next_phase == "escalated"
         assert "missing Status" in (task.error_message or "")
 
@@ -1624,7 +1823,7 @@ class TestVerifyReviewBranches:
             content="Severity: CRITICAL\n\nstill broken",
         )
 
-        next_phase = orchestrator._choose_next_phase(task)
+        next_phase = await orchestrator._choose_next_phase(task)
         assert next_phase == "escalated"
         assert "CRITICAL" in (task.error_message or "")
 
@@ -1644,7 +1843,7 @@ class TestVerifyReviewBranches:
             content="Looks fine to me, shipping it.",
         )
 
-        next_phase = orchestrator._choose_next_phase(task)
+        next_phase = await orchestrator._choose_next_phase(task)
         assert next_phase == "escalated"
         assert "Severity" in (task.error_message or "")
 
@@ -1658,7 +1857,7 @@ class TestVerifyReviewBranches:
         # Implementation Summary stays at the seeded placeholder.
         # No CLI error in phase_context → escalate immediately without retry.
 
-        next_phase = orchestrator._choose_next_phase(task)
+        next_phase = await orchestrator._choose_next_phase(task)
         assert next_phase == "escalated"
         assert "no summary" in (task.error_message or "")
         assert task.phase_context.get("implement_retry_count", 0) == 0
@@ -1673,7 +1872,7 @@ class TestVerifyReviewBranches:
         await task_store.save(task)
         task_memory.seed(task.run_id, task.task, str(tmp_path), version="v3")
 
-        next_phase = orchestrator._choose_next_phase(task)
+        next_phase = await orchestrator._choose_next_phase(task)
 
         assert next_phase == "implement"
         assert task.phase_context["implement_retry_count"] == 1
@@ -1709,7 +1908,7 @@ class TestVerifyReviewBranches:
             await task_store.save(task)
             task_memory.seed(task.run_id, task.task, str(tmp_path), version="v3")
 
-            next_phase = orch._choose_next_phase(task)
+            next_phase = await orch._choose_next_phase(task)
 
             assert next_phase == "escalated"
             assert "no summary" in (task.error_message or "")
@@ -1744,7 +1943,7 @@ class TestVerifyReviewBranches:
             await task_store.save(task)
             task_memory.seed(task.run_id, task.task, str(tmp_path), version="v3")
 
-            next_phase = orch._choose_next_phase(task)
+            next_phase = await orch._choose_next_phase(task)
 
             assert next_phase == "implement"
             assert task.phase_context["implement_retry_count"] == 2

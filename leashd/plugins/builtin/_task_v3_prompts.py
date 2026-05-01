@@ -121,12 +121,17 @@ def implement_prompt(
 
 
 _VERIFY_CODE_BODY = (
-    "You are now in TEST MODE — the system prompt has the full multi-phase\n"
-    "workflow (discovery, server startup, smoke, unit/integration, backend,\n"
-    "agentic E2E with browser tools, error analysis, healing, report).\n"
-    "Scope it to the change recorded in this task: focus on the files and\n"
-    "behaviours called out in the Implementation Summary above, not the\n"
-    "whole product.\n"
+    "Spin up the app using commands in CLAUDE.md (package.json /\n"
+    "Makefile / docker-compose — whatever this repo uses). Run the\n"
+    "unit suite, then integration/e2e. Scope verification to the files\n"
+    "and behaviours called out in the Implementation Summary above —\n"
+    "not the whole product. If tests fail, invoke the `healer` skill\n"
+    "once (via the Skill tool) before hand-fixing.\n"
+    "\n"
+    "If the system prompt also includes a TEST MODE workflow (smoke →\n"
+    "unit → backend → agentic E2E), follow that as your authoritative\n"
+    "playbook — it supersedes the brief instructions above. If it is\n"
+    "absent, the instructions above are sufficient on their own.\n"
 )
 
 _VERIFY_DOCS_BODY = (
@@ -155,9 +160,11 @@ def verify_prompt(
 
     ``change_shape`` tailors the instructions to what actually changed:
 
-    - ``"code"`` (default) — task-scoped pointer; the system prompt
-      injected by the orchestrator carries the full ``/test`` workflow
-      (smoke → unit → backend → agentic E2E with browser tools).
+    - ``"code"`` (default) — self-contained spinup + test-suite + healer
+      instructions. When the orchestrator successfully builds a TEST MODE
+      system prompt (full ``/test`` workflow), the body defers to it as
+      authoritative; when build fails (sandbox FS quirks, missing config),
+      the body alone is enough to drive verification.
     - ``"docs_only"`` — skip spinup; verify rendering and links. No
       test-mode system prompt is injected for this case.
     """

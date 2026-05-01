@@ -138,16 +138,24 @@ class LeashdConfig(BaseSettings):
     task_orchestrator: bool = False
     task_orchestrator_version: Literal["v1", "v2", "v3"] = "v2"
     task_max_retries: int = 3
-    task_phase_timeout_seconds: int = 1800  # 30 minutes per phase
+    task_phase_timeout_seconds: int = 3600  # 60 minutes per phase
     task_conductor_model: str | None = None
     task_conductor_timeout: float = 45.0
     task_memory_max_chars: int = 8000
     task_profile: str = "standalone"
     task_conductor_instructions: str = ""
     # v3-specific retry caps — all default to 1 (same as hardcoded v2 behaviour)
+    task_plan_max_retries: int = 1
     task_implement_max_retries: int = 1
     task_verify_max_retries: int = 1
     task_review_max_loopbacks: int = 1
+    # Inject the multi-phase ``/test`` workflow as the verify-phase system
+    # prompt (smoke → unit → backend → agentic E2E with browser tools).
+    # OFF by default — the workflow demands infrastructure (dev server,
+    # agent-browser) that isn't available in sandboxed/CI environments,
+    # and the agent escalates when phases can't run. Opt in for full-fat
+    # local dev environments that have the tooling.
+    task_v3_verify_test_mode: bool = False
 
     # Streaming
     streaming_enabled: bool = True
