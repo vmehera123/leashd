@@ -723,6 +723,33 @@ class TestApprovalKeyExtraction:
     def test_bash_env_var_with_flag_after(self):
         assert _approval_key("Bash", {"command": "CC=gcc-12 make -j4"}) == "Bash::make"
 
+    def test_bash_pipe_truncates_key(self):
+        # Regression: ``agent-browser snapshot | head`` used to key as
+        # ``Bash::agent-browser snapshot | head`` and miss the
+        # ``Bash::agent-browser snapshot`` allowlist entry, escalating to
+        # a human approval prompt during /test. Pipes now terminate the
+        # key prefix.
+        assert (
+            _approval_key("Bash", {"command": "agent-browser snapshot | head"})
+            == "Bash::agent-browser snapshot"
+        )
+        assert (
+            _approval_key("Bash", {"command": "agent-browser | head"})
+            == "Bash::agent-browser"
+        )
+
+    def test_bash_redirect_truncates_key(self):
+        assert _approval_key("Bash", {"command": "pytest > out.txt"}) == "Bash::pytest"
+        assert _approval_key("Bash", {"command": "pytest >> out.txt"}) == "Bash::pytest"
+
+    def test_bash_compound_truncates_key(self):
+        # ``cd <path> &&`` is stripped by strip_benign_prefixes; other
+        # compound forms must still terminate the key at the operator.
+        assert (
+            _approval_key("Bash", {"command": "pytest && echo done"}) == "Bash::pytest"
+        )
+        assert _approval_key("Bash", {"command": "pytest; echo done"}) == "Bash::pytest"
+
 
 class TestGatekeeperSafetyInvariants:
     """Safety invariant validation tests."""

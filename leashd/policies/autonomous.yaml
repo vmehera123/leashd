@@ -104,7 +104,7 @@ rules:
   - name: agent-browser-readonly
     tool: Bash
     command_patterns:
-      - "^agent-browser\\s+(snapshot|screenshot|console|get|find|wait|diff|errors|highlight|session\\s+list)\\b"
+      - "^agent-browser\\s+(snapshot|screenshot|console|get|find|wait|diff|errors|highlight|viewport|device|session\\s+list)\\b"
       - "^agent-browser\\s+tab\\s+list\\b"
     action: allow
     description: "Read-only agent-browser observation"

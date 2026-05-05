@@ -48,13 +48,23 @@ def normalize_tool_name(tool_name: str) -> str:
 
 _SKIP_CHARS = frozenset("-/.~$")
 
+# Match the first shell operator (pipe, chain, redirect, background) so the
+# command can be truncated to its leading segment. ``re.split`` is used rather
+# than a token-by-token check because operators don't always have surrounding
+# whitespace (``pytest;echo``).
+_SHELL_OP_RE = re.compile(r"\s*(?:\|\||&&|>>|<<|[|;><&])\s*")
+
 
 def _approval_key(tool_name: str, tool_input: dict[str, Any]) -> str:
     """Build a scoped key for auto-approve matching.
 
     For Bash: 'Bash::uv run pytest', 'Bash::git push origin', etc.
     Uses up to three words, skipping tokens that start with flag/path/variable
-    characters (``-``, ``/``, ``.``, ``~``, ``$``).
+    characters (``-``, ``/``, ``.``, ``~``, ``$``). Truncates at the first
+    shell operator (``|``, ``&&``, ``;``, ``>`` …) so piped/compound forms key
+    the same as the bare command — without this, ``agent-browser snapshot
+    | head`` keys differently from ``agent-browser snapshot`` and misses the
+    allowlist.
     Strips leading ``cd <path> &&`` prefixes so the real command is keyed.
     Skips leading inline env var assignments (VAR=value).
     For others: just the tool name ('Write', 'Edit', etc.)
@@ -68,6 +78,8 @@ def _approval_key(tool_name: str, tool_input: dict[str, Any]) -> str:
     from leashd.plugins.builtin.browser_tools import strip_agent_browser_flags
 
     command = strip_benign_prefixes(tool_input.get("command", "").strip())
+    # Keep only the leading segment before any shell operator.
+    command = _SHELL_OP_RE.split(command, maxsplit=1)[0]
     command = strip_agent_browser_flags(command)
     tokens = command.split()
     if not tokens:

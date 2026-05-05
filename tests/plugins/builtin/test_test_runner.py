@@ -373,6 +373,50 @@ class TestTestRunnerPlugin:
         for tool in BROWSER_READONLY_TOOLS:
             gatekeeper.enable_tool_auto_approve.assert_any_call("chat1", tool)
 
+    async def test_test_mode_auto_approves_agent_browser_real_calls(
+        self, plugin, config, event_bus, session
+    ):
+        # Regression: the latest /test session escalated to human on
+        # ``agent-browser viewport ...`` and ``agent-browser snapshot | head``.
+        # Use the real ToolGatekeeper so the integration of pre-approval +
+        # _approval_key truncation + _matches_auto_approved is exercised.
+        from leashd.core.safety.audit import AuditLogger
+        from leashd.core.safety.gatekeeper import ToolGatekeeper, _approval_key
+
+        ctx = PluginContext(event_bus=event_bus, config=config)
+        await plugin.initialize(ctx)
+
+        sandbox = MagicMock()
+        audit = MagicMock(spec=AuditLogger)
+        real_gate = ToolGatekeeper(
+            sandbox=sandbox,
+            audit=audit,
+            event_bus=event_bus,
+        )
+
+        event = Event(
+            name=COMMAND_TEST,
+            data={
+                "session": session,
+                "chat_id": "chat1",
+                "args": "",
+                "gatekeeper": real_gate,
+                "prompt": "",
+            },
+        )
+        await event_bus.emit(event)
+
+        for cmd in (
+            "agent-browser viewport 375",
+            "agent-browser device iPhone-13",
+            "agent-browser snapshot | head",
+            "agent-browser snapshot -i | grep button",
+        ):
+            key = _approval_key("Bash", {"command": cmd})
+            assert real_gate._matches_auto_approved("chat1", key), (
+                f"{cmd!r} → key {key!r} not auto-approved"
+            )
+
     async def test_plugin_builds_prompt_from_args(
         self, initialized_plugin, event_bus, session, gatekeeper
     ):

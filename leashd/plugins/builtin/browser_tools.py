@@ -115,6 +115,8 @@ AGENT_BROWSER_READONLY_COMMANDS: frozenset[str] = frozenset(
         "diff",
         "errors",
         "highlight",
+        "viewport",
+        "device",
     }
 )
 

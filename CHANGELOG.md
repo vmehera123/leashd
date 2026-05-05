@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.16.1] - 2026-05-05
+- **fixed**: `/test` no longer escalates on piped `agent-browser` invocations (`agent-browser snapshot | head`, `… | grep …`) — `_approval_key` truncates at the first shell operator so the leading-segment key matches the same allowlist entry as the un-piped form. Compounds (`&&`, `;`, `>`, `<`) and tightly-spaced forms (`pytest;echo`) are handled too
+- **fixed**: `agent-browser viewport` and `agent-browser device` are now recognized as read-only subcommands — both in the `AGENT_BROWSER_READONLY_COMMANDS` set used by `/test` pre-approval and in the `agent-browser-readonly` regex of `default.yaml` and `autonomous.yaml`
+
 ## [0.16.0] - 2026-05-05
 
 - **added**: `leashd run "<prompt>"` — synchronous headless task command (the leashd equivalent of `claude -p` / `codex exec`). Submits `/task` over the WebUI socket, auto-acks plan reviews/questions/approvals, blocks until terminal state, streams JSONL events to `--log`. Exits 0 on completed, 1 on escalated/failed, 124 on timeout
