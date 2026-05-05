@@ -750,9 +750,7 @@ class TaskOrchestrator(LeashdPlugin):
             await self.store.save(task)
             if self._connector:
                 test_output = task.phase_context.get("test_output", "(none)")[-500:]
-                escalation_summary = (
-                    f"Task stuck after {task.retry_count} retries"
-                )
+                escalation_summary = f"Task stuck after {task.retry_count} retries"
                 await self._connector.send_task_update(
                     task.chat_id,
                     phase="escalated",
