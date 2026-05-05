@@ -1225,6 +1225,12 @@ class TaskV3Orchestrator(LeashdPlugin):
                 if cost_str:
                     msg += f" Total cost: {cost_str}"
                 msg += f"\nrun_id: {task.run_id}"
+                await self._connector.send_task_update(
+                    task.chat_id,
+                    phase="completed",
+                    status="completed",
+                    description=msg,
+                )
                 await self._connector.send_message(task.chat_id, msg)
             if self._event_bus:
                 await self._event_bus.emit(
@@ -1244,6 +1250,13 @@ class TaskV3Orchestrator(LeashdPlugin):
             if self._connector:
                 tail = _escalation_tail(task)
                 reason = task.error_message or "stalled"
+                await self._connector.send_task_update(
+                    task.chat_id,
+                    phase="escalated",
+                    status="escalated",
+                    description=reason,
+                    retry_count=task.retry_count,
+                )
                 await self._connector.send_message(
                     task.chat_id,
                     f"⚠️ *Task escalated*: {reason}\n\n"
@@ -1269,6 +1282,12 @@ class TaskV3Orchestrator(LeashdPlugin):
             await self.store.save(task)
             if self._connector:
                 error = task.error_message or "Unknown error"
+                await self._connector.send_task_update(
+                    task.chat_id,
+                    phase="failed",
+                    status="failed",
+                    description=error,
+                )
                 await self._connector.send_message(
                     task.chat_id,
                     f"❌ Task failed: {error}\nrun_id: {task.run_id}",

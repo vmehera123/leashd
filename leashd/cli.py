@@ -1027,6 +1027,27 @@ def _handle_task(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+def _handle_run(args: argparse.Namespace) -> None:
+    """Submit /task and block until completion. Exit 0 on completed."""
+    from leashd.cli_run import run_blocking
+
+    prompt = args.prompt
+    if prompt == "-":
+        prompt = sys.stdin.read()
+    if not prompt.strip():
+        print("leashd run: empty prompt", file=sys.stderr)
+        sys.exit(2)
+
+    rc = run_blocking(
+        prompt=prompt,
+        workspace=args.workspace,
+        log_path=args.log,
+        timeout_sec=args.timeout,
+        non_interactive=args.non_interactive,
+    )
+    sys.exit(rc)
+
+
 def _handle_task_version(args: argparse.Namespace) -> None:
     """Route task version subcommands."""
     sub = getattr(args, "task_version_command", None)
@@ -2016,6 +2037,45 @@ def main() -> None:
     ws_show = ws_sub.add_parser("show", help="Show workspace details")
     ws_show.add_argument("name", help="Workspace name to show")
 
+    # Synchronous task run (headless equivalent of `claude -p` / `codex exec`)
+    run_parser = subparsers.add_parser(
+        "run",
+        help="Submit /task and block until completion (non-interactive)",
+    )
+    run_parser.add_argument(
+        "prompt",
+        help="Task description (use '-' to read from stdin)",
+    )
+    run_parser.add_argument(
+        "--workspace",
+        default=None,
+        help="Workspace name to switch into before submitting /task",
+    )
+    run_parser.add_argument(
+        "--wait",
+        action="store_true",
+        default=True,
+        help="Block until terminal task_update (default; kept for clarity)",
+    )
+    run_parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        default=True,
+        dest="non_interactive",
+        help="Auto-ack plan_review / question / approval_request (default)",
+    )
+    run_parser.add_argument(
+        "--timeout",
+        type=int,
+        default=3600,
+        help="Wallclock timeout in seconds (default: 3600)",
+    )
+    run_parser.add_argument(
+        "--log",
+        default=None,
+        help="Path to write the JSONL event stream",
+    )
+
     args = parser.parse_args()
 
     # Inject global config as env vars for all commands
@@ -2079,3 +2139,5 @@ def main() -> None:
         _handle_plugin(args)
     elif args.command == "ws":
         _handle_ws(args)
+    elif args.command == "run":
+        _handle_run(args)

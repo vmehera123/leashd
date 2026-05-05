@@ -726,6 +726,12 @@ class TaskOrchestrator(LeashdPlugin):
                 msg = "✅ Task completed successfully."
                 if cost_str:
                     msg += f" Total cost: {cost_str}"
+                await self._connector.send_task_update(
+                    task.chat_id,
+                    phase="completed",
+                    status="completed",
+                    description=msg,
+                )
                 await self._connector.send_message(task.chat_id, msg)
             if self._event_bus:
                 await self._event_bus.emit(
@@ -744,9 +750,19 @@ class TaskOrchestrator(LeashdPlugin):
             await self.store.save(task)
             if self._connector:
                 test_output = task.phase_context.get("test_output", "(none)")[-500:]
+                escalation_summary = (
+                    f"Task stuck after {task.retry_count} retries"
+                )
+                await self._connector.send_task_update(
+                    task.chat_id,
+                    phase="escalated",
+                    status="escalated",
+                    description=escalation_summary,
+                    retry_count=task.retry_count,
+                )
                 await self._connector.send_message(
                     task.chat_id,
-                    f"⚠️ *Task stuck after {task.retry_count} retries*\n\n"
+                    f"⚠️ *{escalation_summary}*\n\n"
                     f"*Last failure:*\n```\n{test_output}\n```\n\n"
                     "Reply to take over manually.",
                 )
@@ -767,6 +783,12 @@ class TaskOrchestrator(LeashdPlugin):
             await self.store.save(task)
             if self._connector:
                 error = task.error_message or "Unknown error"
+                await self._connector.send_task_update(
+                    task.chat_id,
+                    phase="failed",
+                    status="failed",
+                    description=error,
+                )
                 await self._connector.send_message(
                     task.chat_id,
                     f"❌ Task failed: {error}",

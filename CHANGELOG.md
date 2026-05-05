@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.16.0] - 2026-05-05
+
+- **added**: `leashd run "<prompt>"` — synchronous headless task command (the leashd equivalent of `claude -p` / `codex exec`). Submits `/task` over the WebUI socket, auto-acks plan reviews/questions/approvals, blocks until terminal state, streams JSONL events to `--log`. Exits 0 on completed, 1 on escalated/failed, 124 on timeout
+- **added**: Task orchestrators v2 and v3 now emit terminal `task_update` events (`completed`, `escalated`, `failed`) alongside the existing chat messages, so WebUI, `leashd run`, and third-party benchmarks can detect end-of-task without scraping text
+
 ## [0.15.5] - 2026-05-01
 - **fixed**: `TASK_ESCALATED` event now carries `reason=task.error_message` so downstream subscribers (e.g. unleashd bridge) receive the actual escalation cause instead of falling back to a generic string
 - **fixed**: v3 plan phase now retries once on an empty `## Plan` section (was terminal on first miss); configurable via `task_plan_max_retries`
