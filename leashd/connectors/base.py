@@ -265,8 +265,14 @@ class BaseConnector(ABC):
         reason: str | None = None,
         retry_count: int | None = None,
         previous_phase: str | None = None,
+        usage: dict[str, Any] | None = None,
     ) -> None:
-        """Send a task progress update to the client. Default: no-op."""
+        """Send a task progress update to the client. Default: no-op.
+
+        ``usage`` carries structured cost/token telemetry for terminal
+        task updates (completed / escalated / failed). Connectors that
+        don't speak the field can ignore it.
+        """
 
     async def notify_completion(  # noqa: B027
         self,

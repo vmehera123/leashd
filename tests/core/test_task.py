@@ -88,6 +88,37 @@ class TestTaskRunModel:
         assert len(result) == 2000
         assert result == long[-2000:]
 
+    def test_usage_payload_shape(self):
+        task = _make_task(
+            phase="completed",
+            outcome="ok",
+            total_cost=0.0831,
+            phase_costs={"plan": 0.012, "implement": 0.061, "review": 0.010},
+        )
+        task.transition_to("plan")
+        task.transition_to("completed")
+        payload = task.usage_payload()
+        assert payload["cost_usd"] == pytest.approx(0.0831)
+        assert payload["phase_costs"] == {
+            "plan": 0.012,
+            "implement": 0.061,
+            "review": 0.010,
+        }
+        assert payload["run_id"] == task.run_id
+        assert payload["phase"] == "completed"
+        assert payload["outcome"] == "ok"
+        # started_at + completed_at both stamped above, so duration is non-null.
+        assert isinstance(payload["duration_ms"], int)
+        assert payload["duration_ms"] >= 0
+
+    def test_usage_payload_duration_none_without_timestamps(self):
+        # A task that never reached an active phase has no started_at →
+        # duration_ms must stay None instead of crashing on subtraction.
+        task = _make_task(total_cost=0.0)
+        payload = task.usage_payload()
+        assert payload["duration_ms"] is None
+        assert payload["cost_usd"] == 0.0
+
 
 class TestTaskStore:
     @pytest.fixture

@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.16.2] - 2026-05-06
+- **fixed**: `leashd run --non-interactive` no longer hangs ~5 min on `approval_request` — auto-ack now reads `payload.request_id` (was reading a non-existent `payload.approval_id`); missing-id frames raise instead of silently stalling
+- **added**: `--phases plan,implement,review` flag for `leashd run` and `/task` — per-task v3 phase override; rejects unknown phase names with a clear error
+- **added**: v3 orchestrator picks up `.leashd/task-config.yaml` per task (parity with v2); layered between daemon profile and `--phases` override
+
 ## [0.16.1] - 2026-05-05
 - **fixed**: `/test` no longer escalates on piped `agent-browser` invocations (`agent-browser snapshot | head`, `… | grep …`) — `_approval_key` truncates at the first shell operator so the leading-segment key matches the same allowlist entry as the un-piped form. Compounds (`&&`, `;`, `>`, `<`) and tightly-spaced forms (`pytest;echo`) are handled too
 - **fixed**: `agent-browser viewport` and `agent-browser device` are now recognized as read-only subcommands — both in the `AGENT_BROWSER_READONLY_COMMANDS` set used by `/test` pre-approval and in the `agent-browser-readonly` regex of `default.yaml` and `autonomous.yaml`

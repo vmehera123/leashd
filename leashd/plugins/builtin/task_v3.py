@@ -66,7 +66,13 @@ from leashd.core.events import (
 )
 from leashd.core.queue import KeyedAsyncQueue
 from leashd.core.task import TaskPhase, TaskRun, TaskStore
-from leashd.core.task_profile import STANDALONE, TaskProfile
+from leashd.core.task_profile import (
+    STANDALONE,
+    TaskProfile,
+    _profile_from_dict,
+    load_project_task_config,
+    merge_profiles,
+)
 from leashd.plugins.base import LeashdPlugin, PluginMeta
 from leashd.plugins.builtin._task_v3_prompts import (
     implement_prompt,
@@ -219,6 +225,22 @@ def _resolve_pipeline(profile: TaskProfile) -> list[TaskPhase]:
     return active
 
 
+def _build_task_override(raw: Any) -> TaskProfile | None:
+    """Translate a per-task override dict (from event.data) into a TaskProfile.
+
+    Used for one-off overrides like `leashd run --phases plan,implement` —
+    layered on top of the project task-config.yaml and daemon-wide profile
+    via `merge_profiles()`. Returns None when the input is empty or malformed.
+    """
+    if not isinstance(raw, dict) or not raw:
+        return None
+    try:
+        return _profile_from_dict(raw)
+    except (TypeError, ValueError, KeyError) as exc:
+        logger.warning("task_v3_override_parse_failed", error=str(exc))
+        return None
+
+
 def _profile_instruction(profile: TaskProfile, phase: str) -> str | None:
     text = profile.action_instructions.get(phase, "").strip()
     return text or None
@@ -313,6 +335,9 @@ class TaskV3Orchestrator(LeashdPlugin):
         self._db: aiosqlite.Connection | None = None
         self._connector = connector
         self._profile = profile or STANDALONE
+        # Per-task overlays (project `.leashd/task-config.yaml`, `--phases`, etc.)
+        # merged onto self._profile at task creation; cleared on terminal status.
+        self._task_profiles: dict[str, TaskProfile] = {}
         self._phase_timeout_seconds = phase_timeout_seconds
         self._plan_max_retries = plan_max_retries
         self._implement_max_retries = implement_max_retries
@@ -337,6 +362,33 @@ class TaskV3Orchestrator(LeashdPlugin):
         if self._store is None:
             raise RuntimeError("TaskStore not initialized — call start() first")
         return self._store
+
+    def _profile_for(self, task: TaskRun) -> TaskProfile:
+        """Return the active profile for *task* — overlay if registered, else base."""
+        return self._task_profiles.get(task.run_id, self._profile)
+
+    def _pipeline_for(self, task: TaskRun) -> list[TaskPhase]:
+        return _resolve_pipeline(self._profile_for(task))
+
+    def _register_task_profile(
+        self, task: TaskRun, override: TaskProfile | None
+    ) -> TaskProfile:
+        """Build and stash the per-task profile from project config + override.
+
+        Layers, lowest priority first:
+            self._profile  (daemon-wide, from config.task_profile)
+              └─▶ project `.leashd/task-config.yaml` if present
+                    └─▶ override (e.g. `leashd run --phases ...`)
+        """
+        active = self._profile
+        project = load_project_task_config(task.working_directory)
+        if project is not None:
+            active = merge_profiles(active, project)
+        if override is not None:
+            active = merge_profiles(active, override)
+        if active is not self._profile:
+            self._task_profiles[task.run_id] = active
+        return active
 
     def set_engine(self, engine: _EngineProtocol) -> None:
         self._engine = engine
@@ -429,6 +481,7 @@ class TaskV3Orchestrator(LeashdPlugin):
             t.cancel()
         self._running_tasks.clear()
         self._active_tasks.clear()
+        self._task_profiles.clear()
         if self._db:
             await self._db.close()
             self._db = None
@@ -459,7 +512,9 @@ class TaskV3Orchestrator(LeashdPlugin):
             max_retries=1,  # v3 uses per-phase internal retry caps
             settings_override=event.data.get("settings_override"),
         )
-        pipeline = _resolve_pipeline(self._profile)
+        override = _build_task_override(event.data.get("task_overrides"))
+        self._register_task_profile(task, override)
+        pipeline = self._pipeline_for(task)
         task.phase_pipeline = [*pipeline, "completed"]
 
         # Seed the v3-flavoured markdown scratchpad.
@@ -661,7 +716,7 @@ class TaskV3Orchestrator(LeashdPlugin):
         await self._execute_phase(task)
 
     async def _choose_next_phase(self, task: TaskRun) -> TaskPhase:
-        pipeline = _resolve_pipeline(self._profile)
+        pipeline = self._pipeline_for(task)
 
         if task.phase == "pending":
             return pipeline[0] if pipeline else "completed"
@@ -802,7 +857,7 @@ class TaskV3Orchestrator(LeashdPlugin):
         return "completed"
 
     def _write_checkpoint(self, task: TaskRun, next_phase: TaskPhase) -> None:
-        pipeline = _resolve_pipeline(self._profile)
+        pipeline = self._pipeline_for(task)
         if next_phase in _V3_PHASES:
             idx = pipeline.index(next_phase)
             completed = pipeline[:idx]
@@ -1003,7 +1058,7 @@ class TaskV3Orchestrator(LeashdPlugin):
             return None
 
     def _build_prompt_for(self, task: TaskRun) -> str:
-        extra = _profile_instruction(self._profile, str(task.phase))
+        extra = _profile_instruction(self._profile_for(task), str(task.phase))
         primary = task.working_directory
         ws_name = task.workspace_name
         ws_dirs = task.workspace_directories
@@ -1177,7 +1232,7 @@ class TaskV3Orchestrator(LeashdPlugin):
         if task.phase not in _V3_PHASES:
             # Either terminal, or the stored phase is not a v3 phase —
             # restart from the first phase in the active pipeline.
-            pipeline = _resolve_pipeline(self._profile)
+            pipeline = self._pipeline_for(task)
             first = pipeline[0] if pipeline else "completed"
             if first in _V3_PHASES:
                 task.transition_to(first)
@@ -1205,6 +1260,7 @@ class TaskV3Orchestrator(LeashdPlugin):
 
     async def _handle_terminal(self, task: TaskRun) -> None:
         self._active_tasks.pop(task.chat_id, None)
+        self._task_profiles.pop(task.run_id, None)
 
         if self._engine:
             session = self._engine.session_manager.get(task.user_id, task.chat_id)
@@ -1230,6 +1286,7 @@ class TaskV3Orchestrator(LeashdPlugin):
                     phase="completed",
                     status="completed",
                     description=msg,
+                    usage=task.usage_payload(),
                 )
                 await self._connector.send_message(task.chat_id, msg)
             if self._event_bus:
@@ -1256,6 +1313,7 @@ class TaskV3Orchestrator(LeashdPlugin):
                     status="escalated",
                     description=reason,
                     retry_count=task.retry_count,
+                    usage=task.usage_payload(),
                 )
                 await self._connector.send_message(
                     task.chat_id,
@@ -1287,6 +1345,7 @@ class TaskV3Orchestrator(LeashdPlugin):
                     phase="failed",
                     status="failed",
                     description=error,
+                    usage=task.usage_payload(),
                 )
                 await self._connector.send_message(
                     task.chat_id,
@@ -1364,6 +1423,7 @@ class TaskV3Orchestrator(LeashdPlugin):
                 task.outcome = "timeout"
                 await self.store.save(task)
                 self._active_tasks.pop(task.chat_id, None)
+                self._task_profiles.pop(task.run_id, None)
                 cleaned += 1
                 logger.warning(
                     "task_v3_stale_cleanup",

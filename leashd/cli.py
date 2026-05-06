@@ -1044,6 +1044,7 @@ def _handle_run(args: argparse.Namespace) -> None:
         log_path=args.log,
         timeout_sec=args.timeout,
         non_interactive=args.non_interactive,
+        phases=args.phases,
     )
     sys.exit(rc)
 
@@ -2074,6 +2075,15 @@ def main() -> None:
         "--log",
         default=None,
         help="Path to write the JSONL event stream",
+    )
+    run_parser.add_argument(
+        "--phases",
+        default=None,
+        help=(
+            "Comma-separated v3 phase override (e.g. 'plan,implement,review' "
+            "to skip verify in benchmark runs). Layered on top of project "
+            "`.leashd/task-config.yaml` and the daemon-wide profile."
+        ),
     )
 
     args = parser.parse_args()

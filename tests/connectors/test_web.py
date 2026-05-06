@@ -271,6 +271,42 @@ class TestTaskUpdate:
         assert msg.payload["retry_count"] == 0
         assert msg.payload["previous_phase"] == "plan"
 
+    async def test_send_task_update_with_usage(self, connector):
+        # Headless consumers (e.g. multirepo-bench's leashd-task agent)
+        # rely on this structured field to compare $ spend across orchestrator
+        # versions; grepping the description string would be fragile.
+        connector._ws_handler.send_to = AsyncMock()
+        usage = {
+            "cost_usd": 0.0831,
+            "phase_costs": {"plan": 0.012, "implement": 0.061, "review": 0.010},
+            "run_id": "01HXY",
+            "duration_ms": 184230,
+            "phase": "completed",
+            "outcome": "ok",
+        }
+        await connector.send_task_update(
+            "web:1",
+            "completed",
+            "completed",
+            "Task done",
+            usage=usage,
+        )
+
+        msg = connector._ws_handler.send_to.call_args[0][1]
+        assert msg.payload["usage"] == usage
+
+    async def test_send_task_update_omits_usage_when_unset(self, connector):
+        # Non-terminal updates pass `usage=None` (or omit it entirely);
+        # the WS payload must NOT include the key in that case so existing
+        # downstream consumers see an unchanged schema.
+        connector._ws_handler.send_to = AsyncMock()
+        await connector.send_task_update(
+            "web:1", "implement", "running", "Writing code"
+        )
+
+        msg = connector._ws_handler.send_to.call_args[0][1]
+        assert "usage" not in msg.payload
+
 
 class TestSendFile:
     async def test_sends_file_as_message(self, connector):

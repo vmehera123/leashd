@@ -28,6 +28,7 @@ from leashd.plugins.builtin._task_v3_prompts import (
 )
 from leashd.plugins.builtin.task_v3 import (
     TaskV3Orchestrator,
+    _build_task_override,
     _classify_change_shape,
     _parse_severity,
     _parse_verify_status,
@@ -139,6 +140,124 @@ class TestResolvePipeline:
             "verify",
             "review",
         ]
+
+
+class TestPerTaskProfile:
+    """`leashd run --phases ...` and `.leashd/task-config.yaml` overlays.
+
+    Pins the contract that v3 honours per-task profile overrides without
+    needing a daemon restart — see TaskV3Orchestrator._register_task_profile.
+    """
+
+    def _orchestrator(self, base: TaskProfile = STANDALONE) -> TaskV3Orchestrator:
+        return TaskV3Orchestrator(profile=base)
+
+    def _task(self, tmp_path) -> TaskRun:
+        return TaskRun(
+            user_id="u",
+            chat_id="c",
+            session_id="s",
+            task="t",
+            working_directory=str(tmp_path),
+        )
+
+    def test_no_overlay_returns_base_profile(self, tmp_path):
+        orch = self._orchestrator()
+        task = self._task(tmp_path)
+        orch._register_task_profile(task, override=None)
+        assert orch._pipeline_for(task) == ["plan", "implement", "verify", "review"]
+        # No overlay registered → pure base profile (identity, not a copy).
+        assert orch._profile_for(task) is orch._profile
+
+    def test_phases_override_filters_pipeline(self, tmp_path):
+        orch = self._orchestrator()
+        task = self._task(tmp_path)
+        override = _build_task_override(
+            {"enabled_actions": ["plan", "implement", "review"]}
+        )
+        orch._register_task_profile(task, override=override)
+        assert orch._pipeline_for(task) == ["plan", "implement", "review"]
+
+    def test_project_task_config_yaml_filters_pipeline(self, tmp_path):
+        leashd_dir = tmp_path / ".leashd"
+        leashd_dir.mkdir()
+        (leashd_dir / "task-config.yaml").write_text("disabled_actions: [verify]\n")
+
+        orch = self._orchestrator()
+        task = self._task(tmp_path)
+        orch._register_task_profile(task, override=None)
+        assert orch._pipeline_for(task) == ["plan", "implement", "review"]
+
+    def test_override_layers_on_top_of_project_config(self, tmp_path):
+        # Project disables verify; --phases further trims to just plan+implement.
+        leashd_dir = tmp_path / ".leashd"
+        leashd_dir.mkdir()
+        (leashd_dir / "task-config.yaml").write_text("disabled_actions: [verify]\n")
+
+        orch = self._orchestrator()
+        task = self._task(tmp_path)
+        override = _build_task_override({"enabled_actions": ["plan", "implement"]})
+        orch._register_task_profile(task, override=override)
+        # merge_profiles intersects enabled_actions, so result is the narrower set.
+        assert orch._pipeline_for(task) == ["plan", "implement"]
+
+    async def test_handle_terminal_clears_overlay(self, orchestrator, tmp_path):
+        """`_handle_terminal` must drop the per-task overlay on completion.
+
+        Without this cleanup, long-running daemons accumulate overlays for
+        every task they have ever run.
+        """
+        task = _make_task(tmp_path)
+        orchestrator._active_tasks[task.chat_id] = task
+        orchestrator._task_profiles[task.run_id] = TaskProfile(
+            enabled_actions=frozenset({"plan", "implement"}),
+        )
+        task.transition_to("completed")
+
+        await orchestrator._handle_terminal(task)
+
+        assert task.run_id not in orchestrator._task_profiles
+
+    async def test_stop_clears_all_overlays(self, orchestrator, tmp_path):
+        orchestrator._task_profiles["run-a"] = TaskProfile(
+            enabled_actions=frozenset({"plan"}),
+        )
+        orchestrator._task_profiles["run-b"] = TaskProfile(
+            enabled_actions=frozenset({"implement"}),
+        )
+
+        await orchestrator.stop()
+
+        assert orchestrator._task_profiles == {}
+
+    async def test_cleanup_stale_drops_overlay(self, orchestrator, tmp_path):
+        from datetime import datetime, timedelta, timezone
+
+        task = _make_task(tmp_path)
+        task.last_updated = datetime.now(timezone.utc) - timedelta(hours=72)
+        await orchestrator.store.save(task)
+        orchestrator._active_tasks[task.chat_id] = task
+        orchestrator._task_profiles[task.run_id] = TaskProfile(
+            enabled_actions=frozenset({"plan"}),
+        )
+
+        cleaned = await orchestrator.cleanup_stale(max_age_hours=24)
+
+        assert cleaned == 1
+        assert task.run_id not in orchestrator._task_profiles
+        assert task.chat_id not in orchestrator._active_tasks
+
+
+class TestBuildTaskOverride:
+    def test_returns_none_for_empty(self):
+        assert _build_task_override(None) is None
+        assert _build_task_override({}) is None
+        assert _build_task_override("not a dict") is None
+
+    def test_builds_profile_from_enabled_actions(self):
+        profile = _build_task_override({"enabled_actions": ["plan", "implement"]})
+        assert profile is not None
+        assert profile.enabled_actions == frozenset({"plan", "implement"})
 
 
 class TestParsers:

@@ -374,8 +374,15 @@ class WebConnector(BaseConnector):
         reason: str | None = None,
         retry_count: int | None = None,
         previous_phase: str | None = None,
+        usage: dict[str, Any] | None = None,
     ) -> None:
-        payload: dict[str, str | int | None] = {
+        # Structured payload for the task_update WS message. Optional fields
+        # land only when the caller passed them, so the WebUI / CLI / bench
+        # consumers all see a stable schema. ``usage`` carries cost/token
+        # telemetry for terminal updates so headless clients (e.g.
+        # multirepo-bench) can compare spend across orchestrator versions
+        # without grepping the human-readable description string.
+        payload: dict[str, Any] = {
             "phase": phase,
             "status": status,
             "description": description,
@@ -388,6 +395,8 @@ class WebConnector(BaseConnector):
             payload["retry_count"] = retry_count
         if previous_phase is not None:
             payload["previous_phase"] = previous_phase
+        if usage is not None:
+            payload["usage"] = usage
         await self._ws_handler.send_to(
             chat_id,
             ServerMessage(type="task_update", payload=payload),

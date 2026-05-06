@@ -66,13 +66,31 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 
-def _parse_task_flags(args: str) -> tuple[RuntimeSettings, str]:
-    """Strip ``--effort`` / ``--model`` flags off the head of a /task args string.
+def _parse_task_flags(
+    args: str,
+) -> tuple[RuntimeSettings, dict[str, Any] | None, str]:
+    """Strip leading flags off a /task args string.
 
-    Flags must appear before the task description and each takes a single value.
-    Unknown flags or malformed values stop parsing and are treated as task text.
+    Recognised:
+      ``--effort low|medium|high|max``   — runtime override
+      ``--model <name>``                 — runtime override
+      ``--phases plan,implement,...``    — per-task v3 phase override
+                                           (consumed by TaskV3Orchestrator)
+
+    Flags must appear before the task description and each takes a single
+    value. Unknown flags or malformed values stop parsing and are treated
+    as task text. Returns (runtime_override, task_overrides_dict_or_None,
+    remaining_task_text).
+
+    Raises ``ValueError`` for ``--phases`` containing an unrecognised phase
+    name — silently dropping it would let the daemon fall back to the full
+    pipeline (the verify phase being the one users explicitly try to skip
+    in benchmark runs), so we surface the typo to the user instead.
     """
+    from leashd.core.task_profile import _ALL_ACTIONS
+
     override = RuntimeSettings()
+    task_overrides: dict[str, Any] | None = None
     remaining = args.strip()
     while remaining.startswith("--"):
         parts = remaining.split(maxsplit=2)
@@ -92,10 +110,21 @@ def _parse_task_flags(args: str) -> tuple[RuntimeSettings, str]:
                 # Default unknown / claude-ish values to claude_model so a
                 # plain "opus" works without the user specifying a runtime.
                 override = override.model_copy(update={"claude_model": value})
+        elif flag == "--phases":
+            phases = [p.strip() for p in value.split(",") if p.strip()]
+            if not phases:
+                break
+            unknown = [p for p in phases if p not in _ALL_ACTIONS]
+            if unknown:
+                raise ValueError(
+                    f"--phases: unknown phase(s) {unknown!r}. "
+                    f"Valid: {sorted(_ALL_ACTIONS)}"
+                )
+            task_overrides = {**(task_overrides or {}), "enabled_actions": phases}
         else:
             break
         remaining = rest
-    return override, remaining.strip()
+    return override, task_overrides, remaining.strip()
 
 
 _STREAMING_CURSOR = "\u258d"
@@ -1580,11 +1609,15 @@ class Engine:
             return ""
 
         if command == "task":
-            task_override, task_text = _parse_task_flags(args)
+            try:
+                task_override, task_overrides, task_text = _parse_task_flags(args)
+            except ValueError as exc:
+                return f"⚠️ {exc}"
             if not task_text:
                 return (
                     "Usage: /task [--effort low|medium|high|max] "
-                    "[--model <name>] <description of the task>"
+                    "[--model <name>] [--phases plan,implement,review] "
+                    "<description of the task>"
                 )
             session.mode = "task"
             session.task_run_id = None
@@ -1602,6 +1635,8 @@ class Engine:
                 event_data["settings_override"] = task_override.model_dump(
                     exclude_none=True
                 )
+            if task_overrides:
+                event_data["task_overrides"] = task_overrides
             await self.event_bus.emit(Event(name=TASK_SUBMITTED, data=event_data))
             return ""
 

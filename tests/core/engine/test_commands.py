@@ -2517,6 +2517,110 @@ class TestTaskCommand:
             "/repo/b",
         ]
 
+    async def test_task_phases_flag_sets_task_overrides(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        from leashd.core.events import TASK_SUBMITTED, Event
+
+        captured_events: list[Event] = []
+
+        async def capture(event: Event) -> None:
+            captured_events.append(event)
+
+        bus = EventBus()
+        bus.subscribe(TASK_SUBMITTED, capture)
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            event_bus=bus,
+        )
+
+        await eng.handle_command(
+            "user1",
+            "task",
+            "--phases plan,implement,review build it",
+            "chat1",
+        )
+
+        assert len(captured_events) == 1
+        # The flag is consumed; only the description survives in `task`.
+        assert captured_events[0].data["task"] == "build it"
+        assert captured_events[0].data["task_overrides"] == {
+            "enabled_actions": ["plan", "implement", "review"],
+        }
+
+    async def test_task_phases_flag_rejects_unknown_name(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        """`--phases bogus` must surface a clear error, not silently fall back
+        to the full pipeline (which would re-run the verify phase the user
+        was trying to skip).
+        """
+        from leashd.core.events import TASK_SUBMITTED, Event
+
+        captured_events: list[Event] = []
+
+        async def capture(event: Event) -> None:
+            captured_events.append(event)
+
+        bus = EventBus()
+        bus.subscribe(TASK_SUBMITTED, capture)
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            event_bus=bus,
+        )
+
+        result = await eng.handle_command(
+            "user1",
+            "task",
+            "--phases bogus,implement build it",
+            "chat1",
+        )
+
+        assert "unknown phase" in result.lower()
+        assert "bogus" in result
+        # No task should have been submitted.
+        assert captured_events == []
+
+    async def test_task_without_phases_flag_omits_task_overrides(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        from leashd.core.events import TASK_SUBMITTED, Event
+
+        captured_events: list[Event] = []
+
+        async def capture(event: Event) -> None:
+            captured_events.append(event)
+
+        bus = EventBus()
+        bus.subscribe(TASK_SUBMITTED, capture)
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            event_bus=bus,
+        )
+
+        await eng.handle_command("user1", "task", "Build a widget", "chat1")
+
+        assert len(captured_events) == 1
+        assert "task_overrides" not in captured_events[0].data
+
 
 class TestCancelCommand:
     async def test_cancel_emits_event_and_returns_confirmation(

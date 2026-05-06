@@ -138,6 +138,7 @@ class MultiConnector(BaseConnector):
         reason: str | None = None,
         retry_count: int | None = None,
         previous_phase: str | None = None,
+        usage: dict[str, Any] | None = None,
     ) -> None:
         await self._get_connector(chat_id).send_task_update(
             chat_id,
@@ -148,6 +149,7 @@ class MultiConnector(BaseConnector):
             reason=reason,
             retry_count=retry_count,
             previous_phase=previous_phase,
+            usage=usage,
         )
 
     async def notify_completion(self, chat_id: str) -> None:

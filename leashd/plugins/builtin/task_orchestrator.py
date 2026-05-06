@@ -731,6 +731,7 @@ class TaskOrchestrator(LeashdPlugin):
                     phase="completed",
                     status="completed",
                     description=msg,
+                    usage=task.usage_payload(),
                 )
                 await self._connector.send_message(task.chat_id, msg)
             if self._event_bus:
@@ -757,6 +758,7 @@ class TaskOrchestrator(LeashdPlugin):
                     status="escalated",
                     description=escalation_summary,
                     retry_count=task.retry_count,
+                    usage=task.usage_payload(),
                 )
                 await self._connector.send_message(
                     task.chat_id,
@@ -786,6 +788,7 @@ class TaskOrchestrator(LeashdPlugin):
                     phase="failed",
                     status="failed",
                     description=error,
+                    usage=task.usage_payload(),
                 )
                 await self._connector.send_message(
                     task.chat_id,

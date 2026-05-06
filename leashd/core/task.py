@@ -93,6 +93,30 @@ class TaskRun(BaseModel):
     def is_terminal(self) -> bool:
         return self.phase in _TERMINAL_PHASES
 
+    def usage_payload(self) -> dict[str, Any]:
+        """Snapshot of cost telemetry suitable for terminal task_update WS payloads.
+
+        Headless consumers (e.g. multirepo-bench's leashd-task agent)
+        scan the WebSocket JSONL log for this dict instead of grepping
+        the human-readable description string. Phase-1 surfaces only
+        what's already tracked at task scope: total cost, per-phase
+        cost breakdown, wallclock duration, and the run_id. Token
+        counts will land in Phase-2 once AgentResponse is widened.
+        """
+        duration_ms: int | None = None
+        if self.started_at and self.completed_at:
+            duration_ms = int(
+                (self.completed_at - self.started_at).total_seconds() * 1000
+            )
+        return {
+            "cost_usd": float(self.total_cost),
+            "phase_costs": dict(self.phase_costs),
+            "run_id": self.run_id,
+            "duration_ms": duration_ms,
+            "phase": self.phase,
+            "outcome": self.outcome,
+        }
+
     def transition_to(self, new_phase: TaskPhase) -> None:
         """Move to a new phase, recording the previous one."""
         self.previous_phase = self.phase
