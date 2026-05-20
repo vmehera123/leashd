@@ -62,9 +62,13 @@ async def test_drain_handles_rotation(tmp_path):
     assert len(events) == 1
 
     # Rotation (compaction / `project purge`): inode changes → replay
-    # from offset 0 with the dedup set intact.
-    jsonl.unlink()
-    jsonl.write_text('{"uuid": "c", "type": "summary"}\n')
+    # from offset 0 with the dedup set intact. Use an atomic rename so the
+    # new inode is guaranteed distinct — a plain unlink+rewrite often
+    # reuses the freed inode on Linux ext4, which would defeat the
+    # production code's inode-based rotation detection.
+    replacement = proj / "uuid-1.new"
+    replacement.write_text('{"uuid": "c", "type": "summary"}\n')
+    replacement.replace(jsonl)
     await tailer._drain(path)
     assert events[-1]["uuid"] == "c"
 
