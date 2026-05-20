@@ -71,7 +71,7 @@ rules:
   # ── Auto-allow: reads ──────────────────────────────────────────────────────
 
   - name: read-only-tools
-    tools: [Read, Glob, Grep, WebSearch, WebFetch, LS]
+    tools: [Read, Glob, Grep, WebSearch, WebFetch, LS, ToolSearch]
     action: allow
 
   - name: browser-readonly-tools

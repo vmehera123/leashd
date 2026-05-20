@@ -7,6 +7,7 @@ import pytest
 from leashd.agents.runtimes._helpers import (
     AUTO_MODE_INSTRUCTION,
     MAX_BUFFER_SIZE,
+    NATIVE_AUTO_INSTRUCTION,
     PLAN_MODE_INSTRUCTION,
     SESSION_TO_PERMISSION_MODE,
     StderrBuffer,
@@ -15,11 +16,16 @@ from leashd.agents.runtimes._helpers import (
     describe_tool,
     friendly_error,
     is_retryable_error,
+    model_supports_native_auto,
     prepend_instruction,
     read_local_mcp_servers,
     truncate,
 )
 from leashd.agents.runtimes.claude_cli import ClaudeCliAgent
+from leashd.agents.runtimes.tmux_session import (
+    get_or_create_tmux_session_manager,
+    reset_tmux_session_manager,
+)
 from leashd.core.config import LeashdConfig
 from leashd.core.session import Session
 from leashd.exceptions import AgentError
@@ -232,11 +238,188 @@ class TestBuildCommand:
         idx = cmd.index("--permission-mode")
         assert cmd[idx + 1] == "plan"
 
-    def test_permission_mode_auto(self, agent, session):
+    def test_permission_mode_auto_unbound_fallback(self, agent, session):
+        # auto with the tmux hook bridge unbound degrades to acceptEdits +
+        # the stdio pipeline (today's behavior — safety preserved).
+        reset_tmux_session_manager()
         session.mode = "auto"
         cmd = agent._build_command(session)
         idx = cmd.index("--permission-mode")
         assert cmd[idx + 1] == "acceptEdits"
+        assert "--settings" not in cmd
+        assert "--permission-prompt-tool" in cmd
+
+    def test_permission_mode_auto_native_when_bound(self, agent, session):
+        # auto with the hook bridge bound + an Opus model → native `auto` +
+        # a managed --settings hard-deny floor; stdio stays as the redundant
+        # raise catch. (Opus is required: the native classifier is Opus-only.)
+        reset_tmux_session_manager()
+        agent._config.claude_model = "claude-opus-4-7"
+        tsm = get_or_create_tmux_session_manager(agent._config)
+        tsm.bind_safety(
+            gatekeeper=MagicMock(),
+            approval_coordinator=None,
+            interaction_coordinator=None,
+            audit=MagicMock(),
+            event_bus=MagicMock(),
+            session_manager=MagicMock(),
+        )
+        try:
+            session.mode = "auto"
+            cmd = agent._build_command(session)
+            idx = cmd.index("--permission-mode")
+            assert cmd[idx + 1] == "auto"
+            assert "--settings" in cmd
+            assert "--permission-prompt-tool" in cmd
+        finally:
+            reset_tmux_session_manager()
+
+    def test_permission_mode_auto_non_opus_downgrades(self, agent, session):
+        # Sonnet/Haiku silently ignore --permission-mode auto in claude CLI
+        # (verified against 2.1.145: ``auto mode unavailable for this model``).
+        # leashd downgrades to acceptEdits so the YAML pipeline owns approvals.
+        reset_tmux_session_manager()
+        agent._config.claude_model = "claude-sonnet-4-6"
+        tsm = get_or_create_tmux_session_manager(agent._config)
+        tsm.bind_safety(
+            gatekeeper=MagicMock(),
+            approval_coordinator=None,
+            interaction_coordinator=None,
+            audit=MagicMock(),
+            event_bus=MagicMock(),
+            session_manager=MagicMock(),
+        )
+        try:
+            session.mode = "auto"
+            cmd = agent._build_command(session)
+            idx = cmd.index("--permission-mode")
+            assert cmd[idx + 1] == "acceptEdits"
+            assert "--settings" not in cmd
+        finally:
+            reset_tmux_session_manager()
+
+    def test_permission_mode_auto_none_model_downgrades(self, agent, session):
+        # claude_cli leaves model unset to mean "Claude's own default", which
+        # is currently Sonnet — not Opus. Fail-safe: downgrade to acceptEdits
+        # rather than launch a pane that silently runs in default mode.
+        reset_tmux_session_manager()
+        tsm = get_or_create_tmux_session_manager(agent._config)
+        tsm.bind_safety(
+            gatekeeper=MagicMock(),
+            approval_coordinator=None,
+            interaction_coordinator=None,
+            audit=MagicMock(),
+            event_bus=MagicMock(),
+            session_manager=MagicMock(),
+        )
+        try:
+            assert agent._config.claude_model is None
+            session.mode = "auto"
+            cmd = agent._build_command(session)
+            idx = cmd.index("--permission-mode")
+            assert cmd[idx + 1] == "acceptEdits"
+            assert "--settings" not in cmd
+        finally:
+            reset_tmux_session_manager()
+
+    def test_permission_mode_auto_task_phase_accept_edits(self, agent, session):
+        # Orchestrated auto phases keep acceptEdits + the full pipeline.
+        reset_tmux_session_manager()
+        session.mode = "auto"
+        session.task_run_id = "t1"
+        cmd = agent._build_command(session)
+        idx = cmd.index("--permission-mode")
+        assert cmd[idx + 1] == "acceptEdits"
+        assert "--settings" not in cmd
+
+    def test_task_v4_native_auto_when_bound(self, agent, session):
+        # v4 implement phase: task_run_id is set AND native_auto_allowed
+        # is True AND tmux is bound AND an Opus model is pinned → keep
+        # native auto + managed settings. (Native auto is Opus-only.)
+        reset_tmux_session_manager()
+        agent._config.claude_model = "claude-opus-4-7"
+        tsm = get_or_create_tmux_session_manager(agent._config)
+        tsm.bind_safety(
+            gatekeeper=MagicMock(),
+            approval_coordinator=None,
+            interaction_coordinator=None,
+            audit=MagicMock(),
+            event_bus=MagicMock(),
+            session_manager=MagicMock(),
+        )
+        try:
+            session.mode = "auto"
+            session.task_run_id = "v4-run"
+            session.native_auto_allowed = True
+            cmd = agent._build_command(session)
+            idx = cmd.index("--permission-mode")
+            assert cmd[idx + 1] == "auto"
+            assert "--settings" in cmd
+        finally:
+            reset_tmux_session_manager()
+
+    def test_task_v4_native_auto_unbound_falls_back(self, agent, session):
+        # v4 implement with native_auto_allowed=True but tmux unbound:
+        # no hook bridge available → fall back to acceptEdits (same path
+        # the interactive /auto session takes when unbound).
+        reset_tmux_session_manager()
+        session.mode = "auto"
+        session.task_run_id = "v4-run"
+        session.native_auto_allowed = True
+        cmd = agent._build_command(session)
+        idx = cmd.index("--permission-mode")
+        assert cmd[idx + 1] == "acceptEdits"
+        assert "--settings" not in cmd
+
+    def test_task_v3_auto_without_flag_still_downgrades(self, agent, session):
+        # v3 behavior preserved: task + auto without native_auto_allowed
+        # downgrades to acceptEdits even when tmux is bound.
+        reset_tmux_session_manager()
+        tsm = get_or_create_tmux_session_manager(agent._config)
+        tsm.bind_safety(
+            gatekeeper=MagicMock(),
+            approval_coordinator=None,
+            interaction_coordinator=None,
+            audit=MagicMock(),
+            event_bus=MagicMock(),
+            session_manager=MagicMock(),
+        )
+        try:
+            session.mode = "auto"
+            session.task_run_id = "v3-run"
+            assert session.native_auto_allowed is False
+            cmd = agent._build_command(session)
+            idx = cmd.index("--permission-mode")
+            assert cmd[idx + 1] == "acceptEdits"
+            assert "--settings" not in cmd
+        finally:
+            reset_tmux_session_manager()
+
+    def test_task_v4_native_auto_uses_native_banner(self, agent, session):
+        # Confirms _helpers.build_append_system_prompt swaps in the
+        # NATIVE_AUTO_INSTRUCTION banner for v4 implement (rather than
+        # the accept-edits one). Requires an Opus model pin — the native
+        # classifier is Opus-only.
+        reset_tmux_session_manager()
+        agent._config.claude_model = "claude-opus-4-7"
+        tsm = get_or_create_tmux_session_manager(agent._config)
+        tsm.bind_safety(
+            gatekeeper=MagicMock(),
+            approval_coordinator=None,
+            interaction_coordinator=None,
+            audit=MagicMock(),
+            event_bus=MagicMock(),
+            session_manager=MagicMock(),
+        )
+        try:
+            session.mode = "auto"
+            session.task_run_id = "v4-run"
+            session.native_auto_allowed = True
+            cmd = agent._build_command(session)
+            idx = cmd.index("--append-system-prompt")
+            assert NATIVE_AUTO_INSTRUCTION in cmd[idx + 1]
+        finally:
+            reset_tmux_session_manager()
 
     def test_system_prompt_plan_mode(self, agent, session):
         session.mode = "plan"
@@ -267,11 +450,36 @@ class TestBuildCommand:
         idx = cmd.index("--permission-mode")
         assert cmd[idx + 1] == "default"
 
-    def test_system_prompt_auto_mode(self, agent, session):
+    def test_system_prompt_auto_mode_unbound(self, agent, session):
+        # Unbound → accept-edits fallback → the accept-edits banner (the
+        # claude-code SDK / codex runtimes never pass native_auto either).
+        reset_tmux_session_manager()
         session.mode = "auto"
         cmd = agent._build_command(session)
         idx = cmd.index("--append-system-prompt")
         assert AUTO_MODE_INSTRUCTION in cmd[idx + 1]
+
+    def test_system_prompt_auto_mode_native_when_bound(self, agent, session):
+        # Native auto banner requires both a bound hook bridge AND an Opus
+        # model (the classifier is Opus-only — claude CLI 2.1.145 verified).
+        reset_tmux_session_manager()
+        agent._config.claude_model = "claude-opus-4-7"
+        tsm = get_or_create_tmux_session_manager(agent._config)
+        tsm.bind_safety(
+            gatekeeper=MagicMock(),
+            approval_coordinator=None,
+            interaction_coordinator=None,
+            audit=MagicMock(),
+            event_bus=MagicMock(),
+            session_manager=MagicMock(),
+        )
+        try:
+            session.mode = "auto"
+            cmd = agent._build_command(session)
+            idx = cmd.index("--append-system-prompt")
+            assert NATIVE_AUTO_INSTRUCTION in cmd[idx + 1]
+        finally:
+            reset_tmux_session_manager()
 
     def test_system_prompt_from_config(self, tmp_path):
         config = LeashdConfig(
@@ -399,10 +607,47 @@ class TestReadLocalMcpServers:
         assert read_local_mcp_servers(str(tmp_path)) == {}
 
 
+class TestModelSupportsNativeAuto:
+    # Empirically verified against claude CLI 2.1.145 (see plan docs):
+    # Opus → "auto mode on"; Sonnet / Haiku → "auto mode unavailable for this model".
+
+    def test_opus_alias_supported(self):
+        assert model_supports_native_auto("opus") is True
+
+    def test_full_opus_name_supported(self):
+        assert model_supports_native_auto("claude-opus-4-7") is True
+        assert model_supports_native_auto("claude-opus-4-6") is True
+
+    def test_opus_case_insensitive(self):
+        assert model_supports_native_auto("Claude-Opus-4-7") is True
+
+    def test_sonnet_not_supported(self):
+        assert model_supports_native_auto("sonnet") is False
+        assert model_supports_native_auto("claude-sonnet-4-6") is False
+
+    def test_haiku_not_supported(self):
+        assert model_supports_native_auto("haiku") is False
+        assert model_supports_native_auto("claude-haiku-4-5") is False
+
+    def test_none_fails_safe(self):
+        # claude_cli leaves model unset to mean "Claude's own default" (Sonnet).
+        assert model_supports_native_auto(None) is False
+
+
 class TestSessionToPermissionMode:
     def test_all_modes_mapped(self):
         for mode in ("auto", "edit", "test", "task", "web", "plan", "default"):
             assert mode in SESSION_TO_PERMISSION_MODE
+
+    def test_modes_mirror_claude_modes(self):
+        # leashd modes mirror Claude Code permission modes: auto↔native auto,
+        # edit↔acceptEdits, plan↔plan, default↔default.
+        assert SESSION_TO_PERMISSION_MODE["auto"] == "auto"
+        assert SESSION_TO_PERMISSION_MODE["edit"] == "acceptEdits"
+        assert SESSION_TO_PERMISSION_MODE["plan"] == "plan"
+        assert SESSION_TO_PERMISSION_MODE["default"] == "default"
+        # accept-edits-style orchestrator phases stay acceptEdits.
+        assert SESSION_TO_PERMISSION_MODE["task"] == "acceptEdits"
 
 
 class TestCancelShutdown:

@@ -1,6 +1,6 @@
 [project]
 name = "leashd"
-version = "0.16.2"
+version = "0.17.0"
 description = "Safety-first agentic coding framework with pluggable runtimes. Run Claude Code or Codex as a governed daemon — sandbox, YAML policies, human-in-the-loop approval"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -81,6 +81,8 @@ dependencies = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.34.0",
     "pywebpush>=2.0.0",
+    "libtmux>=0.55,<0.56",
+    "watchdog>=4.0",
 ]
 
 [project.scripts]
@@ -159,7 +161,11 @@ select = [
 ignore = ["E501"]  # line too long, handled by formatter
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101", "S105", "S106", "S108", "S603", "S607", "ARG"]  # assert, test tokens, /tmp paths, subprocess, unused args all fine in tests
+"tests/**" = ["S101", "S105", "S106", "S108", "S603", "S607", "ARG", "RUF001", "RUF003"]  # assert, test tokens, /tmp paths, subprocess, unused args all fine in tests; RUF001/3: fixtures embed the literal terminal glyphs (❯) Claude Code renders
+# tmux runtime matches Claude Code's native in-pane permission selector, which
+# renders the literal U+276F (❯) glyph — the markers MUST byte-match captured
+# pane output, so the "ambiguous character" rules do not apply here.
+"leashd/agents/runtimes/tmux_session.py" = ["RUF001", "RUF003"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["leashd"]
@@ -183,6 +189,10 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = ["pywebpush.*", "py_vapid.*", "cryptography.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["libtmux.*", "watchdog.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

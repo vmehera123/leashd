@@ -48,13 +48,16 @@ def _register_builtins() -> None:
     from leashd.agents.runtimes.claude_cli import ClaudeCliAgent
     from leashd.agents.runtimes.claude_code import ClaudeCodeAgent
     from leashd.agents.runtimes.codex import CodexAgent
+    from leashd.agents.runtimes.tmux import TmuxAgent
 
     register_agent("claude-cli", lambda config: ClaudeCliAgent(config))
     register_agent("claude-code", lambda config: ClaudeCodeAgent(config))
     register_agent("codex", lambda config: CodexAgent(config))
+    register_agent("tmux", lambda config: TmuxAgent(config))
     _CAPABILITIES["claude-cli"] = {"stability": "beta"}
     _CAPABILITIES["claude-code"] = {"stability": "stable"}
     _CAPABILITIES["codex"] = {"stability": "beta"}
+    _CAPABILITIES["tmux"] = {"stability": "experimental"}
 
 
 _register_builtins()

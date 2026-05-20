@@ -34,7 +34,7 @@ rules:
     action: allow
 
   - name: all-reads
-    tools: [Read, Glob, Grep, WebSearch, WebFetch, LS]
+    tools: [Read, Glob, Grep, WebSearch, WebFetch, LS, ToolSearch]
     action: allow
 
   - name: plan-file-writes

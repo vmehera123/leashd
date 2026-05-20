@@ -30,6 +30,7 @@ from leashd.plugins.builtin.task_v3 import (
     TaskV3Orchestrator,
     _build_task_override,
     _classify_change_shape,
+    _has_visual_evidence,
     _parse_severity,
     _parse_verify_status,
     _resolve_pipeline,
@@ -390,6 +391,16 @@ class TestPrompts:
         assert "TEST MODE" not in p
         assert "links" in p.lower() or "render" in p.lower()
 
+    def test_verify_prompt_ui_mandates_browser_pass(self):
+        p = verify_prompt("abc", change_shape="ui")
+        assert "agent-browser" in p
+        assert "MANDATORY" in p
+        assert "Visual check:" in p
+        # The "tests alone are sufficient" escape must be gone for UI.
+        assert "sufficient on their own" not in p
+        # CI/sandbox fail-safe must be present.
+        assert "Blocked: cannot-start-app" in p
+
     def test_profile_instruction_appended_to_all_phases(self):
         extra = "Extra guidance from profile"
         for builder in (plan_prompt, implement_prompt, verify_prompt, review_prompt):
@@ -413,6 +424,39 @@ class TestChangeShapeClassifier:
     def test_prose_without_paths_defaults_to_code(self):
         summary = "Refactored the authentication flow to use JWT."
         assert _classify_change_shape(summary) == "code"
+
+    def test_frontend_file_is_ui(self):
+        summary = "Added features/chat/Onboarding.tsx and onboarding.css."
+        assert _classify_change_shape(summary) == "ui"
+
+    def test_mixed_backend_frontend_is_ui(self):
+        # A change touching both must still get the visual pass.
+        summary = "Edited back/ai/tools/onboarding.py and front/Onboarding.tsx."
+        assert _classify_change_shape(summary) == "ui"
+
+    def test_backend_only_stays_code(self):
+        summary = "Edited back/ai/agent.py and back/tests/test_agent.py."
+        assert _classify_change_shape(summary) == "code"
+
+
+class TestVisualEvidence:
+    def test_visual_check_line_is_evidence(self):
+        body = "Status: PASS\nVisual check: /onboarding looked correct"
+        assert _has_visual_evidence(body) is True
+
+    def test_screenshot_path_is_evidence(self):
+        assert _has_visual_evidence("Status: PASS\nsaved /tmp/ob.png") is True
+
+    def test_agent_browser_mention_is_evidence(self):
+        assert _has_visual_evidence("ran agent-browser snapshot, ok") is True
+
+    def test_tests_only_is_not_evidence(self):
+        body = "Status: PASS\n651 pytest passed, 374 vitest passed"
+        assert _has_visual_evidence(body) is False
+
+    def test_empty_is_not_evidence(self):
+        assert _has_visual_evidence(None) is False
+        assert _has_visual_evidence("") is False
 
 
 class TestVerifyModeInstruction:
@@ -1062,6 +1106,125 @@ class TestAdvancement:
         loaded = await task_store.load(task.run_id)
         assert loaded is not None
         assert loaded.phase == "review"
+
+    async def test_verify_ui_pass_without_visual_loops_back(
+        self, orchestrator, event_bus, task_store, tmp_path
+    ):
+        # Regression: interactive (tmux) verify records PASS off tests
+        # alone and skips the agent-browser pass. A UI change must loop
+        # back until the visual check is evidenced.
+        task = _make_task(tmp_path, phase="verify")
+        task.phase_pipeline = ["plan", "implement", "verify", "review", "completed"]
+        await task_store.save(task)
+        orchestrator._active_tasks["c1"] = task
+        task_memory.seed(task.run_id, task.task, str(tmp_path), version="v3")
+        task_memory.update_section(
+            task.run_id,
+            str(tmp_path),
+            section="Implementation Summary",
+            content="Added front/features/chat/Onboarding.tsx",
+        )
+        task_memory.update_section(
+            task.run_id,
+            str(tmp_path),
+            section="Verification",
+            content="Status: PASS\nAll 651 pytest + 374 vitest green",
+        )
+
+        session = MagicMock()
+        session.chat_id = "c1"
+        session.task_run_id = task.run_id
+        await event_bus.emit(
+            Event(
+                name=SESSION_COMPLETED,
+                data={"session": session, "chat_id": "c1", "response_content": "x"},
+            )
+        )
+        await asyncio.sleep(0.05)
+
+        loaded = await task_store.load(task.run_id)
+        assert loaded is not None
+        assert loaded.phase == "verify"  # looped back, not advanced
+        assert loaded.retry_count == 1
+        assert loaded.phase_context.get("verify_needs_visual") is True
+
+    async def test_verify_ui_pass_with_visual_evidence_advances(
+        self, orchestrator, event_bus, task_store, tmp_path
+    ):
+        task = _make_task(tmp_path, phase="verify")
+        task.phase_pipeline = ["plan", "implement", "verify", "review", "completed"]
+        await task_store.save(task)
+        orchestrator._active_tasks["c1"] = task
+        task_memory.seed(task.run_id, task.task, str(tmp_path), version="v3")
+        task_memory.update_section(
+            task.run_id,
+            str(tmp_path),
+            section="Implementation Summary",
+            content="Added Onboarding.tsx and onboarding.css",
+        )
+        task_memory.update_section(
+            task.run_id,
+            str(tmp_path),
+            section="Verification",
+            content=(
+                "Status: PASS\nTests green.\n"
+                "Visual check: /onboarding rendered the new flow; "
+                "screenshot at /tmp/onboarding.png"
+            ),
+        )
+
+        session = MagicMock()
+        session.chat_id = "c1"
+        session.task_run_id = task.run_id
+        await event_bus.emit(
+            Event(
+                name=SESSION_COMPLETED,
+                data={"session": session, "chat_id": "c1", "response_content": "x"},
+            )
+        )
+        await asyncio.sleep(0.05)
+
+        loaded = await task_store.load(task.run_id)
+        assert loaded is not None
+        assert loaded.phase == "review"
+
+    async def test_verify_blocked_cannot_start_escalates_without_loop(
+        self, orchestrator, event_bus, task_store, tmp_path
+    ):
+        task = _make_task(tmp_path, phase="verify")
+        task.phase_pipeline = ["plan", "implement", "verify", "review", "completed"]
+        await task_store.save(task)
+        orchestrator._active_tasks["c1"] = task
+        task_memory.seed(task.run_id, task.task, str(tmp_path), version="v3")
+        task_memory.update_section(
+            task.run_id,
+            str(tmp_path),
+            section="Implementation Summary",
+            content="Added Onboarding.tsx",
+        )
+        task_memory.update_section(
+            task.run_id,
+            str(tmp_path),
+            section="Verification",
+            content="Status: FAIL\nBlocked: cannot-start-app (no dev server here)",
+        )
+
+        session = MagicMock()
+        session.chat_id = "c1"
+        session.task_run_id = task.run_id
+        await event_bus.emit(
+            Event(
+                name=SESSION_COMPLETED,
+                data={"session": session, "chat_id": "c1", "response_content": "x"},
+            )
+        )
+        await asyncio.sleep(0.05)
+
+        loaded = await task_store.load(task.run_id)
+        assert loaded is not None
+        assert loaded.phase == "escalated"
+        assert loaded.retry_count == 0  # terminal — never looped
+        assert "app cannot be started" in (loaded.error_message or "")
 
     async def test_review_critical_loops_back_to_implement_once(
         self, orchestrator, event_bus, task_store, tmp_path

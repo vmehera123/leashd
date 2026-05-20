@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import shutil
 import sys
 import zipfile
@@ -718,7 +719,7 @@ def _handle_webui_tunnel(*, provider: str, notify_telegram: bool) -> None:
 
 
 _VALID_EFFORT_LEVELS = set(VALID_EFFORTS)
-_VALID_TASK_VERSIONS = {"v1", "v2", "v3"}
+_VALID_TASK_VERSIONS = {"v1", "v2", "v3", "v4"}
 
 
 def _scope_from_args(args: argparse.Namespace) -> tuple[str, str | None]:
@@ -1023,7 +1024,7 @@ def _handle_task(args: argparse.Namespace) -> None:
     if sub == "version":
         _handle_task_version(args)
     else:
-        print("Usage: leashd task version {show,set} [v1|v2|v3]", file=sys.stderr)
+        print("Usage: leashd task version {show,set} [v1|v2|v3|v4]", file=sys.stderr)
         sys.exit(1)
 
 
@@ -1061,7 +1062,7 @@ def _handle_task_version(args: argparse.Namespace) -> None:
 def _handle_task_version_show() -> None:
     """Display current task orchestrator version."""
     data = load_global_config()
-    version = data.get("task_orchestrator_version", "v2")
+    version = data.get("task_orchestrator_version", "v4")
     print(f"Task orchestrator version: {version}")
 
 
@@ -1211,6 +1212,24 @@ def _handle_clean() -> None:
         if artifact.is_file():
             artifact.unlink()
             cleaned += 1
+
+    # Kill leashd-owned tmux panes (only leashd_* on leashd's private socket —
+    # never the user's own tmux) and drop the per-session settings + socket.
+    config = _try_resolve_config()
+    if config is not None:
+        with contextlib.suppress(Exception):
+            from leashd.agents.runtimes.tmux_session import TmuxSessionManager
+
+            cleaned += TmuxSessionManager(config).kill_owned_sessions()
+        socket_dir = Path(config.tmux_socket_dir).expanduser()
+        if socket_dir.is_dir():
+            for artifact in (
+                *socket_dir.glob("*.settings.json"),
+                socket_dir / "tmux.sock",
+            ):
+                if artifact.exists():
+                    artifact.unlink()
+                    cleaned += 1
 
     if cleaned:
         print(f"Cleaned {cleaned} artifact(s) across {len(dirs)} project(s)")
@@ -1947,12 +1966,12 @@ def main() -> None:
     )
     task_sub = task_parser.add_subparsers(dest="task_command")
     task_version = task_sub.add_parser(
-        "version", help="Manage task orchestrator version (v1/v2/v3)"
+        "version", help="Manage task orchestrator version (v1/v2/v3/v4)"
     )
     tv_sub = task_version.add_subparsers(dest="task_version_command")
     tv_sub.add_parser("show", help="Show current task orchestrator version (default)")
     tv_set = tv_sub.add_parser("set", help="Set task orchestrator version")
-    tv_set.add_argument("version", choices=["v1", "v2", "v3"])
+    tv_set.add_argument("version", choices=["v1", "v2", "v3", "v4"])
 
     # Max tool calls
     tc_parser = subparsers.add_parser(

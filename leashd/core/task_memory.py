@@ -103,6 +103,31 @@ Pending: plan, implement, verify, review
 """
 
 
+_TEMPLATE_V4 = """\
+# Task: {task_short}
+Run ID: {run_id} | Status: in-progress | Phase: implement
+Created: {created} | Updated: {created}
+
+## Task Description
+{task_full}
+
+## Implementation Summary
+<!-- pending:implement --> (written by implement phase — files changed + key decisions)
+
+## Verification
+<!-- pending:verify --> (written by verify phase — project checks + quality review + agent-browser e2e)
+
+## Progress
+| # | Phase | Action | Result | Time |
+|---|-------|--------|--------|------|
+
+## Checkpoint
+Next: implement | Phase: implement | Retries: 0 | Blocked: none
+Completed: none
+Pending: implement, verify
+"""
+
+
 def is_placeholder(body: str | None) -> bool:
     """Detect the v3 template's `<!-- pending:<phase> -->` sentinel.
 
@@ -129,6 +154,8 @@ def seed(run_id: str, task: str, working_dir: str, *, version: str = "v1") -> Pa
     - ``"v3"`` — slim 4-phase layout (Plan / Implementation Summary /
       Verification / Review) used by the linear Claude-Code-native
       orchestrator.
+    - ``"v4"`` — 2-phase layout (Implementation Summary / Verification)
+      used by the auto-mode v4 orchestrator.
     """
     fp = path(run_id, working_dir)
     fp.parent.mkdir(parents=True, exist_ok=True)
@@ -137,7 +164,12 @@ def seed(run_id: str, task: str, working_dir: str, *, version: str = "v1") -> Pa
     if len(task) > 80:
         short += "..."
 
-    template = _TEMPLATE_V3 if version == "v3" else _TEMPLATE
+    if version == "v4":
+        template = _TEMPLATE_V4
+    elif version == "v3":
+        template = _TEMPLATE_V3
+    else:
+        template = _TEMPLATE
     content = template.format(
         task_short=short,
         run_id=run_id,

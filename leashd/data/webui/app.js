@@ -2917,11 +2917,12 @@ const SettingsManager = {
           <option value="claude-cli" ${runtime === 'claude-cli' ? 'selected' : ''}>Claude CLI</option>
           <option value="claude-code" ${runtime === 'claude-code' ? 'selected' : ''}>Claude Code (SDK)</option>
           <option value="codex" ${runtime === 'codex' ? 'selected' : ''}>Codex</option>
+          <option value="tmux" ${runtime === 'tmux' ? 'selected' : ''}>tmux (interactive, experimental)</option>
         </select>
       </div>
       <div class="setting-row">
         <div><div class="setting-label">Claude model</div>
-          <div class="setting-sublabel">Alias (opus / sonnet) or full name. Used by claude-cli and claude-code runtimes.</div></div>
+          <div class="setting-sublabel">Alias (opus / sonnet) or full name. Used by claude-cli, claude-code, and tmux runtimes.</div></div>
         <input type="text" class="text-input" data-setting="agent.claude_model"
           placeholder="opus, sonnet, claude-opus-4-7, …"
           value="${escapeHtml(claudeModel)}">

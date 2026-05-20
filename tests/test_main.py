@@ -7,7 +7,7 @@ import pytest
 
 from leashd.exceptions import ConnectorError
 from leashd.main import _main as main
-from leashd.main import run
+from leashd.main import _maybe_start_tmux_hook_server, _run_cli, run
 
 
 @pytest.fixture
@@ -325,3 +325,45 @@ class TestWebMode:
             await main()
 
         mock_run.assert_awaited_once_with(cfg)
+
+
+class TestTmuxHookServer:
+    """GAP 3: Telegram-only / CLI-only host their own loopback hook receiver."""
+
+    async def test_maybe_start_skips_non_tmux(self):
+        cfg = MagicMock()
+        cfg.agent_runtime = "claude-cli"
+        assert await _maybe_start_tmux_hook_server(cfg) is None
+
+    async def test_maybe_start_starts_for_tmux(self):
+        cfg = MagicMock()
+        cfg.agent_runtime = "tmux"
+        fake_server = MagicMock()
+        fake_server.start = AsyncMock()
+        with (
+            patch("leashd.main._maybe_tmux_session_manager", return_value=object()),
+            patch(
+                "leashd.web.tmux_server.TmuxHookServer", return_value=fake_server
+            ) as ctor,
+        ):
+            server = await _maybe_start_tmux_hook_server(cfg)
+        assert server is fake_server
+        ctor.assert_called_once()
+        fake_server.start.assert_awaited_once()
+
+    async def test_run_cli_stops_hook_server_on_shutdown(self, mock_engine):
+        cfg = MagicMock()
+        cfg.approved_directories = ["/tmp"]
+        fake_server = MagicMock()
+        fake_server.stop = AsyncMock()
+        with (
+            patch("leashd.main.build_engine", return_value=mock_engine),
+            patch(
+                "leashd.main._maybe_start_tmux_hook_server",
+                new=AsyncMock(return_value=fake_server),
+            ),
+            patch("builtins.input", side_effect=EOFError),
+        ):
+            await _run_cli(cfg)
+        mock_engine.shutdown.assert_awaited_once()
+        fake_server.stop.assert_awaited_once()

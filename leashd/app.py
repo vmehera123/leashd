@@ -253,7 +253,9 @@ def build_engine(
 
     message_logger = MessageLogger(message_store)
 
-    session_manager = SessionManager(store=session_store)
+    session_manager = SessionManager(
+        store=session_store, default_mode=config.default_mode
+    )
     agent = agent or get_agent(config.agent_runtime, config)
     event_bus = EventBus()
 
@@ -358,5 +360,42 @@ def build_engine(
 
     if builtins.task_orchestrator:
         builtins.task_orchestrator.set_engine(engine)
+
+    # tmux: reap stale leashd-owned panes from a prior daemon (always),
+    # then — only when tmux is the active runtime — bind the engine's
+    # safety pipeline into the shared TmuxSessionManager singleton (the
+    # same instance the WebUI hook receiver and the TmuxAgent resolve) so
+    # PreToolUse hooks flow through the existing gatekeeper/approval/audit
+    # path.
+    from leashd.agents.runtimes.tmux_session import (
+        get_or_create_tmux_session_manager,
+    )
+
+    tsm = get_or_create_tmux_session_manager(config)
+    # Always reap leashd-owned tmux panes left by a prior daemon, regardless
+    # of the current runtime. `leashd restart` = stop + start as separate
+    # processes; a clean stop tears its own panes down, but a SIGKILL'd one
+    # (the stop_daemon 10s timeout) or a runtime switched away from tmux
+    # would otherwise leave a stale interactive `claude` serving the user.
+    # Strictly scoped to leashd's private socket + `leashd_*` names, so a
+    # user's own tmux is never touched; idempotent and cheap when there is
+    # nothing to reap.
+    tsm.kill_owned_sessions()
+    if config.agent_runtime == "tmux":
+        tsm.bind_safety(
+            gatekeeper=engine._gatekeeper,
+            approval_coordinator=approval_coordinator,
+            interaction_coordinator=interaction_coordinator,
+            audit=audit,
+            event_bus=event_bus,
+            session_manager=session_manager,
+        )
+        if not config.web_enabled:
+            logger.debug(
+                "tmux_hook_receiver_standalone",
+                hint="WebUI disabled — a loopback-only hook receiver is "
+                "started for Telegram-only / CLI-only mode so the safety "
+                "pipeline still applies",
+            )
 
     return engine

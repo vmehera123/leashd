@@ -37,6 +37,14 @@ class TestPolicyRuleMatching:
         c = engine.classify("Grep", {"pattern": "TODO"})
         assert engine.evaluate(c) == PolicyDecision.ALLOW
 
+    def test_toolsearch_allowed(self, engine):
+        # Claude Code's deferred-tool schema fetch is read-only metadata —
+        # it must not fall to `unmatched`/require_approval (the tmux runtime
+        # was prompting/escalating on every ToolSearch in /task).
+        c = engine.classify("ToolSearch", {"query": "select:Read"})
+        assert engine.evaluate(c) == PolicyDecision.ALLOW
+        assert c.matched_rule.name == "read-only-tools"
+
     def test_read_only_bash_git_status(self, engine):
         c = engine.classify("Bash", {"command": "git status"})
         assert engine.evaluate(c) == PolicyDecision.ALLOW

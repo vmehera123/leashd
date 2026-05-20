@@ -30,7 +30,7 @@ rules:
     action: allow
 
   - name: read-only-tools
-    tools: [Read, Glob, Grep, LS]
+    tools: [Read, Glob, Grep, LS, ToolSearch]
     action: allow
 
   - name: read-only-bash

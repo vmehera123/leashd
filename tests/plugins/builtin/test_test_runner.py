@@ -18,6 +18,7 @@ from leashd.plugins.builtin.test_runner import (
     TestConfig,
     TestRunnerPlugin,
     _build_test_prompt,
+    archive_completed_test_session,
     build_test_instruction,
     parse_test_args,
     read_test_session_context,
@@ -1147,6 +1148,68 @@ class TestReadTestSessionContext:
         (leashd / "test-session.md").write_text("")
         result = read_test_session_context(str(tmp_path))
         assert result is None
+
+    @pytest.mark.parametrize(
+        "completed",
+        [
+            "## Verdict — Session 9\nForm gating solid.",
+            "## Phase 9 — Final Report\nTests run: 196 passed.",
+            "## Healing decision\nNo code changes made — by design.",
+            "## Final Report\nOverall health: good.",
+        ],
+    )
+    def test_skips_completed_session(self, tmp_path, completed):
+        # A wrapped-up prior run (different feature/branch) must NOT be
+        # injected as "Resume from this state" — that poisons the new run.
+        leashd = tmp_path / ".leashd"
+        leashd.mkdir()
+        (leashd / "test-session.md").write_text("# Old run\n" + completed)
+        assert read_test_session_context(str(tmp_path)) is None
+
+
+class TestArchiveCompletedTestSession:
+    def test_completed_is_archived_so_fresh_run_starts_clean(self, tmp_path):
+        leashd = tmp_path / ".leashd"
+        leashd.mkdir()
+        sess = leashd / "test-session.md"
+        sess.write_text("# Old run\n## Phase 9 — Final Report\nTests run: 196 passed.")
+
+        archived = archive_completed_test_session(str(tmp_path))
+
+        assert archived is not None
+        assert archived.startswith("test-session-")
+        assert archived.endswith("-archive.md")
+        assert not sess.exists()  # moved out of the way
+        assert (leashd / archived).is_file()
+        # The agent's Phase-1 "read test-session.md" now finds nothing →
+        # genuinely fresh run (no completed-run poisoning).
+        assert read_test_session_context(str(tmp_path)) is None
+
+    def test_in_progress_session_is_kept(self, tmp_path):
+        leashd = tmp_path / ".leashd"
+        leashd.mkdir()
+        sess = leashd / "test-session.md"
+        sess.write_text("# Run\n## Progress\nPhase 3 in-progress")
+
+        assert archive_completed_test_session(str(tmp_path)) is None
+        assert sess.is_file()  # untouched — the agent should resume it
+
+    def test_missing_and_empty_are_noops(self, tmp_path):
+        assert archive_completed_test_session(str(tmp_path)) is None
+        leashd = tmp_path / ".leashd"
+        leashd.mkdir()
+        (leashd / "test-session.md").write_text("   ")
+        assert archive_completed_test_session(str(tmp_path)) is None
+
+    def test_in_progress_session_still_resumes(self, tmp_path):
+        leashd = tmp_path / ".leashd"
+        leashd.mkdir()
+        (leashd / "test-session.md").write_text(
+            "# Phase 3 in progress\n## Issues Found\n- WIP, no verdict yet"
+        )
+        result = read_test_session_context(str(tmp_path))
+        assert result is not None
+        assert "Phase 3 in progress" in result
 
 
 class TestBuildTestPromptWithContext:

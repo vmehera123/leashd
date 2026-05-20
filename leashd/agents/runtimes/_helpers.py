@@ -18,6 +18,9 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from leashd.connectors.base import Attachment
+    from leashd.core.config import LeashdConfig
+    from leashd.core.runtime_settings import RuntimeSettings
+    from leashd.core.session import Session
 
 logger = structlog.get_logger()
 
@@ -66,10 +69,19 @@ AUTO_MODE_INSTRUCTION = (
     "messages as continuations of the current implementation task."
 )
 
-PermissionMode = Literal["default", "acceptEdits", "plan", "bypassPermissions"]
+NATIVE_AUTO_INSTRUCTION = (
+    "You are in auto mode. Implement changes directly — do not create plans or "
+    "call EnterPlanMode/ExitPlanMode. Claude Code's built-in auto policy runs "
+    "safe actions without prompting; risky actions are reviewed by leashd. "
+    "Always use the Edit and Write tools for file modifications — never use "
+    "Bash or python scripts to read/write files. Treat follow-up messages as "
+    "continuations of the current task."
+)
+
+PermissionMode = Literal["default", "acceptEdits", "plan", "auto", "bypassPermissions"]
 
 SESSION_TO_PERMISSION_MODE: dict[str, PermissionMode] = {
-    "auto": "acceptEdits",
+    "auto": "auto",
     "edit": "acceptEdits",
     "test": "acceptEdits",
     "task": "acceptEdits",
@@ -77,6 +89,22 @@ SESSION_TO_PERMISSION_MODE: dict[str, PermissionMode] = {
     "plan": "plan",
     "default": "default",
 }
+
+
+def model_supports_native_auto(model: str | None) -> bool:
+    """True only for Opus-family models, which carry the native auto classifier.
+
+    Verified empirically against Claude CLI 2.1.145: Sonnet and Haiku show
+    ``auto mode unavailable for this model`` in the TUI status bar and the
+    headless ``-p`` path reports ``default permission mode`` — ``--permission-mode
+    auto`` is silently downgraded. ``None`` returns False as a fail-safe (the
+    claude-cli runtime leaves the model unspecified to mean "Claude's own
+    default", which is currently Sonnet).
+    """
+    if model is None:
+        return False
+    return "opus" in model.lower()
+
 
 # ---------------------------------------------------------------------------
 # Functions
@@ -128,6 +156,145 @@ def build_workspace_context(name: str, directories: list[str], cwd: str) -> str:
         "directories. Use absolute paths when working outside the cwd."
     )
     return "\n".join(lines)
+
+
+def build_append_system_prompt(
+    config: LeashdConfig, session: Session, *, native_auto: bool = False
+) -> str | None:
+    """The ``--append-system-prompt`` value.
+
+    Single source of truth shared by the ``claude-cli`` and ``tmux`` runtimes
+    so the agent receives byte-identical instructions regardless of runtime
+    (config system prompt + plan/auto banner + mode_instruction + workspace
+    context, in that precedence).
+
+    ``native_auto`` is passed only by the ``claude-cli`` / ``tmux`` runtimes
+    when the resolved permission mode is Claude's native ``auto`` (interactive,
+    non-task, hook bridge bound). It swaps the accept-edits banner for the
+    native-auto one; the ``claude-code`` SDK and ``codex`` runtimes never pass
+    it, so their ``auto`` banner is unchanged (byte-identical to before).
+    """
+    system_prompt = config.system_prompt or ""
+    if session.mode == "plan" and session.task_run_id is None:
+        system_prompt = prepend_instruction(PLAN_MODE_INSTRUCTION, system_prompt)
+    elif (
+        native_auto
+        and session.mode == "auto"
+        and (session.task_run_id is None or session.native_auto_allowed)
+    ):
+        # Task v4: orchestrated implement phase opts into native auto via
+        # ``native_auto_allowed``; tell the agent its file writes auto-
+        # approve under Claude's classifier instead of the accept-edits
+        # banner.
+        system_prompt = prepend_instruction(NATIVE_AUTO_INSTRUCTION, system_prompt)
+    elif session.mode in ("auto", "edit"):
+        system_prompt = prepend_instruction(AUTO_MODE_INSTRUCTION, system_prompt)
+    if session.mode_instruction:
+        system_prompt = prepend_instruction(session.mode_instruction, system_prompt)
+    if session.workspace_directories:
+        ws_ctx = build_workspace_context(
+            session.workspace_name or "workspace",
+            session.workspace_directories,
+            session.working_directory,
+        )
+        system_prompt = prepend_instruction(ws_ctx, system_prompt)
+    return system_prompt or None
+
+
+def build_agent_cli_args(
+    *,
+    config: LeashdConfig,
+    session: Session,
+    settings: RuntimeSettings | None,
+    perm_mode: str,
+    model: str | None,
+    append_system_prompt: str | None,
+    resume_token: str | None,
+    interactive: bool = False,
+) -> list[str]:
+    """The agent/model/instruction-shaping ``claude`` CLI flags.
+
+    Single source of truth for ``claude-cli`` (headless ``-p``) and ``tmux``
+    (interactive TUI) so a ``/test`` (or any) session is 100% compatible
+    across runtimes — same model, effort, tool allow/deny, MCP servers,
+    setting sources and plugins. Each ``--flag value`` pair is kept adjacent;
+    inter-flag order is irrelevant to ``claude``.
+
+    ``interactive=True`` applies the two runtime-inherent differences:
+      * ``--max-turns`` is omitted — the interactive pane is multi-turn by
+        nature; a headless turn-budget would truncate it mid-workflow.
+      * ``Task``/``Agent`` are disallowed — headless ``claude_cli`` never
+        fans out to subagents, but the interactive TUI will spawn
+        Explore/Plan/code-reviewer subagents (the "plan agent"), which
+        derails linear workflows like ``/test`` and bypasses leashd's
+        single-agent streaming, transcript and gating. Suppressing it keeps
+        the interactive agent behaviourally identical to ``claude_cli``.
+    """
+    from leashd.core.runtime_settings import to_claude_effort
+
+    args: list[str] = []
+    for d in session.workspace_directories:
+        if d != session.working_directory:
+            args += ["--add-dir", d]
+    if append_system_prompt:
+        args += ["--append-system-prompt", append_system_prompt]
+    args += ["--permission-mode", perm_mode]
+    if not interactive:
+        args += [
+            "--max-turns",
+            str(
+                config.effective_max_turns(
+                    session.mode, is_task=bool(session.task_run_id)
+                )
+            ),
+        ]
+    effort = to_claude_effort((settings.effort if settings else None) or config.effort)
+    if effort:
+        args += ["--effort", effort]
+    if model:
+        args += ["--model", model]
+
+    allowed = list(config.allowed_tools) if config.allowed_tools else []
+    from leashd.skills import has_installed_skills
+
+    if has_installed_skills() and "Skill" not in allowed:
+        allowed.append("Skill")
+    if allowed:
+        args += ["--allowedTools", ",".join(allowed)]
+
+    disallowed = list(config.disallowed_tools) if config.disallowed_tools else []
+    if config.browser_backend == "agent-browser":
+        from leashd.plugins.builtin.browser_tools import ALL_BROWSER_TOOLS
+
+        disallowed = list(
+            set(disallowed) | {f"mcp__playwright__{t}" for t in ALL_BROWSER_TOOLS}
+        )
+    if interactive:
+        for sub in ("Task", "Agent"):
+            if sub not in disallowed:
+                disallowed.append(sub)
+    if disallowed:
+        args += ["--disallowedTools", ",".join(disallowed)]
+
+    args += ["--setting-sources", "project,user"]
+
+    local_servers = read_local_mcp_servers(session.working_directory)
+    leashd_servers = config.mcp_servers
+    if local_servers or leashd_servers:
+        merged = {**local_servers, **leashd_servers}
+        if config.browser_backend == "agent-browser":
+            merged.pop("playwright", None)
+        if merged:
+            args += ["--mcp-config", json.dumps({"mcpServers": merged})]
+
+    from leashd.cc_plugins import get_enabled_plugin_paths
+
+    for plugin_path in get_enabled_plugin_paths():
+        args += ["--plugin-dir", plugin_path]
+
+    if resume_token:
+        args += ["--resume", resume_token]
+    return args
 
 
 def build_content_blocks(

@@ -20,13 +20,19 @@ class TestLeashdConfig:
         assert config.max_concurrent_agents == 5
         assert config.agent_timeout_seconds == 3600
         assert config.storage_backend == "sqlite"
-        assert config.approval_timeout_seconds == 300
+        assert config.approval_timeout_seconds is None
         assert config.interaction_timeout_seconds is None
+        assert config.tmux_no_progress_timeout_seconds == 600
         assert config.log_level == "INFO"
         assert config.system_prompt is None
         assert config.allowed_tools == []
         assert config.disallowed_tools == []
         assert config.rate_limit_rpm == 0
+
+    def test_tmux_no_progress_timeout_env_override(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("LEASHD_TMUX_NO_PROGRESS_TIMEOUT_SECONDS", "120")
+        config = LeashdConfig(approved_directories=[tmp_path])
+        assert config.tmux_no_progress_timeout_seconds == 120
 
     def test_approved_directories_resolved(self, tmp_path):
         config = LeashdConfig(approved_directories=[tmp_path])

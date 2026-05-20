@@ -485,6 +485,28 @@ class TestConfigPutEndpoint:
         assert data["success"] is False
         assert "runtime" in data["reason"]
 
+    def test_runtime_validation_is_registry_driven(self, client):
+        # GAP 1: every registered runtime (incl. tmux) is accepted via the
+        # REST API — validation derives from the agent registry, not a
+        # hardcoded list that can drift.
+        from leashd.agents.registry import get_available_runtime_names
+
+        names = get_available_runtime_names()
+        assert "tmux" in names
+        for name in names:
+            with (
+                patch("leashd.web.routes.update_config_sections") as mock_update,
+                patch("leashd.web.routes.signal_reload"),
+            ):
+                resp = client.put(
+                    "/api/config",
+                    headers={**_AUTH_HEADER, "Content-Type": "application/json"},
+                    json={"agent": {"runtime": name}},
+                )
+                assert resp.status_code == 200, name
+                assert resp.json()["success"] is True
+                mock_update.assert_called_once_with({"agent": {"runtime": name}})
+
     def test_validates_invalid_browser_backend(self, client):
         resp = client.put(
             "/api/config",

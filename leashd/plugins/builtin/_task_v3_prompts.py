@@ -12,7 +12,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Literal
 
-ChangeShape = Literal["docs_only", "code"]
+ChangeShape = Literal["docs_only", "code", "ui"]
 
 
 def _base(run_id: str, phase: str) -> str:
@@ -142,6 +142,31 @@ _VERIFY_DOCS_BODY = (
     "equivalent lint from CLAUDE.md) if cheap.\n"
 )
 
+_VERIFY_UI_BODY = (
+    "This change touched UI / frontend code, so a visual browser check\n"
+    "is MANDATORY — running tests alone is NOT sufficient and you may\n"
+    "NOT record Status: PASS without it. Do ALL of the following:\n"
+    "\n"
+    "1. Start the app + dev server in the background using the commands\n"
+    "   in CLAUDE.md (package.json / Makefile / docker-compose). Poll\n"
+    "   the URL until it is healthy before continuing.\n"
+    "2. Run the unit suite, then integration/e2e. If tests fail, invoke\n"
+    "   the `healer` skill once (via the Skill tool) before hand-fixing.\n"
+    "3. Use the `agent-browser` skill to open the route(s) affected by\n"
+    "   the Implementation Summary, then `agent-browser snapshot` and\n"
+    "   take a screenshot.\n"
+    "4. Exercise the specific behaviour the task changed (click / type /\n"
+    "   navigate) and confirm it visually matches the intent. Scope to\n"
+    "   the Implementation Summary, not the whole product.\n"
+    '5. Under "## Verification", in addition to the Status line, write a\n'
+    "   `Visual check:` line naming the route/URL, what you observed,\n"
+    "   and the saved screenshot path.\n"
+    "\n"
+    "If the app genuinely cannot be started in this environment (no dev\n"
+    "server possible / sandbox), do NOT loop: write Status: FAIL with\n"
+    "`Blocked: cannot-start-app` and stop.\n"
+)
+
 
 def verify_prompt(
     run_id: str,
@@ -167,8 +192,18 @@ def verify_prompt(
       the body alone is enough to drive verification.
     - ``"docs_only"`` — skip spinup; verify rendering and links. No
       test-mode system prompt is injected for this case.
+    - ``"ui"`` — frontend/UI change: a mandatory, evidenced
+      agent-browser visual pass on top of the test suite. ``Status:
+      PASS`` is rejected by the orchestrator unless the Verification
+      section also carries a ``Visual check:`` line, so interactive
+      runtimes can't silently skip the browser pass.
     """
-    body = _VERIFY_DOCS_BODY if change_shape == "docs_only" else _VERIFY_CODE_BODY
+    if change_shape == "docs_only":
+        body = _VERIFY_DOCS_BODY
+    elif change_shape == "ui":
+        body = _VERIFY_UI_BODY
+    else:
+        body = _VERIFY_CODE_BODY
     prompt = _base(run_id, "verify") + (
         "\n"
         f'Read .leashd/tasks/{run_id}.md — especially "## Plan" and\n'

@@ -86,6 +86,7 @@ class TestQuestionHandling:
         from leashd.core.interactions import InteractionCoordinator
 
         assert config.interaction_timeout_seconds is None
+        assert config.approval_timeout_seconds is None  # → no expiry
         coord = InteractionCoordinator(mock_connector, config)
         tool_input = {
             "questions": [
@@ -258,6 +259,7 @@ class TestPlanReviewHandling:
         from leashd.core.interactions import InteractionCoordinator, PlanReviewDecision
 
         assert config.interaction_timeout_seconds is None
+        assert config.approval_timeout_seconds is None  # → no expiry
         coord = InteractionCoordinator(mock_connector, config)
 
         async def decide_after_delay():
@@ -863,6 +865,66 @@ class TestInteractionTimeoutExtended:
         assert p_result.behavior == "deny"
         assert coord.pending == {}
         assert coord._chat_index == {}
+
+    async def test_none_interaction_falls_back_to_approval_window(
+        self, mock_connector, config
+    ):
+        """Unset interaction timeout → questions AND plan reviews inherit the
+        shared approval window. A *finite* approval window still denies on
+        timeout. (When approval is also None the effective window is None =
+        no expiry — see test_no_expiry_waits_without_wait_for.) `0` stays
+        explicit (test_zero_timeout_immediate_denial), so the fallback is
+        guarded on `is None`, not falsiness."""
+        assert config.interaction_timeout_seconds is None
+        config.approval_timeout_seconds = 0.1
+        coord = self._make_coord(mock_connector, config)
+
+        q_result = await coord.handle_question("chat1", self._question_input())
+        assert q_result.behavior == "deny"
+        assert "No response" in q_result.message
+
+        p_result = await coord.handle_plan_review("chat1", {})
+        assert p_result.behavior == "deny"
+        assert "timed out" in p_result.message
+        assert coord.pending == {}
+        assert coord._chat_index == {}
+
+    async def test_no_expiry_waits_without_wait_for(
+        self, mock_connector, config, monkeypatch
+    ):
+        """Both windows None = no expiry: the coordinator blocks on a bare
+        ``event.wait()`` (no ``asyncio.wait_for`` timer) until resolved —
+        true claude-cli parity."""
+        from leashd.core.interactions import PlanReviewDecision
+
+        assert config.interaction_timeout_seconds is None
+        assert config.approval_timeout_seconds is None
+        coord = self._make_coord(mock_connector, config)
+
+        async def _boom(*a, **k):  # asyncio.wait_for must NOT be used
+            raise AssertionError("asyncio.wait_for used on a no-expiry wait")
+
+        monkeypatch.setattr(asyncio, "wait_for", _boom)
+
+        async def answer():
+            await asyncio.sleep(0.15)
+            req = mock_connector.question_requests[0]
+            await coord.resolve_option(req["interaction_id"], "A")
+
+        task = asyncio.create_task(answer())
+        result = await coord.handle_question("chat1", self._question_input())
+        await task
+        assert result.behavior == "allow"
+
+        async def decide():
+            await asyncio.sleep(0.15)
+            req = mock_connector.plan_review_requests[0]
+            await coord.resolve_option(req["interaction_id"], "edit")
+
+        task2 = asyncio.create_task(decide())
+        p_result = await coord.handle_plan_review("chat1", {})
+        await task2
+        assert isinstance(p_result, PlanReviewDecision)
 
     async def test_no_event_bus_still_works(self, mock_connector, config):
         coord = self._make_coord(mock_connector, config, event_bus=None)

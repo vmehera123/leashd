@@ -86,6 +86,51 @@ class TestApprovalCoordinator:
             mock_connector.deleted_messages
         )
 
+    async def test_no_expiry_blocks_until_resolved(
+        self, approval_coordinator, mock_connector, classification, monkeypatch
+    ):
+        """config approval window None + no explicit timeout = no expiry: a
+        bare event.wait() (no asyncio.wait_for timer) until the human acts —
+        parity with claude-cli."""
+        assert approval_coordinator.config.approval_timeout_seconds is None
+        mock_connector.set_approval_resolver(approval_coordinator.resolve_approval)
+
+        async def _boom(*a, **k):
+            raise AssertionError("asyncio.wait_for used on a no-expiry approval")
+
+        monkeypatch.setattr(asyncio, "wait_for", _boom)
+
+        async def approve_later():
+            await asyncio.sleep(0.15)
+            req = mock_connector.approval_requests[0]
+            await approval_coordinator.resolve_approval(req["approval_id"], True)
+
+        task = asyncio.create_task(approve_later())
+        result = await approval_coordinator.request_approval(
+            chat_id="test_chat",
+            tool_name="Write",
+            tool_input={"file_path": "/project/main.py"},
+            classification=classification,
+        )
+        await task
+        assert result.approved is True
+        assert approval_coordinator.pending_count == 0
+
+    async def test_explicit_finite_timeout_still_denies(
+        self, approval_coordinator, mock_connector, classification
+    ):
+        """An explicit positive timeout still auto-denies (regression: the
+        finite path is preserved even with config window None)."""
+        assert approval_coordinator.config.approval_timeout_seconds is None
+        result = await approval_coordinator.request_approval(
+            chat_id="test_chat",
+            tool_name="Write",
+            tool_input={"file_path": "/project/main.py"},
+            classification=classification,
+            timeout=0.1,
+        )
+        assert result.approved is False
+
     async def test_resolve_unknown_approval(self, approval_coordinator):
         result = await approval_coordinator.resolve_approval("nonexistent-id", True)
         assert result is False

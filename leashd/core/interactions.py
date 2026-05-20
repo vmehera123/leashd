@@ -80,6 +80,20 @@ class InteractionCoordinator:
         self._auto_plan_reviewer = auto_plan_reviewer
         self._message_logger = message_logger
 
+    def _effective_timeout(self) -> int | None:
+        """Resolve the shared human-response window.
+
+        ``None`` = **no expiry** — wait for the human as long as it takes
+        (parity with claude-cli, which pauses its turn deadline during the
+        interaction). ``interaction_timeout_seconds`` overrides; unset → inherit
+        ``approval_timeout_seconds`` (itself ``None`` by default). A positive
+        int auto-denies after N seconds (identical on claude-cli and tmux).
+        """
+        timeout = self.config.interaction_timeout_seconds
+        if timeout is None:
+            timeout = self.config.approval_timeout_seconds
+        return timeout
+
     async def handle_question(
         self,
         chat_id: str,
@@ -95,7 +109,11 @@ class InteractionCoordinator:
         logger.info("question_started", chat_id=chat_id, question_count=len(questions))
 
         answers: dict[str, str] = {}
-        timeout = self.config.interaction_timeout_seconds
+        # Shared human-response window across questions, plan reviews and tool
+        # approvals. Effective None = no expiry: wait for the human as long as
+        # it takes (parity with claude-cli; the tmux PreToolUse hook is sized
+        # to outlive it). A positive int auto-denies after N seconds.
+        timeout = self._effective_timeout()
 
         for q in questions:
             question_text = q.get("question", "")
@@ -130,7 +148,12 @@ class InteractionCoordinator:
             )
 
             try:
-                await asyncio.wait_for(pending.event.wait(), timeout=timeout)
+                if timeout is None:
+                    # No expiry — block until the human answers (or the wait
+                    # is cancelled via cancel_pending / pane teardown).
+                    await pending.event.wait()
+                else:
+                    await asyncio.wait_for(pending.event.wait(), timeout=timeout)
                 if pending.answer is not None:
                     logger.debug(
                         "question_answered",
@@ -216,11 +239,14 @@ class InteractionCoordinator:
         )
         await self.connector.send_plan_review(chat_id, interaction_id, description)
 
+        review_timeout = self._effective_timeout()
         try:
-            await asyncio.wait_for(
-                pending.event.wait(),
-                timeout=self.config.interaction_timeout_seconds,
-            )
+            if review_timeout is None:
+                # No expiry — block until the human decides (or the wait is
+                # cancelled via cancel_pending / pane teardown).
+                await pending.event.wait()
+            else:
+                await asyncio.wait_for(pending.event.wait(), timeout=review_timeout)
         except TimeoutError:
             logger.warning(
                 "interaction_timeout",

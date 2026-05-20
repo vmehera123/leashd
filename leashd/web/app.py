@@ -23,6 +23,7 @@ def create_app(
     ws_handler: WebSocketHandler,
     message_store: Any = None,
     push_service: Any = None,
+    tmux_session_manager: Any = None,
 ) -> FastAPI:
     app = FastAPI(
         title="leashd WebUI",
@@ -53,6 +54,13 @@ def create_app(
 
     router = create_rest_router(config, message_store, push_service)
     app.include_router(router)
+
+    # Claude Code HTTP hook receiver for the tmux runtime. Registered
+    # BEFORE the catch-all StaticFiles mount or it would be shadowed.
+    if tmux_session_manager is not None:
+        from leashd.web.tmux_hooks import create_tmux_hook_router
+
+        app.include_router(create_tmux_hook_router(tmux_session_manager))
 
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket) -> None:

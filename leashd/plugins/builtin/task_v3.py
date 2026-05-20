@@ -271,21 +271,36 @@ _CODE_PATH_RE = re.compile(
     r"sql|sh|yaml|yml|json|toml|html|css|scss|vue))\b",
     re.IGNORECASE,
 )
+# Frontend/UI files — when these change, verify must do a visual
+# agent-browser pass, not just run tests.
+_UI_PATH_RE = re.compile(
+    r"(?:^|[\s(`'\"])([a-zA-Z0-9_\-./]+\."
+    r"(?:tsx|jsx|vue|svelte|ts|js|css|scss|sass|less|html))\b",
+    re.IGNORECASE,
+)
 
 
 def _classify_change_shape(
     impl_summary: str | None,
-) -> Literal["docs_only", "code"]:
-    """Return ``"docs_only"`` when only doc files appear in the summary.
+) -> Literal["docs_only", "code", "ui"]:
+    """Classify what the change touched, to tailor the verify phase.
 
-    Heuristic: if the Implementation Summary mentions any code-file path
-    (``.py``, ``.ts``, ...), treat the change as ``"code"``.  If it
-    mentions *only* docs-like files (``.md``, ``.rst``, ...), return
-    ``"docs_only"``.  When nothing parseable is present, default to
-    ``"code"`` (safer to run tests than to skip them).
+    Heuristic over the Implementation Summary:
+
+    - any frontend/UI file (``.tsx``, ``.vue``, ``.css``, ...) →
+      ``"ui"`` (mandatory agent-browser visual pass);
+    - else any code file (``.py``, ``.go``, ...) → ``"code"``;
+    - else only docs-like files (``.md``, ``.rst``, ...) →
+      ``"docs_only"``;
+    - nothing parseable → ``"code"`` (safer to run tests than skip).
+
+    UI is checked first so a mixed backend+frontend change still gets
+    the visual pass.
     """
     if not impl_summary:
         return "code"
+    if _UI_PATH_RE.search(impl_summary):
+        return "ui"
     if _CODE_PATH_RE.search(impl_summary):
         return "code"
     if _DOCS_PATH_RE.search(impl_summary):
@@ -305,6 +320,24 @@ def _parse_verify_status(verification_body: str | None) -> str | None:
         if word:
             return word.group(1).upper()
     return None
+
+
+# CI/sandbox fail-safe marker the verify agent writes when the app
+# genuinely can't be started — terminal, never loop the retry on it.
+_VERIFY_BLOCKED_RE = re.compile(r"Blocked\s*:\s*cannot-start-app", re.IGNORECASE)
+# Evidence that the mandatory agent-browser visual pass actually ran.
+# Lead signal is the `Visual check:` line the UI verify body asks for;
+# the rest are lenient fallbacks for formatting quirks.
+_VISUAL_EVIDENCE_RE = re.compile(
+    r"Visual check\s*:|agent-browser|browser_snapshot|\.png\b|screenshot",
+    re.IGNORECASE,
+)
+
+
+def _has_visual_evidence(verification_body: str | None) -> bool:
+    if not verification_body:
+        return False
+    return bool(_VISUAL_EVIDENCE_RE.search(verification_body))
 
 
 class TaskV3Orchestrator(LeashdPlugin):
@@ -369,6 +402,19 @@ class TaskV3Orchestrator(LeashdPlugin):
 
     def _pipeline_for(self, task: TaskRun) -> list[TaskPhase]:
         return _resolve_pipeline(self._profile_for(task))
+
+    def _memory_template_version(self) -> str:
+        """Which ``task_memory`` template variant to seed (overridable by subclasses)."""
+        return "v3"
+
+    def _native_auto_allowed_for(self, phase: TaskPhase) -> bool:
+        """Whether this phase opts into Claude's native ``auto`` permission
+        policy. v3 never opts in (the auto-floor downgrade preserves
+        accept-edits inside tasks); v4 overrides this to return True for
+        the implement phase.
+        """
+        del phase
+        return False
 
     def _register_task_profile(
         self, task: TaskRun, override: TaskProfile | None
@@ -517,12 +563,13 @@ class TaskV3Orchestrator(LeashdPlugin):
         pipeline = self._pipeline_for(task)
         task.phase_pipeline = [*pipeline, "completed"]
 
-        # Seed the v3-flavoured markdown scratchpad.
+        # Seed the v3-flavoured markdown scratchpad. Subclasses override
+        # ``_memory_template_version`` to pick their own template (e.g. v4).
         fp = task_memory.seed(
             task.run_id,
             task.task,
             task.working_directory,
-            version="v3",
+            version=self._memory_template_version(),
         )
         task.memory_file_path = str(fp)
         task_memory.update_checkpoint(
@@ -746,52 +793,44 @@ class TaskV3Orchestrator(LeashdPlugin):
             return self._phase_after(pipeline, "plan")
 
         if task.phase == "implement":
-            impl_body = task_memory.read_section(
-                task.run_id, task.working_directory, section="Implementation Summary"
-            )
-            if task_memory.is_placeholder(impl_body):
-                # Cheap defense against a write/read race: the agent's last
-                # tool call may have returned before the OS flushed the file.
-                # One short backoff + re-read recovers without burning a full
-                # retry session.
-                await asyncio.sleep(0.2)
-                impl_body = task_memory.read_section(
-                    task.run_id,
-                    task.working_directory,
-                    section="Implementation Summary",
-                )
-            if task_memory.is_placeholder(impl_body):
-                cli_error = task.phase_context.get("implement_cli_error")
-                retry_count = int(task.phase_context.get("implement_retry_count", 0))
-                # Only retry when the CLI errored — a clean session with no
-                # summary means the agent misbehaved (e.g. wrote a plan file
-                # instead of code); retrying burns money without fixing it.
-                if cli_error and retry_count < self._implement_max_retries:
-                    task.phase_context["implement_retry_count"] = retry_count + 1
-                    # Clear the error marker so the retry's fresh session
-                    # starts with a clean slate.
-                    task.phase_context.pop("implement_cli_error", None)
-                    logger.info(
-                        "task_v3_implement_retry",
-                        run_id=task.run_id,
-                        retry_count=retry_count + 1,
-                        max_retries=self._implement_max_retries,
-                        cli_error_preview=cli_error[:120],
-                    )
-                    return "implement"
-                msg = "Implement phase produced no summary"
-                if cli_error:
-                    msg += f" (CLI error: {cli_error[:200]})"
-                task.error_message = msg
-                return "escalated"
-            return self._phase_after(pipeline, "implement")
+            return await self._choose_implement_next(task, pipeline)
 
         if task.phase == "verify":
             verify_body = task_memory.read_section(
                 task.run_id, task.working_directory, section="Verification"
             )
             status = _parse_verify_status(verify_body)
+            # CI/sandbox fail-safe: app can't start — terminal, never loop.
+            if verify_body and _VERIFY_BLOCKED_RE.search(verify_body):
+                task.error_message = "Verify blocked: app cannot be started"
+                return "escalated"
+            impl_summary = task_memory.read_section(
+                task.run_id,
+                task.working_directory,
+                section="Implementation Summary",
+            )
+            is_ui = _classify_change_shape(impl_summary) == "ui"
             if status == "PASS":
+                # Interactive runtimes (tmux TUI) tend to record PASS off
+                # tests alone and skip the agent-browser pass. For a UI
+                # change, require visual-check evidence; force one more
+                # verify that performs it before accepting PASS.
+                if is_ui and not _has_visual_evidence(verify_body):
+                    if task.retry_count < self._verify_max_retries:
+                        task.retry_count += 1
+                        task.phase_context["verify_needs_visual"] = True
+                        logger.info(
+                            "task_v3_verify_missing_visual_retry",
+                            run_id=task.run_id,
+                            retry_count=task.retry_count,
+                            max_retries=self._verify_max_retries,
+                        )
+                        return "verify"
+                    task.error_message = (
+                        "Verify recorded PASS but never performed the "
+                        "mandatory agent-browser visual check"
+                    )
+                    return "escalated"
                 return self._phase_after(pipeline, "verify")
             # FAIL or unparseable → retry up to verify_max_retries, then escalate
             if task.retry_count < self._verify_max_retries:
@@ -811,41 +850,89 @@ class TaskV3Orchestrator(LeashdPlugin):
             return "escalated"
 
         if task.phase == "review":
-            review_body = task_memory.read_section(
-                task.run_id, task.working_directory, section="Review"
-            )
-            severity = _parse_severity(review_body)
-            if severity is None:
-                # Fail loud on malformed review output — silently marking
-                # the task "completed" would hide genuine review failures.
-                logger.warning(
-                    "task_v3_review_unparseable",
-                    run_id=task.run_id,
-                    body_preview=(review_body or "")[:200],
-                )
-                task.error_message = "Review phase output missing Severity: line"
-                return "escalated"
-            if severity == "CRITICAL":
-                prior = int(task.phase_context.get("review_retry_count", 0))
-                if prior < self._review_max_loopbacks:
-                    task.phase_context["review_retry_count"] = prior + 1
-                    logger.info(
-                        "task_v3_review_loopback",
-                        run_id=task.run_id,
-                        review_retry=prior + 1,
-                        max_loopbacks=self._review_max_loopbacks,
-                    )
-                    # Loop back to implement with review feedback
-                    task.phase_context["last_review_feedback"] = review_body or ""
-                    return "implement"
-                task.error_message = f"Review flagged CRITICAL {prior + 1} times"
-                return "escalated"
-            # OK / MINOR → completed
-            return "completed"
+            return self._choose_review_next(task)
 
         # Unknown phase — fail closed
         task.error_message = f"Unknown phase: {task.phase}"
         return "failed"
+
+    async def _choose_implement_next(
+        self, task: TaskRun, pipeline: list[TaskPhase]
+    ) -> TaskPhase:
+        """Decide what comes after the implement phase."""
+        impl_body = task_memory.read_section(
+            task.run_id, task.working_directory, section="Implementation Summary"
+        )
+        if task_memory.is_placeholder(impl_body):
+            # Cheap defense against a write/read race: the agent's last
+            # tool call may have returned before the OS flushed the file.
+            # One short backoff + re-read recovers without burning a full
+            # retry session.
+            await asyncio.sleep(0.2)
+            impl_body = task_memory.read_section(
+                task.run_id,
+                task.working_directory,
+                section="Implementation Summary",
+            )
+        if task_memory.is_placeholder(impl_body):
+            cli_error = task.phase_context.get("implement_cli_error")
+            retry_count = int(task.phase_context.get("implement_retry_count", 0))
+            # Only retry when the CLI errored — a clean session with no
+            # summary means the agent misbehaved (e.g. wrote a plan file
+            # instead of code); retrying burns money without fixing it.
+            if cli_error and retry_count < self._implement_max_retries:
+                task.phase_context["implement_retry_count"] = retry_count + 1
+                # Clear the error marker so the retry's fresh session
+                # starts with a clean slate.
+                task.phase_context.pop("implement_cli_error", None)
+                logger.info(
+                    "task_v3_implement_retry",
+                    run_id=task.run_id,
+                    retry_count=retry_count + 1,
+                    max_retries=self._implement_max_retries,
+                    cli_error_preview=cli_error[:120],
+                )
+                return "implement"
+            msg = "Implement phase produced no summary"
+            if cli_error:
+                msg += f" (CLI error: {cli_error[:200]})"
+            task.error_message = msg
+            return "escalated"
+        return self._phase_after(pipeline, "implement")
+
+    def _choose_review_next(self, task: TaskRun) -> TaskPhase:
+        """Decide what comes after the review phase."""
+        review_body = task_memory.read_section(
+            task.run_id, task.working_directory, section="Review"
+        )
+        severity = _parse_severity(review_body)
+        if severity is None:
+            # Fail loud on malformed review output — silently marking
+            # the task "completed" would hide genuine review failures.
+            logger.warning(
+                "task_v3_review_unparseable",
+                run_id=task.run_id,
+                body_preview=(review_body or "")[:200],
+            )
+            task.error_message = "Review phase output missing Severity: line"
+            return "escalated"
+        if severity == "CRITICAL":
+            prior = int(task.phase_context.get("review_retry_count", 0))
+            if prior < self._review_max_loopbacks:
+                task.phase_context["review_retry_count"] = prior + 1
+                logger.info(
+                    "task_v3_review_loopback",
+                    run_id=task.run_id,
+                    review_retry=prior + 1,
+                    max_loopbacks=self._review_max_loopbacks,
+                )
+                # Loop back to implement with review feedback
+                task.phase_context["last_review_feedback"] = review_body or ""
+                return "implement"
+            task.error_message = f"Review flagged CRITICAL {prior + 1} times"
+            return "escalated"
+        # OK / MINOR → completed
+        return "completed"
 
     @staticmethod
     def _phase_after(pipeline: list[TaskPhase], phase: TaskPhase) -> TaskPhase:
@@ -937,6 +1024,7 @@ class TaskV3Orchestrator(LeashdPlugin):
             mode=mode,
             mode_instruction=mode_instruction,
             settings_override=task.settings_override,
+            native_auto_allowed=self._native_auto_allowed_for(task.phase),
         )
 
         # Reset prior-phase auto-approves and wire this phase's allowlist.
@@ -1093,6 +1181,18 @@ class TaskV3Orchestrator(LeashdPlugin):
                 )
                 if prior:
                     prior_failure = prior[-1500:]
+            if task.phase_context.get("verify_needs_visual"):
+                banner = (
+                    "Your previous verify recorded Status: PASS but did NOT "
+                    "perform the mandatory agent-browser visual check. Tests "
+                    "alone are not acceptable for a UI change. You MUST start "
+                    "the app, drive the affected route(s) with the "
+                    "agent-browser skill, capture a screenshot, and add a "
+                    "`Visual check:` line to ## Verification this time."
+                )
+                prior_failure = (
+                    f"{banner}\n\n{prior_failure}" if prior_failure else banner
+                )
             impl_summary = task_memory.read_section(
                 task.run_id,
                 task.working_directory,
@@ -1269,6 +1369,7 @@ class TaskV3Orchestrator(LeashdPlugin):
                 session.mode_instruction = None
                 session.task_run_id = None
                 session.plan_origin = None
+                session.native_auto_allowed = False
                 await self._engine.session_manager.save(session)
             self._engine.disable_auto_approve(task.chat_id)
 

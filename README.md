@@ -147,15 +147,15 @@ Restart the daemon and both connectors run simultaneously — same engine, same 
 
 ---
 
-## What's New in 0.12.0
+## What's New in 0.17.0
 
-**Agentic task orchestrator v2** — the task orchestrator now uses an LLM-driven think-act-observe loop instead of a fixed phase pipeline. A conductor evaluates progress after each step and dynamically chooses the next action — explore, plan, implement, test, verify, fix, review, or create a PR. Simple tasks skip straight to implementation; complex ones get full exploration and planning. The conductor escalates to the human after 3 consecutive parse failures or CLI errors instead of looping.
+**`tmux` runtime** — runs a real interactive `claude` TUI in a tmux pane (`leashd runtime set tmux`, experimental). Tool calls still flow through leashd's sandbox/policy/approval/audit pipeline via Claude Code `PreToolUse` hooks — approval parity with `claude-cli`. Selectable from the Web UI runtime dropdown; works without a running WebUI. A shared `build_agent_cli_args` helper ensures `tmux` and `claude-cli` launch identical `claude` invocations (same effort, tools, MCP, plugins).
 
-**Task memory** — each task maintains persistent working memory (up to 8K chars) that carries context across steps and survives daemon restarts. The conductor reads and updates this memory at each think step, so the agent doesn't lose track of what it's already done or learned about the codebase.
+**Task orchestrator v4 (new default)** — slim `implement → verify` pipeline with no plan or review phases by default. Implement runs under Claude's native `auto` permission policy (degrades gracefully to `acceptEdits` on SDK runtimes); verify always exercises the change via agent-browser plus a code-quality diff review — no change-shape gating. Opt review back in with `--phases implement,verify,review`. Roll back to v3 with `leashd task version set v3`.
 
-**Browser-based verification and self-review** — autonomous tasks can now verify their own output by launching a browser and checking the result visually, and perform a self-review step before creating a PR.
+**`/auto` mode** — new mode that mirrors Claude Code's native `auto` permission policy. Safe actions run without prompting; when Claude escalates a risky action leashd applies its full YAML policy and approval pipeline. Modes now map directly to Claude modes: `auto` ↔ auto, `edit` ↔ acceptEdits, `plan` ↔ plan. The non-overridable hard-deny floor (credentials, `rm -rf`, `sudo`, force-push) still applies in `auto`.
 
-**Context management** — git-backed checkpointing captures codebase state between actions, observation masking keeps the conductor's context window focused on what matters, and phase summarization compresses earlier observations so long-running tasks don't blow the context budget.
+**Indefinite approval timeout** — `AskUserQuestion`, tool approval, and plan-review now wait for the human indefinitely by default (parity with `claude-cli`). Set `LEASHD_APPROVAL_TIMEOUT_SECONDS` / `LEASHD_INTERACTION_TIMEOUT_SECONDS` to restore a timed fail-closed net.
 
 See [CHANGELOG.md](CHANGELOG.md) for the full history.
 
@@ -178,6 +178,7 @@ leashd runtime set claude-cli    # switch to Claude CLI (default)
 | **claude-cli** *(default)* | Claude CLI (native subprocess) | NDJSON session IDs | Full (task orchestrator, auto-approver) | `claude` CLI authenticated | beta |
 | **claude-code** | Claude Code CLI (SDK) | SDK sessions | Full (task orchestrator, auto-approver) | `claude` CLI + `claude-agent-sdk` | stable |
 | **codex** | Codex CLI | Thread IDs | Full (streaming + approval bridge) | `codex` CLI authenticated | beta |
+| **tmux** *(experimental)* | Interactive `claude` TUI in a tmux pane | Session tokens | Full (PreToolUse hook bridge, auto-approver) | `claude` CLI + `tmux` | experimental |
 
 All runtimes support interactive approval, streaming responses, and the full autonomous pipeline. Each runtime declares its capabilities via an agent capabilities model — leashd adapts features like session resume and approval routing automatically.
 
@@ -305,12 +306,16 @@ Max turns can also be adjusted from the WebUI Settings page.
 ### Task orchestrator version
 
 ```bash
-leashd task version show       # display current version (v1, v2, or v3)
-leashd task version set v3     # switch to v3 (linear plan→implement→verify→review pipeline)
-leashd task version set v2     # switch back to v2 (LLM-driven think-act-observe loop, default)
+leashd task version show       # display current version (v1, v2, v3, or v4)
+leashd task version set v4     # default — linear implement→verify with native auto + always-browser verify
+leashd task version set v3     # linear plan→implement→verify→review pipeline
+leashd task version set v2     # LLM-driven think-act-observe loop
 ```
 
-Restart the daemon (`leashd restart`) to pick up the new version.
+Restart the daemon (`leashd restart`) to pick up the new version. v4 is the
+default for new installs; existing configs with an explicit `v2` / `v3`
+value are preserved. Pass `--phases implement,verify,review` to a v4
+`/task` to opt the review phase back in.
 
 ### Thinking effort
 
@@ -446,12 +451,13 @@ These slash commands are available in both the Web UI and Telegram:
 |---|---|
 | `/plan <text>` | Switch to plan mode and start — agent proposes, you approve before execution |
 | `/edit <text>` | Switch to edit mode and start — direct implementation |
+| `/auto <text>` | Switch to auto mode — Claude's native auto permission policy; leashd safety pipeline intercepts escalations |
 | `/default` | Switch back to balanced default mode |
 | `/dir` | Switch working directory (inline buttons). Blocked while an agent is running. |
 | `/git <subcommand>` | Full git suite: status, branch, checkout, diff, log, add, commit, push, pull |
 | `/web <instruction>` | Autonomous web automation with content-level human approval |
 | `/test` | 9-phase agent-driven test workflow with browser automation |
-| `/task <description>` | Autonomous adaptive task: think-act-observe loop → PR |
+| `/task <description>` | Autonomous task: implement → verify pipeline → PR (v4 default) |
 | `/tasks` | List active and recent tasks for the current chat |
 | `/stop` | Stop all ongoing work (agent, task, loop) without resetting session |
 | `/cancel` | Cancel the active task in the current chat |

@@ -1817,7 +1817,8 @@ class TestModeGuards:
         result = await hook("EnterPlanMode", {}, None)
 
         assert isinstance(result, PermissionDeny)
-        assert "accept-edits mode" in result.message.lower()
+        assert "implementation mode" in result.message.lower()
+        assert "do not enter plan mode" in result.message.lower()
 
     async def test_exit_plan_mode_denied_in_default_mode(
         self, config, audit_logger, policy_engine

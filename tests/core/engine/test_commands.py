@@ -142,6 +142,53 @@ class TestHandleCommand:
         assert "chat1" not in eng._gatekeeper._auto_approved_chats
         assert "chat1" not in eng._gatekeeper._auto_approved_tools
 
+    async def test_auto_command_sets_mode_and_no_auto_approve(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        eng = Engine(
+            connector=mock_connector,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        # /edit first seeds the accept-edits auto-approve registry...
+        await eng.handle_command("user1", "edit", "", "chat1")
+        assert eng._gatekeeper._auto_approved_tools.get("chat1")
+
+        # ...switching to /auto must clear it (native auto decides, not the
+        # leashd auto-approve registry).
+        result = await eng.handle_command("user1", "auto", "", "chat1")
+
+        assert "auto" in result.lower()
+        session = eng.session_manager.get("user1", "chat1")
+        assert session.mode == "auto"
+        assert "chat1" not in eng._gatekeeper._auto_approved_chats
+        assert "chat1" not in eng._gatekeeper._auto_approved_tools
+
+    async def test_status_shows_auto_distinct_from_accept_edits(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        eng = Engine(
+            connector=mock_connector,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_command("user1", "auto", "", "chat1")
+        status = await eng.handle_command("user1", "status", "", "chat1")
+        assert "auto" in status.lower()
+        assert "accept edits" not in status.lower()
+
+        await eng.handle_command("user1", "edit", "", "chat1")
+        status = await eng.handle_command("user1", "status", "", "chat1")
+        assert "accept edits" in status.lower()
+
     async def test_default_disables_auto_approve(
         self, config, audit_logger, policy_engine, mock_connector
     ):

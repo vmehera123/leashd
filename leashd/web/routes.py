@@ -35,7 +35,6 @@ if TYPE_CHECKING:
     from leashd.storage.base import MessageStore
 
 _VALID_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
-_VALID_RUNTIMES = {"claude-cli", "claude-code", "codex"}
 _VALID_MODES = {"default", "plan", "auto"}
 _VALID_BROWSER_BACKENDS = {"playwright", "agent-browser"}
 _VALID_CONFIG_SECTIONS = {"agent", "autonomous", "browser"}
@@ -523,8 +522,14 @@ def _validate_config_update(body: dict[str, Any]) -> str | None:
             return "agent must be an object"
         if "effort" in agent and agent["effort"] not in _VALID_EFFORTS:
             return f"effort must be one of: {', '.join(sorted(_VALID_EFFORTS))}"
-        if "runtime" in agent and agent["runtime"] not in _VALID_RUNTIMES:
-            return f"runtime must be one of: {', '.join(sorted(_VALID_RUNTIMES))}"
+        if "runtime" in agent:
+            # Validate against the agent registry (single source of truth,
+            # shared with the CLI) so this can't drift as runtimes are added.
+            from leashd.agents.registry import get_available_runtime_names
+
+            valid_runtimes = set(get_available_runtime_names())
+            if agent["runtime"] not in valid_runtimes:
+                return f"runtime must be one of: {', '.join(sorted(valid_runtimes))}"
         if "default_mode" in agent and agent["default_mode"] not in _VALID_MODES:
             return f"default_mode must be one of: {', '.join(sorted(_VALID_MODES))}"
         if "max_turns" in agent:

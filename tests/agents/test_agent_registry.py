@@ -51,7 +51,7 @@ class TestRegisterAgent:
 class TestGetAvailableRuntimeNames:
     def test_returns_sorted_names(self):
         names = get_available_runtime_names()
-        assert names == ["claude-cli", "claude-code", "codex"]
+        assert names == ["claude-cli", "claude-code", "codex", "tmux"]
 
     def test_returns_list(self):
         assert isinstance(get_available_runtime_names(), list)
@@ -68,3 +68,4 @@ class TestListRuntimes:
         runtimes = {rt["name"]: rt["stability"] for rt in list_runtimes()}
         assert runtimes["claude-code"] == "stable"
         assert runtimes["codex"] == "beta"
+        assert runtimes["tmux"] == "experimental"

@@ -21,26 +21,23 @@ import structlog
 
 from leashd.agents.base import AgentResponse, BaseAgent, ToolActivity
 from leashd.agents.runtimes._helpers import (
-    AUTO_MODE_INSTRUCTION,
     ERROR_TRUNCATION_LENGTH,
     MAX_BUFFER_SIZE,
     MAX_RETRIES,
-    PLAN_MODE_INSTRUCTION,
     SESSION_TO_PERMISSION_MODE,
     SIGTERM_GRACE_SECONDS,
     StderrBuffer,
     backoff_delay,
+    build_agent_cli_args,
+    build_append_system_prompt,
     build_content_blocks,
-    build_workspace_context,
     describe_tool,
     friendly_error,
     is_retryable_error,
-    prepend_instruction,
-    read_local_mcp_servers,
+    model_supports_native_auto,
     safe_callback,
 )
 from leashd.agents.types import PermissionAllow, PermissionDeny
-from leashd.core.runtime_settings import to_claude_effort
 from leashd.exceptions import AgentError
 
 if TYPE_CHECKING:
@@ -108,6 +105,81 @@ class ClaudeCliAgent(BaseAgent):
             "Claude Code CLI not found. Install with: npm install -g @anthropic-ai/claude-code"
         )
 
+    # -- auto-mode hard-deny floor ------------------------------------------
+
+    def _auto_floor(
+        self, session: Session, *, model: str | None = None
+    ) -> tuple[str, Any | None, Path | None]:
+        """Resolve perm_mode + the ``auto``-mode hard-deny-floor settings.
+
+        Returns ``(perm_mode, tsm_or_None, settings_path_or_None)``. In ``auto``
+        mode (interactive, non-task) leashd enforces only the non-overridable
+        hard-deny floor over an HTTP ``PreToolUse`` hook and defers the routine
+        allow/ask decision to Claude's native auto classifier — Claude's auto
+        classifier auto-allows safe tools *without* invoking the stdio
+        ``--permission-prompt-tool``, so that hook is what closes the floor
+        gap. The stdio tool stays as the redundant raise catch. Orchestrated /
+        ``task`` phases and an unbound hook bridge degrade to ``acceptEdits`` +
+        the stdio pipeline (today's behavior).
+
+        ``model`` gates native auto: Claude CLI's native auto classifier ships
+        only with Opus models (verified empirically against 2.1.145 — Sonnet
+        and Haiku show ``auto mode unavailable for this model``). For non-Opus
+        models we degrade to ``acceptEdits`` so leashd's YAML policy pipeline
+        governs approvals instead of round-tripping every tool call through
+        the PreToolUse hook (broken UX in /auto).
+        """
+        perm_mode = SESSION_TO_PERMISSION_MODE.get(session.mode, "default")
+        if session.task_run_id and perm_mode == "plan":
+            perm_mode = "default"
+        # v4: orchestrated ``auto`` keeps Claude's native classifier when the
+        # orchestrator opts in via ``native_auto_allowed``. Without that
+        # flag we preserve v3's accept-edits downgrade (no behavior change
+        # for v2/v3 / unflagged sessions).
+        if (
+            session.task_run_id
+            and perm_mode == "auto"
+            and not session.native_auto_allowed
+        ):
+            perm_mode = "acceptEdits"
+        if perm_mode == "auto" and not model_supports_native_auto(model):
+            logger.info(
+                "native_auto_unavailable_fell_back_to_accept_edits",
+                session_id=session.session_id,
+                reason="model_not_opus",
+                model=model,
+            )
+            perm_mode = "acceptEdits"
+        if perm_mode != "auto":
+            return perm_mode, None, None
+        from leashd.agents.runtimes.tmux_session import (
+            get_or_create_tmux_session_manager,
+        )
+
+        tsm = get_or_create_tmux_session_manager(self._config)
+        if not tsm.is_bound:
+            # Hook bridge unavailable — degrade to accept-edits (same path
+            # the non-task /auto session takes). v4 implement sees this when
+            # tmux preflight failed; the safe fallback keeps the task running.
+            if session.task_run_id and session.native_auto_allowed:
+                logger.info(
+                    "native_auto_unavailable_fell_back_to_accept_edits",
+                    session_id=session.session_id,
+                    reason="tmux_unbound",
+                )
+            return "acceptEdits", None, None
+        settings_path = tsm.write_auto_floor_settings(session.session_id)
+        return "auto", tsm, settings_path
+
+    def _unregister_floor(self, session_id: str) -> None:
+        from leashd.agents.runtimes.tmux_session import (
+            get_or_create_tmux_session_manager,
+        )
+
+        get_or_create_tmux_session_manager(self._config).unregister_cli_session(
+            session_id
+        )
+
     # -- Command building ----------------------------------------------------
 
     def _build_command(
@@ -125,92 +197,32 @@ class ClaudeCliAgent(BaseAgent):
             "--include-partial-messages",
         ]
 
-        system_prompt = self._config.system_prompt or ""
-        if session.mode == "plan" and session.task_run_id is None:
-            system_prompt = prepend_instruction(PLAN_MODE_INSTRUCTION, system_prompt)
-        elif session.mode in ("auto", "edit"):
-            system_prompt = prepend_instruction(AUTO_MODE_INSTRUCTION, system_prompt)
-        if session.mode_instruction:
-            system_prompt = prepend_instruction(session.mode_instruction, system_prompt)
-
-        if session.workspace_directories:
-            ws_ctx = build_workspace_context(
-                session.workspace_name or "workspace",
-                session.workspace_directories,
-                session.working_directory,
-            )
-            system_prompt = prepend_instruction(ws_ctx, system_prompt)
-            for d in session.workspace_directories:
-                if d != session.working_directory:
-                    cmd.extend(["--add-dir", d])
-
-        if system_prompt:
-            cmd.extend(["--append-system-prompt", system_prompt])
-
-        perm_mode = SESSION_TO_PERMISSION_MODE.get(session.mode, "default")
-        if session.task_run_id and perm_mode == "plan":
-            perm_mode = "default"
-        cmd.extend(["--permission-mode", perm_mode])
-
-        cmd.extend(
-            [
-                "--max-turns",
-                str(
-                    self._config.effective_max_turns(
-                        session.mode, is_task=bool(session.task_run_id)
-                    )
-                ),
-            ]
-        )
-        effort = to_claude_effort(
-            (settings.effort if settings else None) or self._config.effort
-        )
-        if effort:
-            cmd.extend(["--effort", effort])
-
         model = (
             settings.claude_model if settings else None
         ) or self._config.claude_model
-        if model:
-            cmd.extend(["--model", model])
 
-        allowed = list(self._config.allowed_tools) if self._config.allowed_tools else []
-        from leashd.skills import has_installed_skills
-
-        if has_installed_skills() and "Skill" not in allowed:
-            allowed.append("Skill")
-        if allowed:
-            cmd.extend(["--allowedTools", ",".join(allowed)])
-
-        disallowed = (
-            list(self._config.disallowed_tools) if self._config.disallowed_tools else []
+        perm_mode, _tsm, settings_path = self._auto_floor(session, model=model)
+        system_prompt = build_append_system_prompt(
+            self._config, session, native_auto=perm_mode == "auto"
         )
-        if self._config.browser_backend == "agent-browser":
-            from leashd.plugins.builtin.browser_tools import ALL_BROWSER_TOOLS
 
-            pw_tools = [f"mcp__playwright__{t}" for t in ALL_BROWSER_TOOLS]
-            disallowed = list(set(disallowed) | set(pw_tools))
-        if disallowed:
-            cmd.extend(["--disallowedTools", ",".join(disallowed)])
-
-        cmd.extend(["--setting-sources", "project,user"])
-
-        local_servers = read_local_mcp_servers(session.working_directory)
-        leashd_servers = self._config.mcp_servers
-        if local_servers or leashd_servers:
-            merged = {**local_servers, **leashd_servers}
-            if self._config.browser_backend == "agent-browser":
-                merged.pop("playwright", None)
-            if merged:
-                cmd.extend(["--mcp-config", json.dumps({"mcpServers": merged})])
-
-        from leashd.cc_plugins import get_enabled_plugin_paths
-
-        for plugin_path in get_enabled_plugin_paths():
-            cmd.extend(["--plugin-dir", plugin_path])
-
-        if session.agent_resume_token:
-            cmd.extend(["--resume", session.agent_resume_token])
+        cmd.extend(
+            build_agent_cli_args(
+                config=self._config,
+                session=session,
+                settings=settings,
+                perm_mode=perm_mode,
+                model=model,
+                append_system_prompt=system_prompt,
+                resume_token=session.agent_resume_token,
+                interactive=False,
+            )
+        )
+        # auto mode: a managed --settings file carries the hard-deny-floor
+        # PreToolUse + PermissionRequest hooks (stdio stays as the redundant
+        # raise catch). Never touches the user's ~/.claude/settings.json.
+        if settings_path is not None:
+            cmd += ["--settings", str(settings_path)]
 
         return cmd
 
@@ -256,6 +268,25 @@ class ClaudeCliAgent(BaseAgent):
             )
 
         cmd = self._build_command(session, settings)
+
+        if session.mode == "auto":
+            _pm, tsm, settings_path = self._auto_floor(session)
+            if tsm is not None and settings_path is not None:
+                # Register so the auto-mode HTTP hooks resolve to this
+                # session's safety context (Claude mints a fresh UUID;
+                # _bind_uuid falls back to the in-flight cwd).
+                tsm.register_cli_session(
+                    session_id=session.session_id,
+                    chat_id=session.chat_id,
+                    user_id=session.user_id,
+                    working_directory=session.working_directory,
+                    mode=session.mode,
+                    task_run_id=session.task_run_id,
+                    plan_origin=session.plan_origin,
+                    last_prompt=prompt,
+                    settings_path=settings_path,
+                    native_auto_allowed=session.native_auto_allowed,
+                )
 
         logger.info(
             "agent_execute_started",
@@ -307,6 +338,11 @@ class ClaudeCliAgent(BaseAgent):
         finally:
             self._stderr_buffers.pop(session.session_id, None)
             self._cancelled_sessions.discard(session.session_id)
+            # Drop the auto-floor registration + settings file at the turn
+            # boundary (finally runs on normal/exception/cancel). A no-op
+            # when the session was never registered (non-auto / unbound).
+            if session.mode == "auto":
+                self._unregister_floor(session.session_id)
 
     async def _run_with_retry(
         self,

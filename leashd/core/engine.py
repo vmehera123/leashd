@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict
 
 from leashd.agents.types import PermissionAllow, PermissionDeny
 from leashd.connectors.base import Attachment, InlineButton
+from leashd.core import plan_gate
 from leashd.core.config import build_directory_names, ensure_leashd_dir
 from leashd.core.events import (
     COMMAND_TEST,
@@ -1449,6 +1450,25 @@ class Engine:
                 f"Agent timed out after {self.config.agent_timeout_seconds // 60} minutes. "
                 "Send your message again to continue."
             ) from None
+        except AgentError:
+            # Already a well-formed agent fault — propagate unchanged so the
+            # SESSION_FAILED → terminal-state path keeps its original message.
+            raise
+        except Exception as exc:
+            # Any other unexpected runtime fault (e.g. a missing dependency in
+            # a runtime's spawn path) must surface as an AgentError so the
+            # _execute_turn handler emits SESSION_FAILED — otherwise an
+            # in-flight /task hangs in its phase forever.
+            agent_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await agent_task
+            logger.exception(
+                "agent_execution_unexpected_error",
+                chat_id=chat_id,
+                session_id=session.session_id,
+                error=str(exc),
+            )
+            raise AgentError(f"Agent runtime failed: {exc}") from exc
 
     @staticmethod
     def _is_retryable_response(response: AgentResponse) -> bool:
@@ -1702,6 +1722,38 @@ class Engine:
                 "Accept edits on. I'll implement directly and auto-approve file edits."
             )
 
+        if command == "auto":
+            old_mode = session.mode
+            if old_mode == "web":
+                await self._shutdown_browser(session)
+            session.mode = "auto"
+            session.mode_instruction = None
+            session.plan_origin = None
+            # Native auto decides routine actions; leashd does not pre-seed an
+            # auto-approve registry (that is the /edit accept-edits model).
+            self._gatekeeper.disable_auto_approve(chat_id)
+            await self.session_manager.save(session)
+            logger.info(
+                "mode_switched",
+                user_id=user_id,
+                chat_id=chat_id,
+                from_mode=old_mode,
+                to_mode="auto",
+            )
+            msg = (
+                "Auto mode on. Claude's built-in policy runs safe actions "
+                "without prompting; risky actions are reviewed by leashd; "
+                "hard-blocked actions (credentials, rm -rf, sudo, force-push) "
+                "are always denied."
+            )
+            if args.strip():
+                await self._send_transient(chat_id, msg)
+                await self.handle_message(
+                    user_id, args.strip(), chat_id, attachments=attachments
+                )
+                return ""
+            return msg
+
         if command == "default":
             old_mode = session.mode
             if old_mode == "web":
@@ -1736,7 +1788,7 @@ class Engine:
             return "Session cleared. Next message starts a fresh conversation."
 
         if command == "status":
-            mode = "accept edits" if session.mode in ("auto", "edit") else session.mode
+            mode = "accept edits" if session.mode == "edit" else session.mode
             cost = f"${session.total_cost:.4f}"
             blanket, per_tool = self._gatekeeper.get_auto_approve_status(chat_id)
             if blanket:
@@ -2163,35 +2215,11 @@ class Engine:
     ) -> str | None:
         """Scan ~/.claude/plans/ and project-local .claude/plans/ for a recently-modified .md file.
 
-        ``newer_than`` is an optional epoch-seconds floor: files whose mtime
-        predates it are skipped. Callers thread in the current request's
-        start time so a stale plan from a previous session or a botched
-        earlier phase cannot be resurrected as the "current" plan.
+        Delegates to :func:`leashd.core.plan_gate.discover_plan_file` — kept as
+        a staticmethod so existing direct-call and ``patch.object`` test seams
+        (and ``_resolve_plan_content``) continue to work unchanged.
         """
-        candidates: list[Path] = []
-        home_plans = Path.home() / ".claude" / "plans"
-        if home_plans.exists():
-            candidates.extend(home_plans.glob("*.md"))
-        if working_directory:
-            local_plans = Path(working_directory) / ".claude" / "plans"
-            if local_plans.exists():
-                candidates.extend(local_plans.glob("*.md"))
-        if not candidates:
-            return None
-        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-        newest = candidates[0]
-        mtime = newest.stat().st_mtime
-        if newer_than is not None and mtime < newer_than:
-            return None
-        age = time.time() - mtime
-        if age < 600:
-            logger.info(
-                "plan_file_discovered_from_disk",
-                path=str(newest),
-                age_seconds=round(age),
-            )
-            return str(newest)
-        return None
+        return plan_gate.discover_plan_file(working_directory, newer_than)
 
     def _resolve_plan_content(
         self,
@@ -2271,10 +2299,7 @@ class Engine:
         )
 
     def _build_implementation_prompt(self, plan_content: str) -> str:
-        content = plan_content.strip()
-        if content and len(content) > 50:
-            return f"Implement the following plan:\n\n{content}"
-        return "Implement the plan."
+        return plan_gate.build_implementation_prompt(plan_content)
 
     def _build_can_use_tool(
         self,
@@ -2315,168 +2340,31 @@ class Engine:
             tool_input: dict[str, Any],
             _context: Any,
         ) -> Any:
-            if self.interaction_coordinator and tool_name == "AskUserQuestion":
-                if deadline:
-                    deadline.pause()
-                try:
-                    return await self.interaction_coordinator.handle_question(
-                        chat_id,
-                        tool_input,
-                        user_id=session.user_id,
-                        session_id=session.session_id,
-                    )
-                finally:
-                    if deadline:
-                        deadline.resume()
-
-            if tool_name in ("Write", "Edit"):
-                file_path = tool_input.get("file_path", "")
-                is_plan_file = (
-                    file_path.endswith(".plan") or ".claude/plans/" in file_path
-                )
-                # v3 task-memory file is the plan file in v3's model — the
-                # orchestrator reads it directly, so we don't mirror into
-                # plan_file_path (that channel is for the AutoPlanReviewer flow).
-                is_task_memory_file = "/.leashd/tasks/" in file_path
-                if is_plan_file:
-                    state.plan_file_path = file_path
-                    if tool_name == "Write":
-                        state.plan_file_content = tool_input.get("content")
-                elif is_task_memory_file:
-                    pass
-                elif session.mode == "plan" and not state.plan_approved:
-                    return PermissionDeny(
-                        message="In plan mode — create a plan first, then call ExitPlanMode."
-                    )
-
-            if self.interaction_coordinator and tool_name == "ExitPlanMode":
-                if session.task_run_id is not None:
-                    return PermissionDeny(
-                        message="Task orchestrator manages phase transitions. "
-                        "Do not call ExitPlanMode — finish your review and the "
-                        "orchestrator will advance to the next phase."
-                    )
-                if session.mode != "plan":
-                    return PermissionDeny(
-                        message="You are in implementation mode. Implement changes directly "
-                        "using Edit and Write tools — do not call ExitPlanMode."
-                    )
-                if state.plan_approved:
-                    return PermissionDeny(
-                        message="Plan already approved. Implement changes directly "
-                        "using Edit and Write tools — do not call ExitPlanMode again."
-                    )
-                state.plan_review_shown = True
-                if responder:
-                    await responder.on_activity(None)
-                if not state.plan_file_path:
-                    discovered = self._discover_plan_file(
-                        session.working_directory,
-                        newer_than=state.request_started_at,
-                    )
-                    if discovered:
-                        state.plan_file_path = discovered
-                plan_content = None
-                content_source = "none"
-                plan_path = state.plan_file_path
-                if plan_path:
-                    try:
-                        plan_content = Path(plan_path).read_text()
-                        content_source = "disk_file"
-                    except Exception:
-                        logger.warning("plan_file_read_failed", path=plan_path)
-                if not plan_content:
-                    plan_content = state.plan_file_content
-                    if plan_content:
-                        content_source = "cached_write"
-                if not plan_content and responder:
-                    buf = responder.buffer.strip()
-                    if buf:
-                        plan_content = buf
-                        content_source = "streaming_buffer"
-                logger.info(
-                    "exit_plan_mode_content_resolved",
-                    source=content_source,
-                    content_length=len(plan_content) if plan_content else 0,
-                    plan_file_path=plan_path,
-                    has_cached_content=state.plan_file_content is not None,
-                    has_streaming_buffer=bool(responder and responder.buffer.strip()),
-                )
-                if deadline:
-                    deadline.pause()
-                try:
-                    result: PermissionDeny | PlanReviewDecision
-                    if (
-                        self.config.auto_plan
-                        and self.interaction_coordinator._auto_plan_reviewer
-                        and session.plan_origin != "user"
-                    ):
-                        auto_result = (
-                            await self.interaction_coordinator.handle_plan_review_auto(
-                                chat_id,
-                                tool_input,
-                                plan_content=plan_content or "",
-                                task_description=task_description,
-                                session_id=session.session_id,
-                            )
-                        )
-                        if isinstance(auto_result, PermissionDeny):
-                            logger.info(
-                                "auto_plan_review_rejected_skipping_human",
-                                chat_id=chat_id,
-                                session_id=session.session_id,
-                                feedback=auto_result.message,
-                            )
-                            result = auto_result
-                        else:
-                            logger.info(
-                                "auto_plan_review_approved_forwarding_to_human",
-                                chat_id=chat_id,
-                                session_id=session.session_id,
-                            )
-                            result = (
-                                await self.interaction_coordinator.handle_plan_review(
-                                    chat_id, tool_input, plan_content=plan_content
-                                )
-                            )
-                    else:
-                        result = await self.interaction_coordinator.handle_plan_review(
-                            chat_id, tool_input, plan_content=plan_content
-                        )
-                finally:
-                    if deadline:
-                        deadline.reset()
-                if isinstance(result, PlanReviewDecision):
-                    state.plan_approved = True
-                    state.plan_adjustment_feedback = None
-                    state.target_mode = result.target_mode
-                    if responder:
-                        await responder.delete_all_messages()
-                        # Don't reset() — buffer is needed for DB persistence
-                        # (line ~982).  deactivate() below stops all streaming
-                        # and the implementation turn creates a new responder.
-                    if result.clear_context:
-                        session.agent_resume_token = None
-                        state.clean_proceed = True
-                    else:
-                        state.proceed_in_context = True
-                    if responder:
-                        await responder.deactivate()
-
-                    return PermissionDeny(
-                        message="Plan approved. Implementation will begin in a new turn."
-                    )
-
-                state.plan_adjustment_feedback = result.message
-                if responder:
-                    await responder.deactivate()
-                return result
-
-            if tool_name == "EnterPlanMode" and session.mode in ("auto", "edit"):
-                return PermissionDeny(
-                    message="You are in accept-edits mode. Implement changes directly "
-                    "— do not enter plan mode."
-                )
+            # Plan-mode / interaction gate — shared with the tmux runtime's
+            # PreToolUse hook bridge so plan-review behavior is identical
+            # across runtimes. Returns a decision when it handles the tool,
+            # or None to fall through to the normal gatekeeper check below.
+            decision = await plan_gate.evaluate_plan_tool(
+                tool_name=tool_name,
+                tool_input=tool_input,
+                plan_state=state,
+                session_mode=session.mode,
+                task_run_id=session.task_run_id,
+                working_directory=session.working_directory,
+                plan_origin=session.plan_origin,
+                session_id=session.session_id,
+                chat_id=chat_id,
+                user_id=session.user_id,
+                task_description=task_description,
+                interaction_coordinator=self.interaction_coordinator,
+                config=self.config,
+                discover_plan_file_fn=self._discover_plan_file,
+                on_clear_context=lambda: setattr(session, "agent_resume_token", None),
+                responder=responder,
+                deadline=deadline,
+            )
+            if decision is not None:
+                return decision
 
             max_tc = self.config.max_tool_calls
             if max_tc > 0 and tool_name not in _TOOLS_EXCLUDED_FROM_LIMIT:

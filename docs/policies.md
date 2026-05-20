@@ -10,7 +10,7 @@ name: "policy-name"
 
 settings:
   default_action: require_approval  # Fallback when no rule matches
-  approval_timeout_seconds: 300
+  approval_timeout_seconds: 300     # NOT currently enforced — see note below
 
 rules:
   - name: "rule-name"
@@ -28,8 +28,16 @@ rules:
 |---|---|---|
 | `version` | Yes | Policy format version (currently `"1"`) |
 | `name` | Yes | Human-readable policy name |
-| `settings` | No | Global settings (default_action, approval_timeout_seconds) |
+| `settings` | No | Global settings (`default_action`; `approval_timeout_seconds` is parsed but **not enforced** — see note below) |
 | `rules` | Yes | Ordered list of rules |
+
+> **Note on approval/interaction timeout:** the `approval_timeout_seconds` key in policy
+> `settings` is not currently consumed. The effective human-response window for approvals,
+> `AskUserQuestion` and plan reviews is `LEASHD_APPROVAL_TIMEOUT_SECONDS` /
+> `LEASHD_INTERACTION_TIMEOUT_SECONDS` (config). **Default is no expiry** — leashd waits for
+> the human indefinitely (identical on the `claude-cli` and `tmux` runtimes); set either to a
+> positive integer to auto-deny after that many seconds. The per-policy timeouts shown below
+> describe intended profile behavior, not the enforced value.
 
 ### Rule Anatomy
 

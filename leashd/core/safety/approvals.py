@@ -60,7 +60,11 @@ class ApprovalCoordinator:
         timeout: int | None = None,
         ai_denial_reason: str | None = None,
     ) -> ApprovalResult:
-        timeout = timeout or self.config.approval_timeout_seconds
+        # Preserve an explicit timeout (incl. 0); only fall back when unset so
+        # config None propagates as "no expiry" (parity with claude-cli).
+        timeout = (
+            timeout if timeout is not None else self.config.approval_timeout_seconds
+        )
         approval_id = str(uuid.uuid4())
 
         pending = PendingApproval(
@@ -104,7 +108,12 @@ class ApprovalCoordinator:
             )
 
         try:
-            await asyncio.wait_for(pending.event.wait(), timeout=timeout)
+            if timeout is None:
+                # No expiry — block until the human responds (or the wait is
+                # cancelled via cancel_pending / reject_with_reason / teardown).
+                await pending.event.wait()
+            else:
+                await asyncio.wait_for(pending.event.wait(), timeout=timeout)
             approved = pending.decision is True
             reason = pending.rejection_reason if not approved else None
             logger.info(

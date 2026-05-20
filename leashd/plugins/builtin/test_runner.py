@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shlex
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -520,8 +521,32 @@ def build_test_instruction(
 _TEST_SESSION_MAX_CHARS = 4000
 
 
+_TEST_SESSION_COMPLETE_MARKERS = (
+    "## verdict",
+    "phase 9 — final report",
+    "phase 9 - final report",
+    "## final report",
+    "## healing decision",
+)
+
+
+def _test_session_is_complete(content: str) -> bool:
+    """A prior test-session.md that wrapped up (verdict / final report /
+    healing decision) is a *completed* run — often for a different
+    feature/branch. Injecting it as 'Resume from this state' makes the agent
+    burn its opening reconciling stale context instead of testing."""
+    low = content.lower()
+    return any(marker in low for marker in _TEST_SESSION_COMPLETE_MARKERS)
+
+
 def read_test_session_context(working_dir: str) -> str | None:
-    """Read .leashd/test-session.md, return tail content or None if missing."""
+    """Read .leashd/test-session.md, return tail content or None.
+
+    Returns None when missing/empty *or* when the prior session is complete —
+    in the latter case the agent still self-resumes via the Phase 1 "read
+    test-session.md" instruction, but without the heavy-handed inlined
+    "Resume from this state. Do NOT restart completed phases." poisoning.
+    """
     path = Path(working_dir) / ".leashd" / "test-session.md"
     if not path.is_file():
         return None
@@ -531,7 +556,47 @@ def read_test_session_context(working_dir: str) -> str | None:
         return None
     if not content.strip():
         return None
+    if _test_session_is_complete(content):
+        logger.info("test_session_context_skipped_completed", working_dir=working_dir)
+        return None
     return content[-_TEST_SESSION_MAX_CHARS:]
+
+
+def archive_completed_test_session(working_dir: str) -> str | None:
+    """Move a *completed* prior ``test-session.md`` out of the way.
+
+    Skipping the inline-context injection (``read_test_session_context``
+    returning None) is not enough: the agent's own Phase-1 instruction is
+    "FIRST ACTION: Read .leashd/test-session.md — if it exists, resume". A
+    finished run (verdict / final report / healing decision, often a
+    different feature) still on disk makes the agent read it, conclude
+    "testing complete", and skip every browser phase — so ``/test`` never
+    runs agent-browser. Renaming the finished file to a timestamped archive
+    lets a fresh run genuinely start clean (Phase 1 then creates a new file).
+    Returns the archive filename, or None if there was nothing to archive.
+    """
+    path = Path(working_dir) / ".leashd" / "test-session.md"
+    if not path.is_file():
+        return None
+    try:
+        content = path.read_text(errors="replace")
+    except OSError:
+        return None
+    if not content.strip() or not _test_session_is_complete(content):
+        return None
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    archive = path.with_name(f"test-session-{stamp}-archive.md")
+    try:
+        path.rename(archive)
+    except OSError:
+        logger.warning("test_session_archive_failed", working_dir=working_dir)
+        return None
+    logger.info(
+        "test_session_archived_completed",
+        working_dir=working_dir,
+        archive=archive.name,
+    )
+    return archive.name
 
 
 def _build_test_prompt(
@@ -634,6 +699,11 @@ class TestRunnerPlugin(LeashdPlugin):
         # Auto-approve Write/Edit for test file creation/modification
         gatekeeper.enable_tool_auto_approve(chat_id, "Write")
         gatekeeper.enable_tool_auto_approve(chat_id, "Edit")
+
+        # A completed prior run on disk makes the agent's Phase-1
+        # "read test-session.md and resume" skip the whole browser workflow —
+        # archive it so a fresh /test starts clean.
+        archive_completed_test_session(session.working_directory)
 
         # Read test session context for resume
         session_context = read_test_session_context(session.working_directory)

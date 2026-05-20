@@ -35,6 +35,7 @@ class WebConnector(BaseConnector):
         self,
         config: LeashdConfig,
         message_store: MessageStore | None = None,
+        tmux_session_manager: Any = None,
     ) -> None:
         super().__init__()
         self._config = config
@@ -51,7 +52,11 @@ class WebConnector(BaseConnector):
             )
 
         self._app = create_app(
-            config, self._ws_handler, message_store, push_service=self._push_service
+            config,
+            self._ws_handler,
+            message_store,
+            push_service=self._push_service,
+            tmux_session_manager=tmux_session_manager,
         )
         self._server: Any = None
         self._serve_task: asyncio.Task[None] | None = None

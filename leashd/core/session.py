@@ -40,12 +40,26 @@ class Session(BaseModel):
     task_settings_override: dict[str, Any] | None = None
     browser_fresh: bool = False
     browser_backend: str | None = None
+    # Task v4: orchestrator opts a phase into Claude's native ``auto``
+    # permission policy. Honored by the claude-cli and tmux runtimes
+    # (PreToolUse hook bridge required); ignored by claude-code SDK and
+    # codex runtimes. Defaults False so v2/v3 paths are unaffected.
+    native_auto_allowed: bool = False
 
 
 class SessionManager:
-    def __init__(self, store: SessionStore | None = None) -> None:
+    def __init__(
+        self,
+        store: SessionStore | None = None,
+        *,
+        default_mode: Literal["default", "plan", "auto"] = "default",
+    ) -> None:
         self._sessions: dict[str, Session] = {}
         self._store = store
+        # Mode a brand-new or /clear-reset session starts in. The Session
+        # model default stays "default" (schema / deserialization of older
+        # rows); the configured default is applied here at creation/reset.
+        self._default_mode: Literal["default", "plan", "auto"] = default_mode
 
     def _key(self, user_id: str, chat_id: str) -> str:
         return f"{user_id}:{chat_id}"
@@ -87,6 +101,7 @@ class SessionManager:
             user_id=user_id,
             chat_id=chat_id,
             working_directory=working_directory,
+            mode=self._default_mode,
         )
         self._sessions[key] = session
         logger.info(
@@ -139,11 +154,12 @@ class SessionManager:
         session.agent_resume_token = None
         session.message_count = 0
         session.total_cost = 0.0
-        session.mode = "default"
+        session.mode = self._default_mode
         session.mode_instruction = None
         session.plan_origin = None
         session.task_run_id = None
         session.task_settings_override = None
+        session.native_auto_allowed = False
         session.browser_fresh = False
         session.browser_backend = None
         session.created_at = datetime.now(timezone.utc)
@@ -171,6 +187,7 @@ class SessionManager:
         mode: Literal["plan", "auto", "test", "default"],
         mode_instruction: str | None = None,
         settings_override: dict[str, Any] | None = None,
+        native_auto_allowed: bool = False,
     ) -> Session:
         """Force a fresh Claude Code session for a task-orchestrator phase.
 
@@ -198,6 +215,7 @@ class SessionManager:
         session.plan_origin = "task" if mode == "plan" else None
         session.task_run_id = task_run_id
         session.task_settings_override = settings_override
+        session.native_auto_allowed = native_auto_allowed
         session.last_used = datetime.now(timezone.utc)
         session.is_active = True
         if self._store:

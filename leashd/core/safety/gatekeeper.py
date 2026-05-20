@@ -117,7 +117,7 @@ class ToolGatekeeper:
         policy_engine: PolicyEngine | None = None,
         approval_coordinator: ApprovalCoordinator | None = None,
         auto_approver: AutoApprover | None = None,
-        approval_timeout: int = 300,
+        approval_timeout: int | None = None,
         path_tools: frozenset[str] | None = None,
         approval_context_provider: ApprovalContextProvider | None = None,
     ) -> None:
@@ -251,6 +251,106 @@ class ToolGatekeeper:
             task_description=task_description,
             session_mode=session_mode,
         )
+
+    async def check_hard_deny_floor(
+        self,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        session_id: str,
+        chat_id: str,
+        *,
+        session_mode: str | None = None,
+    ) -> PermissionAllow | PermissionDeny:
+        """Hard-deny floor for ``auto`` mode.
+
+        Runs ONLY the non-overridable layers (sandbox + policy ``deny``) and
+        defers everything else to Claude Code's native ``auto`` classifier:
+        a sandbox violation or a ``DENY`` rule blocks; ``ALLOW`` /
+        ``REQUIRE_APPROVAL`` return an allow so the caller hands off to the
+        native classifier (the YAML allow/approval layer is intentionally
+        bypassed). The deferral is audited with ``claude_native_auto`` so it is
+        never invisible. ``check()`` is unchanged and still drives the full
+        pipeline on the ``PermissionRequest`` raise path.
+        """
+        normalized = normalize_tool_name(tool_name)
+
+        await self._event_bus.emit(
+            Event(
+                name=TOOL_GATED,
+                data={
+                    "session_id": session_id,
+                    "tool_name": tool_name,
+                    "tool_input": tool_input,
+                },
+            )
+        )
+
+        sandbox_ok, sandbox_reason = self._check_sandbox(normalized, tool_input)
+        if not sandbox_ok:
+            self._audit.log_security_violation(
+                session_id, tool_name, sandbox_reason, "critical"
+            )
+            return await self._emit_and_deny(
+                session_id, tool_name, sandbox_reason, violation_type="sandbox"
+            )
+
+        if not self._policy_engine:
+            self._audit.log_tool_attempt(
+                session_id,
+                tool_name,
+                tool_input,
+                None,
+                PolicyDecision.ALLOW,
+                session_mode=session_mode,
+            )
+            self._audit.log_approval(
+                session_id,
+                tool_name,
+                True,
+                chat_id,
+                approver_type="claude_native_auto",
+            )
+            return await self._emit_and_allow(session_id, tool_name, tool_input)
+
+        classification = self._policy_engine.classify_compound(normalized, tool_input)
+        decision = self._policy_engine.evaluate(classification)
+
+        logger.info(
+            "hard_deny_floor_evaluated",
+            session_id=session_id,
+            tool_name=tool_name,
+            normalized_name=normalized,
+            category=classification.category,
+            decision=decision.value,
+            risk_level=classification.risk_level,
+        )
+
+        self._audit.log_tool_attempt(
+            session_id,
+            tool_name,
+            tool_input,
+            classification,
+            decision,
+            session_mode=session_mode,
+        )
+
+        if decision == PolicyDecision.DENY:
+            return await self._emit_and_deny(
+                session_id,
+                tool_name,
+                classification.deny_reason or "policy",
+                message=classification.deny_reason or "Blocked by safety policy",
+            )
+
+        # ALLOW or REQUIRE_APPROVAL: defer to Claude's native auto classifier.
+        self._audit.log_approval(
+            session_id,
+            tool_name,
+            True,
+            chat_id,
+            approver_type="claude_native_auto",
+        )
+        return await self._emit_and_allow(session_id, tool_name, tool_input)
 
     def _check_sandbox(
         self, tool_name: str, tool_input: dict[str, Any]

@@ -8,6 +8,7 @@ from leashd.core.events import (
     MESSAGE_IN,
     MESSAGE_OUT,
     SESSION_COMPLETED,
+    SESSION_FAILED,
     TOOL_ALLOWED,
     TOOL_DENIED,
     EventBus,
@@ -61,6 +62,46 @@ class TestEngineEvents:
 
         assert len(events) == 1
         assert "Echo: hello" in events[0].data["content"]
+
+    async def test_session_failed_emitted_on_unexpected_agent_exception(
+        self, config, audit_logger
+    ):
+        """A non-AgentError fault in a runtime's execute path (e.g. a missing
+        dependency) must still emit SESSION_FAILED so the task orchestrator can
+        transition the task to a terminal state instead of hanging."""
+
+        class CrashingAgent(BaseAgent):
+            async def execute(self, prompt, session, **kwargs):
+                raise ModuleNotFoundError("No module named 'libtmux'")
+
+            async def cancel(self, session_id):
+                pass
+
+            async def shutdown(self):
+                pass
+
+        events = []
+
+        async def capture(event):
+            events.append(event)
+
+        bus = EventBus()
+        bus.subscribe(SESSION_FAILED, capture)
+
+        eng = Engine(
+            connector=None,
+            agent=CrashingAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            audit=audit_logger,
+            event_bus=bus,
+        )
+        result = await eng.handle_message("user1", "hello", "chat1")
+
+        assert events, "SESSION_FAILED was not emitted"
+        assert any(e.data.get("reason") == "agent_error" for e in events)
+        assert any("libtmux" in (e.data.get("error") or "") for e in events)
+        assert "error" in result.lower()
 
     async def test_tool_allowed_event_emitted(
         self, config, fake_agent, audit_logger, tmp_dir

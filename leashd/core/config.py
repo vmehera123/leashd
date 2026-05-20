@@ -86,9 +86,33 @@ class LeashdConfig(BaseSettings):
     codex_approval: str | None = None
     codex_search: bool = False
 
+    # tmux runtime settings (only apply when agent_runtime="tmux").
+    # Runs a real interactive `claude` TUI in a tmux pane; tool approvals
+    # flow back through leashd's safety pipeline via Claude Code HTTP hooks,
+    # so this runtime requires web_enabled=true (the hook receiver mounts on
+    # the WebUI FastAPI app).
+    tmux_socket_dir: Path = Path("~/.leashd/tmux")
+    tmux_hook_secret: str | None = None  # auto-generated per daemon if unset
+    tmux_hook_timeout_seconds: int = 25  # optional larger floor only; the
+    # effective PreToolUse hook timeout is effectively-infinite when the human
+    # wait is unbounded (the default — parity with claude-cli), else sized to
+    # OUTLIVE an explicit finite window (see _pre_tool_hook_timeout)
+    tmux_terminal_cols: int = 160
+    tmux_terminal_rows: int = 48
+    tmux_no_progress_timeout_seconds: int = 600  # 10 min — autonomous-path
+    # backstop: aborts a hung-but-alive pane (no JSONL progress) when NO human
+    # is pending. Never preempts the no-expiry-while-a-human-is-pending
+    # guarantee; agent_timeout_seconds stays the absolute ceiling.
+
     # Safety settings
     policy_files: list[Path] = []
-    approval_timeout_seconds: int = 300
+    approval_timeout_seconds: int | None = None
+    # None = wait for the human indefinitely (parity with the claude-cli
+    # runtime); set a positive int to auto-deny after N seconds. Applies to
+    # claude-cli AND tmux identically (the tmux PreToolUse hook is sized to
+    # outlive it). `interaction_timeout_seconds` is an optional override for
+    # the AskUserQuestion + plan-review window; None inherits
+    # approval_timeout_seconds, so an effective None = no expiry everywhere.
     interaction_timeout_seconds: int | None = None
 
     # Auth & rate limiting
@@ -115,7 +139,7 @@ class LeashdConfig(BaseSettings):
     storage_backend: str = "sqlite"
     storage_path: Path = Path(".leashd/messages.db")
 
-    # Agent mode
+    # Agent mode — new/cleared sessions start here (applied by SessionManager).
     default_mode: Literal["default", "plan", "auto"] = "default"
 
     # Browser
@@ -136,7 +160,7 @@ class LeashdConfig(BaseSettings):
 
     # Task orchestration
     task_orchestrator: bool = False
-    task_orchestrator_version: Literal["v1", "v2", "v3"] = "v2"
+    task_orchestrator_version: Literal["v1", "v2", "v3", "v4"] = "v4"
     task_max_retries: int = 3
     task_phase_timeout_seconds: int = 3600  # 60 minutes per phase
     task_conductor_model: str | None = None

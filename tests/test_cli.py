@@ -1542,7 +1542,8 @@ class TestTaskVersion:
 
         _handle_task_version_show()
         captured = capsys.readouterr()
-        assert "v2" in captured.out
+        # v4 is the default since the auto-mode orchestrator shipped.
+        assert "v4" in captured.out
 
     def test_task_version_show_custom(self, fake_config_dir, capsys):
         from leashd.cli import _handle_task_version_show
@@ -1569,7 +1570,7 @@ class TestTaskVersion:
         from leashd.cli import _handle_task_version_set
 
         with pytest.raises(SystemExit) as exc_info:
-            _handle_task_version_set("v4")
+            _handle_task_version_set("v999")
         assert exc_info.value.code == 1
 
 

@@ -36,8 +36,45 @@ async def _create_message_store(config: LeashdConfig) -> MessageStore | None:
     return store
 
 
+def _maybe_tmux_session_manager(config: LeashdConfig) -> Any:
+    """Construct the shared TmuxSessionManager singleton for the WebUI app.
+
+    Only when the tmux runtime is active — the same singleton instance is
+    later resolved by ``build_engine`` (to bind the safety pipeline) and by
+    ``TmuxAgent`` (to drive panes), so the hook receiver and the runtime
+    share one manager.
+    """
+    if config.agent_runtime != "tmux":
+        return None
+    from leashd.agents.runtimes.tmux_session import (
+        get_or_create_tmux_session_manager,
+    )
+
+    return get_or_create_tmux_session_manager(config)
+
+
+async def _maybe_start_tmux_hook_server(config: LeashdConfig) -> Any:
+    """Start a loopback-only Claude Code hook receiver when needed.
+
+    WebUI / multi mode already mount the hook router on the WebUI app, so a
+    standalone receiver is only needed for Telegram-only / CLI-only — there
+    the tmux runtime would otherwise have no endpoint for its safety hooks.
+    Returns the running ``TmuxHookServer`` (caller must ``stop()`` it) or
+    ``None`` when the runtime isn't tmux.
+    """
+    tsm = _maybe_tmux_session_manager(config)
+    if tsm is None:
+        return None
+    from leashd.web.tmux_server import TmuxHookServer
+
+    server = TmuxHookServer(config, tsm)
+    await server.start()
+    return server
+
+
 async def _run_cli(config: LeashdConfig) -> None:
     engine = build_engine(config)
+    hook_server = await _maybe_start_tmux_hook_server(config)
     await engine.startup()
 
     logger.info(
@@ -69,6 +106,8 @@ async def _run_cli(config: LeashdConfig) -> None:
     finally:
         logger.info("cli_shutting_down")
         await engine.shutdown()
+        if hook_server is not None:
+            await hook_server.stop()
         print("\nShutdown complete.")
 
 
@@ -77,12 +116,15 @@ async def _run_telegram(config: LeashdConfig) -> None:
 
     connector = TelegramConnector(config.telegram_bot_token)  # type: ignore[arg-type]
     engine = build_engine(config, connector=connector)
+    hook_server = await _maybe_start_tmux_hook_server(config)
     await engine.startup()
     try:
         await connector.start()
     except Exception:
         logger.error("telegram_startup_failed")
         await engine.shutdown()
+        if hook_server is not None:
+            await hook_server.stop()
         raise
 
     logger.info(
@@ -112,6 +154,8 @@ async def _run_telegram(config: LeashdConfig) -> None:
         logger.info("telegram_shutting_down")
         await connector.stop()
         await engine.shutdown()
+        if hook_server is not None:
+            await hook_server.stop()
         print("\nShutdown complete.")
 
 
@@ -168,7 +212,10 @@ async def _run_web(config: LeashdConfig) -> None:
     from leashd.connectors.web import WebConnector
 
     message_store = await _create_message_store(config)
-    connector = WebConnector(config, message_store=message_store)
+    tmux_sm = _maybe_tmux_session_manager(config)
+    connector = WebConnector(
+        config, message_store=message_store, tmux_session_manager=tmux_sm
+    )
     engine = build_engine(config, connector=connector, message_store=message_store)
     connector.ws_handler.set_on_reconnect_state(_make_reconnect_state_callback(engine))
     await engine.startup()
@@ -217,8 +264,11 @@ async def _run_multi(config: LeashdConfig) -> None:
     from leashd.connectors.web import WebConnector
 
     message_store = await _create_message_store(config)
+    tmux_sm = _maybe_tmux_session_manager(config)
     telegram_connector = TelegramConnector(config.telegram_bot_token)  # type: ignore[arg-type]
-    web_connector = WebConnector(config, message_store=message_store)
+    web_connector = WebConnector(
+        config, message_store=message_store, tmux_session_manager=tmux_sm
+    )
 
     multi = MultiConnector([telegram_connector, web_connector])
 

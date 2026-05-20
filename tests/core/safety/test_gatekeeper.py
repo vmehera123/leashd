@@ -2141,3 +2141,75 @@ class TestGatekeeperEventsExtended:
         gk = ToolGatekeeper(sandbox=sandbox, audit=mock_audit, event_bus=event_bus)
         result = await gk.check("Read", {"file_path": "/etc/passwd"}, "s1", "c1")
         assert result.behavior == "deny"
+
+
+class TestHardDenyFloor:
+    """`check_hard_deny_floor` — the auto-mode safety floor.
+
+    Sandbox + policy `deny` still block; `allow`/`require_approval` defer to
+    Claude's native auto classifier (returned as allow, audited as
+    ``claude_native_auto``). `check()` is unchanged and drives the raise path.
+    """
+
+    @pytest.fixture
+    def policy_gatekeeper(self, sandbox, mock_audit, event_bus, policy_engine):
+        return ToolGatekeeper(
+            sandbox=sandbox,
+            audit=mock_audit,
+            event_bus=event_bus,
+            policy_engine=policy_engine,
+        )
+
+    async def test_sandbox_violation_denied(self, policy_gatekeeper, mock_audit):
+        result = await policy_gatekeeper.check_hard_deny_floor(
+            "Read", {"file_path": "/etc/passwd"}, "s1", "c1"
+        )
+        assert result.behavior == "deny"
+        mock_audit.log_security_violation.assert_called_once()
+
+    async def test_policy_deny_blocks(self, policy_gatekeeper):
+        result = await policy_gatekeeper.check_hard_deny_floor(
+            "Bash", {"command": "rm -rf /"}, "s1", "c1"
+        )
+        assert result.behavior == "deny"
+
+    async def test_allow_defers_and_audits_native(self, policy_gatekeeper, mock_audit):
+        result = await policy_gatekeeper.check_hard_deny_floor(
+            "Bash", {"command": "git status"}, "s1", "c1"
+        )
+        assert result.behavior == "allow"
+        mock_audit.log_approval.assert_called_once_with(
+            "s1", "Bash", True, "c1", approver_type="claude_native_auto"
+        )
+
+    async def test_require_approval_defers_to_native(
+        self, policy_gatekeeper, mock_audit, tmp_dir
+    ):
+        # A sandboxed Write classifies as require_approval in default.yaml —
+        # the floor hands it to Claude's native auto instead of prompting.
+        result = await policy_gatekeeper.check_hard_deny_floor(
+            "Write", {"file_path": str(tmp_dir / "main.py")}, "s1", "c1"
+        )
+        assert result.behavior == "allow"
+        mock_audit.log_approval.assert_called_once_with(
+            "s1", "Write", True, "c1", approver_type="claude_native_auto"
+        )
+
+    async def test_no_policy_engine_allows_with_audit(
+        self, gatekeeper, mock_audit, tmp_dir
+    ):
+        result = await gatekeeper.check_hard_deny_floor(
+            "Read", {"file_path": str(tmp_dir / "foo.py")}, "s1", "c1"
+        )
+        assert result.behavior == "allow"
+        mock_audit.log_tool_attempt.assert_called_once_with(
+            "s1",
+            "Read",
+            {"file_path": str(tmp_dir / "foo.py")},
+            None,
+            PolicyDecision.ALLOW,
+            session_mode=None,
+        )
+        mock_audit.log_approval.assert_called_once_with(
+            "s1", "Read", True, "c1", approver_type="claude_native_auto"
+        )

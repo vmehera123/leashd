@@ -212,6 +212,16 @@ class ClaudeCodeAgent(BaseAgent):
         perm_mode = SESSION_TO_PERMISSION_MODE.get(session.mode, "default")
         if session.task_run_id and perm_mode == "plan":
             perm_mode = "default"
+        # Native-auto (PreToolUse-defer + PermissionRequest hard-deny floor)
+        # is wired only for the tmux / claude-cli runtimes. The SDK runtime
+        # has no `--settings` hook bridge, so it cannot install the auto-
+        # mode hard-deny floor. This branch intentionally ignores
+        # ``session.native_auto_allowed`` (set by task v4 for the implement
+        # phase): native auto would skip leashd's gatekeeper without a hook
+        # bridge to escalate risky tool calls. Switch to the ``claude-cli``
+        # or ``tmux`` runtime to get native auto inside ``/task``.
+        if perm_mode == "auto":
+            perm_mode = "acceptEdits"
         opts = ClaudeAgentOptions(
             cwd=session.working_directory,
             max_turns=self._config.effective_max_turns(

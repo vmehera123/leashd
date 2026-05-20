@@ -50,6 +50,10 @@ class PolicyEngine:
         self.rules: list[PolicyRule] = []
         self.settings: dict[str, Any] = {
             "default_action": "require_approval",
+            # NOTE: not consumed — the effective approval/interaction window is
+            # LeashdConfig.approval_timeout_seconds / interaction_timeout_seconds
+            # (None = no expiry). Kept for back-compat of policy YAML files;
+            # wiring this back is a separate, out-of-scope cleanup.
             "approval_timeout_seconds": 300,
         }
         if policy_paths:
