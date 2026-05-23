@@ -928,7 +928,7 @@ class TmuxSessionManager:
         # Strong refs to in-flight native-permission-selector drive tasks so
         # they are not garbage-collected mid-flight (asyncio only weak-refs
         # tasks). Self-pruning via the done-callback.
-        self._perm_drive_tasks: set[asyncio.Task[bool]] = set()
+        self._perm_drive_tasks: set[asyncio.Task[None]] = set()
 
     # -- configuration / wiring ---------------------------------------------
 
@@ -1541,16 +1541,15 @@ class TmuxSessionManager:
         hso = hook_out.get("hookSpecificOutput", {})
         allow = hso.get("permissionDecision") == "allow"
 
-        async def _drive() -> bool:
+        async def _drive() -> None:
             try:
-                return await cs.answer_perm_selector(allow=allow)
+                await cs.answer_perm_selector(allow=allow)
             except Exception:
                 logger.debug(
                     "tmux_perm_selector_drive_error",
                     tmux_name=cs.tmux_name,
                     exc_info=True,
                 )
-                return False
 
         task = asyncio.create_task(_drive())
         self._perm_drive_tasks.add(task)
@@ -1575,9 +1574,9 @@ class TmuxSessionManager:
             questions = ui.get("questions")
             if isinstance(answers, dict) and answers and isinstance(questions, list):
 
-                async def _drive_q() -> bool:
+                async def _drive_q() -> None:
                     try:
-                        return await cs.answer_question_selector(
+                        await cs.answer_question_selector(
                             questions=questions, answers=answers
                         )
                     except Exception:
@@ -1586,7 +1585,6 @@ class TmuxSessionManager:
                             tmux_name=cs.tmux_name,
                             exc_info=True,
                         )
-                        return False
 
                 task = asyncio.create_task(_drive_q())
                 self._perm_drive_tasks.add(task)
