@@ -45,6 +45,11 @@ _MAX_MESSAGE_LENGTH = 4000  # Telegram limit is 4096; leave buffer
 _APPROVAL_PREFIX = "approval:"
 _INTERACTION_PREFIX = "interact:"
 _CALLBACK_DATA_MAX_BYTES = 64
+# Sigil for the index-encoded AskUserQuestion answer in callback_data. Lex
+# distinct from plan-review keywords (clean_edit / edit / default / adjust /
+# reject / timeout) and from any free-text label a model could ever supply,
+# so a callback can be disambiguated by inspection only.
+_OPTION_INDEX_SIGIL = "#"
 _INTERACTION_CLEANUP_DELAY = (
     4.0  # seconds before deleting resolved interaction messages
 )
@@ -633,10 +638,18 @@ class TelegramConnector(BaseConnector):
     ) -> None:
         text = f"**{header}**\n{question_text}" if header else question_text
         rows = []
-        for opt in options:
+        for idx, opt in enumerate(options):
             label = opt.get("label", "")
-            callback_data = _truncate_callback_data(
-                f"{_INTERACTION_PREFIX}{interaction_id}:{label}"
+            # Encode the option index, NOT the label. Embedding the label
+            # in callback_data is constrained by Telegram's 64-byte ceiling
+            # (interact:{36-uuid}:{label} leaves ~18 bytes for the label),
+            # so any longer label was silently mid-string truncated — and the
+            # tmux selector drive then fails the exact-match check and the
+            # claude TUI hangs forever on its in-pane question selector.
+            # InteractionCoordinator.resolve_option recognises this sigil and
+            # restores the full label before storing the answer.
+            callback_data = (
+                f"{_INTERACTION_PREFIX}{interaction_id}:{_OPTION_INDEX_SIGIL}{idx}"
             )
             rows.append([InlineButton(text=label, callback_data=callback_data)])
         hint = "\nOr reply with a message for a custom answer."

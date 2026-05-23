@@ -54,6 +54,7 @@ def mock_engine():
     mock_session = MagicMock()
     mock_session.mode = "default"
     mock_session.task_run_id = None
+    mock_session.session_id = "phase-session-id"
     engine.session_manager.get_or_create = AsyncMock(return_value=mock_session)
     engine.session_manager.begin_phase_session = AsyncMock(return_value=mock_session)
     engine.session_manager.get = MagicMock(return_value=None)

@@ -104,6 +104,25 @@ class TestSqliteSessionStore:
         finally:
             await store.teardown()
 
+    async def test_writes_noop_after_teardown(self, tmp_path):
+        # Graceful-shutdown race: a turn finalizing (save / save_message) after
+        # the store is torn down must no-op, not raise StorageError up through
+        # handle_message (the observed unexpected_error_in_handle_message).
+        store = SqliteSessionStore(tmp_path / "test.db")
+        await store.setup()
+        await store.teardown()
+        await store.save(_make_session())  # must not raise
+        await store.save_message(
+            user_id="u1", chat_id="c1", role="assistant", content="late"
+        )
+
+    async def test_save_still_raises_when_never_initialized(self, tmp_path):
+        # A genuine "never setup()" misuse must still fail loudly — only the
+        # post-teardown shutdown race is downgraded to a no-op.
+        store = SqliteSessionStore(tmp_path / "test.db")
+        with pytest.raises(StorageError):
+            await store.save(_make_session())
+
     async def test_agent_resume_token_persists(self, tmp_path):
         store = SqliteSessionStore(tmp_path / "test.db")
         await store.setup()

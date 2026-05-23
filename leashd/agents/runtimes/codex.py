@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from leashd.agents.base import AgentResponse, ToolActivity
+from leashd.agents.base import AgentResponse, BaseAgent, ToolActivity
 from leashd.agents.types import PermissionAllow, PermissionDeny
 from leashd.exceptions import AgentError
 
@@ -150,7 +150,7 @@ async def _safe_callback(
         logger.warning(log_event, exc_info=True)
 
 
-class CodexAgent:
+class CodexAgent(BaseAgent):
     def __init__(self, config: LeashdConfig) -> None:
         try:
             import codex_sdk  # noqa: F401

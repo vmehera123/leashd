@@ -152,6 +152,213 @@ class TestQuestionHandling:
         result = await interaction_coordinator.resolve_option("nonexistent", "answer")
         assert result is False
 
+    async def test_index_sigil_resolves_to_full_label(
+        self, interaction_coordinator, mock_connector
+    ):
+        """A connector with a callback-byte budget (Telegram, 64 bytes) sends
+        ``#<idx>`` instead of the label. The coordinator restores the full
+        label from ``pending.options[idx]`` — so downstream consumers (audit
+        log, AskUserQuestion answers dict, INTERACTION_RESOLVED event) keep
+        getting the human-readable text even when the option label is far
+        longer than the callback's budget."""
+        long_label = "Deep-dive on top 2 candidates with full context"
+        tool_input = {
+            "questions": [
+                {
+                    "question": "Research focus?",
+                    "header": "Focus",
+                    "options": [
+                        {"label": "Skim", "description": "Quick"},
+                        {"label": long_label, "description": "Thorough"},
+                    ],
+                    "multiSelect": False,
+                }
+            ]
+        }
+
+        async def click_button():
+            await asyncio.sleep(0.05)
+            req = mock_connector.question_requests[0]
+            # Telegram-style index callback for the second option.
+            await interaction_coordinator.resolve_option(req["interaction_id"], "#1")
+
+        task = asyncio.create_task(click_button())
+        result = await interaction_coordinator.handle_question("chat1", tool_input)
+        await task
+
+        assert result.behavior == "allow"
+        # Full label flows through — NOT a truncated 18-char prefix.
+        assert result.updated_input["answers"]["Research focus?"] == long_label
+
+    async def test_index_sigil_out_of_range_is_treated_as_label(
+        self, interaction_coordinator, mock_connector
+    ):
+        """A bogus index (no matching option) is passed through unchanged —
+        same as a free-text answer that didn't tap any button. Downstream
+        treats it as a verbatim label; the tmux selector drive will log a
+        ``tmux_question_selector_no_match`` warning and skip."""
+        tool_input = {
+            "questions": [
+                {
+                    "question": "Q?",
+                    "header": "H",
+                    "options": [{"label": "Only", "description": "x"}],
+                    "multiSelect": False,
+                }
+            ]
+        }
+
+        async def click():
+            await asyncio.sleep(0.05)
+            req = mock_connector.question_requests[0]
+            await interaction_coordinator.resolve_option(req["interaction_id"], "#9")
+
+        task = asyncio.create_task(click())
+        result = await interaction_coordinator.handle_question("chat1", tool_input)
+        await task
+        assert result.behavior == "allow"
+        # Out-of-range index passes through verbatim (no label translation).
+        assert result.updated_input["answers"]["Q?"] == "#9"
+
+    async def test_index_sigil_non_integer_is_treated_as_label(
+        self, interaction_coordinator, mock_connector
+    ):
+        """``#`` followed by non-digits (``#abc`` / ``#-`` / ``# 1``) is NOT
+        the encoded form — a future encoding change must not accidentally
+        translate it. Passes through verbatim so downstream sees the
+        original string and can decide what to do."""
+        tool_input = {
+            "questions": [
+                {
+                    "question": "Q?",
+                    "header": "H",
+                    "options": [{"label": "Yes"}, {"label": "No"}],
+                    "multiSelect": False,
+                }
+            ]
+        }
+
+        async def click():
+            await asyncio.sleep(0.05)
+            req = mock_connector.question_requests[0]
+            await interaction_coordinator.resolve_option(req["interaction_id"], "#abc")
+
+        task = asyncio.create_task(click())
+        result = await interaction_coordinator.handle_question("chat1", tool_input)
+        await task
+        # ValueError on int("abc") → caller keeps the raw answer.
+        assert result.updated_input["answers"]["Q?"] == "#abc"
+
+    async def test_index_sigil_negative_index_is_treated_as_label(
+        self, interaction_coordinator, mock_connector
+    ):
+        """A negative index parses cleanly as an int but is out of range
+        (``options[-1]`` would otherwise silently pick the last option —
+        very wrong if a user pasted ``#-1``). Must pass through verbatim."""
+        tool_input = {
+            "questions": [
+                {
+                    "question": "Q?",
+                    "header": "H",
+                    "options": [{"label": "Yes"}, {"label": "No"}],
+                    "multiSelect": False,
+                }
+            ]
+        }
+
+        async def click():
+            await asyncio.sleep(0.05)
+            req = mock_connector.question_requests[0]
+            await interaction_coordinator.resolve_option(req["interaction_id"], "#-1")
+
+        task = asyncio.create_task(click())
+        result = await interaction_coordinator.handle_question("chat1", tool_input)
+        await task
+        # NOT "No" — even though options[-1] would pick it in plain Python.
+        assert result.updated_input["answers"]["Q?"] == "#-1"
+
+    async def test_index_sigil_empty_label_falls_through(
+        self, interaction_coordinator, mock_connector
+    ):
+        """An option with an empty/missing label can't be the answer (the
+        downstream agent would see ``""``). Defensive guard — pass the raw
+        sigil through unchanged so the bug is visible, not silently masked."""
+        tool_input = {
+            "questions": [
+                {
+                    "question": "Q?",
+                    "header": "H",
+                    "options": [{"label": ""}, {"label": "Real"}],
+                    "multiSelect": False,
+                }
+            ]
+        }
+
+        async def click():
+            await asyncio.sleep(0.05)
+            req = mock_connector.question_requests[0]
+            await interaction_coordinator.resolve_option(req["interaction_id"], "#0")
+
+        task = asyncio.create_task(click())
+        result = await interaction_coordinator.handle_question("chat1", tool_input)
+        await task
+        # Empty label → resolver returns None → original answer passes through.
+        assert result.updated_input["answers"]["Q?"] == "#0"
+
+    async def test_bare_hash_is_treated_as_label(
+        self, interaction_coordinator, mock_connector
+    ):
+        """``#`` alone (no digits) must NOT be parsed as an index — the
+        ``len(answer) < 2`` early return guards against that."""
+        tool_input = {
+            "questions": [
+                {
+                    "question": "Q?",
+                    "header": "H",
+                    "options": [{"label": "Yes"}],
+                    "multiSelect": False,
+                }
+            ]
+        }
+
+        async def click():
+            await asyncio.sleep(0.05)
+            req = mock_connector.question_requests[0]
+            await interaction_coordinator.resolve_option(req["interaction_id"], "#")
+
+        task = asyncio.create_task(click())
+        result = await interaction_coordinator.handle_question("chat1", tool_input)
+        await task
+        assert result.updated_input["answers"]["Q?"] == "#"
+
+    async def test_free_text_answer_passes_through_unchanged(
+        self, interaction_coordinator, mock_connector
+    ):
+        """A WebUI button (which sends the full label) or a free-text reply
+        is not the ``#<idx>`` sigil form — coordinator must leave it alone."""
+        tool_input = {
+            "questions": [
+                {
+                    "question": "Q?",
+                    "header": "H",
+                    "options": [{"label": "Apple"}, {"label": "Banana"}],
+                    "multiSelect": False,
+                }
+            ]
+        }
+
+        async def click():
+            await asyncio.sleep(0.05)
+            req = mock_connector.question_requests[0]
+            await interaction_coordinator.resolve_option(
+                req["interaction_id"], "Banana"
+            )
+
+        task = asyncio.create_task(click())
+        result = await interaction_coordinator.handle_question("chat1", tool_input)
+        await task
+        assert result.updated_input["answers"]["Q?"] == "Banana"
+
     async def test_cancel_unblocks(self, interaction_coordinator, mock_connector):
         tool_input = {
             "questions": [

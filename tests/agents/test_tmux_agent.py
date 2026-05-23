@@ -212,13 +212,15 @@ async def test_execute_auto_mode_passes_native_perm_mode(tmp_path):
 
 async def test_execute_auto_mode_non_opus_model_downgrades(tmp_path):
     # Verified against claude CLI 2.1.145: Sonnet/Haiku panes show
-    # ``auto mode unavailable for this model``. Leashd downgrades to
-    # acceptEdits so the YAML pipeline owns approvals (no broken UX of
-    # interactive prompts on every tool call).
+    # ``auto mode unavailable for this model``. Leashd downgrades the
+    # interactive permission mode. On tmux, the downgraded mode then goes
+    # through the bypassPermissions override (so claude TUI's native
+    # gates don't surface in-pane where leashd can't bridge them), and the
+    # YAML pipeline + PreToolUse hook owns approvals.
     tsm = FakeTSM(FakeCS(text="ok"))
     agent = _agent(_cfg(tmp_path, claude_model="claude-sonnet-4-6"), tsm)
     await agent.execute("go", _session(tmp_path, mode="auto"))
-    assert tsm.spawn_kwargs["perm_mode"] == "acceptEdits"
+    assert tsm.spawn_kwargs["perm_mode"] == "bypassPermissions"
     assert tsm.spawn_kwargs["model"] == "claude-sonnet-4-6"
 
 
@@ -232,13 +234,41 @@ async def test_execute_auto_mode_explicit_opus_keeps_auto(tmp_path):
     assert tsm.spawn_kwargs["model"] == "claude-opus-4-7"
 
 
-async def test_execute_auto_task_phase_uses_accept_edits(tmp_path):
-    # Orchestrated auto phases (task_run_id set) keep acceptEdits + the full
-    # leashd pipeline — native-auto pass-through is interactive-only.
+async def test_execute_auto_task_phase_uses_bypass_permissions(tmp_path):
+    # Orchestrated auto phases (task_run_id set) no longer use native auto —
+    # they go through the full leashd pipeline. On tmux that pipeline drives
+    # ``--permission-mode bypassPermissions`` so claude TUI's native gates
+    # don't surface in the pane (where leashd can't bridge them); the
+    # PreToolUse hook + AI auto-approver / YAML policy is authoritative.
     tsm = FakeTSM(FakeCS(text="ok"))
     agent = _agent(_cfg(tmp_path), tsm)
     await agent.execute("go", _session(tmp_path, mode="auto", task_run_id="t1"))
-    assert tsm.spawn_kwargs["perm_mode"] == "acceptEdits"
+    assert tsm.spawn_kwargs["perm_mode"] == "bypassPermissions"
+
+
+@pytest.mark.parametrize(
+    "session_mode",
+    ["default", "edit", "test", "task", "web"],
+)
+async def test_execute_execution_modes_use_bypass_permissions(tmp_path, session_mode):
+    """All tmux *execution* modes (anything that runs tools) use
+    bypassPermissions so claude TUI's native gates (WebFetch domain
+    consent, Bash command consent, …) don't surface in-pane where leashd
+    can't bridge them to Telegram. The PreToolUse hook + YAML policy is
+    the sole permission authority. ``auto`` and ``plan`` keep their own
+    semantics and are tested separately."""
+    tsm = FakeTSM(FakeCS(text="ok"))
+    agent = _agent(_cfg(tmp_path), tsm)
+    await agent.execute("go", _session(tmp_path, mode=session_mode))
+    assert tsm.spawn_kwargs["perm_mode"] == "bypassPermissions"
+
+
+async def test_execute_plan_mode_keeps_plan(tmp_path):
+    """Plan mode is read-only by design; bypassPermissions doesn't apply."""
+    tsm = FakeTSM(FakeCS(text="ok"))
+    agent = _agent(_cfg(tmp_path), tsm)
+    await agent.execute("go", _session(tmp_path, mode="plan"))
+    assert tsm.spawn_kwargs["perm_mode"] == "plan"
 
 
 async def test_execute_reused_pane_redelivers_changed_mode_instruction(tmp_path):

@@ -56,6 +56,23 @@ class BaseAgent(Protocol):
 
     async def cancel(self, session_id: str) -> None: ...
 
+    async def inject_followup(
+        self,
+        session_id: str,  # noqa: ARG002
+        text: str,  # noqa: ARG002
+        attachments: list[Attachment] | None = None,  # noqa: ARG002
+    ) -> bool:
+        """Type a human follow-up into a live, in-flight turn (native queue).
+
+        Only meaningful for runtimes whose capabilities set
+        ``accepts_input_while_busy`` (currently tmux). Other runtimes need not
+        override this default — the engine guards on the capability flag and
+        falls back to queue-and-resubmit when this returns ``False``. Returns
+        ``True`` if the text was queued into the running turn, ``False`` if
+        there was no live turn (or the runtime doesn't support live injection).
+        """
+        return False
+
     async def shutdown(self) -> None: ...
 
     def update_config(self, config: Any) -> None: ...

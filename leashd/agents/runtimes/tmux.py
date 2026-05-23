@@ -81,6 +81,9 @@ class TmuxAgent(BaseAgent):
             supports_session_resume=True,
             supports_streaming=True,
             supports_mcp=True,
+            # Live pane: mid-turn human follow-ups are typed into the running
+            # claude TUI (native queue) rather than engine-queued + re-submitted.
+            accepts_input_while_busy=True,
             instruction_path="CLAUDE.md",
             stability="experimental",
         )
@@ -217,6 +220,20 @@ class TmuxAgent(BaseAgent):
         # pass-through is interactive-only (task_run_id is None).
         if session.task_run_id and perm_mode == "auto":
             perm_mode = "acceptEdits"
+        # Tmux-only override: claude TUI's NATIVE permission gates (WebFetch
+        # per-domain consent, Bash command consent, etc.) render in the pane
+        # and never fire any hook, so leashd can't bridge them to Telegram /
+        # Web — the user sees the agent as "stuck". Bypass claude's native
+        # gates and rely on the PreToolUse hook (which still fires under
+        # bypassPermissions; the hard-deny floor is enforced in on_pre_tool
+        # before any policy check) as the SOLE permission authority. ``auto``
+        # and ``plan`` keep their existing values: auto uses claude's
+        # classifier + PermissionRequest escalation pipeline; plan is read-
+        # only by design. The SDK runtimes (claude-code, claude-cli) keep
+        # their original mappings because they have a ``can_use_tool``
+        # callback that bridges natively without rendering pane dialogs.
+        if perm_mode in ("default", "acceptEdits"):
+            perm_mode = "bypassPermissions"
 
         if need_spawn:
             # tmux runs the interactive `claude` TUI; default it to opus
@@ -240,7 +257,11 @@ class TmuxAgent(BaseAgent):
                     reason="model_not_opus",
                     model=model,
                 )
-                perm_mode = "acceptEdits"
+                # Apply the tmux bypassPermissions override (see above) to
+                # the late-bound fallback too — non-Opus auto sessions
+                # must NOT regress to a perm_mode that surfaces native
+                # pane gates leashd can't bridge.
+                perm_mode = "bypassPermissions"
             spawn_native_auto = (
                 session.mode == "auto"
                 and session.task_run_id is None
@@ -458,6 +479,49 @@ class TmuxAgent(BaseAgent):
             tools_used=turn.tools_used,
             is_error=turn.is_error,
         )
+
+    async def inject_followup(
+        self,
+        session_id: str,
+        text: str,
+        attachments: list[Attachment] | None = None,
+    ) -> bool:
+        """Type a human follow-up into the live composer of an in-flight turn.
+
+        Mirrors typing into the ``claude`` TUI while it is busy: the text lands
+        in claude's native input queue and is auto-processed after the current
+        response, merged into the same leashd turn (see
+        ``TmuxTurn.pending_followups`` / ``complete()``).
+
+        Returns ``True`` when the text was queued into the running turn; returns
+        ``False`` (no side effects) when there is no live turn to attach to —
+        the engine then falls back to its normal queue-and-resubmit path.
+        """
+        cs = self._tsm.get(session_id)
+        if cs is None or cs.pane_is_dead():
+            return False
+        turn = cs.turn
+        if turn is None or turn.stop_event.is_set():
+            return False
+        # Bump the counter synchronously (before any await) so a result/Stop
+        # landing during submit()'s sleeps already sees the pending follow-up
+        # and defers instead of ending the turn.
+        turn.pending_followups += 1
+        if attachments:
+            for staged in self._stage_attachments(attachments, cs.working_directory):
+                cs.send_keys(f"@{staged} ", literal=True)
+            await asyncio.sleep(0.3)
+        # submit() returns fast here: the pane already shows "esc to interrupt",
+        # so its started-check is immediately true after one Enter — exactly the
+        # "claude queued it" outcome.
+        await cs.submit(text)
+        logger.info(
+            "tmux_followup_injected",
+            session_id=session_id,
+            chat_id=cs.chat_id,
+            pending_followups=turn.pending_followups,
+        )
+        return True
 
     # -- cancel / shutdown ---------------------------------------------------
 

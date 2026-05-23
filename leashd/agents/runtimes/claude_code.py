@@ -301,6 +301,14 @@ class ClaudeCodeAgent(BaseAgent):
                     session_id=session.session_id,
                     profile=resolved,
                 )
+        # See ``build_agent_cli_args``: in ``/web`` mode we forbid the
+        # built-in ``WebFetch``/``WebSearch`` so all browser activity flows
+        # through ``Bash agent-browser …`` (leashd-gated). On the SDK runtime
+        # the same restriction prevents a similar consent-prompt friction.
+        if session.mode == "web":
+            opts.disallowed_tools = list(
+                set(opts.disallowed_tools or []) | {"WebFetch", "WebSearch"}
+            )
         if session.agent_resume_token:
             opts.resume = session.agent_resume_token
 

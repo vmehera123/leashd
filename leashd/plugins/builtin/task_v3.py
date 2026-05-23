@@ -1016,7 +1016,7 @@ class TaskV3Orchestrator(LeashdPlugin):
             mode_instruction = _V3_PHASE_TO_MODE_INSTRUCTION.get(task.phase)
 
         # Force a fresh Claude Code session for this phase.
-        await self._engine.session_manager.begin_phase_session(
+        phase_session = await self._engine.session_manager.begin_phase_session(
             task.user_id,
             task.chat_id,
             phase=str(task.phase),
@@ -1026,6 +1026,13 @@ class TaskV3Orchestrator(LeashdPlugin):
             settings_override=task.settings_override,
             native_auto_allowed=self._native_auto_allowed_for(task.phase),
         )
+        # Keep task_runs.session_id on the session actually executing this phase:
+        # begin_phase_session mints a fresh UUID (and a recovered task re-runs
+        # under a new one), so the submit-time value otherwise goes stale and
+        # debug/audit lookups resolve the wrong session.
+        if task.session_id != phase_session.session_id:
+            task.session_id = phase_session.session_id
+            await self.store.save(task)
 
         # Reset prior-phase auto-approves and wire this phase's allowlist.
         self._engine.disable_auto_approve(task.chat_id)

@@ -385,9 +385,41 @@ class InteractionCoordinator:
             pending.event.set()
             return True
 
+        # The Telegram connector (and any other connector with a byte-budget on
+        # its callback payload) now sends back the option *index* sigilled with
+        # "#" — "#0", "#1", ... — instead of the (potentially truncated) label.
+        # Restore the original label here so every downstream consumer (audit
+        # log, INTERACTION_RESOLVED event, the AskUserQuestion answers dict the
+        # model sees) keeps getting the human-readable text. Any other shape
+        # (plain text, the WebUI's full label, a free-text reply) is passed
+        # through verbatim — same behaviour as before.
+        resolved = self._resolve_option_index(pending, answer)
+        if resolved is not None:
+            answer = resolved
         pending.answer = answer
         pending.event.set()
         return True
+
+    @staticmethod
+    def _resolve_option_index(pending: PendingInteraction, answer: str) -> str | None:
+        """Translate a ``#<idx>`` callback into ``pending.options[idx]['label']``.
+
+        Returns ``None`` when the answer is not the index form, the index is
+        out of range, or the option carries no label — caller treats the
+        original answer string as a verbatim label in those cases.
+        """
+        if not answer.startswith("#") or len(answer) < 2:
+            return None
+        try:
+            idx = int(answer[1:])
+        except ValueError:
+            return None
+        if idx < 0 or idx >= len(pending.options):
+            return None
+        label = pending.options[idx].get("label")
+        if not isinstance(label, str) or not label:
+            return None
+        return label
 
     async def resolve_text(self, chat_id: str, text: str) -> bool:
         interaction_id = self._chat_index.get(chat_id)

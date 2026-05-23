@@ -88,10 +88,14 @@ class SqliteSessionStore:
     def __init__(self, db_path: Path | str) -> None:
         self._db_path = str(db_path)
         self._db: aiosqlite.Connection | None = None
+        # Set on teardown(): a turn finalizing after a graceful shutdown
+        # (update_from_result → save) then no-ops instead of raising.
+        self._closed = False
 
     async def setup(self) -> None:
         try:
             self._db = await aiosqlite.connect(self._db_path)
+            self._closed = False
             self._db.row_factory = aiosqlite.Row
             await self._db.execute(_CREATE_TABLE)
             await self._db.execute(_CREATE_MESSAGES_TABLE)
@@ -146,12 +150,18 @@ class SqliteSessionStore:
         await self.setup()
 
     async def teardown(self) -> None:
+        self._closed = True
         if self._db:
             await self._db.close()
             self._db = None
             logger.info("sqlite_store_closed", db_path=self._db_path)
 
     async def save(self, session: Session) -> None:
+        if self._closed:
+            # Shutdown race: a turn finalized (update_from_result) after the
+            # store was torn down. The update is moot — skip, don't crash.
+            logger.debug("sqlite_write_skipped_store_closed", op="save_session")
+            return
         if not self._db:
             raise StorageError("Store not initialized — call setup() first")
         await self._db.execute(
@@ -239,6 +249,9 @@ class SqliteSessionStore:
         duration_ms: int | None = None,
         session_id: str | None = None,
     ) -> None:
+        if self._closed:
+            logger.debug("sqlite_write_skipped_store_closed", op="save_message")
+            return
         if not self._db:
             raise StorageError("Store not initialized — call setup() first")
         await self._db.execute(

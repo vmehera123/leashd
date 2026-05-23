@@ -59,6 +59,7 @@ def mock_engine():
     mock_session = MagicMock()
     mock_session.mode = "default"
     mock_session.task_run_id = None
+    mock_session.session_id = "phase-session-id"
     engine.session_manager.get_or_create = AsyncMock(return_value=mock_session)
     engine.session_manager.begin_phase_session = AsyncMock(return_value=mock_session)
     engine.session_manager.get = MagicMock(return_value=None)
@@ -1463,6 +1464,22 @@ class TestPhaseExecution:
         assert mode_instruction is not None
         assert "Read, Grep, and Glob" in mode_instruction
         assert "NEVER Bash" in mode_instruction
+
+    async def test_execute_phase_syncs_task_session_id_to_phase_session(
+        self, orchestrator, mock_engine, task_store, tmp_path
+    ):
+        # The phase runs under a fresh session (begin_phase_session mints a new
+        # UUID); task_runs.session_id must follow it rather than keep the stale
+        # submit-time value (otherwise debug/audit resolve the wrong session).
+        task = _make_task(tmp_path, phase="plan", session_id="stale-submit-session")
+        task_memory.seed(task.run_id, task.task, str(tmp_path), version="v3")
+
+        await orchestrator._execute_phase(task)
+
+        assert task.session_id == "phase-session-id"
+        reloaded = await task_store.load(task.run_id)
+        assert reloaded is not None
+        assert reloaded.session_id == "phase-session-id"
 
     @pytest.mark.parametrize(
         ("phase", "expect_instruction"),

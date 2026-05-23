@@ -273,6 +273,18 @@ def build_agent_cli_args(
         for sub in ("Task", "Agent"):
             if sub not in disallowed:
                 disallowed.append(sub)
+    # `/web` mode tells claude to use the leashd-gated ``agent-browser`` for
+    # all browser activity, but claude TUI 2.1.150 freely picks ``WebFetch``
+    # and ``WebSearch`` for research-heavy work — those route through
+    # claude's *own* per-domain consent prompt (rendered inside the pane,
+    # NOT via any hook), which leashd can't bridge to Telegram, leaving the
+    # turn looking stuck. Forbidding them in web mode forces all browser /
+    # fetch activity through ``Bash agent-browser …`` so every domain
+    # passes through leashd's policy + approval pipeline.
+    if session.mode == "web":
+        for t in ("WebFetch", "WebSearch"):
+            if t not in disallowed:
+                disallowed.append(t)
     if disallowed:
         args += ["--disallowedTools", ",".join(disallowed)]
 

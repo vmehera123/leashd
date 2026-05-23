@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.1] - 2026-05-22
+- **added**: `tmux` runtime feeds mid-turn human follow-ups straight into the live `claude` composer (native queue) — Web UI and Telegram show an auto-clearing "Queued" notice instead of the Send-now/cancel prompt
+- **added**: Native-dialog watcher bridges any un-handled `claude` TUI dialog (WebFetch/Bash consent, future per-tool prompts) to Telegram/Web UI as an `AskUserQuestion` and drives the chosen option back by keystroke
+- **changed**: `tmux` now spawns `claude` with `--permission-mode bypassPermissions` — leashd's `PreToolUse` hook + YAML policy is the sole permission authority (hard-deny floor still enforced); startup acceptance dialog auto-confirmed
+- **fixed**: `tmux` no longer hangs or silently ends the turn on a mid-turn `AskUserQuestion` — answers are now driven into the pane by keystroke and `PermissionRequest` dedup is binary-only (claude TUI 2.1.148 + 2.1.150 parity)
+- **fixed**: `/web` no longer stalls on claude TUI 2.1.150's native per-domain consent — `WebFetch`/`WebSearch` are disallowed in `/web` sessions, all fetch activity flows through `Bash agent-browser`
+
 ## [0.17.0] - 2026-05-20
 - **added**: Task orchestrator v4 (new default) — slim `implement → verify` pipeline; implement runs under Claude's native `auto` permission policy on `claude-cli` / `tmux`; verify ALWAYS exercises the change via agent-browser plus a code-quality review of the diff
 - **changed**: Default `task_orchestrator_version` flipped from `v2` to `v4`; explicit `v2` / `v3` configs preserved. Roll back with `leashd task version set v2`

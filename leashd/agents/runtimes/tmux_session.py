@@ -112,6 +112,202 @@ def _parse_version(text: str) -> tuple[int, ...] | None:
     return tuple(int(g) for g in m.groups() if g is not None)
 
 
+# ---------------------------------------------------------------------------
+# Native claude TUI dialog bridge (Stage 2 — "suspenders" half of the
+# belt-and-suspenders gating contract).
+#
+# claude TUI 2.1.150 renders several permission / consent dialogs *inside
+# the pane* that don't fire any hook leashd can intercept:
+#
+#   - WebFetch per-domain consent ("Claude wants to fetch content from X")
+#   - Bash command consent ("Do you want to proceed?")
+#   - any future per-tool dialog Claude Code might add
+#
+# ``--permission-mode bypassPermissions`` (Stage 1) suppresses most of
+# them, but we cannot guarantee every dialog in every claude version is
+# covered. The dialog watcher polls the pane, detects any *un-handled*
+# native dialog, synthesises an ``AskUserQuestion``-shaped request from
+# the rendered options, routes it through :class:`InteractionCoordinator`
+# (Telegram / Web UI), and drives the user's choice back as a keystroke.
+# Result: every gate the user can see in the pane also flows through the
+# Telegram / Web UI channel — never "stuck" from the user's perspective.
+# ---------------------------------------------------------------------------
+
+
+_NATIVE_DIALOG_POLL_INTERVAL_S = 1.5
+_NATIVE_DIALOG_TOOL_INPUT_KEY = "__leashd_native_dialog__"
+
+# Dialogs we *already* drive elsewhere (AskUserQuestion in-pane selector
+# → ``answer_question_selector``; bypass-mode startup + trust-folder prompt
+# → ``await_ready``). The watcher must skip these so it doesn't race the
+# existing drives. Each tuple is an AND-set of markers; if all markers in
+# any tuple are present, the watcher leaves the screen to the dedicated
+# drive.
+_NATIVE_DIALOG_SKIP_SETS: tuple[tuple[str, ...], ...] = (
+    ("Enter to select", "to navigate"),  # AskUserQuestion selector
+    ("Bypass Permissions mode", "Yes, I accept"),  # Bypass startup
+    ("Do you trust the files",),
+    ("trust the files in this folder",),
+    # ExitPlanMode / plan review live behind the plan-gate path.
+    ("ExitPlanMode",),
+)
+
+# Numbered-option row: optional ``❯`` highlight, then ``N.`` then label.
+_NATIVE_DIALOG_OPTION_RE = re.compile(r"^\s*(❯)?\s*(\d+)\.\s+(.+?)\s*$")
+
+
+class NativeDialogMatch:
+    """A detected actionable native claude TUI dialog.
+
+    ``options`` is the verbatim numbered list pulled from the pane, in
+    pane order. ``selected_row_index`` is 0-based — the row claude
+    rendered with the highlight cursor (default-pick). ``fingerprint``
+    is a stable string the watcher uses to dedup repeated polls of the
+    same on-screen dialog.
+    """
+
+    __slots__ = (
+        "fingerprint",
+        "header",
+        "name",
+        "options",
+        "question",
+        "selected_row_index",
+    )
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        question: str,
+        header: str,
+        options: list[dict[str, str]],
+        fingerprint: str,
+        selected_row_index: int,
+    ) -> None:
+        self.name = name
+        self.question = question
+        self.header = header
+        self.options = options
+        self.fingerprint = fingerprint
+        self.selected_row_index = selected_row_index
+
+
+def _native_dialog_should_skip(screen: str) -> bool:
+    for marker_set in _NATIVE_DIALOG_SKIP_SETS:
+        if all(m in screen for m in marker_set):
+            return True
+    return False
+
+
+def _parse_numbered_options(
+    screen: str,
+) -> list[tuple[int, bool, str]]:
+    """Return ``[(option_number, is_highlighted, label)]`` from a rendered
+    numbered list. Empty when no rows match — caller treats that as
+    "this isn't a numbered-option dialog"."""
+    rows: list[tuple[int, bool, str]] = []
+    for line in screen.splitlines():
+        m = _NATIVE_DIALOG_OPTION_RE.match(line)
+        if m:
+            rows.append((int(m.group(2)), m.group(1) is not None, m.group(3).strip()))
+    return rows
+
+
+def _detect_native_dialog(screen: str) -> NativeDialogMatch | None:
+    """Detect any native claude TUI dialog needing a Telegram / Web UI
+    bridge. Returns ``None`` when the screen is either *already handled*
+    (AUQ selector, bypass startup, trust prompt) or shows no actionable
+    dialog at all."""
+    if _native_dialog_should_skip(screen):
+        return None
+
+    # Known patterns — give nicer question text than the generic fallback.
+    m = re.search(r"wants to fetch content from (\S+)", screen)
+    if m:
+        domain = m.group(1).rstrip(".,")
+        rows = _parse_numbered_options(screen)
+        if not rows:
+            return None
+        options = [{"label": label} for _, _, label in rows]
+        selected = next((i for i, (_, hl, _) in enumerate(rows) if hl), 0)
+        return NativeDialogMatch(
+            name="webfetch_consent",
+            question=f"Claude wants to fetch content from `{domain}`. Allow?",
+            header="Web Fetch",
+            options=options,
+            fingerprint=f"webfetch:{domain}",
+            selected_row_index=selected,
+        )
+
+    if "Do you want to proceed?" in screen and "always allow" in screen:
+        rows = _parse_numbered_options(screen)
+        if not rows:
+            return None
+        # Pull the Bash command preview between "Bash command" and the
+        # description line, if visible.
+        cmd_preview = ""
+        in_block = False
+        for line in screen.splitlines():
+            if "Bash command" in line:
+                in_block = True
+                continue
+            if in_block:
+                stripped = line.strip()
+                if stripped:
+                    cmd_preview = stripped[:120]
+                    break
+        options = [{"label": label} for _, _, label in rows]
+        selected = next((i for i, (_, hl, _) in enumerate(rows) if hl), 0)
+        return NativeDialogMatch(
+            name="bash_consent",
+            question=(
+                f"Allow Bash command? `{cmd_preview}`"
+                if cmd_preview
+                else "Allow Bash command?"
+            ),
+            header="Bash",
+            options=options,
+            fingerprint=f"bash:{cmd_preview}",
+            selected_row_index=selected,
+        )
+
+    # Generic fallback: any pane state with a numbered-option list and a
+    # known confirm-keyboard hint we don't already handle.
+    has_confirm_hint = (
+        "Enter to confirm" in screen
+        or "Esc to cancel" in screen
+        or "Enter to choose" in screen
+    )
+    rows = _parse_numbered_options(screen)
+    if has_confirm_hint and rows:
+        options = [{"label": label} for _, _, label in rows]
+        selected = next((i for i, (_, hl, _) in enumerate(rows) if hl), 0)
+        # Best-effort question text: the line immediately above the first
+        # numbered row often holds the prompt; fall back to a generic
+        # label.
+        question = "Claude needs your decision on an in-pane dialog."
+        lines = [ln.strip() for ln in screen.splitlines() if ln.strip()]
+        for i, line in enumerate(lines):
+            if _NATIVE_DIALOG_OPTION_RE.match(line) and i > 0:
+                candidate = lines[i - 1]
+                # Skip pure separator lines.
+                if candidate and not all(c in "─-_=*" for c in candidate):
+                    question = candidate
+                break
+        labels_fp = "|".join(o["label"] for o in options)
+        return NativeDialogMatch(
+            name="generic_native_dialog",
+            question=question,
+            header="Claude",
+            options=options,
+            fingerprint=f"generic:{labels_fp}",
+            selected_row_index=selected,
+        )
+
+    return None
+
+
 class TmuxTurn:
     """Mutable state for a single in-flight agent turn within a live pane.
 
@@ -134,6 +330,18 @@ class TmuxTurn:
         self.cost_usd: float = 0.0
         self.num_turns: int = 0
         self.is_error: bool = False
+        # Count of additional claude responses still to absorb because the
+        # human typed follow-up(s) into the live composer mid-turn (native
+        # queue). While >0, a completion signal defers instead of ending the
+        # leashd turn, so the follow-up's response merges into this same turn.
+        # See TmuxAgent.inject_followup and complete() below.
+        self.pending_followups: int = 0
+        # Per-response dedup: the Stop hook AND the JSONL `result` line both
+        # fire for one response, both routing through complete(). This flips
+        # True on the first completion signal of a response and back to False
+        # when the next response's assistant content streams in, so one
+        # response only consumes one pending_followup.
+        self._completion_seen_this_response: bool = False
         self._started = time.monotonic()
         # Monotonic stamp of the last observed JSONL progress (assistant
         # text / tool call / result). The no-human watchdog in
@@ -171,6 +379,19 @@ class TmuxTurn:
     def complete(self, *, is_error: bool = False) -> None:
         if self.stop_event.is_set():
             return
+        if not is_error:
+            # The Stop hook AND the JSONL `result` line both fire for one
+            # response; count a response only once.
+            if self._completion_seen_this_response:
+                return
+            self._completion_seen_this_response = True
+            # A human follow-up was typed into the live composer mid-turn;
+            # claude auto-processes it next. Defer ending the leashd turn so the
+            # follow-up's response merges into this turn (one continuous flow).
+            if self.pending_followups > 0:
+                self.pending_followups -= 1
+                self.mark_activity()
+                return
         self.is_error = self.is_error or is_error
         self.duration_ms = int((time.monotonic() - self._started) * 1000)
         self.stop_event.set()
@@ -237,10 +458,20 @@ class TmuxClaudeSession:
         # so a decision never leaks across turns. Maps tool-identity key →
         # asyncio.Future resolving to the hook-shaped decision dict.
         self.inflight_decisions: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        # Guards the AskUserQuestion in-pane selector drive so the PreToolUse +
+        # PermissionRequest double-fire only navigates the pane once.
+        self._question_drive_active = False
         # The --append-system-prompt the live claude was spawned with. It is
         # fixed for the process lifetime, so the agent re-delivers a changed
         # instruction in-band (see TmuxAgent.execute reused-pane branch).
         self.applied_system_prompt: str | None = None
+        # Stage 2 native-dialog watcher: a per-session background task that
+        # polls the pane for any actionable native dialog the existing
+        # drives don't handle (WebFetch consent, Bash consent, future
+        # per-tool dialogs) and bridges it to Telegram / Web UI via the
+        # InteractionCoordinator. Owned by ``TmuxSessionManager.spawn``,
+        # cancelled here in :meth:`teardown`.
+        self.dialog_watcher_task: asyncio.Task[None] | None = None
 
     # -- pane control --------------------------------------------------------
 
@@ -275,8 +506,34 @@ class TmuxClaudeSession:
         return "\n".join(out) if isinstance(out, list) else str(out)
 
     # Claude Code TUI is interactive once the composer hint line is drawn.
-    _READY_MARKERS = ("shift+tab to cycle", "for shortcuts", "esc to interrupt")
+    # Includes the bypass-mode footer ``⏵⏵ bypass permissions on`` so a tmux
+    # session spawned with ``--permission-mode bypassPermissions`` is
+    # detected as ready.
+    _READY_MARKERS = (
+        "shift+tab to cycle",
+        "for shortcuts",
+        "esc to interrupt",
+        "bypass permissions on",
+    )
     _TRUST_MARKERS = ("Do you trust the files", "trust the files in this folder")
+    # claude TUI shows a one-time consent dialog the first time the CLI runs
+    # in ``--permission-mode bypassPermissions``:
+    #
+    #     WARNING: Claude Code running in Bypass Permissions mode
+    #     ...
+    #     ❯ 1. No, exit
+    #       2. Yes, I accept
+    #
+    # claude remembers acceptance per-user-config, so subsequent sessions
+    # skip the dialog. The leashd tmux runtime opts into bypassPermissions
+    # so claude TUI's *native* per-tool gates (WebFetch domain consent,
+    # Bash command consent, …) stop rendering in-pane where leashd can't
+    # bridge them to Telegram — the PreToolUse hook + leashd policy is the
+    # sole permission authority. Auto-confirm the dialog by selecting row
+    # 2 (``2`` then Enter); a user attached to the pane sees the warning
+    # text before the auto-accept fires, so the bypass mode is never
+    # silently engaged.
+    _BYPASS_DIALOG_MARKERS = ("Yes, I accept", "Bypass Permissions mode")
 
     async def await_ready(self, timeout: float) -> bool:
         """Block until the Claude Code TUI can accept a prompt.
@@ -288,12 +545,29 @@ class TmuxClaudeSession:
         and the agent never starts — the exact failure observed.
         """
         deadline = time.monotonic() + timeout
+        bypass_handled = False
         while time.monotonic() < deadline:
             screen = self.capture()
             if any(m in screen for m in self._TRUST_MARKERS):
                 # Accept the trust prompt (default highlighted = proceed).
                 self.send_keys("Enter", literal=False)
                 await asyncio.sleep(0.6)
+                continue
+            if not bypass_handled and all(
+                m in screen for m in self._BYPASS_DIALOG_MARKERS
+            ):
+                # One-time bypass-permissions acceptance: pick row 2 then
+                # Enter. ``literal=True`` so libtmux treats the "2" as a
+                # literal keystroke into the dialog, not a tmux key name.
+                self.send_keys("2", literal=True)
+                await asyncio.sleep(0.3)
+                self.send_keys("Enter", literal=False)
+                logger.info(
+                    "tmux_bypass_permissions_accepted",
+                    tmux_name=self.tmux_name,
+                )
+                bypass_handled = True
+                await asyncio.sleep(1.5)
                 continue
             if any(m in screen for m in self._READY_MARKERS):
                 return True
@@ -397,6 +671,171 @@ class TmuxClaudeSession:
                 return True
         return answered
 
+    # Native AskUserQuestion selector — distinct from the binary permission
+    # prompt above: a numbered option list under a
+    # "Enter to select · ↑/↓ to navigate · Esc to cancel" footer. Unlike a
+    # hook `allow` for a normal tool, allow does NOT suppress this selector in
+    # the interactive TUI — claude renders it and blocks on a keystroke
+    # (verified claude 2.1.148; the headless `updatedInput.answers` contract is
+    # SDK-only). So leashd selects the human's already-collected answer in-pane.
+    _QUESTION_SELECTOR_MARKERS = ("Enter to select", "to navigate")
+    _QUESTION_ROW_RE = re.compile(r"^\s*(❯)?\s*(\d+)\.\s")
+    # claude 2.1.150 wraps a multi-question AskUserQuestion with a final
+    # "Review your answers" page: every individual selector lands the answer
+    # for that one question and auto-advances to the next tab, then the
+    # tabs-complete state renders a confirmation prompt:
+    #
+    #     ←  ☒ Q1  ☒ Q2  ☒ Q3  ✔ Submit  →
+    #     Review your answers
+    #     ...
+    #     Ready to submit your answers?
+    #     ❯ 1. Submit answers
+    #       2. Cancel
+    #
+    # This screen has its own selector — `Submit answers` is row 1 with the
+    # cursor already on it — but it lacks the per-question "Enter to select
+    # · ↑/↓ to navigate" footer, so :meth:`question_selector_present` misses
+    # it. Without a final Enter here the answered questions never reach the
+    # model and the turn hangs (verified live 2026-05-23). The signature is
+    # the literal "Submit answers" / "Cancel" pair next to a "Ready to
+    # submit" prompt.
+    _SUBMIT_REVIEW_MARKERS = ("Submit answers", "Cancel", "Ready to submit")
+
+    def question_selector_present(self, screen: str | None = None) -> bool:
+        s = self.capture() if screen is None else screen
+        return all(m in s for m in self._QUESTION_SELECTOR_MARKERS)
+
+    def submit_review_present(self, screen: str | None = None) -> bool:
+        """True iff claude has the multi-question submission confirmation
+        page on screen (the post-2.1.150 ``Submit answers``/``Cancel`` step
+        that follows the last per-question selector)."""
+        s = self.capture() if screen is None else screen
+        return all(m in s for m in self._SUBMIT_REVIEW_MARKERS)
+
+    async def answer_question_selector(
+        self, *, questions: list[Any], answers: dict[str, Any], timeout: float = 20.0
+    ) -> bool:
+        """Select the human's chosen option(s) in claude's AskUserQuestion
+        selector. claude renders one selector per question (sequentially); for
+        each, navigate from the highlighted row to the chosen option's row and
+        press Enter. Guarded so the PreToolUse + PermissionRequest double-fire
+        drives the pane only once. Screen-gated + idempotent like
+        ``answer_perm_selector`` — a no-op if the selector never renders."""
+        if self._question_drive_active:
+            return False
+        self._question_drive_active = True
+        try:
+            deadline = time.monotonic() + timeout
+            for q in questions:
+                if not isinstance(q, dict):
+                    continue
+                options = [
+                    o.get("label")
+                    for o in (q.get("options") or [])
+                    if isinstance(o, dict)
+                ]
+                chosen = answers.get(q.get("question", ""))
+                # Multi-select arrays / non-string answers are not a single-
+                # row pick — leave them (connectors return one label).
+                if not isinstance(chosen, str):
+                    continue
+                idx = self._match_option_row(chosen, options)
+                if idx is None:
+                    # A free-text reply (the user typed something instead of
+                    # tapping a button) or — historically — a label silently
+                    # mid-string truncated by Telegram's 64-byte callback_data
+                    # limit lands here. Log loudly so the next hang is one log
+                    # line away from diagnosis instead of a silent stall.
+                    logger.warning(
+                        "tmux_question_selector_no_match",
+                        tmux_name=self.tmux_name,
+                        chosen=chosen,
+                        options=options,
+                    )
+                    continue
+                if not await self._select_option_row(idx, deadline):
+                    return False
+            # claude 2.1.150+ adds a final ``Submit answers``/``Cancel``
+            # confirmation when AskUserQuestion carried >1 question — without
+            # the extra Enter the answered tabs never propagate to the model
+            # and the turn hangs (see :attr:`_SUBMIT_REVIEW_MARKERS`).
+            if len(questions) > 1:
+                await self._confirm_submit_review_if_present(deadline)
+            return True
+        finally:
+            self._question_drive_active = False
+
+    async def _confirm_submit_review_if_present(self, deadline: float) -> bool:
+        """Press Enter on claude's ``Ready to submit your answers?`` screen
+        if it appears within a few seconds of the last per-question selector
+        being dismissed. The cursor lands on ``1. Submit answers`` by default,
+        so a single Enter is enough — no navigation needed. Idempotent and
+        screen-gated, like the per-question drive."""
+        end = min(time.monotonic() + 4.0, deadline)
+        while time.monotonic() < end:
+            await asyncio.sleep(0.3)
+            screen = self.capture()
+            if self.submit_review_present(screen):
+                self.send_keys("Enter", literal=False)
+                logger.info(
+                    "tmux_question_submit_confirmed",
+                    tmux_name=self.tmux_name,
+                )
+                await asyncio.sleep(0.6)
+                return True
+        return False
+
+    @staticmethod
+    def _match_option_row(chosen: str, options: list[Any]) -> int | None:
+        """Match a chosen answer to an option index — exact first, then a
+        case-insensitive prefix (handles free-text replies that abbreviate the
+        option and legacy Telegram-truncated answers from before the
+        index-callback fix). Returns ``None`` on miss."""
+        if chosen in options:
+            return options.index(chosen)
+        chosen_lower = chosen.lower()
+        # Prefer the option that *starts with* the chosen text (typical
+        # truncation / abbreviation shape) before falling back to the chosen
+        # text containing the option (typed reply with extra context).
+        for i, opt in enumerate(options):
+            if isinstance(opt, str) and opt.lower().startswith(chosen_lower):
+                return i
+        for i, opt in enumerate(options):
+            if isinstance(opt, str) and chosen_lower.startswith(opt.lower()):
+                return i
+        return None
+
+    async def _select_option_row(self, target_idx: int, deadline: float) -> bool:
+        """Navigate the rendered selector to the agent option at ``target_idx``
+        (0-based; row 1 = first option) and press Enter."""
+        target = target_idx + 1
+        while time.monotonic() < deadline:
+            screen = self.capture()
+            if not self.question_selector_present(screen):
+                await asyncio.sleep(0.3)
+                continue
+            current = None
+            for line in screen.splitlines():
+                m = self._QUESTION_ROW_RE.match(line)
+                if m and m.group(1):  # the highlighted row carries ❯
+                    current = int(m.group(2))
+                    break
+            if current is None:
+                current = 1  # a freshly rendered selector highlights row 1
+            key = "Down" if target > current else "Up"
+            for _ in range(abs(target - current)):
+                self.send_keys(key, literal=False)
+                await asyncio.sleep(0.12)
+            self.send_keys("Enter", literal=False)
+            logger.info(
+                "tmux_question_selector_answered",
+                tmux_name=self.tmux_name,
+                row=target,
+            )
+            await asyncio.sleep(0.6)
+            return True
+        return False
+
     def begin_turn(
         self,
         *,
@@ -440,6 +879,11 @@ class TmuxClaudeSession:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self.jsonl_task
             self.jsonl_task = None
+        if self.dialog_watcher_task is not None:
+            self.dialog_watcher_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self.dialog_watcher_task
+            self.dialog_watcher_task = None
         if self._tmux_session is not None:
             try:
                 self._tmux_session.kill_session()
@@ -1033,6 +1477,20 @@ class TmuxSessionManager:
         )
         cs.jsonl_task = asyncio.create_task(tailer.run())
 
+        # Stage 2 belt-and-suspenders gate: a background watcher that
+        # polls the pane for any actionable native dialog the existing
+        # drives don't handle (WebFetch consent, Bash consent, future
+        # per-tool dialogs claude TUI might add) and bridges each one to
+        # Telegram / Web UI via the InteractionCoordinator. With Stage 1
+        # (``--permission-mode bypassPermissions``) most dialogs never
+        # render in the first place; the watcher is the safety net.
+        # Only start when safety collaborators are bound — without
+        # ``_interactions`` the bridge has no delivery target, and unit
+        # tests / sandbox spawns that never call ``bind_safety`` would
+        # otherwise leak a polling task per spawn.
+        if self.is_bound and self._interactions is not None:
+            cs.dialog_watcher_task = asyncio.create_task(self._dialog_watcher_loop(cs))
+
         logger.info(
             "tmux_session_spawned",
             session_id=session_id,
@@ -1078,8 +1536,8 @@ class TmuxSessionManager:
         waiting for the selector to render; idempotent and screen-gated inside
         :meth:`TmuxClaudeSession.answer_perm_selector` so a no-selector tool is
         a harmless no-op. ``allow``/``deny`` is read from the PreToolUse-shaped
-        envelope (a ``deny``-with-answer rewrite is still ``deny`` → Escape,
-        which is correct: the model already has the answer via the reason)."""
+        envelope. AskUserQuestion is routed to the question selector instead
+        (see :meth:`_spawn_selector_drive`)."""
         hso = hook_out.get("hookSpecificOutput", {})
         allow = hso.get("permissionDecision") == "allow"
 
@@ -1097,6 +1555,44 @@ class TmuxSessionManager:
         task = asyncio.create_task(_drive())
         self._perm_drive_tasks.add(task)
         task.add_done_callback(self._perm_drive_tasks.discard)
+
+    def _spawn_selector_drive(
+        self, cs: TmuxClaudeSession, tool_name: str, hook_out: dict[str, Any]
+    ) -> None:
+        """Drive claude's native in-pane selector to match leashd's decision.
+
+        AskUserQuestion renders a multi-option selector (not the binary Yes/No
+        permission prompt) that a hook ``allow`` does NOT suppress in the
+        interactive TUI — it blocks on a keystroke (verified claude 2.1.148).
+        When leashd holds the human's chosen option(s), drive the pane to
+        select them; every other tool keeps the binary allow→Enter / deny→Escape
+        drive. Fire-and-forget + screen-gated so a no-selector tool is a no-op.
+        """
+        hso = hook_out.get("hookSpecificOutput", {})
+        if tool_name == "AskUserQuestion" and hso.get("permissionDecision") == "allow":
+            ui = hso.get("updatedInput") or {}
+            answers = ui.get("answers")
+            questions = ui.get("questions")
+            if isinstance(answers, dict) and answers and isinstance(questions, list):
+
+                async def _drive_q() -> bool:
+                    try:
+                        return await cs.answer_question_selector(
+                            questions=questions, answers=answers
+                        )
+                    except Exception:
+                        logger.debug(
+                            "tmux_question_selector_drive_error",
+                            tmux_name=cs.tmux_name,
+                            exc_info=True,
+                        )
+                        return False
+
+                task = asyncio.create_task(_drive_q())
+                self._perm_drive_tasks.add(task)
+                task.add_done_callback(self._perm_drive_tasks.discard)
+                return
+        self._spawn_perm_selector_drive(cs, hook_out)
 
     async def on_pre_tool(self, body: dict[str, Any]) -> dict[str, Any]:
         """Bridge a synchronous ``PreToolUse`` hook into the gatekeeper.
@@ -1158,7 +1654,7 @@ class TmuxSessionManager:
         # forever otherwise (the reproduced wedge). Fire-and-forget so the
         # hook response is not delayed waiting for the selector to render.
         if cs is not None:
-            self._spawn_perm_selector_drive(cs, out)
+            self._spawn_selector_drive(cs, tool_name, out)
         return out
 
     async def _on_pre_tool_impl(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -1282,14 +1778,15 @@ class TmuxSessionManager:
 
             return _permission_to_hook(PermissionAllow(updated_input=tool_input))
 
-        if tool_name == "AskUserQuestion":
-            from leashd.agents.types import PermissionAllow
-
-            if isinstance(decision, PermissionAllow):
-                answered = _ask_user_question_to_hook(decision.updated_input)
-                if answered is not None:
-                    return answered
-
+        # AskUserQuestion needs no special-casing in the hook RESULT: a resolved
+        # answer is a PermissionAllow(updated_input={**tool_input, "answers":
+        # {...}}) → a plain allow carrying the answers. The interactive TUI
+        # ignores updatedInput.answers and renders its in-pane selector anyway
+        # (verified claude 2.1.148), so the answer is delivered by keystroke —
+        # _spawn_selector_drive navigates the selector to the chosen option.
+        # (The earlier deny+reason rewrite was worse: the PermissionRequest
+        # dedup in _hook_to_permreq strips the reason, so nothing reached the
+        # model and the pane hung.)
         return _permission_to_hook(decision)
 
     async def on_permission_request(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -1361,7 +1858,7 @@ class TmuxSessionManager:
                         tool_name=tool_name,
                     )
                     permreq = _hook_to_permreq(pre_out)
-                    self._spawn_perm_selector_drive(cs, pre_out)
+                    self._spawn_selector_drive(cs, tool_name, pre_out)
                     return permreq
                 # PreToolUse returned a non-final `defer`/`ask` (native-auto
                 # pass-through): the real decision MUST be made HERE via the
@@ -1456,6 +1953,181 @@ class TmuxSessionManager:
         elif event == "SessionEnd":
             cs.complete_turn()
 
+    # -- native dialog watcher (Stage 2 belt-and-suspenders gate) -----------
+
+    async def _dialog_watcher_loop(self, cs: TmuxClaudeSession) -> None:
+        """Background per-session poll loop. Detects native claude TUI
+        dialogs the existing drives don't handle, bridges each one to
+        Telegram / Web UI via :class:`InteractionCoordinator`, and drives
+        the user's chosen option back as a keystroke. Self-pruning when
+        the pane dies."""
+        seen_fingerprints: set[str] = set()
+        try:
+            while True:
+                await asyncio.sleep(_NATIVE_DIALOG_POLL_INTERVAL_S)
+                if cs.pane_is_dead():
+                    return
+                try:
+                    screen = cs.capture()
+                except Exception:
+                    # Pane reading races are common during teardown — drop
+                    # this cycle, the next captures will recover or the
+                    # pane_is_dead check above will exit the loop.
+                    logger.debug(
+                        "tmux_dialog_watcher_capture_error",
+                        session_id=cs.session_id,
+                        exc_info=True,
+                    )
+                    continue
+                match = _detect_native_dialog(screen)
+                if match is None:
+                    continue
+                if match.fingerprint in seen_fingerprints:
+                    # Same dialog still rendered (keystroke drive hasn't
+                    # dismissed it yet, or we already bridged it this turn).
+                    continue
+                seen_fingerprints.add(match.fingerprint)
+                logger.info(
+                    "tmux_native_dialog_detected",
+                    session_id=cs.session_id,
+                    tmux_name=cs.tmux_name,
+                    name=match.name,
+                    option_count=len(match.options),
+                    fingerprint=match.fingerprint,
+                )
+                # Bridge in a SEPARATE task — the bridge blocks on a human
+                # response (potentially minutes), and we want the poll
+                # loop to keep watching for OTHER dialogs in the meantime.
+                bridge_task = asyncio.create_task(self._bridge_native_dialog(cs, match))
+                # Keep a strong ref so the task isn't gc'd (asyncio only
+                # weak-refs tasks). Self-prunes via the done callback.
+                self._perm_drive_tasks.add(bridge_task)
+                bridge_task.add_done_callback(self._perm_drive_tasks.discard)
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.exception("tmux_dialog_watcher_loop_error", session_id=cs.session_id)
+
+    async def _bridge_native_dialog(
+        self, cs: TmuxClaudeSession, match: NativeDialogMatch
+    ) -> None:
+        """Route a detected native dialog through the InteractionCoordinator
+        (Telegram / Web UI), then drive the user's chosen option back via
+        keystroke. Fail-closed when no interaction coordinator is bound
+        (CLI-only deployment): press Escape to dismiss the dialog so the
+        pane never appears stuck.
+        """
+        if self._interactions is None:
+            # CLI mode without a connector: dismiss with Escape so the
+            # pane doesn't sit on the dialog forever. The PreToolUse hook
+            # (the leashd safety boundary) still runs on any subsequent
+            # tool retry, so we don't bypass the policy gate.
+            logger.warning(
+                "tmux_native_dialog_no_interactions_dismissed",
+                session_id=cs.session_id,
+                name=match.name,
+            )
+            with contextlib.suppress(Exception):
+                cs.send_keys("Escape", literal=False)
+            return
+
+        tool_input = {
+            _NATIVE_DIALOG_TOOL_INPUT_KEY: match.name,
+            "questions": [
+                {
+                    "question": match.question,
+                    "header": match.header,
+                    "multiSelect": False,
+                    "options": match.options,
+                }
+            ],
+        }
+        try:
+            result = await self._interactions.handle_question(
+                cs.chat_id,
+                tool_input,
+                user_id=cs.user_id,
+                session_id=cs.session_id,
+            )
+        except Exception:
+            logger.exception(
+                "tmux_native_dialog_bridge_error",
+                session_id=cs.session_id,
+                name=match.name,
+            )
+            return
+
+        # Locate the chosen label among the option list to recover the
+        # 1-based row to drive in the pane.
+        from leashd.agents.types import PermissionAllow
+
+        chosen_label: str | None = None
+        if isinstance(result, PermissionAllow):
+            answers = (
+                result.updated_input.get("answers") if result.updated_input else None
+            )
+            if isinstance(answers, dict):
+                chosen_label = answers.get(match.question)
+                if not isinstance(chosen_label, str):
+                    chosen_label = None
+        if chosen_label is None:
+            # No answer (timeout / deny). Best we can do is dismiss the
+            # dialog so the pane isn't stuck — claude TUI's Escape on
+            # most permission dialogs maps to "No / cancel".
+            logger.warning(
+                "tmux_native_dialog_no_answer_dismissed",
+                session_id=cs.session_id,
+                name=match.name,
+            )
+            with contextlib.suppress(Exception):
+                cs.send_keys("Escape", literal=False)
+            return
+
+        chosen_idx = next(
+            (
+                i
+                for i, opt in enumerate(match.options)
+                if opt.get("label") == chosen_label
+            ),
+            None,
+        )
+        if chosen_idx is None:
+            logger.warning(
+                "tmux_native_dialog_unknown_choice",
+                session_id=cs.session_id,
+                name=match.name,
+                chosen=chosen_label,
+                options=[o.get("label") for o in match.options],
+            )
+            with contextlib.suppress(Exception):
+                cs.send_keys("Escape", literal=False)
+            return
+
+        # claude TUI numbered-option dialogs accept the row digit (1-based)
+        # as a one-keystroke pick, then Enter to confirm. Send both — the
+        # row digit also moves the highlight if Enter alone wouldn't pick
+        # the right row.
+        row_digit = str(chosen_idx + 1)
+        try:
+            cs.send_keys(row_digit, literal=True)
+            await asyncio.sleep(0.2)
+            cs.send_keys("Enter", literal=False)
+        except Exception:
+            logger.exception(
+                "tmux_native_dialog_drive_error",
+                session_id=cs.session_id,
+                name=match.name,
+            )
+            return
+
+        logger.info(
+            "tmux_native_dialog_bridged",
+            session_id=cs.session_id,
+            tmux_name=cs.tmux_name,
+            name=match.name,
+            chosen_row=chosen_idx + 1,
+        )
+
     # -- JSONL dispatch (called by JSONLTailer) ------------------------------
 
     async def _dispatch_jsonl_event(
@@ -1491,6 +2163,11 @@ class TmuxSessionManager:
     async def _process_blocks(turn: TmuxTurn | None, blocks: list[Any]) -> None:
         if turn is None:
             return
+        # New assistant content after a deferred completion = the follow-up's
+        # response has started; re-arm the per-response dedup so its own
+        # completion signal is counted (and not mistaken for the prior pair).
+        if turn._completion_seen_this_response:
+            turn._completion_seen_this_response = False
         for block in blocks:
             if not isinstance(block, dict):
                 continue
@@ -1653,18 +2330,19 @@ def _hook_to_permreq(hook_out: dict[str, Any]) -> dict[str, Any]:
     PermissionRequest hook without a second safety evaluation.
 
     PreToolUse ``allow``/``deny`` map to PermissionRequest
-    ``allow``/``deny``. A PreToolUse ``deny`` whose reason carries an
-    out-of-band answer (the AskUserQuestion / native-prompt rewrite) is still
-    a ``deny`` here — the model already received the answer via the
-    PreToolUse reason; PermissionRequest only needs the binary behavior.
+    ``allow``/``deny``. PermissionRequest is binary-only on this dedup
+    path — we do NOT echo back ``updatedInput``. PreToolUse already
+    delivered any rewrite (AskUserQuestion ``answers`` dict, Bash command
+    transform, …) to claude TUI; re-delivering the same ``updatedInput``
+    via the PermissionRequest dedup made claude TUI 2.1.150 process the
+    AskUserQuestion ``answers`` twice and stop the turn after the second
+    delivery (``num_turns=0``, ``cost_usd=0.0``, no follow-up tool calls
+    — the failure mode observed on Telegram-answered ``/web``).
     """
     hso = hook_out.get("hookSpecificOutput", {})
     decision = hso.get("permissionDecision")
     if decision == "allow":
-        updated = hso.get("updatedInput")
-        return _permreq_decision(
-            "allow", updated_input=updated if isinstance(updated, dict) else None
-        )
+        return _permreq_decision("allow")
     # deny / ask / defer / anything non-allow → fail closed to deny (the
     # PreToolUse path is authoritative; PermissionRequest must not re-open it).
     return _permreq_decision("deny")
@@ -1718,37 +2396,6 @@ def _permission_to_permreq(result: Any) -> dict[str, Any]:
     # PlanReviewDecision / unknown — fail closed (not reachable under auto:
     # plan review only occurs in plan mode, never on a native-auto raise).
     return _permreq_decision("deny")
-
-
-def _ask_user_question_to_hook(updated_input: dict[str, Any]) -> dict[str, Any] | None:
-    """Convert a resolved ``AskUserQuestion`` into a PreToolUse *deny* whose
-    reason carries the out-of-band answer.
-
-    ``InteractionCoordinator.handle_question`` returns
-    ``PermissionAllow(updated_input={**tool_input, "answers": {q: a}})`` — the
-    *headless SDK* contract, where the SDK consumes ``updated_input`` as the
-    tool result. Interactive claude (the tmux pane) has no such channel: a
-    hook ``allow`` makes it run ``AskUserQuestion`` *natively*, rendering its
-    own selector in the pane and blocking forever on an in-terminal keyboard
-    selection leashd already collected over the connector (the observed
-    ``question_completed``-then-hang). A PreToolUse ``deny`` instead cancels
-    the native tool and feeds ``permissionDecisionReason`` back to the model,
-    which reads the answer and continues — verified against interactive
-    ``claude`` 2.1.143. Returns ``None`` when there is no answer to deliver
-    (e.g. empty ``questions``) so the caller falls back to the normal mapping.
-    """
-    answers = updated_input.get("answers")
-    if not isinstance(answers, dict) or not answers:
-        return None
-    lines = [
-        "The user already answered this via leashd (out of band). Do NOT "
-        "call AskUserQuestion again or wait for an in-terminal selection — "
-        "treat the following as the answer and continue immediately:",
-        "",
-    ]
-    for question, answer in answers.items():
-        lines.append(f"- {question}\n  → {answer}")
-    return _hook_decision("deny", "\n".join(lines))
 
 
 # ---------------------------------------------------------------------------

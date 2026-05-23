@@ -1808,7 +1808,12 @@ class TestSendQuestion:
         )
         assert connector._question_message_ids["123"] == "88"
 
-    async def test_callback_data_truncated_to_64_bytes(self, connector):
+    async def test_callback_data_uses_index_not_label(self, connector):
+        """The button payload encodes the option *index* (``#0`` / ``#1`` …),
+        not the label — so even an arbitrarily long or multibyte label produces
+        a tiny callback. The full label still flows on the visible button.
+        Pre-fix behaviour embedded the label and silently truncated it at
+        Telegram's 64-byte ceiling, which caused the tmux selector hang."""
         mock_app = _make_mock_app()
         mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=99))
         connector._app = mock_app
@@ -1818,7 +1823,29 @@ class TestSendQuestion:
         call_args = mock_app.bot.send_message.call_args
         markup = call_args.kwargs.get("reply_markup", call_args[1].get("reply_markup"))
         btn = markup.inline_keyboard[0][0]
+        assert btn.callback_data == "interact:q-3:#0"
         assert len(btn.callback_data.encode()) <= 64
+        assert btn.text == long_label
+
+    async def test_callback_data_indexes_all_options(self, connector):
+        """Every option's callback carries its own ``#<idx>`` so the
+        coordinator can map a tap back to the exact option that was chosen
+        independent of label content."""
+        mock_app = _make_mock_app()
+        mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=99))
+        connector._app = mock_app
+
+        await connector.send_question(
+            "123",
+            "q-6",
+            "Pick",
+            "",
+            [{"label": "Alpha"}, {"label": "Beta"}, {"label": "Gamma"}],
+        )
+        call_args = mock_app.bot.send_message.call_args
+        markup = call_args.kwargs.get("reply_markup", call_args[1].get("reply_markup"))
+        cbs = [row[0].callback_data for row in markup.inline_keyboard]
+        assert cbs == ["interact:q-6:#0", "interact:q-6:#1", "interact:q-6:#2"]
 
     async def test_header_prepended_to_question_text(self, connector):
         mock_app = _make_mock_app()
@@ -1845,9 +1872,9 @@ class TestSendQuestion:
         markup = call_args.kwargs.get("reply_markup", call_args[1].get("reply_markup"))
         btn = markup.inline_keyboard[0][0]
         data = btn.callback_data
+        assert data == "interact:q-5:#0"
         assert len(data.encode()) <= 64
-        # Ensure it's still valid UTF-8 (decode would raise on invalid)
-        data.encode().decode()
+        assert btn.text == cjk_label
 
 
 # --- B4: Plan review interaction callbacks ---
@@ -2227,6 +2254,19 @@ class TestCallbackEdgeCases:
         await connector._on_callback_query(update, MagicMock())
         edited = update.callback_query.edit_message_text.call_args[0][0]
         assert "Expired" in edited
+
+    async def test_interaction_callback_passes_index_sigil_to_resolver(self, connector):
+        """The button payload is now ``#<idx>``; the connector hands it to the
+        resolver verbatim — the InteractionCoordinator owns the index→label
+        translation (so the connector stays oblivious to option content)."""
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        resolver = AsyncMock(return_value=True)
+        connector.set_interaction_resolver(resolver)
+
+        update = _make_callback_update("interact:int-7:#2")
+        await connector._on_callback_query(update, MagicMock())
+        resolver.assert_awaited_once_with("int-7", "#2")
 
 
 class TestDirCallback:

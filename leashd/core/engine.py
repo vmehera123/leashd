@@ -399,7 +399,15 @@ class _StreamingResponder:
         tail = source[offset:] if offset < len(source) else source
 
         summary = self._build_tools_summary()
-        if summary:
+        if summary and not tail.rstrip().endswith(summary):
+            # The tmux runtime appends an identical ``🧰 …`` footer to its
+            # ``assembled_text`` (so a non-streaming send_message fallback also
+            # carries the summary). When ``final_text`` is that already-
+            # footered string, the buffer-vs-final_text branch above selects
+            # it as the source — appending the engine's own summary here
+            # produces the doubled ``🧰 Bash x2, Read x3, AskUserQuestion``
+            # the user sees on Telegram. Skip the append when the source
+            # already ends with the same line.
             tail = tail + "\n\n" + summary
 
         try:
@@ -742,6 +750,23 @@ class Engine:
         except Exception:
             logger.exception("config_reload_failed")
 
+    async def _send_transient_notice(self, chat_id: str, text: str) -> None:
+        """Send a short auto-clearing status notice to the originating client.
+
+        Connector-agnostic: ``MultiConnector`` routes by ``chat_id`` so the
+        notice lands on whichever connector (Web UI / Telegram) sent the
+        message. Falls back to a plain message if the client can't return an id.
+        """
+        if not self.connector:
+            return
+        msg_id = await self.connector.send_message_with_id(chat_id, text)
+        if msg_id:
+            self.connector.schedule_message_cleanup(
+                chat_id, msg_id, delay=_TRANSIENT_MESSAGE_DELAY
+            )
+        else:
+            await self.connector.send_message(chat_id, text)
+
     async def handle_message(
         self,
         user_id: str,
@@ -778,6 +803,46 @@ class Engine:
                 return ""
 
         if chat_id in self._executing_chats:
+            await self.event_bus.emit(
+                Event(
+                    name=MESSAGE_QUEUED,
+                    data={"user_id": user_id, "text": text, "chat_id": chat_id},
+                )
+            )
+
+            # Live runtimes (tmux): type the follow-up straight into the running
+            # agent so it queues natively and is auto-picked-up next, merged into
+            # the current turn — same experience as typing into the claude TUI.
+            caps = getattr(self.agent, "capabilities", None)
+            live = bool(getattr(caps, "accepts_input_while_busy", False))
+            session_id = self._executing_sessions.get(chat_id)
+            if live and session_id and hasattr(self.agent, "inject_followup"):
+                injected = await self.agent.inject_followup(
+                    session_id, text, attachments
+                )
+                if injected:
+                    logger.info(
+                        "message_injected_live",
+                        user_id=user_id,
+                        chat_id=chat_id,
+                    )
+                    # No engine queue / re-submit: the running turn absorbs it.
+                    # Log the user message ourselves (the skipped _execute_turn
+                    # would otherwise have done so).
+                    await self._message_logger.log(
+                        user_id=user_id,
+                        chat_id=chat_id,
+                        role="user",
+                        content=text,
+                    )
+                    await self._send_transient_notice(
+                        chat_id,
+                        "⏳ Queued — Claude will pick it up after the current step.",
+                    )
+                    return ""
+
+            # Fallback: no live turn to attach to, or a non-live runtime →
+            # queue for re-submission after the current turn completes.
             self._pending_messages.setdefault(chat_id, []).append(
                 (user_id, text, attachments)
             )
@@ -787,13 +852,9 @@ class Engine:
                 chat_id=chat_id,
                 queue_depth=len(self._pending_messages[chat_id]),
             )
-            await self.event_bus.emit(
-                Event(
-                    name=MESSAGE_QUEUED,
-                    data={"user_id": user_id, "text": text, "chat_id": chat_id},
-                )
-            )
-            if self.connector and chat_id not in self._pending_interrupts:
+            if live:
+                await self._send_transient_notice(chat_id, "⏳ Queued — will run next.")
+            elif self.connector and chat_id not in self._pending_interrupts:
                 interrupt_id = uuid.uuid4().hex[:12]
                 msg_id = await self.connector.send_interrupt_prompt(
                     chat_id, interrupt_id, text

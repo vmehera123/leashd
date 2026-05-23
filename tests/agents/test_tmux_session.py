@@ -349,7 +349,11 @@ async def test_dispatch_jsonl_marks_activity(cfg):
     assert turn.last_activity > 0.0
 
 
-async def test_on_pre_tool_ask_user_question_delegates(cfg):
+async def test_on_pre_tool_ask_user_question_allows_with_answers(cfg):
+    """A resolved AskUserQuestion maps to allow + updatedInput.answers — the
+    documented contract where claude consumes the pre-filled answers and skips
+    its in-pane selector. The earlier deny+reason rewrite hung under the
+    PermissionRequest dedup, which strips the answer-bearing reason."""
     tsm = TmuxSessionManager(cfg)
     cs = _session(tsm)
     tsm._by_uuid["u1"] = cs.session_id
@@ -361,7 +365,7 @@ async def test_on_pre_tool_ask_user_question_delegates(cfg):
     async def _hq(chat_id, tool_input, *, user_id=None, session_id=None):
         seen["user_id"] = user_id
         return PermissionAllow(
-            updated_input={"answers": {"Which DB?": "Postgres (managed)"}}
+            updated_input={**tool_input, "answers": {"Which DB?": "Postgres (managed)"}}
         )
 
     interactions.handle_question = _hq
@@ -374,27 +378,19 @@ async def test_on_pre_tool_ask_user_question_delegates(cfg):
             "session_id": "u1",
             "cwd": "/work",
             "tool_name": "AskUserQuestion",
-            "tool_input": {"questions": []},
+            "tool_input": {"questions": [{"question": "Which DB?"}]},
         }
     )
     hso = out["hookSpecificOutput"]
-    # A resolved question must become a *deny* carrying the answer — an
-    # "allow" would make interactive claude render its own selector in the
-    # pane and hang on a keyboard selection leashd already collected.
-    assert hso["permissionDecision"] == "deny"
-    assert "updatedInput" not in hso
-    reason = hso["permissionDecisionReason"]
-    assert "Which DB?" in reason
-    assert "Postgres (managed)" in reason
-    assert "AskUserQuestion" in reason  # instructs the model not to re-ask
-    # GAP 5: user_id is now threaded through for interaction-audit attribution.
+    assert hso["permissionDecision"] == "allow"
+    assert hso["updatedInput"]["answers"] == {"Which DB?": "Postgres (managed)"}
+    # user_id is threaded through for interaction-audit attribution.
     assert seen["user_id"] == cs.user_id
 
 
 async def test_on_pre_tool_ask_user_question_no_answers_falls_back(cfg):
     """Empty ``questions`` → ``handle_question`` returns an allow with no
-    ``answers`` payload; nothing to inject, so the normal allow mapping
-    stands (the deny-with-answer rewrite must not fire)."""
+    ``answers`` payload, which maps to a plain allow (no answers to deliver)."""
     tsm = TmuxSessionManager(cfg)
     cs = _session(tsm)
     tsm._by_uuid["u1"] = cs.session_id
@@ -828,6 +824,66 @@ def test_build_agent_cli_args_runtime_parity(cfg, tmp_path):
     assert any(t.startswith("mcp__playwright__") for t in dh)
 
 
+def test_build_agent_cli_args_web_mode_disallows_webfetch(cfg, tmp_path):
+    """`/web` mode forbids the built-in ``WebFetch``/``WebSearch`` so all
+    browser/fetch activity routes through ``Bash agent-browser …`` (which
+    leashd gates and bridges to Telegram). Without this, claude TUI 2.1.150
+    picks ``WebFetch`` for research and hits its own per-domain consent
+    prompt inside the pane — a prompt leashd can't bridge."""
+    from types import SimpleNamespace
+
+    from leashd.agents.runtimes._helpers import build_agent_cli_args
+
+    web_session = SimpleNamespace(
+        mode="web",
+        task_run_id=None,
+        workspace_directories=[],
+        working_directory=str(tmp_path),
+        mode_instruction="WEB MODE",
+        session_id="s",
+        chat_id="web:c1",
+        user_id="u1",
+    )
+    args = build_agent_cli_args(
+        config=cfg,
+        session=web_session,
+        settings=None,
+        perm_mode="acceptEdits",
+        model="claude-x",
+        append_system_prompt="SYS",
+        resume_token=None,
+        interactive=True,
+    )
+    disallowed = args[args.index("--disallowedTools") + 1].split(",")
+    assert "WebFetch" in disallowed
+    assert "WebSearch" in disallowed
+
+    # Non-web sessions are unaffected — those built-ins remain available.
+    non_web_session = SimpleNamespace(
+        mode="default",
+        task_run_id=None,
+        workspace_directories=[],
+        working_directory=str(tmp_path),
+        mode_instruction=None,
+        session_id="s",
+        chat_id="c1",
+        user_id="u1",
+    )
+    args = build_agent_cli_args(
+        config=cfg,
+        session=non_web_session,
+        settings=None,
+        perm_mode="acceptEdits",
+        model="claude-x",
+        append_system_prompt="SYS",
+        resume_token=None,
+        interactive=True,
+    )
+    disallowed = args[args.index("--disallowedTools") + 1].split(",")
+    assert "WebFetch" not in disallowed
+    assert "WebSearch" not in disallowed
+
+
 def test_build_claude_command_has_parity_flags(cfg, tmp_path):
     tsm = TmuxSessionManager(cfg)
     tsm._claude_path = "/usr/bin/claude"
@@ -903,6 +959,49 @@ async def test_await_ready_times_out_on_stuck_splash(cfg, no_real_sleep):
     cs = _session(tsm)
     cs.attach(object(), _FakePane(["▐▛███▜▌  Claude Code v2.1.143\n(booting)"]))
     assert await cs.await_ready(timeout=0.5) is False
+
+
+async def test_await_ready_accepts_bypass_permissions_dialog(cfg, no_real_sleep):
+    """One-time ``Bypass Permissions mode`` startup dialog: drive ``2`` +
+    Enter to accept (the second row, ``Yes, I accept``). Required when
+    leashd spawns a tmux ``claude`` with ``--permission-mode
+    bypassPermissions`` and the user hasn't accepted before on this
+    config — without auto-confirming, the agent would sit on the
+    dialog forever and the first user prompt would land in the wrong
+    composer state."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    pane = _FakePane(
+        [
+            (
+                "WARNING: Claude Code running in Bypass Permissions mode\n"
+                "...\n"
+                " ❯ 1. No, exit\n"
+                "   2. Yes, I accept\n"
+                " Enter to confirm · Esc to cancel"
+            ),
+            # After acceptance the composer renders with the bypass footer.
+            "⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents",
+        ]
+    )
+    cs.attach(object(), pane)
+    assert await cs.await_ready(timeout=5.0) is True
+    # The accept sequence is "2" (literal) then Enter (named key).
+    assert ("2", True) in pane.sent
+    assert ("Enter", False) in pane.sent
+
+
+async def test_await_ready_recognizes_bypass_footer_as_ready(cfg, no_real_sleep):
+    """``bypass permissions on`` is the bypass-mode footer marker; it must
+    count as composer-ready alongside ``? for shortcuts`` / ``shift+tab
+    to cycle``."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    cs.attach(
+        object(),
+        _FakePane(["⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"]),
+    )
+    assert await cs.await_ready(timeout=5.0) is True
 
 
 async def test_submit_pastes_then_enters_until_started(cfg, no_real_sleep):
@@ -1510,12 +1609,21 @@ def test_hook_is_decisive_only_for_final_allow_deny():
 
 
 def test_hook_to_permreq_maps_allow_and_fails_closed():
+    """The PermissionRequest dedup is *binary only* — it never carries
+    ``updatedInput``. PreToolUse is the authoritative delivery channel for
+    any rewrite (AskUserQuestion ``answers`` dict, Bash command transform,
+    …); re-delivering it via the PermissionRequest dedup made claude TUI
+    2.1.150 process AskUserQuestion answers twice and stop the turn after
+    the second delivery (the Telegram-answered ``/web`` failure mode)."""
     allow = _hook_decision("allow", "ok")
     allow["hookSpecificOutput"]["updatedInput"] = {"command": "ls"}
     out = _hook_to_permreq(allow)
     assert out["hookSpecificOutput"]["hookEventName"] == "PermissionRequest"
     assert out["hookSpecificOutput"]["decision"]["behavior"] == "allow"
-    assert out["hookSpecificOutput"]["decision"]["updatedInput"] == {"command": "ls"}
+    # No updatedInput in the dedup — claude TUI must consume any rewrite
+    # from PreToolUse alone (or, for AskUserQuestion, from leashd's
+    # keystroke drive).
+    assert "updatedInput" not in out["hookSpecificOutput"]["decision"]
     # deny / non-allow → fail closed to deny (PreToolUse is authoritative).
     assert (
         _hook_to_permreq(_hook_decision("deny", "x"))["hookSpecificOutput"]["decision"][
@@ -1523,10 +1631,10 @@ def test_hook_to_permreq_maps_allow_and_fails_closed():
         ]
         == "deny"
     )
-    # An AskUserQuestion deny-with-answer rewrite is still a binary deny here
-    # (the model already got the answer via the PreToolUse reason).
+    # A deny carrying any reason still maps to a bare deny — PermissionRequest
+    # has no reason channel, so only the binary behavior survives.
     assert (
-        _hook_to_permreq(_hook_decision("deny", "answer: Postgres"))[
+        _hook_to_permreq(_hook_decision("deny", "blocked by policy"))[
             "hookSpecificOutput"
         ]["decision"]["behavior"]
         == "deny"
@@ -1734,6 +1842,575 @@ async def test_teardown_resolves_inflight_decision_futures(cfg):
     assert cs.inflight_decisions == {}
 
 
+async def test_permission_request_dedupes_askuserquestion_to_binary_allow(cfg):
+    """The PreToolUse + PermissionRequest double-fire for AskUserQuestion:
+    PreToolUse carries the answer in ``updatedInput.answers`` (the
+    authoritative delivery), and the PermissionRequest dedup is BINARY ONLY
+    — no ``updatedInput`` echo. Re-delivering the answer in the dedup made
+    claude TUI 2.1.150 process it twice and stop the turn after the second
+    delivery (`num_turns=0`, `cost_usd=0.0` — the Telegram /web failure)."""
+    import asyncio
+
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    tsm._by_uuid["u1"] = cs.session_id
+    cs.begin_turn(on_text_chunk=None, on_tool_activity=None)
+
+    interactions = MagicMock()
+    calls = []
+
+    async def _hq(chat_id, tool_input, *, user_id=None, session_id=None):
+        calls.append(chat_id)
+        return PermissionAllow(
+            updated_input={**tool_input, "answers": {"Run probe?": "Yes, run it"}}
+        )
+
+    interactions.handle_question = _hq
+    _bind(tsm, _StubGatekeeper(PermissionDeny(message="unused")), interactions)
+
+    body = {
+        "session_id": "u1",
+        "cwd": "/work",
+        "tool_name": "AskUserQuestion",
+        "tool_input": {"questions": [{"question": "Run probe?"}]},
+    }
+    pre = await tsm.on_pre_tool(body)
+    assert pre["hookSpecificOutput"]["permissionDecision"] == "allow"
+    # PreToolUse is the authoritative answer-delivery channel.
+    assert pre["hookSpecificOutput"]["updatedInput"]["answers"] == {
+        "Run probe?": "Yes, run it"
+    }
+
+    permreq = await tsm.on_permission_request(dict(body))
+    hso = permreq["hookSpecificOutput"]
+    assert hso["hookEventName"] == "PermissionRequest"
+    assert hso["decision"]["behavior"] == "allow"
+    # PermissionRequest dedup is binary-only — no updatedInput re-delivery.
+    assert "updatedInput" not in hso["decision"]
+    assert len(calls) == 1, "the question must be asked once, not re-prompted"
+    for t in list(tsm._perm_drive_tasks):
+        with __import__("contextlib").suppress(Exception):
+            await asyncio.wait_for(t, timeout=2)
+
+
+async def test_on_pre_tool_ask_user_question_no_answer_denies(cfg):
+    """No answer (timeout / declined) → ``handle_question`` returns a deny,
+    which maps to a plain deny on both hooks (fail-closed, nothing to deliver)."""
+    import asyncio
+
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    tsm._by_uuid["u1"] = cs.session_id
+    cs.begin_turn(on_text_chunk=None, on_tool_activity=None)
+
+    interactions = MagicMock()
+
+    async def _hq(chat_id, tool_input, *, user_id=None, session_id=None):
+        return PermissionDeny(message="No answer received")
+
+    interactions.handle_question = _hq
+    _bind(tsm, _StubGatekeeper(PermissionAllow(updated_input={})), interactions)
+
+    body = {
+        "session_id": "u1",
+        "cwd": "/work",
+        "tool_name": "AskUserQuestion",
+        "tool_input": {"questions": [{"question": "x"}]},
+    }
+    pre = await tsm.on_pre_tool(body)
+    assert pre["hookSpecificOutput"]["permissionDecision"] == "deny"
+    permreq = await tsm.on_permission_request(dict(body))
+    assert permreq["hookSpecificOutput"]["decision"]["behavior"] == "deny"
+    for t in list(tsm._perm_drive_tasks):
+        with __import__("contextlib").suppress(Exception):
+            await asyncio.wait_for(t, timeout=2)
+
+
+async def test_on_pre_tool_ask_user_question_multiselect_array_survives(cfg):
+    """Multi-select answers (arrays) pass through ``updatedInput`` verbatim
+    on the PreToolUse hook (the authoritative delivery). PermissionRequest
+    dedup is binary-only — no ``updatedInput`` echo."""
+    import asyncio
+
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    tsm._by_uuid["u1"] = cs.session_id
+    cs.begin_turn(on_text_chunk=None, on_tool_activity=None)
+
+    interactions = MagicMock()
+
+    async def _hq(chat_id, tool_input, *, user_id=None, session_id=None):
+        return PermissionAllow(
+            updated_input={**tool_input, "answers": {"Pick langs": ["Python", "Go"]}}
+        )
+
+    interactions.handle_question = _hq
+    _bind(tsm, _StubGatekeeper(PermissionDeny(message="unused")), interactions)
+
+    body = {
+        "session_id": "u1",
+        "cwd": "/work",
+        "tool_name": "AskUserQuestion",
+        "tool_input": {"questions": [{"question": "Pick langs"}]},
+    }
+    pre = await tsm.on_pre_tool(body)
+    assert pre["hookSpecificOutput"]["updatedInput"]["answers"]["Pick langs"] == [
+        "Python",
+        "Go",
+    ]
+    permreq = await tsm.on_permission_request(dict(body))
+    # PermissionRequest dedup is binary-only — no updatedInput re-delivery
+    # (which made claude TUI 2.1.150 process the answer twice and stop).
+    assert permreq["hookSpecificOutput"]["decision"]["behavior"] == "allow"
+    assert "updatedInput" not in permreq["hookSpecificOutput"]["decision"]
+    for t in list(tsm._perm_drive_tasks):
+        with __import__("contextlib").suppress(Exception):
+            await asyncio.wait_for(t, timeout=2)
+
+
+_AUQ_SELECTOR = (
+    " Which database should I use?\n"
+    " ❯ 1. Postgres\n"
+    "      Use PostgreSQL.\n"
+    "   2. MySQL\n"
+    "      Use MySQL.\n"
+    "   3. Type something.\n"
+    "   4. Chat about this\n"
+    " Enter to select · ↑/↓ to navigate · Esc to cancel"
+)
+_AUQ_QUESTION = {
+    "question": "Which database should I use?",
+    "options": [{"label": "Postgres"}, {"label": "MySQL"}],
+}
+
+
+async def test_answer_question_selector_navigates_to_chosen_option(cfg, no_real_sleep):
+    """The real-TUI fix: claude renders its in-pane AskUserQuestion selector
+    (allow does NOT suppress it on 2.1.148), so leashd navigates from the
+    highlighted row to the chosen option and presses Enter."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    cs.attach(object(), _FakePane([_AUQ_SELECTOR]))
+    ok = await cs.answer_question_selector(
+        questions=[_AUQ_QUESTION],
+        answers={"Which database should I use?": "MySQL"},
+        timeout=5.0,
+    )
+    assert ok is True
+    # row 1 (Postgres, highlighted) -> row 2 (MySQL): exactly one Down, then Enter
+    assert cs._pane.sent.count(("Down", False)) == 1
+    assert cs._pane.sent.count(("Up", False)) == 0
+    assert cs._pane.sent[-1] == ("Enter", False)
+
+
+async def test_answer_question_selector_first_option_enters_immediately(
+    cfg, no_real_sleep
+):
+    """Chosen == the already-highlighted first option → Enter, no navigation."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    cs.attach(object(), _FakePane([_AUQ_SELECTOR]))
+    ok = await cs.answer_question_selector(
+        questions=[_AUQ_QUESTION],
+        answers={"Which database should I use?": "Postgres"},
+        timeout=5.0,
+    )
+    assert ok is True
+    assert cs._pane.sent == [("Enter", False)]
+
+
+async def test_answer_question_selector_guard_blocks_concurrent_drive(cfg):
+    """The PreToolUse + PermissionRequest double-fire must drive the pane once:
+    a second concurrent call bails (the first owns the flag)."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    cs.attach(object(), _FakePane([_AUQ_SELECTOR]))
+    cs._question_drive_active = True  # simulate a drive already in flight
+    ok = await cs.answer_question_selector(
+        questions=[_AUQ_QUESTION],
+        answers={"Which database should I use?": "Postgres"},
+        timeout=5.0,
+    )
+    assert ok is False
+    assert cs._pane.sent == []  # no keystrokes from the second drive
+
+
+async def test_answer_question_selector_noop_without_selector(cfg, no_real_sleep):
+    """Screen-gated: if the selector never renders, the drive presses nothing."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    cs.attach(object(), _FakePane(["⏺ Done\n ⏵⏵ accept edits on"]))
+    ok = await cs.answer_question_selector(
+        questions=[_AUQ_QUESTION],
+        answers={"Which database should I use?": "Postgres"},
+        timeout=0.2,
+    )
+    assert ok is False
+    assert cs._pane.sent == []
+
+
+async def test_answer_question_selector_prefix_match_fallback(cfg, no_real_sleep):
+    """A legacy Telegram-truncated answer (the answer is a prefix of an
+    option, e.g. ``'Deep-dive on top 2'`` for option ``'Deep-dive on top 2
+    candidates'``) still resolves to the right row instead of silently hanging
+    the pane. Defence in depth — the index-callback fix is the structural fix;
+    this guards against any future answer/label mismatch."""
+    selector = (
+        " Pick:\n"
+        " ❯ 1. Quick skim\n"
+        "      Fast.\n"
+        "   2. Deep-dive on top 2 candidates\n"
+        "      Thorough.\n"
+        " Enter to select · ↑/↓ to navigate · Esc to cancel"
+    )
+    question = {
+        "question": "Pick:",
+        "options": [
+            {"label": "Quick skim"},
+            {"label": "Deep-dive on top 2 candidates"},
+        ],
+    }
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    cs.attach(object(), _FakePane([selector]))
+    ok = await cs.answer_question_selector(
+        questions=[question],
+        answers={"Pick:": "Deep-dive on top 2"},  # the Telegram-truncated form
+        timeout=5.0,
+    )
+    assert ok is True
+    # row 1 (Quick skim, highlighted) -> row 2 (the Deep-dive option): exactly
+    # one Down, then Enter — proves the prefix match found the right row.
+    assert cs._pane.sent.count(("Down", False)) == 1
+    assert cs._pane.sent[-1] == ("Enter", False)
+
+
+_SUBMIT_REVIEW_SCREEN = (
+    "←  ☒ Research focus  ☒ Format  ☒ Filename  ✔ Submit  →\n"
+    "\n"
+    "Review your answers\n"
+    "\n"
+    " ● What should the research focus on?\n"
+    "   → Top 2 of each — clusters AND companies\n"
+    " ● Output format?\n"
+    "   → Prose + tables\n"
+    " ● Filename?\n"
+    "   → devon-outreach-research.md\n"
+    "\n"
+    "Ready to submit your answers?\n"
+    "\n"
+    "❯ 1. Submit answers\n"
+    "  2. Cancel"
+)
+# Two-question selector — the first one — and then the post-last-question
+# submit review screen. ``_FakePane`` replays these screens in sequence as
+# the drive captures repeatedly.
+_AUQ_SELECTOR_Q1 = (
+    " Which database should I use?\n"
+    " ❯ 1. Postgres\n"
+    "   2. MySQL\n"
+    " Enter to select · ↑/↓ to navigate · Esc to cancel"
+)
+_AUQ_SELECTOR_Q2 = (
+    " Which framework?\n"
+    " ❯ 1. FastAPI\n"
+    "   2. Django\n"
+    " Enter to select · ↑/↓ to navigate · Esc to cancel"
+)
+
+
+async def test_answer_question_selector_drives_multi_question_submit(
+    cfg, no_real_sleep
+):
+    """Multi-question AskUserQuestion in claude 2.1.150+ adds a final
+    ``Submit answers``/``Cancel`` confirmation page after the last
+    per-question selector. Without an extra Enter on that page the
+    answered tabs never propagate to the model and the turn hangs
+    (the actual 2026-05-23 ``/web`` failure mode). The drive must press
+    Enter on the submit page after the per-question loop."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    # Each capture() advances to the next screen — first Q1's selector,
+    # then Q2's selector, then the submit-review confirmation screen.
+    pane = _FakePane([_AUQ_SELECTOR_Q1, _AUQ_SELECTOR_Q2, _SUBMIT_REVIEW_SCREEN])
+    cs.attach(object(), pane)
+    ok = await cs.answer_question_selector(
+        questions=[
+            {
+                "question": "Which database should I use?",
+                "options": [{"label": "Postgres"}, {"label": "MySQL"}],
+            },
+            {
+                "question": "Which framework?",
+                "options": [{"label": "FastAPI"}, {"label": "Django"}],
+            },
+        ],
+        answers={
+            "Which database should I use?": "Postgres",
+            "Which framework?": "FastAPI",
+        },
+        timeout=5.0,
+    )
+    assert ok is True
+    # Q1 Enter, Q2 Enter, then the Submit-screen Enter — three total.
+    assert pane.sent.count(("Enter", False)) == 3
+
+
+def test_submit_review_present_marker_check(cfg):
+    """The Submit confirmation page is detected by its three text canaries
+    (``Submit answers``, ``Cancel``, ``Ready to submit``) — independent of
+    the per-question selector footer (which is absent on this page)."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    cs.attach(object(), _FakePane([_SUBMIT_REVIEW_SCREEN]))
+    assert cs.submit_review_present(_SUBMIT_REVIEW_SCREEN) is True
+    # The per-question selector footer alone is NOT a submit page.
+    assert cs.submit_review_present(_AUQ_SELECTOR) is False
+
+
+async def test_answer_question_selector_single_question_skips_submit_drive(
+    cfg, no_real_sleep
+):
+    """A single-question AskUserQuestion never triggers the submit page in
+    claude 2.1.150 — the drive must not press an extra Enter (which would
+    leak into the composer once the question is dismissed)."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    cs.attach(object(), _FakePane([_AUQ_SELECTOR]))
+    ok = await cs.answer_question_selector(
+        questions=[_AUQ_QUESTION],
+        answers={"Which database should I use?": "Postgres"},
+        timeout=5.0,
+    )
+    assert ok is True
+    # Exactly one Enter — the per-question pick. No spurious Submit drive.
+    assert pane_enters(cs._pane) == 1
+
+
+def pane_enters(pane) -> int:
+    return sum(1 for k in pane.sent if k == ("Enter", False))
+
+
+async def test_answer_question_selector_no_match_logs_warning(cfg, no_real_sleep):
+    """A truly unmappable answer (free-text the model never offered, no
+    prefix overlap with any option) used to bail silently — the agent then
+    hung on the in-pane selector with no log evidence. Now leashd logs a
+    ``tmux_question_selector_no_match`` warning so the next hang is one log
+    line away from diagnosis."""
+    import structlog.testing
+
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    cs.attach(object(), _FakePane([_AUQ_SELECTOR]))
+    with structlog.testing.capture_logs() as captured:
+        ok = await cs.answer_question_selector(
+            questions=[_AUQ_QUESTION],
+            answers={"Which database should I use?": "totally-different"},
+            timeout=0.5,
+        )
+    # No row picked → no keystrokes sent; but the drive still completes.
+    assert cs._pane.sent == []
+    assert ok is True  # nothing matched, but no row to navigate either
+    events = [e["event"] for e in captured]
+    assert "tmux_question_selector_no_match" in events
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 — native-dialog watcher (belt-and-suspenders gate)
+# ---------------------------------------------------------------------------
+
+
+_WEBFETCH_SCREEN = (
+    " Fetch\n"
+    '  url: "https://woodallscm.com/article/"\n'
+    " Claude wants to fetch content from woodallscm.com\n"
+    "\n"
+    " Do you want to allow Claude to fetch this content?\n"
+    " ❯ 1. Yes\n"
+    "   2. Yes, and don't ask again for woodallscm.com\n"
+    "   3. No, and tell Claude what to do differently (esc)\n"
+    " Enter to confirm · Esc to cancel"
+)
+
+_BASH_CONSENT_SCREEN = (
+    " Bash command\n"
+    "   echo 'hello' > /tmp/probe.txt\n"
+    "   Write probe line\n"
+    " Do you want to proceed?\n"
+    " ❯ 1. Yes\n"
+    "   2. Yes, and always allow access to tmp/ from this project\n"
+    "   3. No\n"
+    " Enter to confirm · Esc to cancel"
+)
+
+_GENERIC_DIALOG_SCREEN = (
+    " Some future claude feature\n"
+    " Please confirm your choice:\n"
+    " ❯ 1. Option Alpha\n"
+    "   2. Option Beta\n"
+    " Enter to confirm · Esc to cancel"
+)
+
+
+def test_detect_native_dialog_webfetch():
+    """The WebFetch per-domain consent has the most user-friendly
+    synthesised question text — name=webfetch_consent, domain extracted."""
+    from leashd.agents.runtimes.tmux_session import _detect_native_dialog
+
+    match = _detect_native_dialog(_WEBFETCH_SCREEN)
+    assert match is not None
+    assert match.name == "webfetch_consent"
+    assert "woodallscm.com" in match.question
+    assert match.fingerprint == "webfetch:woodallscm.com"
+    assert [o["label"] for o in match.options] == [
+        "Yes",
+        "Yes, and don't ask again for woodallscm.com",
+        "No, and tell Claude what to do differently (esc)",
+    ]
+    assert match.selected_row_index == 0
+
+
+def test_detect_native_dialog_bash():
+    """The Bash command consent surfaces the command preview in the
+    bridged question text — fp keys off the command so different commands
+    don't dedup."""
+    from leashd.agents.runtimes.tmux_session import _detect_native_dialog
+
+    match = _detect_native_dialog(_BASH_CONSENT_SCREEN)
+    assert match is not None
+    assert match.name == "bash_consent"
+    assert "echo 'hello' > /tmp/probe.txt" in match.question
+    assert [o["label"] for o in match.options] == [
+        "Yes",
+        "Yes, and always allow access to tmp/ from this project",
+        "No",
+    ]
+    assert match.selected_row_index == 0
+
+
+def test_detect_native_dialog_generic_fallback():
+    """An unknown dialog with the numbered-option + Enter-to-confirm
+    shape still gets bridged via the generic fallback — that's the
+    'suspenders' safety net for future claude TUI versions."""
+    from leashd.agents.runtimes.tmux_session import _detect_native_dialog
+
+    match = _detect_native_dialog(_GENERIC_DIALOG_SCREEN)
+    assert match is not None
+    assert match.name == "generic_native_dialog"
+    assert [o["label"] for o in match.options] == ["Option Alpha", "Option Beta"]
+
+
+def test_detect_native_dialog_skips_auq_selector():
+    """The AskUserQuestion in-pane selector has its own dedicated drive
+    (``answer_question_selector``). The watcher must not race it."""
+    from leashd.agents.runtimes.tmux_session import _detect_native_dialog
+
+    assert _detect_native_dialog(_AUQ_SELECTOR) is None
+
+
+def test_detect_native_dialog_skips_bypass_dialog():
+    """The bypass-permissions startup dialog is handled in await_ready."""
+    from leashd.agents.runtimes.tmux_session import _detect_native_dialog
+
+    screen = (
+        "WARNING: Claude Code running in Bypass Permissions mode\n"
+        " ❯ 1. No, exit\n"
+        "   2. Yes, I accept\n"
+        " Enter to confirm · Esc to cancel"
+    )
+    assert _detect_native_dialog(screen) is None
+
+
+def test_detect_native_dialog_skips_trust_prompt():
+    """Folder-trust dialog is handled in await_ready."""
+    from leashd.agents.runtimes.tmux_session import _detect_native_dialog
+
+    screen = "Do you trust the files in this folder?\n ❯ 1. Yes, proceed"
+    assert _detect_native_dialog(screen) is None
+
+
+def test_detect_native_dialog_no_dialog_returns_none():
+    """Plain composer / streaming text isn't a dialog."""
+    from leashd.agents.runtimes.tmux_session import _detect_native_dialog
+
+    assert _detect_native_dialog("⏵⏵ bypass permissions on · for shortcuts") is None
+    assert _detect_native_dialog("") is None
+
+
+async def test_bridge_native_dialog_drives_chosen_row(cfg, no_real_sleep):
+    """The bridge translates a Telegram-resolved answer (the user's
+    chosen option's label) back into the 1-based row digit + Enter that
+    claude TUI expects. Same pattern as the AskUserQuestion selector
+    drive — this is the post-fix delivery contract."""
+    from leashd.agents.runtimes.tmux_session import (
+        NativeDialogMatch,
+        TmuxSessionManager,
+    )
+    from leashd.agents.types import PermissionAllow
+
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    cs.attach(object(), _FakePane([_WEBFETCH_SCREEN]))
+
+    class _StubInteractions:
+        async def handle_question(self, chat_id, tool_input, *, user_id, session_id):
+            # Simulate the user tapping the second option in Telegram.
+            return PermissionAllow(
+                updated_input={
+                    **tool_input,
+                    "answers": {
+                        tool_input["questions"][0]["question"]: (
+                            "Yes, and don't ask again for woodallscm.com"
+                        )
+                    },
+                }
+            )
+
+    tsm._interactions = _StubInteractions()  # type: ignore[assignment]
+
+    match = NativeDialogMatch(
+        name="webfetch_consent",
+        question="Claude wants to fetch content from `woodallscm.com`. Allow?",
+        header="Web Fetch",
+        options=[
+            {"label": "Yes"},
+            {"label": "Yes, and don't ask again for woodallscm.com"},
+            {"label": "No, and tell Claude what to do differently (esc)"},
+        ],
+        fingerprint="webfetch:woodallscm.com",
+        selected_row_index=0,
+    )
+    await tsm._bridge_native_dialog(cs, match)
+    # Row digit "2" (literal) then Enter (named).
+    assert ("2", True) in cs._pane.sent
+    assert ("Enter", False) in cs._pane.sent
+
+
+async def test_bridge_native_dialog_no_interactions_dismisses(cfg, no_real_sleep):
+    """CLI-only deployment (no connector) → fail-closed via Escape so the
+    pane doesn't sit on the dialog forever. The PreToolUse hook still
+    runs on any subsequent tool retry, so the safety boundary is intact."""
+    from leashd.agents.runtimes.tmux_session import (
+        NativeDialogMatch,
+        TmuxSessionManager,
+    )
+
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    cs.attach(object(), _FakePane([_WEBFETCH_SCREEN]))
+    tsm._interactions = None
+    match = NativeDialogMatch(
+        name="webfetch_consent",
+        question="?",
+        header="?",
+        options=[{"label": "Yes"}, {"label": "No"}],
+        fingerprint="x",
+        selected_row_index=0,
+    )
+    await tsm._bridge_native_dialog(cs, match)
+    assert ("Escape", False) in cs._pane.sent
+
+
 def test_begin_turn_clears_inflight_decisions(cfg):
     """A decision must never leak across turns (parity with plan_state reset)."""
     import asyncio
@@ -1747,3 +2424,334 @@ def test_begin_turn_clears_inflight_decisions(cfg):
         assert cs.inflight_decisions == {}
     finally:
         loop.close()
+
+
+# ---------------------------------------------------------------------------
+# _bridge_native_dialog — error / fail-closed paths
+# ---------------------------------------------------------------------------
+
+
+async def test_bridge_native_dialog_handle_question_exception_dismisses(
+    cfg, no_real_sleep
+):
+    """If the interaction coordinator raises (handler bug, downstream crash),
+    the bridge must NOT leak the exception up into the watcher loop — it
+    logs and returns silently. The pane stays on the dialog (no Escape /
+    no row drive) because there's no answer to drive; the next watcher
+    cycle will re-detect the same fingerprint and skip (dedup)."""
+    from leashd.agents.runtimes.tmux_session import (
+        NativeDialogMatch,
+        TmuxSessionManager,
+    )
+
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    cs.attach(object(), _FakePane([_WEBFETCH_SCREEN]))
+
+    class _BoomInteractions:
+        async def handle_question(self, *_a, **_k):
+            raise RuntimeError("interaction handler exploded")
+
+    tsm._interactions = _BoomInteractions()  # type: ignore[assignment]
+    match = NativeDialogMatch(
+        name="webfetch_consent",
+        question="?",
+        header="?",
+        options=[{"label": "Yes"}, {"label": "No"}],
+        fingerprint="x",
+        selected_row_index=0,
+    )
+    # Must not raise.
+    await tsm._bridge_native_dialog(cs, match)
+    # Nothing typed into the pane (no answer, no dismissal — the watcher's
+    # fingerprint dedup is what prevents a re-bridge storm).
+    assert ("Escape", False) not in cs._pane.sent
+    assert ("1", True) not in cs._pane.sent
+    assert ("2", True) not in cs._pane.sent
+
+
+async def test_bridge_native_dialog_no_answer_dismisses(cfg, no_real_sleep):
+    """A PermissionDeny / timeout returns a non-Allow result with no
+    answers dict — the bridge dismisses with Escape so the dialog can't
+    sit on the pane forever. (The PreToolUse hook still runs on any
+    subsequent tool retry; the safety boundary is intact.)"""
+    from leashd.agents.runtimes.tmux_session import (
+        NativeDialogMatch,
+        TmuxSessionManager,
+    )
+    from leashd.agents.types import PermissionDeny
+
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    cs.attach(object(), _FakePane([_WEBFETCH_SCREEN]))
+
+    class _DenyingInteractions:
+        async def handle_question(self, *_a, **_k):
+            return PermissionDeny(message="timed out")
+
+    tsm._interactions = _DenyingInteractions()  # type: ignore[assignment]
+    match = NativeDialogMatch(
+        name="webfetch_consent",
+        question="?",
+        header="?",
+        options=[{"label": "Yes"}, {"label": "No"}],
+        fingerprint="x",
+        selected_row_index=0,
+    )
+    await tsm._bridge_native_dialog(cs, match)
+    assert ("Escape", False) in cs._pane.sent
+
+
+async def test_bridge_native_dialog_allow_without_answers_dict_dismisses(
+    cfg, no_real_sleep
+):
+    """A defensive path: ``PermissionAllow`` with no answers dict (or
+    answers that don't map our question) → no chosen_label resolves → the
+    bridge MUST dismiss with Escape rather than silently passing on a
+    stale dialog. Prevents a malformed handler from hanging the pane."""
+    from leashd.agents.runtimes.tmux_session import (
+        NativeDialogMatch,
+        TmuxSessionManager,
+    )
+    from leashd.agents.types import PermissionAllow
+
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    cs.attach(object(), _FakePane([_WEBFETCH_SCREEN]))
+
+    class _NoAnswersInteractions:
+        async def handle_question(self, *_a, **_k):
+            return PermissionAllow(updated_input={})  # no "answers"
+
+    tsm._interactions = _NoAnswersInteractions()  # type: ignore[assignment]
+    match = NativeDialogMatch(
+        name="webfetch_consent",
+        question="Allow?",
+        header="?",
+        options=[{"label": "Yes"}, {"label": "No"}],
+        fingerprint="x",
+        selected_row_index=0,
+    )
+    await tsm._bridge_native_dialog(cs, match)
+    assert ("Escape", False) in cs._pane.sent
+    # Row drive must NOT have happened — no answer to drive.
+    assert ("1", True) not in cs._pane.sent
+
+
+async def test_bridge_native_dialog_unknown_label_dismisses(cfg, no_real_sleep):
+    """User's chosen label not in the option list (drift, race, custom
+    text reply) → fail-closed via Escape, not a wrong row pick. Same
+    safety property as the no-answer path."""
+    from leashd.agents.runtimes.tmux_session import (
+        NativeDialogMatch,
+        TmuxSessionManager,
+    )
+    from leashd.agents.types import PermissionAllow
+
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    cs.attach(object(), _FakePane([_WEBFETCH_SCREEN]))
+
+    class _StubInteractions:
+        async def handle_question(self, _chat, tool_input, **_k):
+            return PermissionAllow(
+                updated_input={
+                    **tool_input,
+                    "answers": {
+                        tool_input["questions"][0]["question"]: (
+                            "something the dialog never offered"
+                        )
+                    },
+                }
+            )
+
+    tsm._interactions = _StubInteractions()  # type: ignore[assignment]
+    match = NativeDialogMatch(
+        name="webfetch_consent",
+        question="Q?",
+        header="?",
+        options=[{"label": "Yes"}, {"label": "No"}],
+        fingerprint="x",
+        selected_row_index=0,
+    )
+    await tsm._bridge_native_dialog(cs, match)
+    assert ("Escape", False) in cs._pane.sent
+    # No row was driven — picking the wrong row would be the worst outcome.
+    assert ("1", True) not in cs._pane.sent
+    assert ("2", True) not in cs._pane.sent
+
+
+async def test_bridge_native_dialog_drive_keystroke_failure_does_not_raise(
+    cfg, no_real_sleep
+):
+    """If the pane is mid-teardown and send_keys raises during the drive,
+    the bridge must swallow it (logging only). Otherwise the exception
+    would propagate up into the bridge task and the watcher loop would
+    log a noisy "dialog_watcher_loop_error" on a perfectly normal race."""
+    from leashd.agents.runtimes.tmux_session import (
+        NativeDialogMatch,
+        TmuxSessionManager,
+    )
+    from leashd.agents.types import PermissionAllow
+    from leashd.exceptions import AgentError
+
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    cs.attach(object(), _FakePane([_WEBFETCH_SCREEN]))
+
+    class _StubInteractions:
+        async def handle_question(self, _chat, tool_input, **_k):
+            return PermissionAllow(
+                updated_input={
+                    **tool_input,
+                    "answers": {tool_input["questions"][0]["question"]: "Yes"},
+                }
+            )
+
+    tsm._interactions = _StubInteractions()  # type: ignore[assignment]
+
+    def _boom(*_a, **_k):
+        raise AgentError("pane gone")
+
+    cs.send_keys = _boom  # type: ignore[method-assign]
+
+    match = NativeDialogMatch(
+        name="webfetch_consent",
+        question="Q?",
+        header="?",
+        options=[{"label": "Yes"}, {"label": "No"}],
+        fingerprint="x",
+        selected_row_index=0,
+    )
+    # Must not raise.
+    await tsm._bridge_native_dialog(cs, match)
+
+
+# ---------------------------------------------------------------------------
+# _dialog_watcher_loop — polling loop behaviour
+# ---------------------------------------------------------------------------
+
+
+async def test_dialog_watcher_loop_exits_when_pane_dies(cfg, monkeypatch):
+    """The watcher must stop polling once the pane is dead — otherwise
+    every dead session leaks one infinite asyncio.Task. ``return`` from
+    inside the loop is the self-pruning contract the manager relies on."""
+    import asyncio as _asyncio
+
+    from leashd.agents.runtimes.tmux_session import TmuxSessionManager
+
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    # No pane attached → pane_is_dead() returns True on the first check.
+    monkeypatch.setattr(
+        "leashd.agents.runtimes.tmux_session._NATIVE_DIALOG_POLL_INTERVAL_S",
+        0.001,
+    )
+
+    task = _asyncio.create_task(tsm._dialog_watcher_loop(cs))
+    # Tight bound: the loop sleeps the poll interval once, checks, returns.
+    await _asyncio.wait_for(task, timeout=1.0)
+    assert task.done()
+
+
+async def test_dialog_watcher_loop_swallows_capture_errors(cfg, monkeypatch):
+    """A transient capture-pane failure (common during teardown) must
+    NOT exit the loop — the next cycle either recovers or the pane_is_dead
+    check exits cleanly. Verifies the ``except Exception: continue`` is
+    actually exercised."""
+    import asyncio as _asyncio
+
+    from leashd.agents.runtimes.tmux_session import TmuxSessionManager
+
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+
+    pane_states = [False, False, True]  # alive, alive, dead
+
+    class _FlakyPane:
+        def __init__(self):
+            self.calls = 0
+            self.sent: list[tuple[str, bool]] = []
+
+        def cmd(self, *args):
+            from types import SimpleNamespace
+
+            if args[0] == "list-panes":
+                # Drive the pane_is_dead() return value.
+                dead = pane_states[min(self.calls, len(pane_states) - 1)]
+                self.calls += 1
+                return SimpleNamespace(stdout=["1" if dead else "0"])
+            # capture-pane: blow up so the watcher's except branch runs.
+            raise OSError("transient capture error")
+
+        def send_keys(self, *_a, **_k):
+            pass
+
+    pane = _FlakyPane()
+    cs.attach(object(), pane)
+    monkeypatch.setattr(
+        "leashd.agents.runtimes.tmux_session._NATIVE_DIALOG_POLL_INTERVAL_S",
+        0.001,
+    )
+
+    task = _asyncio.create_task(tsm._dialog_watcher_loop(cs))
+    await _asyncio.wait_for(task, timeout=2.0)
+    assert task.done()
+    # We made it past at least one capture failure (the loop didn't crash
+    # on the OSError) before pane_is_dead finally exited.
+    assert pane.calls >= 2
+
+
+async def test_dialog_watcher_loop_dedups_same_fingerprint(cfg, monkeypatch):
+    """The same dialog rendered across multiple poll cycles must bridge
+    ONCE — not on every cycle, or every user gets N duplicate Telegram
+    prompts for one underlying dialog. ``seen_fingerprints`` is the dedup."""
+    import asyncio as _asyncio
+
+    from leashd.agents.runtimes.tmux_session import TmuxSessionManager
+
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+
+    captures = 0
+
+    class _StickyPane:
+        def __init__(self):
+            self.sent: list[tuple[str, bool]] = []
+
+        def cmd(self, *args):
+            nonlocal captures
+            from types import SimpleNamespace
+
+            if args[0] == "list-panes":
+                # Stay alive for 4 captures so the dedup actually trips.
+                return SimpleNamespace(stdout=["0" if captures < 4 else "1"])
+            captures += 1
+            return SimpleNamespace(stdout=_WEBFETCH_SCREEN.split("\n"))
+
+        def send_keys(self, *_a, **_k):
+            pass
+
+    cs.attach(object(), _StickyPane())
+
+    bridge_calls: list[str] = []
+
+    async def _stub_bridge(_cs, match):
+        bridge_calls.append(match.fingerprint)
+
+    tsm._bridge_native_dialog = _stub_bridge  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        "leashd.agents.runtimes.tmux_session._NATIVE_DIALOG_POLL_INTERVAL_S",
+        0.001,
+    )
+
+    task = _asyncio.create_task(tsm._dialog_watcher_loop(cs))
+    await _asyncio.wait_for(task, timeout=2.0)
+
+    # The watcher saw the same dialog multiple times but bridged once.
+    assert bridge_calls == ["webfetch:woodallscm.com"]
+    # And the bridge task was tracked (then auto-pruned by the done-callback).
+    # Either still present (race) or removed — either is fine; the contract
+    # is that no other tasks leaked.
+    leaked = [t for t in tsm._perm_drive_tasks if not t.done() and not t.cancelled()]
+    assert leaked == []
