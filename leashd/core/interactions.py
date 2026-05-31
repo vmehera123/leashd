@@ -76,7 +76,7 @@ class InteractionCoordinator:
         self.config = config
         self._event_bus = event_bus
         self.pending: dict[str, PendingInteraction] = {}
-        self._chat_index: dict[str, str] = {}  # chat_id → interaction_id
+        self._chat_index: dict[str, str] = {}
         self._auto_plan_reviewer = auto_plan_reviewer
         self._message_logger = message_logger
 
@@ -109,10 +109,6 @@ class InteractionCoordinator:
         logger.info("question_started", chat_id=chat_id, question_count=len(questions))
 
         answers: dict[str, str] = {}
-        # Shared human-response window across questions, plan reviews and tool
-        # approvals. Effective None = no expiry: wait for the human as long as
-        # it takes (parity with claude-cli; the tmux PreToolUse hook is sized
-        # to outlive it). A positive int auto-denies after N seconds.
         timeout = self._effective_timeout()
 
         for q in questions:
@@ -149,8 +145,6 @@ class InteractionCoordinator:
 
             try:
                 if timeout is None:
-                    # No expiry — block until the human answers (or the wait
-                    # is cancelled via cancel_pending / pane teardown).
                     await pending.event.wait()
                 else:
                     await asyncio.wait_for(pending.event.wait(), timeout=timeout)
@@ -242,8 +236,6 @@ class InteractionCoordinator:
         review_timeout = self._effective_timeout()
         try:
             if review_timeout is None:
-                # No expiry — block until the human decides (or the wait is
-                # cancelled via cancel_pending / pane teardown).
                 await pending.event.wait()
             else:
                 await asyncio.wait_for(pending.event.wait(), timeout=review_timeout)

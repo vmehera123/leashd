@@ -18,8 +18,6 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
-# --- Playwright MCP tools ---
-
 BROWSER_READONLY_TOOLS: frozenset[str] = frozenset(
     {
         "browser_snapshot",
@@ -101,8 +99,6 @@ def is_browser_tool(tool_name: str) -> bool:
     """Check if a tool is a browser tool, normalizing MCP prefixes."""
     return normalize_tool_name(tool_name) in ALL_BROWSER_TOOLS
 
-
-# --- agent-browser CLI commands ---
 
 AGENT_BROWSER_READONLY_COMMANDS: frozenset[str] = frozenset(
     {
@@ -278,12 +274,10 @@ class BrowserToolsPlugin(LeashdPlugin):
         """Detect a browser tool event. Returns (tool_name, is_mutation, backend) or None."""
         tool_name = event.data.get("tool_name", "")
 
-        # Playwright MCP tools
         if is_browser_tool(tool_name):
             normalized = normalize_tool_name(tool_name)
             return tool_name, normalized in BROWSER_MUTATION_TOOLS, "playwright"
 
-        # agent-browser Bash commands
         if tool_name == "Bash":
             tool_input = event.data.get("tool_input", {})
             command = str(tool_input.get("command", "")) if tool_input else ""

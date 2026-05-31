@@ -1359,9 +1359,18 @@ class _StubFloorGatekeeper:
         self.check_calls.append((tool_name, session_mode))
         return self.check_result
 
-    async def check_hard_deny_floor(
-        self, tool_name, tool_input, session_id, chat_id, *, session_mode=None
+    async def check_auto_gated(
+        self,
+        tool_name,
+        tool_input,
+        session_id,
+        chat_id,
+        *,
+        task_description=None,
+        session_mode=None,
     ):
+        # Returns None to signal "defer to native", or a PermissionAllow/Deny
+        # for an explicit-rule gate (mirrors the real check_auto_gated).
         self.floor_calls.append((tool_name, session_mode))
         return self.floor_result
 
@@ -1401,7 +1410,8 @@ async def test_on_pre_tool_auto_defers_safe_tool(cfg):
     tsm = TmuxSessionManager(cfg)
     cs = _session(tsm, mode="auto")
     tsm._by_uuid["u1"] = cs.session_id
-    gk = _StubFloorGatekeeper(floor_result=PermissionAllow(updated_input={}))
+    # None = the hybrid gate found no explicit rule → defer to native.
+    gk = _StubFloorGatekeeper(floor_result=None)
     _bind(tsm, gk)
     out = await tsm.on_pre_tool(
         {
@@ -1435,6 +1445,30 @@ async def test_on_pre_tool_auto_hard_deny_blocks(cfg):
     hso = out["hookSpecificOutput"]
     assert hso["permissionDecision"] == "deny"
     assert "blocked: rm -rf" in hso["permissionDecisionReason"]
+
+
+async def test_on_pre_tool_auto_explicit_rule_gated_allows(cfg):
+    # Hybrid auto: an EXPLICIT require_approval rule routes through the leashd
+    # pipeline and (here) resolves to allow — the hook returns "allow", NOT
+    # "defer". This is what keeps agent-browser / file writes policy-gated in
+    # auto mode instead of handing them to Claude's native classifier.
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm, mode="auto")
+    tsm._by_uuid["u1"] = cs.session_id
+    gk = _StubFloorGatekeeper(
+        floor_result=PermissionAllow(updated_input={"command": "agent-browser open x"})
+    )
+    _bind(tsm, gk)
+    out = await tsm.on_pre_tool(
+        {
+            "session_id": "u1",
+            "cwd": "/work",
+            "tool_name": "Bash",
+            "tool_input": {"command": "agent-browser open x"},
+            "permission_mode": "auto",
+        }
+    )
+    assert out["hookSpecificOutput"]["permissionDecision"] == "allow"
 
 
 async def test_on_pre_tool_auto_task_run_id_uses_full_pipeline(cfg):
@@ -1730,7 +1764,7 @@ async def test_permission_request_not_deduped_for_native_auto_defer(cfg):
     tsm._by_uuid["u1"] = cs.session_id
     cs.begin_turn(on_text_chunk=None, on_tool_activity=None)
     gk = _StubFloorGatekeeper(
-        floor_result=PermissionAllow(updated_input={}),  # PreToolUse → defer
+        floor_result=None,  # hybrid gate found no explicit rule → PreToolUse defer
         check_result=PermissionAllow(updated_input={"command": "curl x"}),
     )
     _bind(tsm, gk)

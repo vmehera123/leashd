@@ -69,7 +69,6 @@ class SessionManager:
     ) -> Session:
         key = self._key(user_id, chat_id)
 
-        # Memory cache first
         session = self._sessions.get(key)
         if session and session.is_active:
             session.last_used = datetime.now(timezone.utc)
@@ -81,7 +80,6 @@ class SessionManager:
             )
             return session
 
-        # Try persistent store
         if self._store:
             session = await self._store.load(user_id, chat_id)
             if session and session.is_active:
@@ -95,7 +93,6 @@ class SessionManager:
                 )
                 return session
 
-        # Create new
         session = Session(
             session_id=str(uuid.uuid4()),
             user_id=user_id,

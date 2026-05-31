@@ -96,8 +96,6 @@ class TmuxAgent(BaseAgent):
         self._config = config
         self._tsm.update_config(config)
 
-    # -- helpers -------------------------------------------------------------
-
     def _build_append_system_prompt(
         self, session: Session, *, native_auto: bool = False
     ) -> str | None:
@@ -170,8 +168,6 @@ class TmuxAgent(BaseAgent):
             if cs.turn is not None and not cs.turn.stop_event.is_set():
                 count += 1
         return count
-
-    # -- execute -------------------------------------------------------------
 
     async def execute(
         self,
@@ -344,6 +340,7 @@ class TmuxAgent(BaseAgent):
 
         ceiling = float(self._config.agent_timeout_seconds)
         no_progress = float(self._config.tmux_no_progress_timeout_seconds)
+        goal_idle_grace = float(self._config.tmux_goal_idle_grace_seconds)
         started = time.monotonic()
         notified_blocked = False
         blocked_since: float | None = None
@@ -429,10 +426,56 @@ class TmuxAgent(BaseAgent):
                 )
                 continue
 
-            # 4. No human pending → no-progress backstop, then the absolute
-            #    ceiling. Both are soft (pane stays alive for the next turn).
+            # No human pending. If we told the user we were waiting, the block
+            # just cleared — give a short "continuing" beat and re-arm so a
+            # later block notifies again. (The streamed "⏳ Waiting…" chunk
+            # can't be retracted from the message, so this is the signal that
+            # work resumed after an approval.)
+            if notified_blocked:
+                notified_blocked = False
+                blocked_since = None
+                if on_text_chunk is not None:
+                    await safe_callback(
+                        on_text_chunk,
+                        "\n\n✅ Approved — continuing.\n",
+                        log_event="tmux_unblock_notice_failed",
+                    )
+
             now = time.monotonic()
+
+            # 4a. Goal idle backstop. A `/goal` keeps the turn open across
+            #     sub-turns (TmuxTurn.complete defers each Stop). If the goal
+            #     run goes idle — a completion was deferred and no new sub-turn
+            #     streamed within the grace — finalize cleanly with the
+            #     assembled summary instead of waiting out the no-progress
+            #     ceiling. Backstops the case where the `/goal active` indicator
+            #     never clears, so note_goal_indicator never releases the turn.
+            deferred_at = turn.goal_completion_deferred_at
+            if deferred_at is not None and now - deferred_at > goal_idle_grace:
+                logger.info(
+                    "tmux_goal_idle_finalized",
+                    session_id=session.session_id,
+                    chat_id=session.chat_id,
+                    idle_s=int(now - deferred_at),
+                )
+                cs.goal_active = False
+                turn.force_complete()
+                break
+
+            # 4b. No-progress backstop, then the absolute ceiling. Both are soft
+            #     (pane stays alive for the next turn). If the agent assembled
+            #     output before going quiet (a finished run with no clean Stop),
+            #     return that as a normal response rather than the misleading
+            #     "produced no output" error.
             if now - turn.last_activity > no_progress:
+                if turn.assembled_text:
+                    logger.info(
+                        "tmux_turn_no_progress_finalized_with_text",
+                        session_id=session.session_id,
+                        idle_s=int(now - turn.last_activity),
+                    )
+                    turn.force_complete()
+                    break
                 return await _abort(
                     "tmux_turn_no_progress",
                     "agent produced no output — turn aborted; resend to retry",
@@ -523,7 +566,33 @@ class TmuxAgent(BaseAgent):
         )
         return True
 
-    # -- cancel / shutdown ---------------------------------------------------
+    async def inject_goal(self, session_id: str, args: str) -> bool:
+        """Inject a Claude Code ``/goal`` command into the live pane.
+
+        ``args`` is the text after ``/goal``: a condition sets a goal, ``clear``
+        (and aliases) clears it, empty shows status. A set goal keeps claude
+        working across turns until a fast model confirms the condition; leashd
+        defers turn-completion while it runs (``submit`` seeds ``goal_active``)
+        so the whole sequence streams as one task. Unlike ``inject_followup`` it
+        never touches ``pending_followups`` — the ``goal_active`` gate owns the
+        deferral. Returns ``False`` (no side effects) when there is no live pane.
+        """
+        cs = self._tsm.get(session_id)
+        if cs is None or cs.pane_is_dead():
+            return False
+        await cs.submit(f"/goal {args}".rstrip())
+        logger.info(
+            "tmux_goal_injected",
+            session_id=session_id,
+            chat_id=cs.chat_id,
+            has_condition=bool(args.strip()),
+        )
+        return True
+
+    def is_goal_active(self, session_id: str) -> bool:
+        """True while a Claude Code ``/goal`` is running in this session's pane."""
+        cs = self._tsm.get(session_id)
+        return bool(cs and cs.goal_active)
 
     async def cancel(self, session_id: str) -> None:
         cs = self._tsm.get(session_id)

@@ -9,7 +9,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 logger = structlog.get_logger()
 
-# Event name constants
 TOOL_GATED = "tool.gated"
 TOOL_ALLOWED = "tool.allowed"
 TOOL_DENIED = "tool.denied"
@@ -40,7 +39,6 @@ PLAN_REVIEW_COMPLETED = "plan.review.completed"
 AUTO_PR_CREATED = "auto_pr.created"
 CONFIG_RELOADED = "config.reloaded"
 
-# Task orchestration events
 TASK_SUBMITTED = "task.submitted"
 TASK_PHASE_CHANGED = "task.phase_changed"
 TASK_COMPLETED = "task.completed"

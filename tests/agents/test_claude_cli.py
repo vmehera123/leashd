@@ -5,13 +5,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from leashd.agents.runtimes._helpers import (
+    AGENT_BROWSER_GUIDANCE,
     AUTO_MODE_INSTRUCTION,
     MAX_BUFFER_SIZE,
     NATIVE_AUTO_INSTRUCTION,
     PLAN_MODE_INSTRUCTION,
     SESSION_TO_PERMISSION_MODE,
+    UV_PROJECT_GUIDANCE,
     StderrBuffer,
     backoff_delay,
+    build_append_system_prompt,
+    build_runtime_guidance,
     build_workspace_context,
     describe_tool,
     friendly_error,
@@ -125,6 +129,50 @@ class TestBuildWorkspaceContext:
         assert "WORKSPACE" in result
         assert "(primary, cwd)" in result
         assert "/b" in result
+
+
+class TestBuildRuntimeGuidance:
+    def _session(self, tmp_path):
+        return Session(
+            session_id="s",
+            user_id="u",
+            chat_id="c",
+            working_directory=str(tmp_path),
+        )
+
+    def test_uv_project_emits_uv_guidance(self, tmp_path):
+        (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n")
+        cfg = LeashdConfig(
+            approved_directories=[tmp_path], browser_backend="playwright"
+        )
+        guidance = build_runtime_guidance(cfg, self._session(tmp_path))
+        assert guidance is not None
+        assert UV_PROJECT_GUIDANCE in guidance
+        assert AGENT_BROWSER_GUIDANCE not in guidance
+
+    def test_non_uv_dir_omits_uv_guidance(self, tmp_path):
+        cfg = LeashdConfig(
+            approved_directories=[tmp_path], browser_backend="playwright"
+        )
+        assert build_runtime_guidance(cfg, self._session(tmp_path)) is None
+
+    def test_agent_browser_backend_emits_browser_guidance(self, tmp_path):
+        cfg = LeashdConfig(
+            approved_directories=[tmp_path], browser_backend="agent-browser"
+        )
+        guidance = build_runtime_guidance(cfg, self._session(tmp_path))
+        assert guidance is not None
+        assert AGENT_BROWSER_GUIDANCE in guidance
+
+    def test_guidance_prepended_to_append_system_prompt(self, tmp_path):
+        (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n")
+        cfg = LeashdConfig(
+            approved_directories=[tmp_path], browser_backend="agent-browser"
+        )
+        prompt = build_append_system_prompt(cfg, self._session(tmp_path))
+        assert prompt is not None
+        assert UV_PROJECT_GUIDANCE in prompt
+        assert AGENT_BROWSER_GUIDANCE in prompt
 
 
 class TestDescribeTool:

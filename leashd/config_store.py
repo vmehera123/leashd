@@ -178,9 +178,8 @@ def inject_global_config_as_env(*, force: bool = False) -> None:
     _inject_browser_config(data, force=force)
     _inject_web_config(data, force=force)
     _inject_codebase_memory_config(data, force=force)
+    _inject_security_config(data, force=force)
 
-
-# --- Autonomous config bridging ---
 
 _AUTONOMOUS_FIELD_MAP: dict[str, str] = {
     "auto_approver": "LEASHD_AUTO_APPROVER",
@@ -252,9 +251,6 @@ def _inject_autonomous_config(data: dict[str, Any], *, force: bool = False) -> N
                 os.environ[env_key] = str(value)
 
 
-# --- Browser config bridging ---
-
-
 def get_browser_config(data: dict[str, Any] | None = None) -> dict[str, Any]:
     """Read the ``browser`` section from global config.
 
@@ -288,9 +284,6 @@ def _inject_browser_config(data: dict[str, Any], *, force: bool = False) -> None
         key = "LEASHD_BROWSER_HEADLESS"
         if force or key not in os.environ:
             os.environ[key] = str(headless).lower()
-
-
-# --- WebUI config bridging ---
 
 
 def get_web_config(data: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -329,9 +322,6 @@ def _inject_web_config(data: dict[str, Any], *, force: bool = False) -> None:
                 os.environ[env_key] = str(value)
 
 
-# --- Codebase memory config bridging ---
-
-
 def get_codebase_memory_config(
     data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -361,7 +351,34 @@ def _inject_codebase_memory_config(
             os.environ[key] = str(enabled).lower()
 
 
-# --- Workspace config at ~/.leashd/workspaces.yaml ---
+def get_security_config(data: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Read the ``security`` section from global config.
+
+    Returns an empty dict when the section is missing or not a dict.
+    """
+    if data is None:
+        data = load_global_config()
+    sec = data.get("security", {})
+    if not isinstance(sec, dict):
+        return {}
+    return sec
+
+
+def _inject_security_config(data: dict[str, Any], *, force: bool = False) -> None:
+    """Bridge ``security`` YAML → LEASHD_SECURITY_GUIDANCE_* env vars."""
+    sec = data.get("security", {})
+    if not isinstance(sec, dict):
+        return
+    enabled = sec.get("enabled")
+    if enabled is not None:
+        key = "LEASHD_SECURITY_GUIDANCE_ENABLED"
+        if force or key not in os.environ:
+            os.environ[key] = str(enabled).lower()
+    review_model = sec.get("review_model")
+    if review_model:
+        key = "LEASHD_SECURITY_GUIDANCE_REVIEW_MODEL"
+        if force or key not in os.environ:
+            os.environ[key] = str(review_model)
 
 
 def workspaces_path() -> Path:
@@ -598,9 +615,6 @@ def remove_skill_metadata(name: str) -> bool:
     return True
 
 
-# --- Claude Code plugin config ---
-
-
 def get_cc_plugins_config(data: dict[str, Any] | None = None) -> dict[str, Any]:
     """Read the ``cc_plugins`` section from global config.
 
@@ -664,8 +678,6 @@ def set_cc_plugin_enabled(name: str, *, enabled: bool) -> bool:
     save_global_config(data)
     return True
 
-
-# --- Per-directory RuntimeSettings overrides ---
 
 _VALID_SETTING_FIELDS = frozenset({"effort", "claude_model", "codex_model"})
 
@@ -775,9 +787,6 @@ def clear_directory_setting(path: str | Path, *, field: str | None = None) -> bo
         data.pop("directory_settings", None)
     save_global_config(data)
     return True
-
-
-# --- Per-workspace RuntimeSettings overrides ---
 
 
 def get_workspace_settings(name: str) -> dict[str, Any]:

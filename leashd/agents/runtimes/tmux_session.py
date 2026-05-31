@@ -21,6 +21,7 @@ import asyncio
 import contextlib
 import importlib.util
 import json
+import os
 import re
 import secrets
 import shutil
@@ -76,6 +77,15 @@ _ASYNC_HOOK_EVENTS = (
 # 1 year exceeds any daemon/turn lifetime (a restart reaps panes) while
 # staying a sane value in the settings JSON.
 _HOOK_NO_EXPIRY_SECONDS = 365 * 24 * 3600
+
+# Claude Code marketplace plugin that reviews Claude's own code changes for
+# vulnerabilities in-session (per-edit pattern match → end-of-turn diff review
+# → agentic commit review). Opt-in via ``LEASHD_SECURITY_GUIDANCE_ENABLED``;
+# leashd installs it once and activates it through its managed ``--settings``
+# (install ≠ enable), so the user's real ``~/.claude/settings.json`` is never
+# touched. The plugin's hooks compose with leashd's PreToolUse/Stop bridge.
+_SECURITY_GUIDANCE_PLUGIN = "security-guidance@claude-plugins-official"
+_OFFICIAL_MARKETPLACE = "anthropics/claude-plugins-official"
 
 
 def encode_project_dir(cwd: str) -> str:
@@ -136,6 +146,15 @@ def _parse_version(text: str) -> tuple[int, ...] | None:
 
 _NATIVE_DIALOG_POLL_INTERVAL_S = 1.5
 _NATIVE_DIALOG_TOOL_INPUT_KEY = "__leashd_native_dialog__"
+
+# Status-bar indicator the claude TUI renders while a ``/goal`` is running
+# (``◎ /goal active 2m``). leashd seeds ``goal_active`` optimistically when it
+# injects a goal; the dialog watcher uses this marker only to detect the goal
+# CLEARING, so assistant text that happens to mention the phrase can never
+# start a deferral. See TmuxTurn.complete and _dialog_watcher_loop.
+_GOAL_ACTIVE_MARKER = "/goal active"
+# ``/goal <word>`` forms that CLEAR rather than set a goal (Claude Code aliases).
+_GOAL_CLEAR_WORDS = frozenset({"clear", "stop", "off", "reset", "none", "cancel"})
 
 # Dialogs we *already* drive elsewhere (AskUserQuestion in-pane selector
 # → ``answer_question_selector``; bypass-mode startup + trust-folder prompt
@@ -323,6 +342,7 @@ class TmuxTurn:
         on_text_chunk: Callable[[str], Coroutine[Any, Any, None]] | None,
         on_tool_activity: Callable[[ToolActivity | None], Coroutine[Any, Any, None]]
         | None,
+        goal_active_cb: Callable[[], bool] | None = None,
     ) -> None:
         self.stop_event = asyncio.Event()
         self.text_parts: list[str] = []
@@ -350,6 +370,20 @@ class TmuxTurn:
         self.duration_ms: int = 0
         self.on_text_chunk = on_text_chunk
         self.on_tool_activity = on_tool_activity
+        # Returns True while a Claude Code ``/goal`` is active in the pane. When
+        # set, a completion signal defers (the goal keeps Claude working across
+        # turns and leashd streams the whole run as one task). The dialog
+        # watcher finalizes the turn when the goal clears. See complete().
+        self.goal_active_cb = goal_active_cb
+        # Monotonic stamp of the last completion signal that was DEFERRED
+        # because a ``/goal`` was active, or None when not deferring. Set in
+        # complete(); cleared the moment the next goal sub-turn streams content
+        # (the deferral was justified — Claude kept going). The watch loop in
+        # TmuxAgent.execute finalizes the turn if this stays set past
+        # ``tmux_goal_idle_grace_seconds`` — the backstop for the case where the
+        # ``/goal active`` indicator never clears (so note_goal_indicator never
+        # releases the turn) and it would otherwise hang until no-progress.
+        self.goal_completion_deferred_at: float | None = None
 
     @property
     def assembled_text(self) -> str:
@@ -392,7 +426,35 @@ class TmuxTurn:
                 self.pending_followups -= 1
                 self.mark_activity()
                 return
+            # A Claude Code `/goal` is active: Claude auto-starts another turn
+            # until its condition holds. Defer ending the leashd turn so the
+            # whole goal-driven sequence streams as one continuous flow; the
+            # per-response dedup re-arms on the next turn's assistant content,
+            # and the dialog watcher finalizes the turn when the goal clears
+            # (Claude won't start another turn then, so nothing else would).
+            # Stamp the deferral so the watch loop can finalize cleanly if the
+            # goal goes idle without the indicator ever clearing (see
+            # goal_completion_deferred_at); cleared when the next sub-turn
+            # streams content in _process_blocks.
+            if self.goal_active_cb is not None and self.goal_active_cb():
+                self.mark_activity()
+                self.goal_completion_deferred_at = time.monotonic()
+                return
         self.is_error = self.is_error or is_error
+        self.duration_ms = int((time.monotonic() - self._started) * 1000)
+        self.stop_event.set()
+
+    def force_complete(self) -> None:
+        """End the turn now, bypassing the goal/follow-up deferral and the
+        per-response dedup.
+
+        The watch loop in :meth:`TmuxAgent.execute` calls this when a deferred
+        goal run has gone idle past its grace, or when the no-progress backstop
+        fires but the turn already assembled output — the turn must finalize
+        cleanly (not as an error) with whatever was streamed so far."""
+        if self.stop_event.is_set():
+            return
+        self.goal_completion_deferred_at = None
         self.duration_ms = int((time.monotonic() - self._started) * 1000)
         self.stop_event.set()
 
@@ -431,6 +493,16 @@ class TmuxClaudeSession:
         # the reuse path on subsequent turns picks the right system-prompt
         # banner without re-deriving the model.
         self.native_auto_active: bool = False
+        # True while a Claude Code ``/goal`` runs in this pane. Seeded
+        # optimistically by TmuxAgent.inject_goal (leashd owns all pane input,
+        # so it authoritatively knows when a goal starts) and cleared by the
+        # dialog watcher when the ``/goal active`` indicator vanishes. Gates
+        # turn-completion so a multi-turn goal run streams as one leashd task.
+        # ``_goal_indicator_seen`` makes the watcher wait until the indicator
+        # has actually appeared before treating its absence as "cleared", so a
+        # startup lag can't release the deferral early. See TmuxTurn.complete.
+        self.goal_active: bool = False
+        self._goal_indicator_seen: bool = False
         # Latest user prompt — fed to the gatekeeper / plan gate as
         # task_description (parity with the engine, which passes the user
         # message text; see engine handle_message task_description=text).
@@ -584,6 +656,7 @@ class TmuxClaudeSession:
         confirm the agent actually started — re-pressing Enter a few times if
         the composer still holds the prompt.
         """
+        self._maybe_update_goal_state(text)
         self.send_keys(text, literal=True)
         await asyncio.sleep(0.5)
         tail = " ".join(text.split())[-48:]
@@ -845,7 +918,11 @@ class TmuxClaudeSession:
     ) -> TmuxTurn:
         from leashd.core.plan_gate import PlanState
 
-        turn = TmuxTurn(on_text_chunk=on_text_chunk, on_tool_activity=on_tool_activity)
+        turn = TmuxTurn(
+            on_text_chunk=on_text_chunk,
+            on_tool_activity=on_tool_activity,
+            goal_active_cb=lambda: self.goal_active,
+        )
         self.turn = turn
         self.plan_state = PlanState()
         # Drop any in-flight decision futures from a prior turn so a new turn
@@ -856,6 +933,46 @@ class TmuxClaudeSession:
     def complete_turn(self, *, is_error: bool = False) -> None:
         if self.turn is not None:
             self.turn.complete(is_error=is_error)
+
+    def note_goal_indicator(self, screen: str) -> bool:
+        """Update ``/goal`` state from a pane capture.
+
+        Returns True iff the goal just cleared (its indicator appeared and then
+        vanished) so the caller finalizes the turn that ``TmuxTurn.complete``
+        deferred — Claude starts no further turn once a goal is met, so nothing
+        else would release that deferral. Only ever clears ``goal_active`` (it
+        is set on inject), so assistant text mentioning the phrase, or a
+        transient capture miss before the indicator first renders, cannot end a
+        goal run early.
+        """
+        if not self.goal_active:
+            return False
+        if _GOAL_ACTIVE_MARKER in screen:
+            self._goal_indicator_seen = True
+            return False
+        if self._goal_indicator_seen:
+            self.goal_active = False
+            self._goal_indicator_seen = False
+            return True
+        return False
+
+    def _maybe_update_goal_state(self, text: str) -> None:
+        """Seed/clear ``/goal`` state from a submitted prompt.
+
+        ``submit`` is the single pane-input chokepoint (initial prompt AND
+        mid-turn injects route through it), so seeding here covers every path
+        that can start a goal. leashd owns all pane input, so a ``/goal
+        <condition>`` it submits is the authoritative signal that a goal is
+        starting — the watcher then only releases it (see note_goal_indicator).
+        """
+        stripped = text.strip()
+        if not stripped.startswith("/goal"):
+            return
+        rest = stripped[len("/goal") :].strip()
+        if not rest:
+            return
+        self.goal_active = rest.lower() not in _GOAL_CLEAR_WORDS
+        self._goal_indicator_seen = False
 
     async def teardown(self) -> None:
         # Unblock any awaiting TmuxAgent.execute() FIRST — daemon shutdown
@@ -912,6 +1029,7 @@ class TmuxSessionManager:
         self._server: Any = None
         self._preflighted = False
         self._claude_path: str = ""
+        self._security_guidance_installed = False
 
         self._sessions: dict[str, TmuxClaudeSession] = {}  # leashd session_id
         self._by_uuid: dict[str, str] = {}  # claude uuid → leashd session_id
@@ -956,6 +1074,66 @@ class TmuxSessionManager:
         self._event_bus = event_bus
         self._session_manager = session_manager
         logger.info("tmux_safety_bound")
+
+    def _security_enabled_plugins(self) -> dict[str, bool]:
+        """``enabledPlugins`` map for the managed settings, empty when off."""
+        if not self._config.security_guidance_enabled:
+            return {}
+        return {_SECURITY_GUIDANCE_PLUGIN: True}
+
+    def ensure_security_guidance_installed(self) -> None:
+        """Idempotently install + register the security-guidance plugin.
+
+        Opt-in via ``LEASHD_SECURITY_GUIDANCE_ENABLED``. Adds the official
+        marketplace (if absent) and installs the plugin into the user scope so
+        leashd's managed ``enabledPlugins`` can activate it (install ≠ enable).
+        Best-effort and attempt-once per daemon: a failure is logged and never
+        blocks a session — the plugin simply stays inactive. Runtime-agnostic;
+        called once at engine build for whichever runtime is active, so the
+        headless ``claude-cli`` default benefits without the tmux preflight.
+        """
+        if self._security_guidance_installed:
+            return
+        if not self._config.security_guidance_enabled:
+            return
+        self._security_guidance_installed = True  # attempt once, even on failure
+        claude = self._claude_path or shutil.which("claude")
+        if claude is None:
+            logger.warning("security_guidance_skipped", reason="claude_not_found")
+            return
+        env = {**os.environ, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "0"}
+        steps = (
+            ("marketplace", ["plugin", "marketplace", "add", _OFFICIAL_MARKETPLACE]),
+            (
+                "install",
+                ["plugin", "install", _SECURITY_GUIDANCE_PLUGIN, "--scope", "user"],
+            ),
+        )
+        for label, sub in steps:
+            try:
+                proc = subprocess.run(  # noqa: S603
+                    [claude, *sub],
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                    env=env,
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                logger.warning(
+                    "security_guidance_install_failed", step=label, error=str(exc)
+                )
+                return
+            if proc.returncode != 0:
+                # Idempotent re-add / re-install returns nonzero ("already
+                # exists"); tolerate and continue. A hard install failure only
+                # leaves the plugin unavailable, which enabledPlugins handles
+                # gracefully (claude logs unknown-plugin, no crash).
+                logger.debug(
+                    "security_guidance_step_nonzero",
+                    step=label,
+                    stderr=proc.stderr.strip()[:200],
+                )
+        logger.info("security_guidance_ready", plugin=_SECURITY_GUIDANCE_PLUGIN)
 
     @property
     def is_bound(self) -> bool:
@@ -1135,7 +1313,11 @@ class TmuxSessionManager:
                 }
             ]
         path = self._socket_dir / f"{session_id}.settings.json"
-        path.write_text(json.dumps({"hooks": hooks}, indent=2))
+        payload: dict[str, Any] = {"hooks": hooks}
+        enabled = self._security_enabled_plugins()
+        if enabled:
+            payload["enabledPlugins"] = enabled
+        path.write_text(json.dumps(payload, indent=2))
         return path
 
     def write_auto_floor_settings(self, session_id: str) -> Path:
@@ -1155,7 +1337,28 @@ class TmuxSessionManager:
             "PermissionRequest": [self._sync_hook_block("PermissionRequest")],
         }
         path = self._socket_dir / f"{session_id}.cli.settings.json"
-        path.write_text(json.dumps({"hooks": hooks}, indent=2))
+        payload: dict[str, Any] = {"hooks": hooks}
+        enabled = self._security_enabled_plugins()
+        if enabled:
+            payload["enabledPlugins"] = enabled
+        path.write_text(json.dumps(payload, indent=2))
+        return path
+
+    def write_plugin_settings(self, session_id: str) -> Path | None:
+        """Managed settings carrying ONLY ``enabledPlugins`` (no hooks).
+
+        Used by the headless ``claude-cli`` runtime in non-``auto`` modes,
+        which otherwise write no managed ``--settings`` file: this activates
+        the security-guidance plugin without touching the user's real
+        ``~/.claude/settings.json``. Returns ``None`` when the plugin is
+        disabled (the caller then skips ``--settings`` entirely).
+        """
+        enabled = self._security_enabled_plugins()
+        if not enabled:
+            return None
+        self._socket_dir.mkdir(parents=True, exist_ok=True)
+        path = self._socket_dir / f"{session_id}.plugins.settings.json"
+        path.write_text(json.dumps({"enabledPlugins": enabled}, indent=2))
         return path
 
     def register_cli_session(
@@ -1501,8 +1704,6 @@ class TmuxSessionManager:
         )
         return cs
 
-    # -- uuid resolution -----------------------------------------------------
-
     def _bind_uuid(self, cwd: str, claude_uuid: str) -> TmuxClaudeSession | None:
         """Resolve a hook's Claude UUID to a leashd session.
 
@@ -1520,8 +1721,6 @@ class TmuxSessionManager:
         if cs is not None and cs.claude_uuid is None:
             cs.claude_uuid = claude_uuid
         return cs
-
-    # -- hook bridge (called by web/tmux_hooks.py) ---------------------------
 
     def verify_secret(self, token: str | None) -> bool:
         import hmac
@@ -1716,27 +1915,29 @@ class TmuxSessionManager:
                 cs.task_run_id is None or cs.native_auto_allowed
             )
             if native_auto and str(body.get("permission_mode", "")) == "auto":
-                # auto mode: enforce only the non-overridable hard-deny floor,
-                # then `defer` the routine allow/ask decision to Claude's
-                # native auto classifier (leashd's YAML allow/approval layer is
-                # bypassed). A classifier escalation re-enters the full
-                # pipeline via the PermissionRequest hook. The payload-mode
-                # cross-check guards against resumed-pane mode drift — a
-                # mismatch falls through to the stricter full pipeline.
-                from leashd.agents.types import PermissionDeny
-
-                floor = await self._gatekeeper.check_hard_deny_floor(
+                # Hybrid auto gate: sandbox + the non-overridable hard-deny floor
+                # + any EXPLICIT leashd policy rule (deny / require_approval)
+                # still apply, so agent-browser, file writes and other ruled
+                # tools stay gated by the YAML policy even in auto mode. Only an
+                # explicit ``allow`` rule or an unmatched tool returns None =
+                # `defer` to Claude's native auto classifier, which then runs
+                # routine actions without a leashd prompt (re-entering the full
+                # pipeline via PermissionRequest if it escalates). The
+                # payload-mode cross-check guards against resumed-pane mode
+                # drift — a mismatch falls through to the stricter full pipeline.
+                gated = await self._gatekeeper.check_auto_gated(
                     tool_name,
                     tool_input,
                     cs.session_id,
                     cs.chat_id,
+                    task_description=cs.last_prompt,
                     session_mode=cs.mode,
                 )
-                if isinstance(floor, PermissionDeny):
-                    return _permission_to_hook(floor)
-                return _hook_decision(
-                    "defer", "leashd: deferring to Claude native auto"
-                )
+                if gated is None:
+                    return _hook_decision(
+                        "defer", "leashd: deferring to Claude native auto"
+                    )
+                return _permission_to_hook(gated)
             # Not a gated interaction tool — run the normal safety pipeline.
             # Log before the call: the gatekeeper logs `policy_evaluated`
             # right after, and a require_approval blocks HERE awaiting the
@@ -1977,6 +2178,10 @@ class TmuxSessionManager:
                         exc_info=True,
                     )
                     continue
+                if cs.note_goal_indicator(screen):
+                    turn = cs.turn
+                    if turn is not None and not turn.stop_event.is_set():
+                        turn.complete()
                 match = _detect_native_dialog(screen)
                 if match is None:
                     continue
@@ -2126,8 +2331,6 @@ class TmuxSessionManager:
             chosen_row=chosen_idx + 1,
         )
 
-    # -- JSONL dispatch (called by JSONLTailer) ------------------------------
-
     async def _dispatch_jsonl_event(
         self, cs: TmuxClaudeSession, obj: dict[str, Any]
     ) -> None:
@@ -2164,8 +2367,11 @@ class TmuxSessionManager:
         # New assistant content after a deferred completion = the follow-up's
         # response has started; re-arm the per-response dedup so its own
         # completion signal is counted (and not mistaken for the prior pair).
+        # A goal sub-turn that resumes here justifies the prior goal deferral —
+        # clear its idle stamp so the watch loop does not finalize mid-run.
         if turn._completion_seen_this_response:
             turn._completion_seen_this_response = False
+            turn.goal_completion_deferred_at = None
         for block in blocks:
             if not isinstance(block, dict):
                 continue
@@ -2210,8 +2416,6 @@ class TmuxSessionManager:
                     None,
                     log_event="tmux_on_tool_activity_error",
                 )
-
-    # -- shutdown ------------------------------------------------------------
 
     def kill_owned_sessions(self) -> int:
         """Kill every tmux session leashd spawned — and *only* those.
@@ -2395,10 +2599,6 @@ def _permission_to_permreq(result: Any) -> dict[str, Any]:
     # plan review only occurs in plan mode, never on a native-auto raise).
     return _permreq_decision("deny")
 
-
-# ---------------------------------------------------------------------------
-# Module singleton — both TmuxAgent and the web layer resolve the same one.
-# ---------------------------------------------------------------------------
 
 _SINGLETON: TmuxSessionManager | None = None
 

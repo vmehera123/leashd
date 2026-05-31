@@ -26,7 +26,6 @@ def format_status(status: GitStatus) -> str:
     """Format GitStatus for display."""
     lines: list[str] = []
 
-    # Branch line
     branch_line = f"\U0001f4cb Branch: {status.branch}"
     if status.tracking:
         tracking_parts = [f"tracking {status.tracking}"]

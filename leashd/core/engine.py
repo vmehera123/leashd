@@ -130,7 +130,21 @@ def _parse_task_flags(
 
 _STREAMING_CURSOR = "\u258d"
 _MAX_STREAMING_DISPLAY = 4000
+# ``/goal <word>`` forms that CLEAR rather than set a goal (Claude Code aliases).
+_GOAL_CLEAR_WORDS = frozenset({"clear", "stop", "off", "reset", "none", "cancel"})
 _TRANSIENT_MESSAGE_DELAY = 5.0  # seconds before auto-deleting status messages (longer than connector's 4.0s approval cleanup)
+
+
+def _is_goal_command_prompt(text: str) -> bool:
+    """True when a turn's prompt is a ``/goal <condition>`` directive.
+
+    ``_handle_goal_command`` submits the goal verbatim as the turn prompt. A
+    goal IS the autonomous directive, so it must bypass ``auto_plan`` — letting
+    auto_plan flip a goal into plan mode derails the run (and, in the tmux
+    runtime, hangs on Claude's native plan-execute selector, which leashd does
+    not drive)."""
+    stripped = text.lstrip()
+    return stripped == "/goal" or stripped.startswith("/goal ")
 
 
 class AgentDeadline:
@@ -516,11 +530,11 @@ class Engine:
             str, list[tuple[str, str, list[Attachment] | None]]
         ] = {}
         self._recent_failures: dict[str, list[float]] = {}
-        self._pending_interrupts: dict[str, str] = {}  # chat_id -> interrupt_id
-        self._interrupt_to_chat: dict[str, str] = {}  # interrupt_id -> chat_id
-        self._interrupt_message_ids: dict[str, str] = {}  # chat_id -> msg_id
+        self._pending_interrupts: dict[str, str] = {}
+        self._interrupt_to_chat: dict[str, str] = {}
+        self._interrupt_message_ids: dict[str, str] = {}
         self._interrupted_chats: set[str] = set()
-        self._executing_sessions: dict[str, str] = {}  # chat_id -> session_id
+        self._executing_sessions: dict[str, str] = {}
 
         if connector:
             if self.middleware_chain and self.middleware_chain.has_middleware():
@@ -575,8 +589,6 @@ class Engine:
             prompt = merge_event.data.get("prompt", "")
             if prompt:
                 await self.handle_message(user_id, prompt, chat_id)
-
-    # ── Public gatekeeper delegation ─────────────────────────────
 
     def enable_tool_auto_approve(self, chat_id: str, tool_name: str) -> None:
         """Enable auto-approve for a specific tool on a chat (plugin-facing API)."""
@@ -672,6 +684,12 @@ class Engine:
     async def _shutdown_browser(self, session: Session) -> None:
         if session.mode != "web":
             return
+        await self._close_browser_processes(session)
+
+    async def _close_browser_processes(self, session: Session) -> None:
+        """Close any live browser the agent opened (agent-browser session or
+        Playwright MCP). Mode-independent — callers decide when it applies (web
+        mode teardown, or after a ``/goal`` that drove the browser)."""
         backend = session.browser_backend or self.config.browser_backend
         try:
             if backend == "agent-browser":
@@ -826,9 +844,6 @@ class Engine:
                         user_id=user_id,
                         chat_id=chat_id,
                     )
-                    # No engine queue / re-submit: the running turn absorbs it.
-                    # Log the user message ourselves (the skipped _execute_turn
-                    # would otherwise have done so).
                     await self._message_logger.log(
                         user_id=user_id,
                         chat_id=chat_id,
@@ -841,8 +856,6 @@ class Engine:
                     )
                     return ""
 
-            # Fallback: no live turn to attach to, or a non-live runtime →
-            # queue for re-submission after the current turn completes.
             self._pending_messages.setdefault(chat_id, []).append(
                 (user_id, text, attachments)
             )
@@ -1013,6 +1026,7 @@ class Engine:
             and session.plan_origin is None
             and session.task_run_id is None
             and not _skip_auto_plan
+            and not _is_goal_command_prompt(text)
         ):
             session.mode = "plan"
             session.plan_origin = "auto"
@@ -1090,9 +1104,6 @@ class Engine:
                     attachments=attachments,
                 )
 
-            # Check interrupt BEFORE persisting session — /clear may have
-            # already reset the session, and writing the old agent's
-            # session_id back would corrupt the fresh session state.
             if chat_id in self._interrupted_chats:
                 self._interrupted_chats.discard(chat_id)
                 if responder:
@@ -1138,10 +1149,6 @@ class Engine:
             )
 
             duration_ms = round((time.monotonic() - start) * 1000)
-            # Prefer the streaming buffer for storage — it matches what the
-            # user saw during live streaming.  response.content may differ
-            # (e.g. only the last turn's text, or a text_parts fallback with
-            # duplicates from --include-partial-messages snapshots).
             stored_content = response.content
             if responder and responder.buffer:
                 stored_content = responder.buffer
@@ -1512,14 +1519,8 @@ class Engine:
                 "Send your message again to continue."
             ) from None
         except AgentError:
-            # Already a well-formed agent fault — propagate unchanged so the
-            # SESSION_FAILED → terminal-state path keeps its original message.
             raise
         except Exception as exc:
-            # Any other unexpected runtime fault (e.g. a missing dependency in
-            # a runtime's spawn path) must surface as an AgentError so the
-            # _execute_turn handler emits SESSION_FAILED — otherwise an
-            # in-flight /task hangs in its phase forever.
             agent_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await agent_task
@@ -1722,7 +1723,6 @@ class Engine:
             return ""
 
         if command == "cancel":
-            # Emit MESSAGE_IN with /cancel text so TaskOrchestrator handles it
             await self.event_bus.emit(
                 Event(
                     name=MESSAGE_IN,
@@ -1874,7 +1874,15 @@ class Engine:
                     f"Autonomous loop: {'enabled' if self.config.autonomous_loop else 'disabled'}",
                 ]
             )
+            sid = self._executing_sessions.get(chat_id) or session.session_id
+            if self.agent.is_goal_active(sid):
+                lines.append("Goal: active")
             return "\n".join(lines)
+
+        if command == "goal":
+            return await self._handle_goal_command(
+                args, session, chat_id, user_id, attachments
+            )
 
         if command == "plugin":
             return self._handle_plugin_command(args)
@@ -1883,6 +1891,65 @@ class Engine:
             "unknown_command", user_id=user_id, chat_id=chat_id, command=command
         )
         return f"Unknown command: /{command}"
+
+    async def _handle_goal_command(
+        self,
+        args: str,
+        session: Session,
+        chat_id: str,
+        user_id: str,
+        attachments: list[Attachment] | None,
+    ) -> str:
+        """Set/clear a Claude Code ``/goal`` — a completion condition the agent
+        works toward across turns until a fast model confirms it. Needs the
+        interactive tmux runtime: leashd injects the command into the live pane
+        and streams the multi-turn run as one task, deferring completion until
+        the goal clears."""
+        caps = getattr(self.agent, "capabilities", None)
+        if not getattr(caps, "accepts_input_while_busy", False):
+            return (
+                "/goal needs the interactive tmux runtime. "
+                "Switch with: leashd runtime set tmux (then restart)."
+            )
+        # Mid-turn: inject into the live pane so the goal merges into the
+        # currently streaming task.
+        session_id = self._executing_sessions.get(chat_id)
+        if session_id and await self.agent.inject_goal(session_id, args):
+            return ""
+        # Idle: a bare/clear `/goal` has nothing to act on; otherwise start a
+        # turn with the command as the prompt (submit() seeds goal_active).
+        stripped = args.strip()
+        if not stripped or stripped.lower() in _GOAL_CLEAR_WORDS:
+            return "No active goal. Send '/goal <condition>' to start one."
+        # A goal runs autonomously across many turns — put the session in auto
+        # mode so Claude's native policy handles routine actions without a
+        # prompt, while leashd's hybrid auto gate still enforces every explicit
+        # policy rule (agent-browser, file writes, …). Mirrors /auto.
+        if session.mode != "auto":
+            old_mode = session.mode
+            if old_mode == "web":
+                await self._shutdown_browser(session)
+            session.mode = "auto"
+            session.mode_instruction = None
+            session.plan_origin = None
+            self._gatekeeper.disable_auto_approve(chat_id)
+            await self.session_manager.save(session)
+            logger.info(
+                "mode_switched",
+                user_id=user_id,
+                chat_id=chat_id,
+                from_mode=old_mode,
+                to_mode="auto",
+            )
+        await self.handle_message(
+            user_id, f"/goal {stripped}", chat_id, attachments=attachments
+        )
+        # The goal turn has completed (handle_message blocks until the turn
+        # ends). Close any browser the goal drove — a /goal frequently opens
+        # agent-browser across many pages and would otherwise leave a live
+        # browser session running after the task is done.
+        await self._close_browser_processes(session)
+        return ""
 
     def _handle_plugin_command(self, args: str) -> str:
         """Handle /plugin subcommands for Claude Code plugin management."""
@@ -1930,7 +1997,6 @@ class Engine:
         if sub == "add":
             if not sub_args:
                 return "Usage: /plugin add <path>"
-            # Enforce sandbox: plugin source must be within approved directories
             source_path = Path(sub_args).expanduser().resolve()
             allowed, reason = self.sandbox.validate_path(source_path)
             if not allowed:
@@ -2054,7 +2120,6 @@ class Engine:
     async def _handle_dir_command(
         self, session: Session, args: str, chat_id: str, user_id: str
     ) -> str:
-        # Listing (no args) is safe; only block actual switches while executing
         if args and args.strip() and chat_id in self._executing_chats:
             return (
                 "Cannot switch directories — an agent is running in this conversation.\n"
@@ -2117,7 +2182,6 @@ class Engine:
 
         target = args.strip()
 
-        # Listing (no args) is safe; only block actual switches while executing
         if target and chat_id in self._executing_chats:
             return (
                 "Cannot switch workspaces — an agent is running in this conversation.\n"
@@ -2401,10 +2465,6 @@ class Engine:
             tool_input: dict[str, Any],
             _context: Any,
         ) -> Any:
-            # Plan-mode / interaction gate — shared with the tmux runtime's
-            # PreToolUse hook bridge so plan-review behavior is identical
-            # across runtimes. Returns a decision when it handles the tool,
-            # or None to fall through to the normal gatekeeper check below.
             decision = await plan_gate.evaluate_plan_tool(
                 tool_name=tool_name,
                 tool_input=tool_input,

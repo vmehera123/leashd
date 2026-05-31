@@ -108,7 +108,6 @@ logger = structlog.get_logger()
 
 _STALE_TASK_HOURS = 24
 
-# Ordered list of conductor actions (excludes terminal states)
 _ORDERED_ACTIONS: list[str] = [
     "plan",
     "implement",
@@ -168,8 +167,6 @@ async def _git_diff_stat(working_dir: str) -> str | None:
         return None
 
 
-# ── Action → session mode mapping ──────────────────────────────────────
-
 _ACTION_TO_MODE: dict[str, str] = {
     "plan": "plan",
     "implement": "auto",
@@ -179,8 +176,6 @@ _ACTION_TO_MODE: dict[str, str] = {
     "review": "plan",
     "pr": "auto",
 }
-
-# ── Read-only tools for explore/review ─────────────────────────────────
 
 _READ_ONLY_BASH: frozenset[str] = frozenset(
     {
@@ -193,8 +188,6 @@ _READ_ONLY_BASH: frozenset[str] = frozenset(
         "Bash::find",
     }
 )
-
-# ── Action-specific prompt suffixes ────────────────────────────────────
 
 _CODEBASE_MEMORY_PLAN_HINT = (
     "CODEBASE EXPLORATION — use codebase-memory-mcp tools FIRST to understand "
@@ -424,12 +417,10 @@ def _build_action_prompt(
         suffix = _ACTION_SUFFIXES.get(decision.action, "Continue the task.")
     lines.append(suffix)
 
-    # Merge profile-specific action instructions
     if profile and decision.action in profile.action_instructions:
         lines.append("")
         lines.append(profile.action_instructions[decision.action])
 
-    # Include checkpoint history for context
     checkpoints = [
         (k.replace("_checkpoint", ""), v)
         for k, v in task.phase_context.items()
@@ -503,8 +494,6 @@ class AgenticOrchestrator(LeashdPlugin):
     def set_engine(self, engine: _EngineProtocol) -> None:
         self._engine = engine
 
-    # ── Plugin lifecycle ───────────────────────────────────────────────
-
     async def initialize(self, context: PluginContext) -> None:
         self._event_bus = context.event_bus
         self._browser_backend = context.config.browser_backend
@@ -559,8 +548,6 @@ class AgenticOrchestrator(LeashdPlugin):
         if self._db:
             await self._db.close()
             self._db = None
-
-    # ── Codebase indexing ────────────────────────────────────────────────
 
     @staticmethod
     async def _ensure_codebase_indexed(working_directory: str) -> None:
@@ -626,8 +613,6 @@ class AgenticOrchestrator(LeashdPlugin):
                     nodes=result.get("nodes"),
                 )
 
-    # ── Event handlers ─────────────────────────────────────────────────
-
     async def _on_task_submitted(self, event: Event) -> None:
         chat_id = event.data.get("chat_id", "")
 
@@ -654,7 +639,6 @@ class AgenticOrchestrator(LeashdPlugin):
         )
         task.phase_context["auto_pr_base_branch"] = self._auto_pr_base_branch
 
-        # Load project-level task config and merge with global profile
         from leashd.core.task_profile import load_project_task_config, merge_profiles
 
         project_profile = load_project_task_config(task.working_directory)
@@ -668,7 +652,6 @@ class AgenticOrchestrator(LeashdPlugin):
                 working_directory=task.working_directory,
             )
 
-        # Seed the memory file
         mem_path = task_memory.seed(task.run_id, task.task, task.working_directory)
         task.memory_file_path = str(mem_path)
 
@@ -721,7 +704,6 @@ class AgenticOrchestrator(LeashdPlugin):
             task.total_cost += cost
             task.phase_costs[task.phase] = task.phase_costs.get(task.phase, 0.0) + cost
 
-        # Git checkpoint after phase completion
         commit_hash = await git_checkpoint(
             task.working_directory, task.run_id, task.phase
         )
@@ -743,7 +725,6 @@ class AgenticOrchestrator(LeashdPlugin):
             elapsed=elapsed,
         )
 
-        # Compute completed/pending phases for the memory file
         profile = self._get_profile(task)
         completed, pending = _compute_phase_status(
             task.phase_context, profile.enabled_actions
@@ -774,7 +755,6 @@ class AgenticOrchestrator(LeashdPlugin):
             },
         )
 
-        # After implement, write changed files into memory
         if task.phase == "implement":
             diff_stat = await _git_diff_stat(task.working_directory)
             if diff_stat:
@@ -824,8 +804,6 @@ class AgenticOrchestrator(LeashdPlugin):
             )
             self._browser_backend = new_backend
 
-    # ── Conductor loop ─────────────────────────────────────────────────
-
     async def _advance(self, task: TaskRun, *, is_first_call: bool = False) -> None:
         await self._queue.enqueue(
             task.chat_id,
@@ -850,7 +828,6 @@ class AgenticOrchestrator(LeashdPlugin):
 
         last_output = task.phase_context.get(f"{task.phase}_output", "")
 
-        # Summarize verbose phase output for the conductor
         if last_output and len(last_output) > 500 and not is_first_call:
             last_output = await summarize_phase_output(
                 task.phase,
@@ -862,7 +839,6 @@ class AgenticOrchestrator(LeashdPlugin):
             # Cache the summary so we don't re-summarize on restart
             task.phase_context[f"{task.phase}_summary"] = last_output
 
-        # Profile: use forced initial_action on first call if set
         if is_first_call and profile.initial_action:
             decision = ConductorDecision(
                 action=profile.initial_action,
@@ -1055,7 +1031,6 @@ class AgenticOrchestrator(LeashdPlugin):
                     reason=decision.reason,
                 )
 
-        # Handle terminal decisions
         if decision.action == "complete":
             # Auto-PR enforcement: if auto_pr enabled and PR action is available,
             # force a PR step before completing
@@ -1082,14 +1057,12 @@ class AgenticOrchestrator(LeashdPlugin):
             await self._handle_terminal(task)
             return
 
-        # Handle PR skip if auto_pr is disabled
         if decision.action == "pr" and not self._auto_pr:
             task.transition_to("completed")
             await self.store.save(task)
             await self._handle_terminal(task)
             return
 
-        # Track fix retries
         if decision.action == "fix":
             task.retry_count += 1
             if task.retry_count > task.max_retries:
@@ -1099,7 +1072,6 @@ class AgenticOrchestrator(LeashdPlugin):
                 await self._handle_terminal(task)
                 return
 
-        # Store complexity from first call
         if decision.complexity:
             task.complexity = decision.complexity
 
@@ -1150,8 +1122,6 @@ class AgenticOrchestrator(LeashdPlugin):
         if task.is_terminal():
             return
         await self._execute_action(task, decision, memory)
-
-    # ── Action execution ───────────────────────────────────────────────
 
     async def _execute_action(
         self,
@@ -1207,7 +1177,6 @@ class AgenticOrchestrator(LeashdPlugin):
         if mode == "plan":
             session.plan_origin = "task"
 
-        # Build prompt — test/verify phases get special setup
         if decision.action in ("test", "verify"):
             prompt = self._setup_test_or_verify(task, decision, session, memory)
         else:
@@ -1220,7 +1189,6 @@ class AgenticOrchestrator(LeashdPlugin):
                 codebase_memory=self._codebase_memory_enabled,
             )
 
-        # Set up auto-approvals based on action type
         self._setup_auto_approvals(task.chat_id, decision.action)
 
         task_events.append(
@@ -1397,7 +1365,6 @@ class AgenticOrchestrator(LeashdPlugin):
             browser_backend=self._browser_backend,
         )
 
-        # Build prompt with memory context
         lines = [
             f"AUTONOMOUS TASK — Action: {decision.action}",
             f"TASK: {task.task}",
@@ -1430,8 +1397,6 @@ class AgenticOrchestrator(LeashdPlugin):
             lines.append(suffix)
 
         return "\n".join(lines)
-
-    # ── Restart recovery ───────────────────────────────────────────────
 
     async def _resume_task(self, task: TaskRun) -> None:
         if self._connector:
@@ -1537,8 +1502,6 @@ class AgenticOrchestrator(LeashdPlugin):
                 )
 
         bg.add_done_callback(_on_resume_done)
-
-    # ── Terminal state handling ─────────────────────────────────────────
 
     async def _handle_terminal(self, task: TaskRun) -> None:
         self._active_tasks.pop(task.chat_id, None)
@@ -1685,8 +1648,6 @@ class AgenticOrchestrator(LeashdPlugin):
             reason=reason,
         )
 
-    # ── Stale cleanup ──────────────────────────────────────────────────
-
     async def cleanup_stale(self, max_age_hours: int = _STALE_TASK_HOURS) -> int:
         active = await self.store.load_all_active()
         now = datetime.now(timezone.utc)
@@ -1706,8 +1667,6 @@ class AgenticOrchestrator(LeashdPlugin):
                     age_hours=age_hours,
                 )
         return cleaned
-
-    # ── Public API ─────────────────────────────────────────────────────
 
     @property
     def active_tasks(self) -> dict[str, TaskRun]:

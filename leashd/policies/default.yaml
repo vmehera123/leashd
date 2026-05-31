@@ -38,6 +38,11 @@ rules:
     tools: [Read, Glob, Grep, WebSearch, WebFetch, LS, ToolSearch]
     action: allow
 
+  - name: background-task-tools
+    tools: [Monitor, BashOutput, KillShell]
+    action: allow
+    description: "Observe/manage background shells the agent already started (Monitor = watch a command's output)"
+
   - name: browser-readonly-tools
     tools:
       - browser_snapshot

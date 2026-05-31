@@ -23,6 +23,7 @@ from leashd.config_store import (
     get_autonomous_config,
     get_browser_config,
     get_codebase_memory_config,
+    get_security_config,
     get_skills_config,
     get_web_config,
     get_workspace_settings,
@@ -101,7 +102,6 @@ def _handle_config() -> None:
 
     print(f"Config: {config_path()}\n")
 
-    # Try to build the resolved config (merges YAML env vars, .env, real env)
     resolved = _try_resolve_config()
     if resolved:
         _print_resolved_config(resolved, yaml_data)
@@ -475,6 +475,53 @@ def _handle_codebase_memory_toggle(enabled: bool) -> None:
     inject_global_config_as_env(force=True)
     state = "enabled" if enabled else "disabled"
     print(f"\u2713 Codebase memory {state}")
+    _notify_daemon_reload()
+
+
+def _handle_security(args: argparse.Namespace) -> None:
+    """Route security-guidance subcommands."""
+    sub = getattr(args, "security_command", None)
+    if sub is None or sub == "show":
+        _handle_security_show()
+    elif sub == "enable":
+        _handle_security_toggle(True)
+    elif sub == "disable":
+        _handle_security_toggle(False)
+
+
+def _handle_security_show() -> None:
+    """Display security-guidance plugin settings."""
+    data = load_global_config()
+    sec = get_security_config(data)
+    enabled = bool(sec.get("enabled", False))
+    print(f"Security-guidance plugin: {'enabled' if enabled else 'disabled'}")
+    review_model = sec.get("review_model")
+    print(f"Review model: {review_model or 'plugin default (Claude Opus)'}")
+    if enabled:
+        print(
+            "  Claude reviews its own code changes for vulnerabilities "
+            "in-session;\n  findings flow back through leashd's approval "
+            "pipeline.\n  Plugin: security-guidance@claude-plugins-official "
+            "(installed on daemon start)."
+        )
+    else:
+        print("  Run 'leashd security enable' to turn it on.")
+
+
+def _handle_security_toggle(enabled: bool) -> None:
+    """Enable or disable the security-guidance plugin."""
+    data = load_global_config()
+    sec = data.get("security", {})
+    if not isinstance(sec, dict):
+        sec = {}
+    sec["enabled"] = enabled
+    data["security"] = sec
+    save_global_config(data)
+    inject_global_config_as_env(force=True)
+    state = "enabled" if enabled else "disabled"
+    print(f"\u2713 Security-guidance plugin {state}")
+    if enabled:
+        print("  Restart the daemon (leashd restart) to install + activate it.")
     _notify_daemon_reload()
 
 
@@ -1205,7 +1252,6 @@ def _handle_clean() -> None:
                 img.unlink()
                 cleaned += 1
 
-    # Clean global ~/.leashd/ artifacts
     home_leashd = Path.home() / ".leashd"
     for name in ("sessions.db", "messages.db", "leashd.pid", "daemon.log"):
         artifact = home_leashd / name
@@ -1412,7 +1458,6 @@ def _handle_plugin_show(name: str) -> None:
     print(f"Installed: {plugin.installed_at}")
     print(f"Status: {'enabled' if plugin.enabled else 'disabled'}")
 
-    # Show components if the plugin directory exists
     plugin_dir = Path.home() / ".claude" / "plugins" / plugin.name
     if plugin_dir.is_dir():
         components = []
@@ -1629,7 +1674,6 @@ def _smart_start() -> None:
         _handle_start(foreground=False)
         return
 
-    # Check if cwd is already approved
     existing = [str(d) for d in data.get("approved_directories", [])]
     if str(cwd) not in existing:
         try:
@@ -1671,7 +1715,6 @@ def _handle_start(*, foreground: bool) -> None:
     from leashd.daemon import daemon_log_path, start_daemon
     from leashd.exceptions import DaemonError
 
-    # Validate config exists before spawning background process
     data = load_global_config()
     if not data or not data.get("approved_directories"):
         print("No config found. Run 'leashd init' first.", file=sys.stderr)
@@ -1783,7 +1826,6 @@ def main() -> None:
     parser.add_argument("--version", action="version", version=f"leashd {__version__}")
     subparsers = parser.add_subparsers(dest="command")
 
-    # Daemon lifecycle
     start_parser = subparsers.add_parser("start", help="Start leashd daemon")
     start_parser.add_argument(
         "-f",
@@ -1819,7 +1861,6 @@ def main() -> None:
     subparsers.add_parser("clean", help="Remove all logs, databases, and audit files")
     subparsers.add_parser("reload", help="Reload config in running daemon")
 
-    # WebUI
     webui_parser = subparsers.add_parser("webui", help="Manage WebUI settings")
     webui_sub = webui_parser.add_subparsers(dest="webui_command")
     webui_sub.add_parser("show", help="Show WebUI settings (default)")
@@ -1842,7 +1883,6 @@ def main() -> None:
         help="Send the public URL to your Telegram chat",
     )
 
-    # Autonomous mode
     auto_parser = subparsers.add_parser(
         "autonomous", help="Manage autonomous mode settings"
     )
@@ -1852,7 +1892,6 @@ def main() -> None:
     auto_sub.add_parser("enable", help="Quick-enable autonomous mode with defaults")
     auto_sub.add_parser("disable", help="Disable autonomous mode")
 
-    # Browser profile
     browser_parser = subparsers.add_parser(
         "browser", help="Manage browser profile settings"
     )
@@ -1880,7 +1919,6 @@ def main() -> None:
         help="Set headless on or off (omit to show current)",
     )
 
-    # Codebase memory
     cm_parser = subparsers.add_parser(
         "codebase-memory",
         help="Manage codebase-memory-mcp code intelligence",
@@ -1893,7 +1931,15 @@ def main() -> None:
     cm_sub.add_parser("enable", help="Enable codebase-memory-mcp")
     cm_sub.add_parser("disable", help="Disable codebase-memory-mcp")
 
-    # Thinking effort
+    sec_parser = subparsers.add_parser(
+        "security",
+        help="Manage the security-guidance plugin (in-session vuln review)",
+    )
+    sec_sub = sec_parser.add_subparsers(dest="security_command")
+    sec_sub.add_parser("show", help="Show security-guidance settings (default)")
+    sec_sub.add_parser("enable", help="Enable the security-guidance plugin")
+    sec_sub.add_parser("disable", help="Disable the security-guidance plugin")
+
     effort_parser = subparsers.add_parser("effort", help="Manage thinking effort level")
     effort_sub = effort_parser.add_subparsers(dest="effort_command")
     effort_sub.add_parser(
@@ -1916,7 +1962,6 @@ def main() -> None:
     effort_clear.add_argument("--dir", help="Directory whose override to clear")
     effort_clear.add_argument("--workspace", help="Workspace whose override to clear")
 
-    # Model selection
     model_parser = subparsers.add_parser(
         "model", help="Manage default model (claude_model / codex_model)"
     )
@@ -1953,14 +1998,12 @@ def main() -> None:
         help="Target runtime family (defaults to claude)",
     )
 
-    # Max turns
     turns_parser = subparsers.add_parser("turns", help="Manage max turns per request")
     turns_sub = turns_parser.add_subparsers(dest="turns_command")
     turns_sub.add_parser("show", help="Show current max turns (default)")
     turns_set = turns_sub.add_parser("set", help="Set max turns per request")
     turns_set.add_argument("value", type=int, help="Max turns (positive integer)")
 
-    # Task orchestrator
     task_parser = subparsers.add_parser(
         "task", help="Manage task orchestrator settings"
     )
@@ -1973,7 +2016,6 @@ def main() -> None:
     tv_set = tv_sub.add_parser("set", help="Set task orchestrator version")
     tv_set.add_argument("version", choices=["v1", "v2", "v3", "v4"])
 
-    # Max tool calls
     tc_parser = subparsers.add_parser(
         "tool-calls", help="Manage max tool calls per execution"
     )
@@ -1982,7 +2024,6 @@ def main() -> None:
     tc_set = tc_sub.add_parser("set", help="Set max tool calls per execution")
     tc_set.add_argument("value", type=int, help="Max tool calls (-1 for unlimited)")
 
-    # Agent runtime
     runtime_parser = subparsers.add_parser("runtime", help="Manage agent runtime")
     runtime_sub = runtime_parser.add_subparsers(dest="runtime_command")
     runtime_sub.add_parser("show", help="Show current runtime (default)")
@@ -1990,7 +2031,6 @@ def main() -> None:
     runtime_set = runtime_sub.add_parser("set", help="Set agent runtime")
     runtime_set.add_argument("name", help="Runtime name (e.g. claude-code, codex)")
 
-    # Workflow / playbook management
     workflow_parser = subparsers.add_parser(
         "workflow", help="Manage web workflow playbooks"
     )
@@ -1999,7 +2039,6 @@ def main() -> None:
     workflow_show = workflow_sub.add_parser("show", help="Show playbook details")
     workflow_show.add_argument("name", help="Playbook name to show")
 
-    # Skill management
     skill_parser = subparsers.add_parser("skill", help="Manage agent skills")
     skill_sub = skill_parser.add_subparsers(dest="skill_command")
     skill_sub.add_parser("list", help="List installed skills (default)")
@@ -2013,7 +2052,6 @@ def main() -> None:
     skill_show = skill_sub.add_parser("show", help="Show skill details")
     skill_show.add_argument("name", help="Skill name to show")
 
-    # Claude Code plugin management
     plugin_parser = subparsers.add_parser("plugin", help="Manage Claude Code plugins")
     plugin_sub = plugin_parser.add_subparsers(dest="plugin_command")
     plugin_sub.add_parser("list", help="List installed plugins (default)")
@@ -2030,7 +2068,6 @@ def main() -> None:
     plugin_disable = plugin_sub.add_parser("disable", help="Disable a plugin")
     plugin_disable.add_argument("name", help="Plugin name to disable")
 
-    # Workspace management
     ws_parser = subparsers.add_parser("ws", help="Manage workspaces")
     ws_sub = ws_parser.add_subparsers(dest="ws_command")
 
@@ -2107,7 +2144,6 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    # Inject global config as env vars for all commands
     inject_global_config_as_env()
 
     if args.command is None:
@@ -2148,6 +2184,8 @@ def main() -> None:
         _handle_browser(args)
     elif args.command == "codebase-memory":
         _handle_codebase_memory(args)
+    elif args.command == "security":
+        _handle_security(args)
     elif args.command == "effort":
         _handle_effort(args)
     elif args.command == "model":

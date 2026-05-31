@@ -73,6 +73,27 @@ class BaseAgent(Protocol):
         """
         return False
 
+    async def inject_goal(
+        self,
+        session_id: str,  # noqa: ARG002
+        args: str,  # noqa: ARG002
+    ) -> bool:
+        """Inject a Claude Code ``/goal`` command into a live interactive pane.
+
+        Only meaningful for runtimes whose capabilities set
+        ``accepts_input_while_busy`` (currently tmux). Returns ``True`` when the
+        command was driven into the pane, ``False`` otherwise — the engine then
+        falls back to starting a normal turn with the command as the prompt.
+        """
+        return False
+
+    def is_goal_active(self, session_id: str) -> bool:  # noqa: ARG002
+        """True while a Claude Code ``/goal`` is running in this session's pane.
+
+        Defaults to ``False`` for runtimes without an interactive goal loop.
+        """
+        return False
+
     async def shutdown(self) -> None: ...
 
     def update_config(self, config: Any) -> None: ...

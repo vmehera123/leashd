@@ -121,11 +121,9 @@ def analyze_bash(command: str) -> CommandAnalysis:
     if has_pipe and has_redirect:
         risk_factors.append("pipe with redirect")
 
-    # Split on pipes and chains to get individual commands
     parts = re.split(r"\s*[|;]\s*|\s*&&\s*|\s*\|\|\s*", command)
     commands = [part.strip() for part in parts if part.strip()]
 
-    # Check for dangerous patterns
     if re.search(r"\brm\s.*-.*r.*f|\brm\s+-rf", command):
         risk_factors.append("recursive force delete")
     if re.search(r"\bchmod\s+777\b", command):

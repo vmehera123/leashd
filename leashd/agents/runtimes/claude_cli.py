@@ -85,8 +85,6 @@ class ClaudeCliAgent(BaseAgent):
     def update_config(self, config: LeashdConfig) -> None:
         self._config = config
 
-    # -- CLI discovery -------------------------------------------------------
-
     @staticmethod
     def _find_cli() -> str:
         if cli := shutil.which("claude"):
@@ -104,8 +102,6 @@ class ClaudeCliAgent(BaseAgent):
         raise AgentError(
             "Claude Code CLI not found. Install with: npm install -g @anthropic-ai/claude-code"
         )
-
-    # -- auto-mode hard-deny floor ------------------------------------------
 
     def _auto_floor(
         self, session: Session, *, model: str | None = None
@@ -180,8 +176,6 @@ class ClaudeCliAgent(BaseAgent):
             session_id
         )
 
-    # -- Command building ----------------------------------------------------
-
     def _build_command(
         self, session: Session, settings: RuntimeSettings | None = None
     ) -> list[str]:
@@ -218,6 +212,18 @@ class ClaudeCliAgent(BaseAgent):
                 interactive=False,
             )
         )
+        # security-guidance plugin: non-auto modes write no managed --settings,
+        # so activate it via a plugins-only managed file (auto mode already
+        # rides enabledPlugins on the hard-deny-floor settings written above).
+        # Never touches the user's ~/.claude/settings.json.
+        if settings_path is None and self._config.security_guidance_enabled:
+            from leashd.agents.runtimes.tmux_session import (
+                get_or_create_tmux_session_manager,
+            )
+
+            settings_path = get_or_create_tmux_session_manager(
+                self._config
+            ).write_plugin_settings(session.session_id)
         # auto mode: a managed --settings file carries the hard-deny-floor
         # PreToolUse + PermissionRequest hooks (stdio stays as the redundant
         # raise catch). Never touches the user's ~/.claude/settings.json.
@@ -225,8 +231,6 @@ class ClaudeCliAgent(BaseAgent):
             cmd += ["--settings", str(settings_path)]
 
         return cmd
-
-    # -- NDJSON I/O ----------------------------------------------------------
 
     def _next_request_id(self) -> str:
         self._request_counter += 1
@@ -242,8 +246,6 @@ class ClaudeCliAgent(BaseAgent):
             line = json.dumps(data) + "\n"
             stdin.write(line.encode())
             await stdin.drain()
-
-    # -- Execute -------------------------------------------------------------
 
     async def execute(
         self,
@@ -834,8 +836,6 @@ class ClaudeCliAgent(BaseAgent):
                     buf(line)
         except asyncio.CancelledError:
             pass
-
-    # -- Cancel / Shutdown ---------------------------------------------------
 
     async def cancel(self, session_id: str) -> None:
         self._cancelled_sessions.add(session_id)

@@ -211,6 +211,7 @@ class TelegramConnector(BaseConnector):
                     "tasks",
                     "stop",
                     "web",
+                    "goal",
                 ],
                 self._on_command,
             )
@@ -799,7 +800,6 @@ class TelegramConnector(BaseConnector):
         chat_id = str(update.message.chat_id)
         caption = update.message.caption or ""
 
-        # Download largest photo variant
         photo = update.message.photo[-1]
         try:
             tg_file = await photo.get_file()

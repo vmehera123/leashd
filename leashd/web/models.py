@@ -4,8 +4,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
-# --- Client → Server ---
-
 ClientMessageType = Literal[
     "auth",
     "message",
@@ -22,8 +20,6 @@ class ClientMessage(BaseModel):
     type: ClientMessageType
     payload: dict[str, Any] = {}
 
-
-# --- Server → Client ---
 
 ServerMessageType = Literal[
     "auth_ok",
@@ -55,9 +51,6 @@ class ServerMessage(BaseModel):
 
     type: ServerMessageType
     payload: dict[str, Any] = {}
-
-
-# --- Tab API models ---
 
 
 class TabInfo(BaseModel):

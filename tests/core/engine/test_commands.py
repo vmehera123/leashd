@@ -2,6 +2,7 @@
 
 import asyncio
 import signal
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, create_autospec, patch
 
 from leashd.core.config import LeashdConfig
@@ -167,6 +168,58 @@ class TestHandleCommand:
         assert session.mode == "auto"
         assert "chat1" not in eng._gatekeeper._auto_approved_chats
         assert "chat1" not in eng._gatekeeper._auto_approved_tools
+
+    async def test_goal_command_switches_to_auto_and_closes_browser(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        eng = Engine(
+            connector=mock_connector,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+        # /goal needs the interactive (tmux) runtime capability; the default
+        # FakeAgent's `capabilities` is a read-only property, so swap in a mock
+        # agent that advertises it.
+        eng.agent = MagicMock()
+        eng.agent.capabilities = SimpleNamespace(accepts_input_while_busy=True)
+        # Don't run a real turn — capture the start + verify the side effects.
+        eng.handle_message = AsyncMock(return_value="")
+        eng._close_browser_processes = AsyncMock()
+
+        result = await eng.handle_command("user1", "goal", "all tests pass", "chat1")
+
+        assert result == ""
+        session = eng.session_manager.get("user1", "chat1")
+        # A goal runs autonomously → the session is put in auto mode.
+        assert session.mode == "auto"
+        # The goal was started as a turn with the literal /goal prompt...
+        eng.handle_message.assert_awaited_once()
+        assert eng.handle_message.await_args.args[1] == "/goal all tests pass"
+        # ...and the browser is closed after the goal turn returns.
+        eng._close_browser_processes.assert_awaited_once()
+
+    async def test_goal_command_without_interactive_runtime_is_rejected(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        eng = Engine(
+            connector=mock_connector,
+            agent=FakeAgent(),  # no accepts_input_while_busy capability
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+        eng.handle_message = AsyncMock(return_value="")
+
+        result = await eng.handle_command("user1", "goal", "all tests pass", "chat1")
+
+        assert "tmux runtime" in result
+        eng.handle_message.assert_not_awaited()
+        session = eng.session_manager.get("user1", "chat1")
+        assert session.mode != "auto"
 
     async def test_status_shows_auto_distinct_from_accept_edits(
         self, config, audit_logger, policy_engine, mock_connector

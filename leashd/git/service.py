@@ -151,7 +151,6 @@ class GitService:
             # For remote branches, match against short name too
             match_name = branch.name
             if branch.is_remote and match_name.startswith("remotes/"):
-                # Strip "remotes/origin/" for matching
                 parts = match_name.split("/", 2)
                 if len(parts) >= 3:
                     match_name = parts[2]

@@ -62,10 +62,6 @@ class WebConfig(BaseModel):
     resume: bool = False
 
 
-# ---------------------------------------------------------------------------
-# Built-in recipes
-# ---------------------------------------------------------------------------
-
 _LINKEDIN_AUTH_TEMPLATE = (
     "Navigate to LinkedIn. If not logged in, use AskUserQuestion to tell "
     "the user to log in manually in the headed browser window. Verify "
@@ -232,7 +228,6 @@ def build_web_instruction(
     tools = BROWSER_TOOL_SETS.get(browser_backend, BROWSER_TOOL_SETS["playwright"])
     sections: list[str] = []
 
-    # Mode header
     if browser_backend == "agent-browser":
         browser_desc = (
             "You have browser tools via agent-browser CLI "
@@ -261,7 +256,6 @@ def build_web_instruction(
         f"submitting any content.\n\n{browser_desc}"
     )
 
-    # Authentication
     if recipe:
         sections.append(f"AUTHENTICATION:\n{recipe.auth_instruction}")
     else:
@@ -272,7 +266,6 @@ def build_web_instruction(
             f"login via {tools.snap_tool} before proceeding."
         )
 
-    # Task instructions
     if recipe:
         task_text = recipe.task_instruction
         if config.topic:
@@ -310,7 +303,6 @@ def build_web_instruction(
                 lines.append(f"  - {s.name}: {s.description}")
             sections.append("\n".join(lines))
 
-    # Playbook navigation guide — injected between TASK and CONTENT REVIEW
     if playbook:
         sections.append(
             format_playbook_instruction(
@@ -318,7 +310,6 @@ def build_web_instruction(
             )
         )
 
-    # Content review rule — always present
     if recipe:
         sections.append(
             f"CONTENT REVIEW RULE (MANDATORY):\n{recipe.content_review_instruction}"
@@ -333,7 +324,6 @@ def build_web_instruction(
             "stop, halt immediately. This is a hard safety rule."
         )
 
-    # Context persistence
     checkpoint_fields = (
         "Write BOTH files at these specific points:\n"
         "  - After authentication completes\n"
@@ -370,7 +360,6 @@ def build_web_instruction(
             "fresh session"
         )
 
-    # General rules
     rules_lines = [
         "RULES:",
         f"- Use {tools.snap_tool} only when the playbook specifies verify: true "
@@ -555,7 +544,6 @@ class WebAgentPlugin(LeashdPlugin):
         for key in AGENT_BROWSER_AUTO_APPROVE:
             gatekeeper.enable_tool_auto_approve(chat_id, key)
 
-        # Auto-approve Write/Edit for session context files
         gatekeeper.enable_tool_auto_approve(chat_id, "Write")
         gatekeeper.enable_tool_auto_approve(chat_id, "Edit")
         if not (playbook and playbook.inline_guidance):

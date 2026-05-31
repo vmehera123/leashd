@@ -93,7 +93,6 @@ class PolicyEngine:
         elif "tool" in data:
             tools = [data["tool"]]
 
-        # Compile regex patterns
         command_patterns = [re.compile(p) for p in data.get("command_patterns", [])]
         path_patterns = [re.compile(p) for p in data.get("path_patterns", [])]
 
@@ -124,7 +123,6 @@ class PolicyEngine:
                     matched_rule=rule,
                 )
 
-        # No rule matched — use default
         return Classification(
             category="unmatched",
             tool_name=tool_name,
@@ -137,7 +135,6 @@ class PolicyEngine:
         if classification.matched_rule:
             return classification.matched_rule.action
 
-        # Default action from settings
         default = self.settings.get("default_action", "require_approval")
         return PolicyDecision(default)
 
@@ -147,7 +144,6 @@ class PolicyEngine:
         tool_name: str,
         tool_input: dict[str, Any],
     ) -> bool:
-        # Tool name must match if tools are specified
         if rule.tools and tool_name not in rule.tools:
             return False
 
@@ -155,7 +151,6 @@ class PolicyEngine:
         if not rule.tools:
             return False
 
-        # If rule has command_patterns, the tool must be Bash and command must match
         if rule.command_patterns:
             if tool_name != "Bash":
                 return False
@@ -170,7 +165,6 @@ class PolicyEngine:
             if not any(p.search(command) for p in rule.command_patterns):
                 return False
 
-        # If rule has path_patterns, check file_path or path in input
         if rule.path_patterns:
             path = tool_input.get("file_path") or tool_input.get("path") or ""
             if not any(p.search(path) for p in rule.path_patterns):

@@ -24,10 +24,6 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
 MAX_RETRIES = 3
 MAX_BACKOFF_SECONDS: float = 16
 MAX_BUFFER_SIZE = 10 * 1024 * 1024  # 10 MB
@@ -78,6 +74,24 @@ NATIVE_AUTO_INSTRUCTION = (
     "continuations of the current task."
 )
 
+UV_PROJECT_GUIDANCE = (
+    "This is a uv-managed Python project. Run Python via `uv run python …` and "
+    "`uv run <tool>` (pytest, ruff, mypy, …), and install dependencies with "
+    "`uv add <pkg>` or `uv pip install <pkg>`. Never invoke the global "
+    "`python3`/`pip3` or install packages globally (no `pip install`, no "
+    "`pip install --user`) — that pollutes the system environment and bypasses "
+    "the project's locked dependencies."
+)
+
+AGENT_BROWSER_GUIDANCE = (
+    "Browser automation uses agent-browser on this machine, so pages can show "
+    "Cloudflare / JS anti-bot challenges. After `agent-browser open`, do not "
+    "scrape immediately — wait for the real content (`agent-browser wait`, or a "
+    "short `sleep` then re-`agent-browser get`/`snapshot`) and retry once if a "
+    "challenge or interstitial is still rendered. Run locally, these usually "
+    "clear within a few seconds."
+)
+
 PermissionMode = Literal["default", "acceptEdits", "plan", "auto", "bypassPermissions"]
 
 SESSION_TO_PERMISSION_MODE: dict[str, PermissionMode] = {
@@ -104,11 +118,6 @@ def model_supports_native_auto(model: str | None) -> bool:
     if model is None:
         return False
     return "opus" in model.lower()
-
-
-# ---------------------------------------------------------------------------
-# Functions
-# ---------------------------------------------------------------------------
 
 
 def truncate(text: str, max_len: int = 60) -> str:
@@ -158,6 +167,40 @@ def build_workspace_context(name: str, directories: list[str], cwd: str) -> str:
     return "\n".join(lines)
 
 
+def _is_uv_project(working_directory: str, workspace_directories: list[str]) -> bool:
+    """True if the cwd (or any workspace dir) is a Python project uv can drive.
+
+    A ``pyproject.toml`` is the signal — ``uv run`` works against it whether or
+    not a ``uv.lock`` has been generated yet.
+    """
+    candidates = [working_directory, *workspace_directories]
+    for d in candidates:
+        if not d:
+            continue
+        try:
+            if (Path(d) / "pyproject.toml").exists():
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def build_runtime_guidance(config: LeashdConfig, session: Session) -> str | None:
+    """Environment-specific operating guidance prepended to the system prompt.
+
+    Only the blocks that apply to *this* session are included, so a prompt
+    stays lean: uv guidance for a uv project, agent-browser resilience when
+    that is the configured backend. Shared by every runtime via
+    :func:`build_append_system_prompt`.
+    """
+    blocks: list[str] = []
+    if _is_uv_project(session.working_directory, session.workspace_directories):
+        blocks.append(UV_PROJECT_GUIDANCE)
+    if config.browser_backend == "agent-browser":
+        blocks.append(AGENT_BROWSER_GUIDANCE)
+    return "\n\n".join(blocks) if blocks else None
+
+
 def build_append_system_prompt(
     config: LeashdConfig, session: Session, *, native_auto: bool = False
 ) -> str | None:
@@ -198,6 +241,9 @@ def build_append_system_prompt(
             session.working_directory,
         )
         system_prompt = prepend_instruction(ws_ctx, system_prompt)
+    guidance = build_runtime_guidance(config, session)
+    if guidance:
+        system_prompt = prepend_instruction(guidance, system_prompt)
     return system_prompt or None
 
 

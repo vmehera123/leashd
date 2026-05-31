@@ -228,8 +228,6 @@ class GitCommandHandler:
         pending.event.set()
         return True
 
-    # ── Subcommand handlers ──────────────────────────────────────────
-
     async def _status(self, cwd: Path, chat_id: str) -> str:
         status = await self._service.status(cwd)
         text = formatter.format_status(status)
@@ -524,7 +522,6 @@ class GitCommandHandler:
                 "prompt": "",
             },
         )
-        # Store event for engine to pick up
         self._pending_merge_event = (chat_id, event)
 
     def pop_pending_merge_event(self) -> tuple[str, Event] | None:
@@ -532,8 +529,6 @@ class GitCommandHandler:
         ev = self._pending_merge_event
         self._pending_merge_event = None
         return ev
-
-    # ── Helpers ───────────────────────────────────────────────────────
 
     def _log_audit(
         self, session: Session, operation: str, detail: str, user_id: str | None = None

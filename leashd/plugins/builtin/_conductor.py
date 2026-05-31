@@ -122,7 +122,6 @@ def _build_system_prompt(
     if enabled_actions is None:
         enabled_actions = _VALID_ACTIONS
 
-    # Always include complete and escalate
     actions = enabled_actions | {"complete", "escalate"}
 
     action_lines = "\n".join(
@@ -236,7 +235,6 @@ def _parse_response(raw: str) -> ConductorDecision:
     """Parse conductor response — try JSON first, fall back to ACTION: reason."""
     raw = raw.strip()
 
-    # Try JSON
     data = _extract_json_dict(raw)
     if data is not None:
         action = str(data.get("action", "")).lower()
@@ -251,7 +249,6 @@ def _parse_response(raw: str) -> ConductorDecision:
                 complexity=str(complexity).lower() if complexity else None,  # type: ignore[arg-type]
             )
 
-    # Fallback: ACTION: reason (search all lines)
     fb_match = _FALLBACK_RE.search(raw)
     if fb_match:
         action = fb_match.group(1).lower()
@@ -261,7 +258,6 @@ def _parse_response(raw: str) -> ConductorDecision:
                 reason=fb_match.group(2).strip(),
             )
 
-    # Default: advance to implement (fail-forward)
     logger.warning("conductor_parse_failed", raw=raw[:200])
     return ConductorDecision(
         action="implement",
@@ -327,7 +323,6 @@ async def decide_next_action(
             error=exc_detail,
             kind="timeout" if is_timeout else "cli_error",
         )
-        # Fail-forward: if we haven't started, explore; otherwise implement
         fallback_action: ConductorAction = "plan" if is_first_call else "implement"
         reason_prefix = "conductor timed out" if is_timeout else "conductor call failed"
         return ConductorDecision(

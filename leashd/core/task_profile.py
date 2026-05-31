@@ -25,7 +25,6 @@ from leashd.plugins.builtin._conductor import ConductorAction
 
 logger = structlog.get_logger()
 
-# All valid conductor actions (mirrors ConductorAction literal)
 _ALL_ACTIONS: frozenset[str] = frozenset(
     {
         "plan",
@@ -56,16 +55,11 @@ class TaskProfile(BaseModel):
         return action in self.enabled_actions
 
 
-# ── Predefined profiles ──────────────────────────────────────────────
-
 STANDALONE = TaskProfile()
 
 _NAMED_PROFILES: dict[str, TaskProfile] = {
     "standalone": STANDALONE,
 }
-
-
-# ── Profile resolution ────────────────────────────────────────────────
 
 
 def resolve_profile(name_or_json: str) -> TaskProfile:
@@ -77,11 +71,9 @@ def resolve_profile(name_or_json: str) -> TaskProfile:
     """
     name_or_json = name_or_json.strip()
 
-    # Named profile
     if name_or_json in _NAMED_PROFILES:
         return _NAMED_PROFILES[name_or_json]
 
-    # Try JSON
     if name_or_json.startswith("{"):
         try:
             data = json.loads(name_or_json)
@@ -100,7 +92,6 @@ def _profile_from_dict(data: dict[str, Any]) -> TaskProfile:
     if enabled is not None:
         enabled = frozenset(str(a) for a in enabled) & _ALL_ACTIONS
     else:
-        # If disabled_actions is specified, subtract from all
         disabled = data.get("disabled_actions", [])
         if disabled:
             enabled = _ALL_ACTIONS - frozenset(str(a) for a in disabled)

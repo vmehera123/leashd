@@ -18,9 +18,6 @@ import structlog
 
 logger = structlog.get_logger()
 
-# ── Observation masking ───────────────────────────────────────────────
-
-# Max chars for different output categories
 _TOOL_OUTPUT_MAX = 800
 _PHASE_OUTPUT_MAX = 1500
 _ERROR_OUTPUT_MAX = 2000
@@ -42,14 +39,12 @@ def mask_tool_output(output: str, *, max_chars: int = _TOOL_OUTPUT_MAX) -> str:
     if max_chars < min_useful:
         return output[:max_chars]
 
-    # Keep 40% head, 60% tail (errors are usually at the end)
     head_budget = int(max_chars * 0.4)
-    tail_budget = max_chars - head_budget - len(_MASK_MARKER) - 2  # 2 newlines
+    tail_budget = max_chars - head_budget - len(_MASK_MARKER) - 2
 
     head = output[:head_budget]
     tail = output[-tail_budget:]
 
-    # Break at newline boundaries for readability
     head_nl = head.rfind("\n")
     if head_nl > head_budget // 2:
         head = head[: head_nl + 1]
@@ -69,8 +64,6 @@ def mask_phase_output(output: str, *, max_chars: int = _PHASE_OUTPUT_MAX) -> str
     """
     return mask_tool_output(output, max_chars=max_chars)
 
-
-# ── Phase summarization ──────────────────────────────────────────────
 
 _SUMMARIZE_SYSTEM_PROMPT = """\
 You are summarizing the output of a completed phase in an autonomous coding task.
@@ -129,8 +122,6 @@ async def summarize_phase_output(
     return mask_phase_output(output)
 
 
-# ── Git-backed checkpointing ─────────────────────────────────────────
-
 _CHECKPOINT_PREFIX = "leashd-checkpoint"
 
 
@@ -159,7 +150,6 @@ async def git_checkpoint(
         return None
 
     try:
-        # Check for changes first
         proc = await asyncio.create_subprocess_exec(
             "git",
             "status",
@@ -173,7 +163,6 @@ async def git_checkpoint(
             logger.debug("git_checkpoint_nothing_to_commit", phase=phase)
             return None
 
-        # Stage all changes
         proc = await asyncio.create_subprocess_exec(
             "git",
             "add",
@@ -184,7 +173,6 @@ async def git_checkpoint(
         )
         await asyncio.wait_for(proc.communicate(), timeout=10)
 
-        # Build commit message
         commit_msg = message or f"{_CHECKPOINT_PREFIX}: {phase} [run_id={run_id}]"
         full_msg = f"{commit_msg}\n\nPhase completed: {phase}\nTask run: {run_id}"
 
@@ -212,7 +200,6 @@ async def git_checkpoint(
             )
             return None
 
-        # Get the short hash
         proc = await asyncio.create_subprocess_exec(
             "git",
             "rev-parse",

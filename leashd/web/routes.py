@@ -296,8 +296,6 @@ def create_rest_router(
             )
         return JSONResponse(content={"success": True})
 
-    # ---- Per-directory & per-workspace RuntimeSettings overrides ----
-
     @router.get("/config/directory-settings")
     async def list_directory_settings(
         x_api_key: str = Header(""),
@@ -440,8 +438,6 @@ def create_rest_router(
         if not signal_reload():
             logger.info("config_saved_no_daemon")
         return JSONResponse(content={"success": removed})
-
-    # ---- Push notification endpoints ----
 
     @router.get("/push/vapid-key")
     async def vapid_key(x_api_key: str = Header("")) -> JSONResponse:

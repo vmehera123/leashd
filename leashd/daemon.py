@@ -122,7 +122,6 @@ def is_running() -> tuple[bool, int | None]:
         return False, None
     if _is_process_alive(pid):
         return True, pid
-    # Stale PID file — process is gone
     _remove_pid()
     return False, None
 

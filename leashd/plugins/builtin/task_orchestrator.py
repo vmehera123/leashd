@@ -320,7 +320,7 @@ class TaskOrchestrator(LeashdPlugin):
         self._max_retries = max_retries
         self._auto_pr = auto_pr
         self._auto_pr_base_branch = auto_pr_base_branch
-        self._active_tasks: dict[str, TaskRun] = {}  # chat_id → TaskRun
+        self._active_tasks: dict[str, TaskRun] = {}
         self._queue = KeyedAsyncQueue()
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._engine: _EngineProtocol | None = None

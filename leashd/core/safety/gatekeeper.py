@@ -174,8 +174,6 @@ class ToolGatekeeper:
         task_description: str = "",
         session_mode: str | None = None,
     ) -> PermissionAllow | PermissionDeny:
-        # Normalize MCP tool names (mcp__playwright__browser_navigate → browser_navigate)
-        # for policy/sandbox/approval matching. Keep original for events/audit.
         normalized = normalize_tool_name(tool_name)
 
         await self._event_bus.emit(
@@ -252,25 +250,35 @@ class ToolGatekeeper:
             session_mode=session_mode,
         )
 
-    async def check_hard_deny_floor(
+    async def check_auto_gated(
         self,
         tool_name: str,
         tool_input: dict[str, Any],
         session_id: str,
         chat_id: str,
         *,
+        task_description: str = "",
         session_mode: str | None = None,
-    ) -> PermissionAllow | PermissionDeny:
-        """Hard-deny floor for ``auto`` mode.
+    ) -> PermissionAllow | PermissionDeny | None:
+        """Hybrid gate for tmux ``auto`` mode.
 
-        Runs ONLY the non-overridable layers (sandbox + policy ``deny``) and
-        defers everything else to Claude Code's native ``auto`` classifier:
-        a sandbox violation or a ``DENY`` rule blocks; ``ALLOW`` /
-        ``REQUIRE_APPROVAL`` return an allow so the caller hands off to the
-        native classifier (the YAML allow/approval layer is intentionally
-        bypassed). The deferral is audited with ``claude_native_auto`` so it is
-        never invisible. ``check()`` is unchanged and still drives the full
-        pipeline on the ``PermissionRequest`` raise path.
+        leashd's non-overridable layers AND its *explicit* policy verdicts win;
+        only the cases leashd does not actively gate hand off to Claude Code's
+        native auto classifier:
+
+          * sandbox violation                          → ``PermissionDeny``
+          * explicit ``deny`` rule                     → ``PermissionDeny``
+          * explicit ``require_approval`` rule         → human/AI approval pipeline
+          * explicit ``allow`` rule OR unmatched tool  → ``None`` (defer to native)
+
+        Returning ``None`` tells the caller to answer the PreToolUse hook with
+        ``defer`` so Claude's classifier runs safe actions without a leashd
+        prompt (re-entering the full pipeline via PermissionRequest if it
+        escalates). This keeps agent-browser, file writes and every other
+        explicitly-ruled tool under leashd's policy even in auto mode, while the
+        long tail of routine commands (``mkdir``, ``awk``, project scripts …)
+        stops prompting. ``default_action`` is intentionally NOT applied here —
+        an unmatched tool is the native classifier's call, not a leashd ask.
         """
         normalized = normalize_tool_name(tool_name)
 
@@ -295,14 +303,6 @@ class ToolGatekeeper:
             )
 
         if not self._policy_engine:
-            self._audit.log_tool_attempt(
-                session_id,
-                tool_name,
-                tool_input,
-                None,
-                PolicyDecision.ALLOW,
-                session_mode=session_mode,
-            )
             self._audit.log_approval(
                 session_id,
                 tool_name,
@@ -310,21 +310,25 @@ class ToolGatekeeper:
                 chat_id,
                 approver_type="claude_native_auto",
             )
-            return await self._emit_and_allow(session_id, tool_name, tool_input)
+            return None
 
         classification = self._policy_engine.classify_compound(normalized, tool_input)
         decision = self._policy_engine.evaluate(classification)
+        gated = classification.matched_rule is not None and decision in (
+            PolicyDecision.DENY,
+            PolicyDecision.REQUIRE_APPROVAL,
+        )
 
         logger.info(
-            "hard_deny_floor_evaluated",
+            "auto_hybrid_evaluated",
             session_id=session_id,
             tool_name=tool_name,
             normalized_name=normalized,
             category=classification.category,
             decision=decision.value,
+            gated=gated,
             risk_level=classification.risk_level,
         )
-
         self._audit.log_tool_attempt(
             session_id,
             tool_name,
@@ -334,6 +338,16 @@ class ToolGatekeeper:
             session_mode=session_mode,
         )
 
+        if not gated:
+            self._audit.log_approval(
+                session_id,
+                tool_name,
+                True,
+                chat_id,
+                approver_type="claude_native_auto",
+            )
+            return None
+
         if decision == PolicyDecision.DENY:
             return await self._emit_and_deny(
                 session_id,
@@ -342,15 +356,15 @@ class ToolGatekeeper:
                 message=classification.deny_reason or "Blocked by safety policy",
             )
 
-        # ALLOW or REQUIRE_APPROVAL: defer to Claude's native auto classifier.
-        self._audit.log_approval(
+        return await self._handle_approval(
             session_id,
-            tool_name,
-            True,
             chat_id,
-            approver_type="claude_native_auto",
+            tool_name,
+            tool_input,
+            classification,
+            task_description=task_description,
+            session_mode=session_mode,
         )
-        return await self._emit_and_allow(session_id, tool_name, tool_input)
 
     def _check_sandbox(
         self, tool_name: str, tool_input: dict[str, Any]

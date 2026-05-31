@@ -140,8 +140,6 @@ class TaskV4Orchestrator(TaskV3Orchestrator):
         ),
     )
 
-    # ── Hook overrides ────────────────────────────────────────────────
-
     def _memory_template_version(self) -> str:
         return "v4"
 
@@ -152,8 +150,6 @@ class TaskV4Orchestrator(TaskV3Orchestrator):
 
     def _pipeline_for(self, task: TaskRun) -> list[TaskPhase]:
         return _resolve_pipeline_v4(self._profile_for(task))
-
-    # ── Next-phase decision (no plan, stricter verify, opt-in review) ──
 
     async def _choose_next_phase(self, task: TaskRun) -> TaskPhase:
         pipeline = self._pipeline_for(task)
@@ -218,8 +214,6 @@ class TaskV4Orchestrator(TaskV3Orchestrator):
         # Unknown phase — fail closed
         task.error_message = f"Unknown phase: {task.phase}"
         return "failed"
-
-    # ── Prompt dispatch ───────────────────────────────────────────────
 
     def _build_prompt_for(self, task: TaskRun) -> str:
         extra = _profile_instruction(self._profile_for(task), str(task.phase))
@@ -302,8 +296,6 @@ class TaskV4Orchestrator(TaskV3Orchestrator):
                 workspace_directories=ws_dirs,
             )
         raise RuntimeError(f"No v4 prompt builder for phase: {task.phase}")
-
-    # ── Auto-approve allowlist ────────────────────────────────────────
 
     def _apply_auto_approve(self, phase: TaskPhase, chat_id: str) -> None:
         engine = self._engine

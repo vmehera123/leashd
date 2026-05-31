@@ -274,7 +274,6 @@ def build_test_instruction(
         )
     sections.append(ctx_section)
 
-    # User hints
     hints: list[str] = []
     if config.app_url:
         hints.append(f"App URL: {config.app_url}")
@@ -289,7 +288,6 @@ def build_test_instruction(
     if hints:
         sections.append("USER HINTS:\n" + "\n".join(f"- {h}" for h in hints))
 
-    # API spec files
     if api_specs:
         spec_parts = [
             "API SPECIFICATIONS:\n"
@@ -300,7 +298,6 @@ def build_test_instruction(
             spec_parts.append(f"\n--- {path} ---\n{content}\n---")
         sections.append("\n".join(spec_parts))
 
-    # Project config sections
     if project_config:
         pc_parts: list[str] = []
         if project_config.credentials:
@@ -481,7 +478,6 @@ def build_test_instruction(
         "- Overall health: a brief assessment of the codebase"
     )
 
-    # General rules
     snap_cmd = _b(
         browser_backend,
         "browser_snapshot",
@@ -657,12 +653,10 @@ class TestRunnerPlugin(LeashdPlugin):
 
         session = event.data["session"]
 
-        # Load project test config and merge with CLI args
         project_config = load_project_test_config(session.working_directory)
         if project_config:
             config = merge_project_config(config, project_config)
 
-        # Discover API spec files
         explicit_specs = project_config.api_specs if project_config else None
         api_specs = discover_api_specs(
             session.working_directory,
@@ -680,23 +674,18 @@ class TestRunnerPlugin(LeashdPlugin):
         gatekeeper = event.data["gatekeeper"]
         chat_id = event.data["chat_id"]
 
-        # Auto-approve browser readonly tools
         for tool in BROWSER_READONLY_TOOLS:
             gatekeeper.enable_tool_auto_approve(chat_id, tool)
 
-        # Auto-approve browser mutation tools
         for tool in BROWSER_MUTATION_TOOLS:
             gatekeeper.enable_tool_auto_approve(chat_id, tool)
 
-        # Auto-approve agent-browser CLI commands
         for key in AGENT_BROWSER_AUTO_APPROVE:
             gatekeeper.enable_tool_auto_approve(chat_id, key)
 
-        # Auto-approve test-related bash commands
         for key in TEST_BASH_AUTO_APPROVE:
             gatekeeper.enable_tool_auto_approve(chat_id, key)
 
-        # Auto-approve Write/Edit for test file creation/modification
         gatekeeper.enable_tool_auto_approve(chat_id, "Write")
         gatekeeper.enable_tool_auto_approve(chat_id, "Edit")
 
@@ -705,7 +694,6 @@ class TestRunnerPlugin(LeashdPlugin):
         # archive it so a fresh /test starts clean.
         archive_completed_test_session(session.working_directory)
 
-        # Read test session context for resume
         session_context = read_test_session_context(session.working_directory)
 
         event.data["prompt"] = _build_test_prompt(

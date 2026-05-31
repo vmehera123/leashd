@@ -474,8 +474,6 @@ class TaskV3Orchestrator(LeashdPlugin):
             plan_excerpt=plan_excerpt,
         )
 
-    # ── Plugin lifecycle ──────────────────────────────────────────────
-
     async def initialize(self, context: PluginContext) -> None:
         self._event_bus = context.event_bus
         self._browser_backend = context.config.browser_backend
@@ -531,8 +529,6 @@ class TaskV3Orchestrator(LeashdPlugin):
         if self._db:
             await self._db.close()
             self._db = None
-
-    # ── Event handlers ────────────────────────────────────────────────
 
     async def _on_task_submitted(self, event: Event) -> None:
         chat_id = event.data.get("chat_id", "")
@@ -695,8 +691,6 @@ class TaskV3Orchestrator(LeashdPlugin):
 
     async def _on_config_reloaded(self, _event: Event) -> None:
         logger.debug("task_v3_config_reloaded")
-
-    # ── Core loop ─────────────────────────────────────────────────────
 
     async def _advance(self, task: TaskRun) -> None:
         async def _do_advance() -> None:
@@ -931,7 +925,6 @@ class TaskV3Orchestrator(LeashdPlugin):
                 return "implement"
             task.error_message = f"Review flagged CRITICAL {prior + 1} times"
             return "escalated"
-        # OK / MINOR → completed
         return "completed"
 
     @staticmethod
@@ -973,8 +966,6 @@ class TaskV3Orchestrator(LeashdPlugin):
             completed_phases=list(completed),
             pending_phases=list(pending),
         )
-
-    # ── Phase execution ───────────────────────────────────────────────
 
     async def _execute_phase(self, task: TaskRun) -> None:
         if not self._engine:
@@ -1034,7 +1025,6 @@ class TaskV3Orchestrator(LeashdPlugin):
             task.session_id = phase_session.session_id
             await self.store.save(task)
 
-        # Reset prior-phase auto-approves and wire this phase's allowlist.
         self._engine.disable_auto_approve(task.chat_id)
         self._apply_auto_approve(task.phase, task.chat_id)
 
@@ -1302,8 +1292,6 @@ class TaskV3Orchestrator(LeashdPlugin):
             for key in AGENT_BROWSER_AUTO_APPROVE:
                 engine.enable_tool_auto_approve(chat_id, key)
 
-    # ── Recovery ──────────────────────────────────────────────────────
-
     async def _resume_task(self, task: TaskRun) -> None:
         if self._connector:
             await self._connector.send_message(
@@ -1362,8 +1350,6 @@ class TaskV3Orchestrator(LeashdPlugin):
             bg = asyncio.create_task(self._execute_phase(task))
             self._running_tasks[task.chat_id] = bg
             bg.add_done_callback(lambda _t: self._running_tasks.pop(task.chat_id, None))
-
-    # ── Terminal handling ─────────────────────────────────────────────
 
     async def _handle_terminal(self, task: TaskRun) -> None:
         self._active_tasks.pop(task.chat_id, None)

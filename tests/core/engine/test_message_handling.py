@@ -9,7 +9,7 @@ import structlog.contextvars
 
 from leashd.agents.base import AgentResponse, BaseAgent
 from leashd.core.config import LeashdConfig
-from leashd.core.engine import Engine
+from leashd.core.engine import Engine, _is_goal_command_prompt
 from leashd.core.interactions import InteractionCoordinator
 from leashd.core.session import SessionManager
 from leashd.exceptions import AgentError
@@ -594,6 +594,44 @@ class TestAutoPlanActivation:
 
         session = eng.session_manager.get("u1", "c1")
         assert session.mode == "plan"
+
+    def test_is_goal_command_prompt(self):
+        assert _is_goal_command_prompt("/goal all tests pass")
+        assert _is_goal_command_prompt("/goal")
+        assert _is_goal_command_prompt("  /goal ship it")  # leading whitespace
+        assert not _is_goal_command_prompt("/goalkeeper drills")  # not a goal
+        assert not _is_goal_command_prompt("set a goal for me")
+        assert not _is_goal_command_prompt("hello")
+
+    async def test_auto_plan_skipped_for_goal_prompt(
+        self, audit_logger, policy_engine, tmp_path
+    ):
+        """A `/goal <condition>` directive must NOT be hijacked into plan mode by
+        auto_plan — a goal is itself the autonomous directive. Regression: the
+        `/goal`→auto switch tripped auto_plan (mode=='auto'), forcing a plan +
+        review and then hanging on the tmux native plan-execute selector."""
+        config = LeashdConfig(
+            approved_directories=[tmp_path],
+            auto_plan=True,
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        eng = Engine(
+            connector=None,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        session = await eng.session_manager.get_or_create("u1", "c1", str(tmp_path))
+        session.mode = "auto"
+        await eng.session_manager.save(session)
+
+        await eng.handle_message("u1", "/goal all tests pass", "c1")
+
+        session = eng.session_manager.get("u1", "c1")
+        assert session.mode == "auto"  # auto_plan skipped — goal stays autonomous
 
     async def test_auto_plan_does_not_reactivate_on_resume(
         self, audit_logger, policy_engine, tmp_path

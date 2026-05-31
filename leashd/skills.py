@@ -218,8 +218,6 @@ def has_installed_skills() -> bool:
     return bool(get_skills_config())
 
 
-# --- Builtin skill: agent-browser ---
-
 _BUILTIN_SKILL_DATA = Path(__file__).resolve().parent / "data" / "skills"
 
 

@@ -54,7 +54,6 @@ def run_setup(
 
     data = load_global_config()
 
-    # --- Approved directory ---
     resolved_cwd = cwd.resolve()
     existing_dirs = data.get("approved_directories", [])
     cwd_str = str(resolved_cwd)
@@ -70,7 +69,6 @@ def run_setup(
             print("  Aborted.\n")
             return data
 
-    # --- Telegram bot token ---
     telegram = data.get("telegram", {})
     if not isinstance(telegram, dict):
         telegram = {}
@@ -89,7 +87,6 @@ def run_setup(
         else:
             print("  - Skipped (will use CLI REPL)\n")
 
-    # --- Telegram user ID ---
     if telegram.get("bot_token") and not telegram.get("allowed_user_ids"):
         print("  \U0001f464 Your Telegram User ID")
         user_id = _prompt_optional(

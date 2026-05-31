@@ -134,12 +134,10 @@ class MergeResolverPlugin(LeashdPlugin):
         session.mode = "merge"
         session.mode_instruction = build_merge_instruction(config)
 
-        # Auto-approve file tools
         gatekeeper.enable_tool_auto_approve(chat_id, "Edit")
         gatekeeper.enable_tool_auto_approve(chat_id, "Write")
         gatekeeper.enable_tool_auto_approve(chat_id, "Read")
 
-        # Auto-approve git read commands
         for key in MERGE_BASH_AUTO_APPROVE:
             gatekeeper.enable_tool_auto_approve(chat_id, key)
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.18.0] - 2026-05-31
+- **added**: `/goal <condition>` (Web UI + Telegram, `tmux` runtime) — sets a Claude Code completion goal and streams the whole multi-turn run as one leashd task; pairs with `/auto` + remote approval for unattended runs
+- **added**: `security-guidance` plugin opt-in (`leashd security enable`) — Claude reviews its own code changes for vulnerabilities in-session, with fix re-prompts flowing through the normal approval pipeline
+- **changed**: tmux `auto` mode is now a hybrid gate — leashd's `deny`/`require_approval` rules always apply, only unmatched tools defer to Claude's native classifier
+- **fixed**: a finished `/goal` finalizes promptly with the agent's summary instead of appearing stuck for ~10 min
+- **changed**: agent system prompt now carries `uv` and agent-browser anti-bot guidance; `Monitor`/`BashOutput`/`KillShell` auto-allowed
+
 ## [0.17.1] - 2026-05-22
 - **added**: `tmux` runtime feeds mid-turn human follow-ups straight into the live `claude` composer (native queue) — Web UI and Telegram show an auto-clearing "Queued" notice instead of the Send-now/cancel prompt
 - **added**: Native-dialog watcher bridges any un-handled `claude` TUI dialog (WebFetch/Bash consent, future per-tool prompts) to Telegram/Web UI as an `AskUserQuestion` and drives the chosen option back by keystroke

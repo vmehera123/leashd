@@ -216,7 +216,6 @@ def append_progress_row(
     if not match:
         return False
 
-    # Find the section boundary (next ## heading after Progress)
     after_heading = content[match.end() :]
     next_section = _NEXT_SECTION_RE.search(after_heading)
     if next_section:
@@ -226,18 +225,15 @@ def append_progress_row(
         section_text = after_heading
         insert_pos = len(content)
 
-    # Count existing rows to determine next row number
     existing_rows = _PROGRESS_ROW_RE.findall(section_text)
     row_num = max((int(n) for n in existing_rows), default=0) + 1
 
-    # Truncate result to keep rows concise
     result_short = result[:80].replace("\n", " ")
     if len(result) > 80:
         result_short += "..."
 
     row = f"| {row_num} | {action} | {result_short} | {elapsed} |\n"
 
-    # Insert before the next section heading
     content = content[:insert_pos] + row + content[insert_pos:]
     fp.write_text(content, encoding="utf-8")
     return True
@@ -273,24 +269,20 @@ def read(run_id: str, working_dir: str, *, max_chars: int = 8000) -> str | None:
         path=str(fp),
     )
     mask_marker = _MASK_MARKER_TEMPLATE.format(original=len(text), path=str(fp))
-    marker_cost = len(mask_marker) + 2  # two newlines around marker
+    marker_cost = len(mask_marker) + 2
     head_budget = int((max_chars - marker_cost) * 0.6)
     tail_budget = max_chars - marker_cost - head_budget
 
-    # Try to split at the ## Progress boundary so the head keeps the
-    # plan/context sections intact.
     progress_match = _PROGRESS_RE.search(text)
     if progress_match and progress_match.start() <= head_budget:
         head = text[: progress_match.start()]
     else:
         head = text[:head_budget]
-        # Snap to a newline boundary
         nl = head.rfind("\n")
         if nl > head_budget // 2:
             head = head[: nl + 1]
 
     tail = text[-tail_budget:]
-    # Snap to a newline boundary
     nl = tail.find("\n")
     if nl != -1 and nl < tail_budget // 2:
         tail = tail[nl + 1 :]
@@ -375,7 +367,6 @@ def update_checkpoint(
     if git_hash:
         new_line += f" | Commit: {git_hash}"
 
-    # Append completed/pending phase lines
     if completed_phases is not None:
         new_line += f"\nCompleted: {', '.join(completed_phases) if completed_phases else 'none'}"
     if pending_phases is not None:
@@ -383,7 +374,6 @@ def update_checkpoint(
             f"\nPending: {', '.join(pending_phases) if pending_phases else 'none'}"
         )
 
-    # Also update the Updated timestamp in the header
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     content = re.sub(
         r"Updated: \d{4}-\d{2}-\d{2}T[\d:]+Z",
@@ -396,7 +386,6 @@ def update_checkpoint(
     if not match:
         return False
 
-    # Replace everything after the heading until the next section or EOF
     after = content[match.end() :]
     next_heading = _NEXT_SECTION_RE.search(after)
     rest = after[next_heading.start() :] if next_heading else ""

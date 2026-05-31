@@ -82,7 +82,6 @@ def _configure_logging(config: LeashdConfig, *, log_dir: Path | None = None) -> 
     root_logger.setLevel(config.log_level)
     root_logger.handlers.clear()
 
-    # Console handler — colored dev-friendly output
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(
         structlog.stdlib.ProcessorFormatter(
@@ -91,7 +90,6 @@ def _configure_logging(config: LeashdConfig, *, log_dir: Path | None = None) -> 
     )
     root_logger.addHandler(console_handler)
 
-    # File handler — JSON lines for machine parsing
     if log_dir is not None:
         log_dir.mkdir(parents=True, exist_ok=True)
         file_handler = logging.handlers.RotatingFileHandler(
@@ -259,7 +257,6 @@ def build_engine(
     agent = agent or get_agent(config.agent_runtime, config)
     event_bus = EventBus()
 
-    # Safety components
     policy_paths = list(config.policy_files)
     if not policy_paths:
         policies_dir = Path(__file__).parent / "policies"
@@ -296,7 +293,6 @@ def build_engine(
             message_logger=message_logger,
         )
 
-    # Middleware
     middleware_chain = MiddlewareChain()
     if config.allowed_user_ids:
         allowed = set(config.allowed_user_ids)
@@ -308,7 +304,6 @@ def build_engine(
             RateLimitMiddleware(config.rate_limit_rpm, config.rate_limit_burst)
         )
 
-    # Git command handler
     git_handler = None
     if connector:
         git_handler = GitCommandHandler(
@@ -381,6 +376,10 @@ def build_engine(
     # user's own tmux is never touched; idempotent and cheap when there is
     # nothing to reap.
     tsm.kill_owned_sessions()
+    # Install + register the opt-in security-guidance plugin once per daemon,
+    # runtime-agnostic (no-op unless LEASHD_SECURITY_GUIDANCE_ENABLED). The
+    # managed --settings written per session then activate it via enabledPlugins.
+    tsm.ensure_security_guidance_installed()
     if config.agent_runtime == "tmux":
         tsm.bind_safety(
             gatekeeper=engine._gatekeeper,

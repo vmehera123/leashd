@@ -58,10 +58,8 @@ class LeashdConfig(BaseSettings):
         extra="ignore",
     )
 
-    # Required
     approved_directories: list[Path]
 
-    # Agent settings
     agent_runtime: str = "claude-cli"
     max_turns: int = 250
     max_tool_calls: int = -1  # -1 = unlimited
@@ -103,8 +101,15 @@ class LeashdConfig(BaseSettings):
     # backstop: aborts a hung-but-alive pane (no JSONL progress) when NO human
     # is pending. Never preempts the no-expiry-while-a-human-is-pending
     # guarantee; agent_timeout_seconds stays the absolute ceiling.
+    tmux_goal_idle_grace_seconds: int = 25
+    # A Claude Code ``/goal`` keeps the leashd turn open across sub-turns
+    # (TmuxTurn.complete defers while the goal is active). When the goal run
+    # goes idle (Stop fired, no new sub-turn starts), finalize the leashd turn
+    # after this grace instead of waiting out tmux_no_progress_timeout_seconds —
+    # the grace just has to outlast the gap between auto-continued goal turns
+    # (typically 1-5s). Cleanly returns the agent's summary; see
+    # TmuxAgent.execute's watch loop.
 
-    # Safety settings
     policy_files: list[Path] = []
     approval_timeout_seconds: int | None = None
     # None = wait for the human indefinitely (parity with the claude-cli
@@ -115,15 +120,12 @@ class LeashdConfig(BaseSettings):
     # approval_timeout_seconds, so an effective None = no expiry everywhere.
     interaction_timeout_seconds: int | None = None
 
-    # Auth & rate limiting
     allowed_user_ids: set[str] = set()
     rate_limit_rpm: int = 0
     rate_limit_burst: int = 5
 
-    # Connector
     telegram_bot_token: str | None = None
 
-    # WebUI
     web_enabled: bool = False
     web_host: str = "0.0.0.0"  # noqa: S104
     web_port: int = 8080
@@ -132,17 +134,14 @@ class LeashdConfig(BaseSettings):
     web_dev_mode: bool = False
     web_telegram_notify: bool = False
 
-    # Workspaces
     workspace_config_root: Path | None = None
 
-    # Storage
     storage_backend: str = "sqlite"
     storage_path: Path = Path(".leashd/messages.db")
 
     # Agent mode — new/cleared sessions start here (applied by SessionManager).
     default_mode: Literal["default", "plan", "auto"] = "default"
 
-    # Browser
     browser_backend: Literal["playwright", "agent-browser"] = "agent-browser"
     browser_user_data_dir: str | None = None
     browser_headless: bool = True
@@ -157,6 +156,17 @@ class LeashdConfig(BaseSettings):
     auto_plan_model: str | None = None
     auto_pr: bool = False
     auto_pr_base_branch: str = "main"
+
+    # Security-guidance plugin (Claude Code marketplace plugin).
+    # OFF by default — opt-in. When on, leashd installs and enables
+    # ``security-guidance@claude-plugins-official`` via its managed Claude
+    # Code settings so Claude reviews its own code changes for
+    # vulnerabilities in-session. The plugin's hooks compose with leashd's
+    # PreToolUse/Stop bridge; its fix re-prompts flow through the normal
+    # approval pipeline. ``review_model`` pins the plugin's review model
+    # (``SECURITY_REVIEW_MODEL`` / ``SG_AGENTIC_MODEL``) to cap review spend.
+    security_guidance_enabled: bool = False
+    security_guidance_review_model: str | None = None
 
     # Task orchestration
     task_orchestrator: bool = False
@@ -181,11 +191,9 @@ class LeashdConfig(BaseSettings):
     # local dev environments that have the tooling.
     task_v3_verify_test_mode: bool = False
 
-    # Streaming
     streaming_enabled: bool = True
     streaming_throttle_seconds: float = 0.15
 
-    # Logging
     log_level: str = "INFO"
     audit_log_path: Path = Path(".leashd/audit.jsonl")
     log_dir: Path | None = Path(".leashd/logs")
