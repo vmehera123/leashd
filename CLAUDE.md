@@ -82,7 +82,7 @@ Plugin system uses EventBus pub/sub (`core/events.py`) for decoupling. Plugins r
 - structlog for logging — keyword args only, no string interpolation
 - No `__init__.py` files — use implicit namespace packages
 - `TYPE_CHECKING` blocks to break circular imports
-- **PROHIBITED: dumb, self-explanatory, or restating comments.** Never write a comment that just narrates what the code already says (e.g. `# increment counter` above `counter += 1`, `# loop over items`, `# return the result`). Comments are only allowed to explain *why* — non-obvious rationale, tricky edge cases, or context the code cannot convey. If a comment would be obvious from reading the line below it, delete it.
+- **DO NOT COMMENT CODE. Write zero comments.** This is absolute. Make the code self-explanatory through clear names and structure instead of narrating it; if something seems to need a comment to be understood, rewrite the code to be clearer. Never write comments that narrate the code, restate a line, label sections, or explain *why* — delete any such comment you encounter. The ONLY exceptions, because removing them breaks tooling: machine directives (`# type: ignore`, `# noqa`, `# pragma`), and `# TODO`/`# FIXME` markers when explicitly requested.
 - Only use `from __future__ import annotations` when necessary (e.g., forward references needed at runtime by Pydantic models)
 - Tests use `pytest-asyncio` with `asyncio_mode = "auto"`
 - Ruff for lint/format (config in `pyproject.toml`)
