@@ -344,3 +344,58 @@ async def test_tailer_crash_completes_turn(tmp_path):
     await tailer.run()  # returns after the except-Exception handler
 
     assert completed == {"called": True, "is_error": True}
+
+
+async def test_resume_skips_prior_history_and_streams_only_new(tmp_path):
+    sess = _fake_session("/work", uuid="resumed-uuid")
+    events: list[dict] = []
+
+    async def on_event(_sess, obj):
+        events.append(obj)
+
+    root = tmp_path / "projects"
+    root.mkdir()
+    from leashd.agents.runtimes.tmux_session import encode_project_dir
+
+    proj = root / encode_project_dir("/work")
+    proj.mkdir(parents=True)
+    jsonl = proj / "resumed-uuid.jsonl"
+    jsonl.write_text(
+        '{"uuid": "old1", "type": "assistant"}\n{"uuid": "old2", "type": "assistant"}\n'
+    )
+
+    tailer = JSONLTailer(
+        projects_root=root, on_event=on_event, session=sess, resume=True
+    )
+    path = tailer._resolve_path()
+    tailer._skip_resume_history(path)
+    await tailer._drain(path)
+    assert events == []
+
+    with jsonl.open("a") as fh:
+        fh.write('{"uuid": "new1", "type": "assistant"}\n')
+    await tailer._drain(path)
+    assert [e["uuid"] for e in events] == ["new1"]
+
+
+async def test_non_resume_still_replays_existing_history(tmp_path):
+    sess = _fake_session("/work", uuid="fresh-uuid")
+    events: list[dict] = []
+
+    async def on_event(_sess, obj):
+        events.append(obj)
+
+    root = tmp_path / "projects"
+    root.mkdir()
+    from leashd.agents.runtimes.tmux_session import encode_project_dir
+
+    proj = root / encode_project_dir("/work")
+    proj.mkdir(parents=True)
+    jsonl = proj / "fresh-uuid.jsonl"
+    jsonl.write_text('{"uuid": "a", "type": "assistant"}\n')
+
+    tailer = JSONLTailer(projects_root=root, on_event=on_event, session=sess)
+    path = tailer._resolve_path()
+    tailer._skip_resume_history(path)
+    await tailer._drain(path)
+    assert [e["uuid"] for e in events] == ["a"]

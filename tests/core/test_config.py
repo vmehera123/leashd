@@ -20,6 +20,7 @@ class TestLeashdConfig:
         assert config.max_concurrent_agents == 5
         assert config.agent_timeout_seconds == 3600
         assert config.storage_backend == "sqlite"
+        assert config.default_mode == "auto"
         assert config.approval_timeout_seconds is None
         assert config.interaction_timeout_seconds is None
         assert config.tmux_no_progress_timeout_seconds == 600

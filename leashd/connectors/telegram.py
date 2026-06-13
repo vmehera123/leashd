@@ -198,6 +198,7 @@ class TelegramConnector(BaseConnector):
                 [
                     "plan",
                     "edit",
+                    "auto",
                     "default",
                     "status",
                     "clear",

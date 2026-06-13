@@ -494,3 +494,76 @@ class TestWorkspaceGuardDuringExecution:
         # Listing (no args) should work even while executing
         result = await eng.handle_command("user1", "workspace", "", "chat1")
         assert "Cannot switch" not in result
+
+
+class TestWorkspaceCancelTask:
+    """/ws activate and /ws exit must emit /cancel so a running task is driven
+    to a terminal state, not stranded when the working directory changes."""
+
+    async def test_activate_workspace_emits_cancel_signal(
+        self, tmp_path, mock_connector, policy_engine, audit_logger
+    ):
+        from leashd.core.events import MESSAGE_IN, Event, EventBus
+
+        dir_a = tmp_path / "primary"
+        dir_a.mkdir()
+        config = LeashdConfig(
+            approved_directories=[tmp_path, dir_a],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        captured: list[Event] = []
+
+        async def capture(event: Event) -> None:
+            captured.append(event)
+
+        bus = EventBus()
+        bus.subscribe(MESSAGE_IN, capture)
+        eng = Engine(
+            connector=mock_connector,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            event_bus=bus,
+        )
+        eng._workspaces = {"ws": Workspace(name="ws", directories=[dir_a])}
+
+        await eng.handle_command("user1", "workspace", "ws", "chat1")
+
+        assert any(e.data["text"] == "/cancel" for e in captured)
+
+    async def test_exit_workspace_emits_cancel_signal(
+        self, tmp_path, mock_connector, policy_engine, audit_logger
+    ):
+        from leashd.core.events import MESSAGE_IN, Event, EventBus
+
+        dir_a = tmp_path / "repo"
+        dir_a.mkdir()
+        config = LeashdConfig(
+            approved_directories=[tmp_path, dir_a],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        captured: list[Event] = []
+
+        async def capture(event: Event) -> None:
+            captured.append(event)
+
+        bus = EventBus()
+        bus.subscribe(MESSAGE_IN, capture)
+        eng = Engine(
+            connector=mock_connector,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            event_bus=bus,
+        )
+        eng._workspaces = {"ws": Workspace(name="ws", directories=[dir_a])}
+        await eng.handle_command("user1", "workspace", "ws", "chat1")
+        captured.clear()
+
+        await eng.handle_command("user1", "workspace", "exit", "chat1")
+
+        assert any(e.data["text"] == "/cancel" for e in captured)

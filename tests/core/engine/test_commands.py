@@ -4069,3 +4069,70 @@ class TestClearFullCleanup:
         assert "chat1" not in eng._pending_messages
         session = eng.session_manager.get("user1", "chat1")
         assert session.message_count == 0
+
+
+class TestDirAndWorkspaceCancelTask:
+    """/dir and /ws must drive the chat's task to terminal (emit /cancel),
+    not just kill panes — else a task is stranded in a non-terminal phase."""
+
+    async def test_dir_switch_emits_cancel_signal(
+        self, audit_logger, policy_engine, mock_connector, tmp_path
+    ):
+        from leashd.core.events import MESSAGE_IN, Event
+
+        d1 = tmp_path / "leashd"
+        d2 = tmp_path / "api"
+        d1.mkdir()
+        d2.mkdir()
+        config = LeashdConfig(
+            approved_directories=[d1, d2],
+            audit_log_path=tmp_path / "audit.jsonl",
+        )
+        captured: list[Event] = []
+
+        async def capture(event: Event) -> None:
+            captured.append(event)
+
+        bus = EventBus()
+        bus.subscribe(MESSAGE_IN, capture)
+        eng = Engine(
+            connector=mock_connector,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            event_bus=bus,
+        )
+
+        await eng.handle_command("user1", "dir", "api", "chat1")
+
+        assert any(e.data["text"] == "/cancel" for e in captured)
+        assert all(e.data["chat_id"] == "chat1" for e in captured)
+
+
+class TestTaskTakesOverPriorWork:
+    """/task must stop the chat's prior interactive work (a detached /goal)
+    so the two never run simultaneously in the same repo."""
+
+    async def test_task_reaps_chat_panes_before_starting(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        from unittest.mock import AsyncMock
+
+        agent = AsyncMock()
+        agent.cancel_chat = AsyncMock()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_command("user1", "task", "do the thing", "chat1")
+
+        agent.cancel_chat.assert_awaited_once_with("chat1")
+        session = eng.session_manager.get("user1", "chat1")
+        assert session.mode == "task"

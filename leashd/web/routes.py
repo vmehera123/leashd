@@ -237,7 +237,7 @@ def create_rest_router(
                 "agent": {
                     "effort": raw.get("effort", "xhigh"),
                     "runtime": raw.get("agent_runtime", "claude-code"),
-                    "default_mode": raw.get("default_mode", "default"),
+                    "default_mode": raw.get("default_mode", "auto"),
                     "max_turns": raw.get("max_turns", 250),
                     "max_tool_calls": raw.get("max_tool_calls", -1),
                     "claude_model": raw.get("claude_model") or "",

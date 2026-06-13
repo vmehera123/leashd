@@ -52,6 +52,8 @@ if TYPE_CHECKING:
     from leashd.core.runtime_settings import RuntimeSettings
     from leashd.core.session import Session
 
+    from .tmux_session import TmuxClaudeSession, TmuxTurn
+
 logger = structlog.get_logger()
 
 # Max wait for the interactive Claude Code TUI to become ready for input on a
@@ -62,6 +64,12 @@ PANE_READY_TIMEOUT = 45.0
 # dead or stalled pane is caught in seconds on EVERY path (not only while a
 # human approval is pending, and not after a 60-minute blind wait).
 LIVENESS_POLL_INTERVAL = 5.0
+
+# Backstop on the plan-adjustment re-prompt loop. Each revision is already
+# gated upstream (a human reject, or the AutoPlanReviewer's own 5-revision
+# circuit breaker that flips to auto-approve), so this only guards against an
+# unforeseen state that keeps re-setting feedback — finalize rather than spin.
+MAX_PLAN_REVISIONS = 10
 
 
 class TmuxAgent(BaseAgent):
@@ -317,30 +325,120 @@ class TmuxAgent(BaseAgent):
         )
 
         cs.last_prompt = prompt
-        turn = cs.begin_turn(
-            on_text_chunk=on_text_chunk, on_tool_activity=on_tool_activity
-        )
-
-        # Wait for the Claude Code TUI to be interactive. On a fresh spawn it
-        # is still booting (config/MCP/splash); typing into that screen drops
-        # the submit Enter and the prompt sits in the composer unsent — the
-        # agent never starts. On a reused pane this returns near-instantly.
-        await cs.await_ready(PANE_READY_TIMEOUT)
-
-        if attachments:
-            for staged in self._stage_attachments(
-                attachments, session.working_directory
-            ):
-                cs.send_keys(f"@{staged} ", literal=True)
-            await asyncio.sleep(0.3)
-        # `cs.last_prompt` stays the raw user text (gatekeeper task_description);
-        # the re-delivered instruction only rides along on the keystrokes.
-        send_text = f"{reuse_preamble}\n\n{prompt}" if reuse_preamble else prompt
-        await cs.submit(send_text)
-
         ceiling = float(self._config.agent_timeout_seconds)
         no_progress = float(self._config.tmux_no_progress_timeout_seconds)
         goal_idle_grace = float(self._config.tmux_goal_idle_grace_seconds)
+
+        # Plan-adjustment re-prompt loop. A rejected plan (human or the
+        # AutoPlanReviewer) leaves ``plan_state.plan_adjustment_feedback`` set
+        # with no approval; re-submit it to the same plan-mode pane so claude
+        # revises — the tmux parity for the engine's plan_adjustment_restart,
+        # which never fires here (it reads the engine's tool_state, not this
+        # session's plan_state). The reject drive already returned the pane to
+        # the plan composer, so the re-prompt lands cleanly.
+        current_text = f"{reuse_preamble}\n\n{prompt}" if reuse_preamble else prompt
+        staged_attachments = False
+        plan_revisions = 0
+        while True:
+            turn = cs.begin_turn(
+                on_text_chunk=on_text_chunk, on_tool_activity=on_tool_activity
+            )
+
+            # Wait for the Claude Code TUI to be interactive. On a fresh spawn
+            # it is still booting (config/MCP/splash); typing into that screen
+            # drops the submit Enter and the prompt sits unsent — the agent
+            # never starts. A reused pane returns near-instantly.
+            await cs.await_ready(PANE_READY_TIMEOUT)
+
+            # Attachments belong to the original message only — never re-stage
+            # them on a plan-revision re-prompt.
+            if attachments and not staged_attachments:
+                for staged in self._stage_attachments(
+                    attachments, session.working_directory
+                ):
+                    cs.send_keys(f"@{staged} ", literal=True)
+                await asyncio.sleep(0.3)
+                staged_attachments = True
+            # `cs.last_prompt` stays the raw user text (gatekeeper
+            # task_description) across revisions; only the keystrokes change.
+            await cs.submit(current_text)
+
+            early = await self._await_turn(
+                cs,
+                turn,
+                session,
+                on_text_chunk,
+                ceiling=ceiling,
+                no_progress=no_progress,
+                goal_idle_grace=goal_idle_grace,
+            )
+            if early is not None:
+                return early
+
+            feedback = cs.plan_state.plan_adjustment_feedback if cs.plan_state else None
+            if (
+                feedback
+                and cs.plan_state is not None
+                and not cs.plan_state.plan_approved
+                and plan_revisions < MAX_PLAN_REVISIONS
+            ):
+                plan_revisions += 1
+                logger.info(
+                    "tmux_plan_adjustment_restart",
+                    session_id=session.session_id,
+                    chat_id=session.chat_id,
+                    revision=plan_revisions,
+                )
+                current_text = feedback
+                continue
+            break
+
+        # Resume that produced no turns → stale session id; clear it so the
+        # next execute() spawns fresh (mirrors claude_cli behaviour).
+        if resume_uuid and turn.num_turns == 0:
+            logger.info("tmux_resume_zero_turns", session_id=session.session_id)
+            session.agent_resume_token = None
+        elif cs.claude_uuid:
+            session.agent_resume_token = cs.claude_uuid
+
+        content = turn.assembled_text or "(no text in turn — see the terminal)"
+        logger.info(
+            "agent_execute_completed",
+            session_id=session.session_id,
+            duration_ms=turn.duration_ms,
+            num_turns=turn.num_turns,
+            cost_usd=turn.cost_usd,
+            tools_used_count=len(turn.tools_used),
+            is_error=turn.is_error,
+            runtime="tmux",
+        )
+        return AgentResponse(
+            content=content,
+            session_id=cs.claude_uuid,
+            cost=turn.cost_usd,
+            duration_ms=turn.duration_ms,
+            num_turns=turn.num_turns,
+            tools_used=turn.tools_used,
+            is_error=turn.is_error,
+        )
+
+    async def _await_turn(
+        self,
+        cs: TmuxClaudeSession,
+        turn: TmuxTurn,
+        session: Session,
+        on_text_chunk: Callable[[str], Coroutine[Any, Any, None]] | None,
+        *,
+        ceiling: float,
+        no_progress: float,
+        goal_idle_grace: float,
+    ) -> AgentResponse | None:
+        """Block until the live turn completes (Stop / JSONL result) or can
+        never complete (dead pane, dead tailer, no-progress, or the absolute
+        ceiling). Returns an error ``AgentResponse`` on an abort/timeout, or
+        ``None`` on clean completion so ``execute`` can finalize — or, for a
+        rejected plan, re-prompt with the adjustment feedback. A pending human
+        pauses the deadline (parity with claude-cli)."""
         started = time.monotonic()
         notified_blocked = False
         blocked_since: float | None = None
@@ -494,34 +592,7 @@ class TmuxAgent(BaseAgent):
                     is_error=True,
                 )
 
-        # Resume that produced no turns → stale session id; clear it so the
-        # next execute() spawns fresh (mirrors claude_cli behaviour).
-        if resume_uuid and turn.num_turns == 0:
-            logger.info("tmux_resume_zero_turns", session_id=session.session_id)
-            session.agent_resume_token = None
-        elif cs.claude_uuid:
-            session.agent_resume_token = cs.claude_uuid
-
-        content = turn.assembled_text or "(no text in turn — see the terminal)"
-        logger.info(
-            "agent_execute_completed",
-            session_id=session.session_id,
-            duration_ms=turn.duration_ms,
-            num_turns=turn.num_turns,
-            cost_usd=turn.cost_usd,
-            tools_used_count=len(turn.tools_used),
-            is_error=turn.is_error,
-            runtime="tmux",
-        )
-        return AgentResponse(
-            content=content,
-            session_id=cs.claude_uuid,
-            cost=turn.cost_usd,
-            duration_ms=turn.duration_ms,
-            num_turns=turn.num_turns,
-            tools_used=turn.tools_used,
-            is_error=turn.is_error,
-        )
+        return None
 
     async def inject_followup(
         self,
@@ -613,6 +684,17 @@ class TmuxAgent(BaseAgent):
         # session is gone) and resumes via the saved agent_resume_token.
         cs.complete_turn(is_error=True)
         await self._tsm.terminate(session_id)
+
+    async def cancel_chat(self, chat_id: str) -> None:
+        """Terminate every live pane owned by this chat.
+
+        ``cancel`` only stops the session the engine still tracks as executing.
+        A ``/goal`` detaches its pane (the agent loop keeps running after
+        ``agent_execute_completed``), so ``/clear`` / ``/stop`` / ``/cancel``
+        must reap by chat or the pane runs on un-killably until daemon restart.
+        """
+        for cs in self._tsm.sessions_for_chat(chat_id):
+            await self.cancel(cs.session_id)
 
     async def shutdown(self) -> None:
         await self._tsm.shutdown_all()

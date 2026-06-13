@@ -133,6 +133,29 @@ class TestStart:
         mock_app.start.assert_awaited_once()
         mock_app.updater.start_polling.assert_awaited_once()
 
+    async def test_start_registers_mode_commands(self, connector):
+        from telegram.ext import CommandHandler
+
+        mock_app = _make_mock_app()
+        mock_app.add_error_handler = MagicMock()
+        mock_builder = MagicMock()
+        mock_builder.token.return_value = mock_builder
+        mock_builder.concurrent_updates.return_value = mock_builder
+        mock_builder.build.return_value = mock_app
+
+        with patch(
+            "leashd.connectors.telegram.Application.builder",
+            return_value=mock_builder,
+        ):
+            await connector.start()
+
+        registered: set[str] = set()
+        for call in mock_app.add_handler.call_args_list:
+            handler = call.args[0]
+            if isinstance(handler, CommandHandler):
+                registered |= set(handler.commands)
+        assert {"plan", "edit", "auto", "default"} <= registered
+
 
 class TestStop:
     async def test_stop_shuts_down_in_order(self, connector):

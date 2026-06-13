@@ -1,3 +1,3 @@
 """leashd — Remote AI-assisted development with safety constraints."""
 
-__version__ = "0.18.0"
+__version__ = "0.18.1"

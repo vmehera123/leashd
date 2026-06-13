@@ -1856,6 +1856,130 @@ async def test_answer_perm_selector_noop_when_no_selector(cfg, no_real_sleep):
     assert pane.sent == []
 
 
+# The exact ExitPlanMode plan-approval dialog rendered live by claude 2.1.177.
+# The plan body carries its OWN numbered list (1./2.) above the menu — the
+# row picker must scan only BELOW the "Would you like to proceed?" prompt.
+_PLAN_DIALOG = (
+    " Ready to code?\n"
+    "\n"
+    " Here is Claude's plan:\n"
+    " Plan: Add CONTRIBUTING.md\n"
+    " 1. Create CONTRIBUTING.md with setup + PR steps\n"
+    " 2. Link it from the README\n"
+    "\n"
+    " Claude has written up a plan and is ready to execute. "
+    "Would you like to proceed?\n"
+    "\n"
+    " ❯ 1. Yes, and use auto mode\n"
+    "   2. Yes, manually approve edits\n"
+    "   3. No, refine with Ultraplan on Claude Code on the web\n"
+    "   4. Tell Claude what to change\n"
+    "      shift+tab to approve with this feedback"
+)
+
+
+def test_plan_selector_present_matches_real_dialog(cfg):
+    """The plan dialog is a third selector kind: its header is "Would you like
+    to proceed?", NOT the binary prompt's "Do you want to proceed?", so the
+    binary detector misses it (the reproduced hang) and this one must catch
+    it — while ignoring a tool that merely echoes plan text in its output."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    cs.attach(object(), _FakePane([_PLAN_DIALOG]))
+    assert cs.plan_selector_present() is True
+    # Must NOT be mistaken for the binary permission selector and vice-versa.
+    assert cs.perm_selector_present() is False
+    cs.attach(
+        object(),
+        _FakePane([" Do you want to proceed?\n ❯ 1. Yes\n   2. No"]),
+    )
+    assert cs.plan_selector_present() is False
+    # Idle composer → not it.
+    cs.attach(object(), _FakePane(["❯ \n ⏵⏵ auto mode on"]))
+    assert cs.plan_selector_present() is False
+
+
+def test_plan_target_row_ignores_plan_body_numbers(cfg):
+    """Row order is stable but labels drift, so pick by label below the prompt:
+    ``edit`` → the autonomous 'Yes' row, anything else → manual-approve. The
+    numbered plan body above the menu must never be matched."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    assert cs._plan_target_row(_PLAN_DIALOG, "edit") == 1
+    assert cs._plan_target_row(_PLAN_DIALOG, "default") == 2
+
+
+async def test_answer_plan_selector_edit_picks_auto_row(cfg, no_real_sleep):
+    """An approved-for-auto plan: cursor already on the autonomous row → a bare
+    Enter dismisses claude's dialog so it leaves plan mode and implements
+    (this is the keystroke that was never sent in the reproduced wedge)."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    pane = _FakePane([_PLAN_DIALOG])
+    cs.attach(object(), pane)
+    assert await cs.answer_plan_selector(target_mode="edit", timeout=5.0) is True
+    assert pane.sent == [("Enter", False)]
+
+
+async def test_answer_plan_selector_default_picks_manual_row(cfg, no_real_sleep):
+    """Approved-for-manual: navigate from the autonomous row (1) down to the
+    manual-approve row (2), then Enter."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    pane = _FakePane([_PLAN_DIALOG])
+    cs.attach(object(), pane)
+    assert await cs.answer_plan_selector(target_mode="default", timeout=5.0) is True
+    assert pane.sent.count(("Down", False)) == 1
+    assert pane.sent.count(("Up", False)) == 0
+    assert pane.sent[-1] == ("Enter", False)
+
+
+async def test_answer_plan_selector_guard_blocks_concurrent_drive(cfg):
+    """The PreToolUse + PermissionRequest double-fire must drive the dialog
+    once: a second concurrent call bails (the first owns the flag)."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    cs.attach(object(), _FakePane([_PLAN_DIALOG]))
+    cs._plan_drive_active = True
+    assert await cs.answer_plan_selector(target_mode="edit", timeout=5.0) is False
+    assert cs._pane.sent == []
+
+
+async def test_answer_plan_selector_noop_without_dialog(cfg, no_real_sleep):
+    """Screen-gated: if the plan dialog never renders, the drive presses
+    nothing (a headless allow, or a dialog already dismissed)."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    pane = _FakePane(["⏺ Done\n ⏵⏵ auto mode on"])
+    cs.attach(object(), pane)
+    assert await cs.answer_plan_selector(target_mode="edit", timeout=0.2) is False
+    assert pane.sent == []
+
+
+def test_plan_target_row_reject_picks_feedback_row(cfg):
+    """A rejected plan must dismiss via "Tell Claude what to change" (returns
+    to the plan composer), NOT the "refine on the web" option."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    assert cs._plan_target_row(_PLAN_DIALOG, "reject") == 4
+
+
+async def test_answer_plan_selector_reject_navigates_to_feedback_row(
+    cfg, no_real_sleep
+):
+    """Reject: navigate from the autonomous row (1) to "Tell Claude what to
+    change" (4) — three Downs, then Enter — so the pane returns to the plan
+    composer for execute()'s adjustment re-prompt instead of hanging."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    pane = _FakePane([_PLAN_DIALOG])
+    cs.attach(object(), pane)
+    assert await cs.answer_plan_selector(target_mode="reject", timeout=5.0) is True
+    assert pane.sent.count(("Down", False)) == 3
+    assert pane.sent.count(("Up", False)) == 0
+    assert pane.sent[-1] == ("Enter", False)
+
+
 async def test_teardown_resolves_inflight_decision_futures(cfg):
     """A PermissionRequest awaiting a torn-down session's PreToolUse decision
     must fail closed fast, not block on the effectively-infinite hook timeout
@@ -2789,3 +2913,104 @@ async def test_dialog_watcher_loop_dedups_same_fingerprint(cfg, monkeypatch):
     # is that no other tasks leaked.
     leaked = [t for t in tsm._perm_drive_tasks if not t.done() and not t.cancelled()]
     assert leaked == []
+
+
+def test_sessions_for_chat_filters_by_chat(cfg):
+    tsm = TmuxSessionManager(cfg)
+    _session(tsm, session_id="a", chat_id="web:1")
+    _session(tsm, session_id="b", chat_id="web:1")
+    _session(tsm, session_id="c", chat_id="web:2")
+    assert {cs.session_id for cs in tsm.sessions_for_chat("web:1")} == {"a", "b"}
+    assert {cs.session_id for cs in tsm.sessions_for_chat("web:2")} == {"c"}
+    assert tsm.sessions_for_chat("web:absent") == []
+
+
+async def test_terminate_cli_kills_when_teardown_leaves_pane(cfg, monkeypatch):
+    tsm = TmuxSessionManager(cfg)
+    _session(tsm, session_id="goal1")
+    monkeypatch.setattr(tsm, "_tmux_session_exists", lambda name: True)
+    killed: list[str] = []
+    monkeypatch.setattr(tsm, "_kill_tmux_session", lambda name: killed.append(name))
+    await tsm.terminate("goal1")
+    assert killed == ["leashd_goal1"]
+    assert "goal1" not in tsm._sessions
+
+
+async def test_terminate_skips_cli_kill_when_pane_confirmed_gone(cfg, monkeypatch):
+    tsm = TmuxSessionManager(cfg)
+    _session(tsm, session_id="goal2")
+    monkeypatch.setattr(tsm, "_tmux_session_exists", lambda name: False)
+    killed: list[str] = []
+    monkeypatch.setattr(tsm, "_kill_tmux_session", lambda name: killed.append(name))
+    await tsm.terminate("goal2")
+    assert killed == []
+
+
+async def test_reap_orphan_panes_kills_only_unowned_leashd_sessions(cfg, monkeypatch):
+    from types import SimpleNamespace
+
+    tsm = TmuxSessionManager(cfg)
+    _session(tsm, session_id="live")
+    tsm._socket_dir.mkdir(parents=True, exist_ok=True)
+    tsm._socket_path.write_text("")
+
+    def fake_run(argv, **kwargs):
+        return SimpleNamespace(
+            returncode=0,
+            stdout="leashd_live\nleashd_orphan\ncli_x\nmytmux\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("leashd.agents.runtimes.tmux_session.subprocess.run", fake_run)
+    killed: list[str] = []
+    monkeypatch.setattr(tsm, "_kill_tmux_session", lambda name: killed.append(name))
+    monkeypatch.setattr(tsm, "_tmux_session_exists", lambda name: False)
+
+    count = await tsm.reap_orphan_panes()
+    assert killed == ["leashd_orphan"]
+    assert count == 1
+
+
+async def test_schedule_orphan_reap_debounces(cfg, monkeypatch):
+    tsm = TmuxSessionManager(cfg)
+    calls: list[int] = []
+
+    async def fake_reap():
+        calls.append(1)
+        return 0
+
+    monkeypatch.setattr(tsm, "reap_orphan_panes", fake_reap)
+    tsm._schedule_orphan_reap()
+    assert tsm._orphan_reap_task is not None
+    await tsm._orphan_reap_task
+    tsm._schedule_orphan_reap()
+    assert calls == [1]
+
+
+async def test_reap_leftover_chat_panes_keeps_only_current(cfg, monkeypatch):
+    tsm = TmuxSessionManager(cfg)
+    _session(tsm, session_id="new", chat_id="web:1")
+    _session(tsm, session_id="stale-a", chat_id="web:1")
+    _session(tsm, session_id="stale-b", chat_id="web:1")
+    _session(tsm, session_id="other-chat", chat_id="web:2")
+    monkeypatch.setattr(tsm, "_tmux_session_exists", lambda name: False)
+    monkeypatch.setattr(tsm, "_kill_tmux_session", lambda name: None)
+
+    await tsm._reap_leftover_chat_panes("web:1", keep="new")
+
+    assert set(tsm._sessions) == {"new", "other-chat"}
+
+
+async def test_reap_leftover_chat_panes_ignores_pane_less_cli_sessions(
+    cfg, monkeypatch
+):
+    tsm = TmuxSessionManager(cfg)
+    _session(tsm, session_id="new", chat_id="web:1")
+    cli = _session(tsm, session_id="cli-sess", chat_id="web:1")
+    cli.tmux_name = "cli_cli-sess"
+    monkeypatch.setattr(tsm, "_tmux_session_exists", lambda name: False)
+    monkeypatch.setattr(tsm, "_kill_tmux_session", lambda name: None)
+
+    await tsm._reap_leftover_chat_panes("web:1", keep="new")
+
+    assert "cli-sess" in tsm._sessions

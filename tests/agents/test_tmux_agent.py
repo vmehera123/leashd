@@ -9,6 +9,7 @@ import pytest
 from leashd.agents.runtimes.tmux import TmuxAgent
 from leashd.agents.runtimes.tmux_session import TmuxTurn, reset_tmux_session_manager
 from leashd.core.config import LeashdConfig
+from leashd.core.plan_gate import PlanState
 from leashd.exceptions import AgentError
 
 
@@ -73,6 +74,10 @@ class FakeCS:
         # Mirrors TmuxClaudeSession: pinned at spawn to ``perm_mode == "auto"``
         # so reuse-path system-prompt comparison picks the right banner.
         self.native_auto_active: bool = False
+        self.plan_state: PlanState | None = None
+        # Per-turn adjustment feedback the fake "rejects" with, consumed once
+        # so the re-prompt loop revises then converges (None = no rejection).
+        self._reject_feedback: list[str] = []
 
     def pane_is_dead(self):
         return False
@@ -81,6 +86,9 @@ class FakeCS:
         self.turn = TmuxTurn(
             on_text_chunk=on_text_chunk, on_tool_activity=on_tool_activity
         )
+        self.plan_state = PlanState()
+        if self._reject_feedback:
+            self.plan_state.plan_adjustment_feedback = self._reject_feedback.pop(0)
         return self.turn
 
     def send_keys(self, keys, *, literal=True):
@@ -269,6 +277,36 @@ async def test_execute_plan_mode_keeps_plan(tmp_path):
     agent = _agent(_cfg(tmp_path), tsm)
     await agent.execute("go", _session(tmp_path, mode="plan"))
     assert tsm.spawn_kwargs["perm_mode"] == "plan"
+
+
+async def test_execute_replans_on_plan_adjustment_feedback(tmp_path):
+    """A rejected plan leaves adjustment feedback with no approval → execute()
+    re-prompts the same pane with it (tmux parity for the engine's
+    plan_adjustment_restart, which never fires for tmux). One revision here:
+    feedback on turn 1, none on turn 2."""
+    cs = FakeCS(text="revised")
+    cs._reject_feedback = ["Use CONTRIBUTORS.md instead"]
+    agent = _agent(_cfg(tmp_path), FakeTSM(cs))
+    resp = await agent.execute(
+        "add a contributing guide", _session(tmp_path, mode="plan")
+    )
+    submits = [s for s, literal in cs.sent if literal and not s.startswith("@")]
+    assert submits == ["add a contributing guide", "Use CONTRIBUTORS.md instead"]
+    assert resp.is_error is False
+
+
+async def test_execute_plan_adjustment_loop_is_bounded(tmp_path):
+    """Defence-in-depth: even if feedback keeps coming back, the re-prompt loop
+    stops at MAX_PLAN_REVISIONS rather than spinning forever."""
+    from leashd.agents.runtimes.tmux import MAX_PLAN_REVISIONS
+
+    cs = FakeCS(text="revised")
+    cs._reject_feedback = ["change it"] * (MAX_PLAN_REVISIONS + 5)
+    agent = _agent(_cfg(tmp_path), FakeTSM(cs))
+    await agent.execute("go", _session(tmp_path, mode="plan"))
+    submits = [s for s, literal in cs.sent if literal and not s.startswith("@")]
+    # initial prompt + exactly MAX_PLAN_REVISIONS re-prompts
+    assert len(submits) == MAX_PLAN_REVISIONS + 1
 
 
 async def test_execute_reused_pane_redelivers_changed_mode_instruction(tmp_path):
@@ -669,3 +707,37 @@ async def test_cancel_swallows_send_keys_failure_and_still_tears_down(tmp_path):
 
     assert cs.complete_calls == 1
     assert tsm.terminated == "s1"
+
+
+async def test_cancel_chat_terminates_every_pane_for_the_chat(tmp_path):
+    from types import SimpleNamespace
+
+    def _cs(session_id, chat_id):
+        return SimpleNamespace(
+            session_id=session_id,
+            chat_id=chat_id,
+            send_keys=lambda *a, **k: None,
+            complete_turn=lambda **k: None,
+        )
+
+    sessions = {
+        "g1": _cs("g1", "web:1"),
+        "g2": _cs("g2", "web:1"),
+        "other": _cs("other", "web:2"),
+    }
+    terminated: list[str] = []
+
+    class Tsm:
+        def sessions_for_chat(self, chat_id):
+            return [cs for cs in sessions.values() if cs.chat_id == chat_id]
+
+        def get(self, session_id):
+            return sessions.get(session_id)
+
+        async def terminate(self, session_id):
+            terminated.append(session_id)
+
+    agent = TmuxAgent(_cfg(tmp_path))
+    agent._tsm = Tsm()
+    await agent.cancel_chat("web:1")
+    assert sorted(terminated) == ["g1", "g2"]

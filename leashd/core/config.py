@@ -140,7 +140,7 @@ class LeashdConfig(BaseSettings):
     storage_path: Path = Path(".leashd/messages.db")
 
     # Agent mode — new/cleared sessions start here (applied by SessionManager).
-    default_mode: Literal["default", "plan", "auto"] = "default"
+    default_mode: Literal["default", "plan", "auto"] = "auto"
 
     browser_backend: Literal["playwright", "agent-browser"] = "agent-browser"
     browser_user_data_dir: str | None = None

@@ -134,6 +134,7 @@ function authFetch(url, opts = {}) {
 const SLASH_COMMANDS = [
   { command: "/plan", description: "Switch to plan mode" },
   { command: "/edit", description: "Auto-approve file writes" },
+  { command: "/auto", description: "Native auto mode — safe actions run, risky escalate" },
   { command: "/default", description: "Return to default mode" },
   { command: "/test", description: "Activate test workflow" },
   { command: "/web", description: "Web automation" },
@@ -2897,7 +2898,7 @@ const SettingsManager = {
   _renderAgentSection(agent) {
     const effort = agent.effort || "xhigh";
     const runtime = agent.runtime || "claude-code";
-    const mode = agent.default_mode || "default";
+    const mode = agent.default_mode || "auto";
     const claudeModel = agent.claude_model || "";
     const codexModel = agent.codex_model || "";
 

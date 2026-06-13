@@ -661,6 +661,19 @@ class Engine:
             await self._store.teardown()
         await self.agent.shutdown()
 
+    async def _signal_task_cancel(self, chat_id: str, user_id: str) -> None:
+        """Drive any active task / autonomous loop for this chat to terminal.
+
+        Mirrors the ``/cancel`` signal ``/stop`` emits so directory and
+        workspace switches do not strand a task in a non-terminal phase.
+        """
+        await self.event_bus.emit(
+            Event(
+                name=MESSAGE_IN,
+                data={"user_id": user_id, "chat_id": chat_id, "text": "/cancel"},
+            )
+        )
+
     async def _cleanup_session(self, session: Session, chat_id: str) -> None:
         """Cancel active work, shut down browser, and clean up state for a chat."""
         if self.approval_coordinator:
@@ -671,6 +684,9 @@ class Engine:
         if session_id:
             self._interrupted_chats.add(chat_id)
             await self.agent.cancel(session_id)
+        cancel_chat = getattr(self.agent, "cancel_chat", None)
+        if cancel_chat is not None:
+            await cancel_chat(chat_id)
         old_iid = self._pending_interrupts.pop(chat_id, None)
         if old_iid:
             self._interrupt_to_chat.pop(old_iid, None)
@@ -1701,6 +1717,9 @@ class Engine:
                     "[--model <name>] [--phases plan,implement,review] "
                     "<description of the task>"
                 )
+            cancel_chat = getattr(self.agent, "cancel_chat", None)
+            if cancel_chat is not None:
+                await cancel_chat(chat_id)
             session.mode = "task"
             session.task_run_id = None
             await self.session_manager.save(session)
@@ -2159,6 +2178,7 @@ class Engine:
             return f"Already in {target}."
 
         old_workspace = session.workspace_name
+        await self._signal_task_cancel(chat_id, user_id)
         await self._cleanup_session(session, chat_id)
         await self.session_manager.reset(user_id, chat_id)
         session.working_directory = str(target_path)
@@ -2219,6 +2239,7 @@ class Engine:
             if not session.workspace_name:
                 return "No workspace active."
             old_name = session.workspace_name
+            await self._signal_task_cancel(chat_id, user_id)
             await self._cleanup_session(session, chat_id)
             await self.session_manager.reset(user_id, chat_id)
             logger.info("workspace_deactivated", chat_id=chat_id, workspace=old_name)
@@ -2231,6 +2252,7 @@ class Engine:
         ws = self._workspaces[target]
         primary = ws.primary_directory
 
+        await self._signal_task_cancel(chat_id, user_id)
         await self._cleanup_session(session, chat_id)
         await self.session_manager.reset(user_id, chat_id)
 

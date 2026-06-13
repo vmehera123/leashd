@@ -77,6 +77,7 @@ _ASYNC_HOOK_EVENTS = (
 # 1 year exceeds any daemon/turn lifetime (a restart reaps panes) while
 # staying a sane value in the settings JSON.
 _HOOK_NO_EXPIRY_SECONDS = 365 * 24 * 3600
+_ORPHAN_REAP_DEBOUNCE_SECONDS = 30.0
 
 # Claude Code marketplace plugin that reviews Claude's own code changes for
 # vulnerabilities in-session (per-edit pattern match → end-of-turn diff review
@@ -533,6 +534,8 @@ class TmuxClaudeSession:
         # Guards the AskUserQuestion in-pane selector drive so the PreToolUse +
         # PermissionRequest double-fire only navigates the pane once.
         self._question_drive_active = False
+        # Same guard for the ExitPlanMode plan-approval dialog drive.
+        self._plan_drive_active = False
         # The --append-system-prompt the live claude was spawned with. It is
         # fixed for the process lifetime, so the agent re-delivers a changed
         # instruction in-band (see TmuxAgent.execute reused-pane branch).
@@ -785,6 +788,113 @@ class TmuxClaudeSession:
         s = self.capture() if screen is None else screen
         return all(m in s for m in self._SUBMIT_REVIEW_MARKERS)
 
+    # Native ExitPlanMode plan-approval dialog — a third in-pane selector kind,
+    # distinct from both the binary permission prompt and the AskUserQuestion
+    # selector. claude renders it when the agent calls ExitPlanMode in plan
+    # mode: a "Ready to code? … Would you like to proceed?" header above a
+    # numbered Yes/No menu (verified claude 2.1.177):
+    #
+    #     Would you like to proceed?
+    #     ❯ 1. Yes, and use auto mode
+    #       2. Yes, manually approve edits
+    #       3. No, refine ...
+    #       4. Tell Claude what to change
+    #
+    # A hook ``allow`` for ExitPlanMode does NOT dismiss it (same class as the
+    # AskUserQuestion selector), so leashd must press the matching row or the
+    # pane hangs until the no-progress watchdog finalizes the turn (the
+    # reproduced wedge: a human-approved plan stuck ~10 min, then finalized
+    # with no implementation). Its header is "Would you like to proceed?" —
+    # NOT the binary prompt's "Do you want to proceed?" — so it matches neither
+    # existing selector signature.
+    _PLAN_SELECTOR_MARKERS = ("Would you like to proceed?", "Ready to code?")
+
+    def plan_selector_present(self, screen: str | None = None) -> bool:
+        """Is claude's native ExitPlanMode plan-approval dialog on screen?"""
+        s = self.capture() if screen is None else screen
+        if not any(m in s for m in self._PLAN_SELECTOR_MARKERS):
+            return False
+        return "1. Yes" in s and ("2. " in s or "❯ 2." in s)
+
+    def _plan_target_row(self, screen: str, target_mode: str) -> int:
+        """The plan-dialog row to select. Row ORDER is stable across claude
+        versions (autonomous 'Yes' first, manual 'Yes' second, the feedback
+        row last), but the LABELS drift ("auto-accept edits" → "use auto
+        mode"), so match by label with a positional fallback. ``edit`` → the
+        autonomous row; ``reject`` → the "Tell Claude what to change" row
+        (dismisses the dialog back to the plan composer so leashd can re-prompt
+        with the adjustment feedback — NOT the "refine on the web" row); any
+        other approved mode → the manual-approve row.
+
+        Options render BELOW the proceed prompt; the plan body above can carry
+        its own numbered list, so only scan past the prompt line."""
+        lines = screen.splitlines()
+        start = 0
+        for i, line in enumerate(lines):
+            if any(m in line for m in self._PLAN_SELECTOR_MARKERS):
+                start = i + 1
+        rows: list[tuple[int, str]] = []
+        for line in lines[start:]:
+            m = re.match(r"^\s*(?:❯\s*)?(\d+)\.\s+(.*\S)\s*$", line)
+            if m:
+                rows.append((int(m.group(1)), m.group(2).lower()))
+        if target_mode == "reject":
+            for num, label in rows:
+                if "tell" in label and "change" in label:
+                    return num
+            _web = ("refine", "web", "ultraplan")
+            for num, label in rows:
+                if "change" in label and not any(w in label for w in _web):
+                    return num
+            return rows[-1][0] if rows else 4
+        if target_mode == "edit":
+            for num, label in rows:
+                if "yes" in label and ("auto" in label or "accept" in label):
+                    return num
+            return rows[0][0] if rows else 1
+        for num, label in rows:
+            if "yes" in label and "manual" in label:
+                return num
+        return rows[1][0] if len(rows) > 1 else 2
+
+    async def answer_plan_selector(
+        self, *, target_mode: str, timeout: float = 12.0
+    ) -> bool:
+        """Drive claude's ExitPlanMode plan-approval dialog. ``target_mode ==
+        "edit"`` selects the autonomous 'Yes' row (claude proceeds
+        auto-accepting edits); ``"reject"`` selects "Tell Claude what to
+        change" (dismisses the dialog back to the plan composer so the turn
+        ends cleanly and execute() can re-prompt with the adjustment feedback);
+        any other approved mode selects the manual-approve 'Yes' row. Guarded
+        against the PreToolUse + PermissionRequest double-fire; screen-gated +
+        idempotent like ``answer_perm_selector`` — a no-op if the dialog never
+        renders."""
+        if self._plan_drive_active:
+            return False
+        self._plan_drive_active = True
+        try:
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                screen = self.capture()
+                if self.plan_selector_present(screen):
+                    row = self._plan_target_row(screen, target_mode)
+                    logger.info(
+                        "tmux_plan_selector_answering",
+                        tmux_name=self.tmux_name,
+                        target_mode=target_mode,
+                        row=row,
+                    )
+                    return await self._select_option_row(
+                        row - 1,
+                        deadline,
+                        present=self.plan_selector_present,
+                        log_event="tmux_plan_selector_answered",
+                    )
+                await asyncio.sleep(0.3)
+            return False
+        finally:
+            self._plan_drive_active = False
+
     async def answer_question_selector(
         self, *, questions: list[Any], answers: dict[str, Any], timeout: float = 20.0
     ) -> bool:
@@ -878,13 +988,23 @@ class TmuxClaudeSession:
                 return i
         return None
 
-    async def _select_option_row(self, target_idx: int, deadline: float) -> bool:
+    async def _select_option_row(
+        self,
+        target_idx: int,
+        deadline: float,
+        present: Callable[[str], bool] | None = None,
+        log_event: str = "tmux_question_selector_answered",
+    ) -> bool:
         """Navigate the rendered selector to the agent option at ``target_idx``
-        (0-based; row 1 = first option) and press Enter."""
+        (0-based; row 1 = first option) and press Enter. ``present`` gates the
+        drive on the right selector kind (AskUserQuestion by default; the plan
+        dialog passes its own detector). Cursor-aware so a re-poll never
+        overshoots the target row."""
+        present = present or self.question_selector_present
         target = target_idx + 1
         while time.monotonic() < deadline:
             screen = self.capture()
-            if not self.question_selector_present(screen):
+            if not present(screen):
                 await asyncio.sleep(0.3)
                 continue
             current = None
@@ -901,7 +1021,7 @@ class TmuxClaudeSession:
                 await asyncio.sleep(0.12)
             self.send_keys("Enter", literal=False)
             logger.info(
-                "tmux_question_selector_answered",
+                log_event,
                 tmux_name=self.tmux_name,
                 row=target,
             )
@@ -1047,6 +1167,9 @@ class TmuxSessionManager:
         # they are not garbage-collected mid-flight (asyncio only weak-refs
         # tasks). Self-pruning via the done-callback.
         self._perm_drive_tasks: set[asyncio.Task[None]] = set()
+
+        self._last_orphan_reap = 0.0
+        self._orphan_reap_task: asyncio.Task[int] | None = None
 
     # -- configuration / wiring ---------------------------------------------
 
@@ -1436,6 +1559,29 @@ class TmuxSessionManager:
                 del self._pending_by_cwd[cwd]
         if cs is not None:
             await cs.teardown()
+            if self._tmux_session_exists(cs.tmux_name) is not False:
+                self._kill_tmux_session(cs.tmux_name)
+
+    def sessions_for_chat(self, chat_id: str) -> list[TmuxClaudeSession]:
+        return [cs for cs in self._sessions.values() if cs.chat_id == chat_id]
+
+    async def _reap_leftover_chat_panes(self, chat_id: str, *, keep: str) -> None:
+        """Terminate every owned pane for this chat except ``keep``.
+
+        Enforces one live pane per chat at spawn time: a prior turn's pane (a
+        detached ``/goal``, or a session whose id rotated across ``/clear``)
+        must not survive into the new turn — that leftover is what replayed
+        stale output and wedged the next task.
+        """
+        leftover = [
+            cs
+            for cs in self._sessions.values()
+            if cs.chat_id == chat_id
+            and cs.session_id != keep
+            and cs.tmux_name.startswith("leashd_")
+        ]
+        for cs in leftover:
+            await self.terminate(cs.session_id)
 
     def _ensure_server(self) -> Any:
         if self._server is None:
@@ -1593,6 +1739,8 @@ class TmuxSessionManager:
         if old is not None:
             await old.teardown()
 
+        await self._reap_leftover_chat_panes(chat_id, keep=session_id)
+
         tmux_name = f"leashd_{session_id}"
         settings_path = self.write_managed_settings(session_id)
         command = self._build_claude_command(
@@ -1677,6 +1825,7 @@ class TmuxSessionManager:
             projects_root=self._projects_root,
             on_event=self._dispatch_jsonl_event,
             session=cs,
+            resume=resume_uuid is not None,
         )
         cs.jsonl_task = asyncio.create_task(tailer.run())
 
@@ -1789,6 +1938,36 @@ class TmuxSessionManager:
                 self._perm_drive_tasks.add(task)
                 task.add_done_callback(self._perm_drive_tasks.discard)
                 return
+        if tool_name == "ExitPlanMode":
+            # claude's native "Would you like to proceed?" dialog blocks on a
+            # keystroke that neither the hook allow nor the hook deny supplies.
+            # allow → _apply_plan_approved already flipped cs.mode to the
+            # approved target, so it carries the row (auto vs manual); deny →
+            # the human (or auto-reviewer) rejected, so pick the "tell Claude
+            # what to change" row, which returns the pane to the plan composer
+            # for execute()'s adjustment re-prompt.
+            decision = hso.get("permissionDecision")
+            plan_mode = ""
+            if decision == "allow":
+                plan_mode = "edit" if cs.mode == "edit" else "default"
+            elif decision == "deny":
+                plan_mode = "reject"
+            if plan_mode:
+
+                async def _drive_plan(mode: str = plan_mode) -> None:
+                    try:
+                        await cs.answer_plan_selector(target_mode=mode)
+                    except Exception:
+                        logger.debug(
+                            "tmux_plan_selector_drive_error",
+                            tmux_name=cs.tmux_name,
+                            exc_info=True,
+                        )
+
+                task = asyncio.create_task(_drive_plan())
+                self._perm_drive_tasks.add(task)
+                task.add_done_callback(self._perm_drive_tasks.discard)
+                return
         self._spawn_perm_selector_drive(cs, hook_out)
 
     async def on_pre_tool(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -1871,6 +2050,7 @@ class TmuxSessionManager:
                 claude_uuid=claude_uuid,
                 bound=self.is_bound,
             )
+            self._schedule_orphan_reap()
             return _hook_decision(
                 "deny", "leashd could not map this session to a safety context"
             )
@@ -2014,6 +2194,7 @@ class TmuxSessionManager:
                 claude_uuid=claude_uuid,
                 bound=self.is_bound,
             )
+            self._schedule_orphan_reap()
             return _permreq_decision("deny")
 
         assert self._gatekeeper is not None  # noqa: S101  (is_bound checked)
@@ -2142,6 +2323,8 @@ class TmuxSessionManager:
         cwd = str(body.get("cwd", ""))
         cs = self._bind_uuid(cwd, claude_uuid)
         if cs is None:
+            if event not in ("SessionStart", "UserPromptSubmit"):
+                self._schedule_orphan_reap()
             return
 
         if event in ("SessionStart", "UserPromptSubmit"):
@@ -2469,6 +2652,59 @@ class TmuxSessionManager:
         if killed:
             logger.info("tmux_owned_sessions_killed", count=killed)
         logger.info("tmux_owned_sessions_swept", found=len(owned), killed=killed)
+        return killed
+
+    def _schedule_orphan_reap(self) -> None:
+        """Debounced, fire-and-forget reap triggered by an unmappable hook.
+
+        An unmappable PreToolUse/PermissionRequest is proof of a ``leashd_``
+        pane with no in-memory owner — a ``/goal`` whose session was reset, or
+        a crashed-daemon leftover. Such a pane spins forever on denied tools.
+        Reaping it here self-heals the wedge without a daemon restart.
+        """
+        if self._orphan_reap_task is not None and not self._orphan_reap_task.done():
+            return
+        now = time.monotonic()
+        if now - self._last_orphan_reap < _ORPHAN_REAP_DEBOUNCE_SECONDS:
+            return
+        self._last_orphan_reap = now
+        self._orphan_reap_task = asyncio.create_task(self.reap_orphan_panes())
+
+    async def reap_orphan_panes(self) -> int:
+        """Kill ``leashd_`` socket sessions with no entry in ``_sessions``.
+
+        Scoped to leashd's own naming on its private socket and to sessions
+        leashd does not currently own, so a live session (this or any other
+        chat) and a user's own tmux are never touched. Best-effort.
+        """
+        if not self._socket_path.exists():
+            return 0
+        try:
+            proc = subprocess.run(  # noqa: S603
+                self._tmux_argv("list-sessions", "-F", "#{session_name}"),
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            logger.warning("tmux_orphan_list_failed", error=str(exc))
+            return 0
+        if proc.returncode != 0:
+            return 0
+        owned = {cs.tmux_name for cs in self._sessions.values()}
+        orphans = [
+            n
+            for n in (line.strip() for line in proc.stdout.splitlines())
+            if n.startswith("leashd_") and n not in owned
+        ]
+        killed = 0
+        for name in orphans:
+            self._kill_tmux_session(name)
+            if self._tmux_session_exists(name) is not True:
+                killed += 1
+        if killed:
+            logger.info("tmux_orphan_panes_reaped", count=killed, found=len(orphans))
         return killed
 
     async def shutdown_all(self) -> None:

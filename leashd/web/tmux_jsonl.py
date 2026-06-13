@@ -57,6 +57,7 @@ class JSONLTailer:
             [TmuxClaudeSession, dict[str, Any]], Coroutine[Any, Any, None]
         ],
         session: TmuxClaudeSession,
+        resume: bool = False,
     ) -> None:
         self._projects_root = projects_root
         self._on_event = on_event
@@ -66,6 +67,7 @@ class JSONLTailer:
         self._inode: int | None = None
         self._seen: set[str] = set()
         self._started = time.monotonic()
+        self._skip_history_on_resume_pending = resume
 
     def _resolve_path(self) -> Path | None:
         if self._path is not None and self._path.is_file():
@@ -144,11 +146,23 @@ class JSONLTailer:
                     exc_info=True,
                 )
 
+    def _skip_resume_history(self, path: Path) -> None:
+        if not self._skip_history_on_resume_pending:
+            return
+        self._skip_history_on_resume_pending = False
+        try:
+            stat = path.stat()
+        except OSError:
+            return
+        self._offset = stat.st_size
+        self._inode = stat.st_ino
+
     async def run(self) -> None:
         try:
             while True:
                 path = self._resolve_path()
                 if path is not None:
+                    self._skip_resume_history(path)
                     await self._drain(path)
                 await asyncio.sleep(_POLL_INTERVAL)
         except asyncio.CancelledError:
