@@ -1,17 +1,10 @@
 # Changelog
 
 ## [0.18.1] - 2026-06-13
-- **fixed**: `tmux` runtime no longer hangs after a human approves a plan — leashd now keystroke-drives claude's native ExitPlanMode dialog ("Would you like to proceed?" + numbered Yes/No menu), which the hook `allow` does not dismiss. Previously the approved-plan pane sat idle until the 600s no-progress watchdog finalized the turn with no implementation (verified live against claude 2.1.177: `edit` → autonomous row, `default` → manual-approve row)
-- **fixed**: `tmux` runtime now handles a *rejected* plan too — the reject drive picks "Tell Claude what to change" (returns the pane to the plan composer, not "refine on the web"), and `execute()` re-prompts the same pane with the adjustment feedback so claude revises (the tmux parity for the engine's `plan_adjustment_restart`, which never fired here). Bounded by `MAX_PLAN_REVISIONS` on top of the AutoPlanReviewer's existing circuit breaker
-- **fixed**: `/auto` is now wired into Telegram (added to the `CommandHandler` list — it was silently dropped before) and the Web UI command palette (`SLASH_COMMANDS`); the engine handler and Web UI Settings dropdown already supported it
-- **changed**: `auto` is now the default session mode (`default_mode`) — new and `/clear`ed sessions start in Claude's native auto permission policy instead of per-call approval; explicit `default_mode` config and `/plan` `/edit` `/default` overrides still apply
-- **fixed**: `tmux` runtime no longer replays a *previous* conversation's answer as the response to a new `/goal` or `/task` — a resumed session's JSONL tailer now seeks past the prior transcript instead of re-streaming its history (verified: a fresh goal was returning an unrelated earlier evaluation, cost $0)
-- **fixed**: `/clear`, `/stop`, and `/cancel` now tear down *every* live pane for the chat, not just the one currently executing — a detached `/goal` (whose `claude` keeps running after the turn returns) was un-killable without `leashd restart`
-- **fixed**: an orphaned `tmux` pane whose session was reset (so its `PreToolUse` hooks can no longer map to a safety context) is now reaped on the spot instead of spinning forever on denied tool calls — self-heals the wedge that blocked starting any new `/goal` or `/task`
-- **changed**: `TmuxSessionManager.terminate` falls back to a socket-level `kill-session` when the cached libtmux handle leaves the pane alive
-- **fixed**: `/dir` and `/ws` (switch + exit) now drive the chat's active task / autonomous loop to a terminal state (emit `/cancel`) instead of only killing panes — a directory switch no longer strands a task in a non-terminal phase
-- **changed**: spawning a `tmux` session reaps the chat's other live panes first (one live pane per chat) — a new `/task` or `/goal` can never inherit a leftover pane from a prior turn
-- **fixed**: `/task` now stops the chat's active `/goal` (or other interactive pane) before starting — a `/task` fired while a `/goal` was still running used to run *simultaneously* in the same repo, and the task escalated immediately ("Implement phase produced no summary") because the goal's pane streamed the captured response
+- **changed**: `auto` is now the default mode — new and `/clear`ed sessions run Claude's native auto policy (safe actions run; risky ones still go through leashd's approval pipeline; hard blocks always denied)
+- **fixed**: `/auto` now works from Telegram and the Web UI command palette (it was silently dropped on Telegram)
+- **fixed**: `tmux` plan review no longer gets stuck — approving a plan implements in the live pane, and rejecting re-prompts the agent with your feedback so it revises
+- **fixed**: `tmux` session lifecycle hardened — `/clear`, `/stop`, and `/cancel` reliably tear down every pane, orphaned/stale panes self-heal, and `/task` and `/goal` no longer collide or replay an earlier conversation's answer
 
 ## [0.18.0] - 2026-05-31
 - **added**: `/goal <condition>` (Web UI + Telegram, `tmux` runtime) — sets a Claude Code completion goal and streams the whole multi-turn run as one leashd task; pairs with `/auto` + remote approval for unattended runs
