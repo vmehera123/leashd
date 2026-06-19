@@ -262,10 +262,6 @@ def _handle_autonomous_show() -> None:
     print("Autonomous mode: ENABLED\n")
     _yn = {True: "yes", False: "no"}
     print(f"  Policy: {autonomous.get('policy', 'autonomous')}")
-    print(
-        f"  AI tool approver: {_yn.get(autonomous.get('auto_approver', True), 'yes')}"
-    )
-    print(f"  AI plan reviewer: {_yn.get(autonomous.get('auto_plan', True), 'yes')}")
     print(f"  Auto PR: {_yn.get(autonomous.get('auto_pr', False), 'no')}")
     print(f"  PR base branch: {autonomous.get('auto_pr_base_branch', 'main')}")
     print(
@@ -308,8 +304,6 @@ def _handle_autonomous_enable() -> None:
         return
 
     autonomous.setdefault("policy", "autonomous")
-    autonomous.setdefault("auto_approver", True)
-    autonomous.setdefault("auto_plan", True)
     autonomous.setdefault("auto_pr", True)
     autonomous.setdefault("auto_pr_base_branch", "main")
     autonomous.setdefault("autonomous_loop", True)
@@ -766,7 +760,6 @@ def _handle_webui_tunnel(*, provider: str, notify_telegram: bool) -> None:
 
 
 _VALID_EFFORT_LEVELS = set(VALID_EFFORTS)
-_VALID_TASK_VERSIONS = {"v1", "v2", "v3", "v4"}
 
 
 def _scope_from_args(args: argparse.Namespace) -> tuple[str, str | None]:
@@ -1065,16 +1058,6 @@ def _handle_turns_set(value: int) -> None:
     _notify_daemon_reload()
 
 
-def _handle_task(args: argparse.Namespace) -> None:
-    """Route task subcommands."""
-    sub = getattr(args, "task_command", None)
-    if sub == "version":
-        _handle_task_version(args)
-    else:
-        print("Usage: leashd task version {show,set} [v1|v2|v3|v4]", file=sys.stderr)
-        sys.exit(1)
-
-
 def _handle_run(args: argparse.Namespace) -> None:
     """Submit /task and block until completion. Exit 0 on completed."""
     from leashd.cli_run import run_blocking
@@ -1095,40 +1078,6 @@ def _handle_run(args: argparse.Namespace) -> None:
         phases=args.phases,
     )
     sys.exit(rc)
-
-
-def _handle_task_version(args: argparse.Namespace) -> None:
-    """Route task version subcommands."""
-    sub = getattr(args, "task_version_command", None)
-    if sub is None or sub == "show":
-        _handle_task_version_show()
-    elif sub == "set":
-        _handle_task_version_set(args.version)
-
-
-def _handle_task_version_show() -> None:
-    """Display current task orchestrator version."""
-    data = load_global_config()
-    version = data.get("task_orchestrator_version", "v4")
-    print(f"Task orchestrator version: {version}")
-
-
-def _handle_task_version_set(version: str) -> None:
-    """Set the task orchestrator version."""
-    if version not in _VALID_TASK_VERSIONS:
-        print(
-            f"Error: invalid task orchestrator version '{version}'. "
-            f"Must be one of: {', '.join(sorted(_VALID_TASK_VERSIONS))}",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    data = load_global_config()
-    data["task_orchestrator_version"] = version
-    save_global_config(data)
-    inject_global_config_as_env(force=True)
-    print(f"\u2713 Task orchestrator version set to {version}")
-    _notify_daemon_reload()
 
 
 def _handle_tool_calls(args: argparse.Namespace) -> None:
@@ -2004,18 +1953,6 @@ def main() -> None:
     turns_set = turns_sub.add_parser("set", help="Set max turns per request")
     turns_set.add_argument("value", type=int, help="Max turns (positive integer)")
 
-    task_parser = subparsers.add_parser(
-        "task", help="Manage task orchestrator settings"
-    )
-    task_sub = task_parser.add_subparsers(dest="task_command")
-    task_version = task_sub.add_parser(
-        "version", help="Manage task orchestrator version (v1/v2/v3/v4)"
-    )
-    tv_sub = task_version.add_subparsers(dest="task_version_command")
-    tv_sub.add_parser("show", help="Show current task orchestrator version (default)")
-    tv_set = tv_sub.add_parser("set", help="Set task orchestrator version")
-    tv_set.add_argument("version", choices=["v1", "v2", "v3", "v4"])
-
     tc_parser = subparsers.add_parser(
         "tool-calls", help="Manage max tool calls per execution"
     )
@@ -2192,8 +2129,6 @@ def main() -> None:
         _handle_model(args)
     elif args.command == "turns":
         _handle_turns(args)
-    elif args.command == "task":
-        _handle_task(args)
     elif args.command == "tool-calls":
         _handle_tool_calls(args)
     elif args.command == "runtime":

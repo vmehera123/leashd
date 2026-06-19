@@ -414,8 +414,7 @@ class TestConfigGetEndpoint:
                 "default_mode": "plan",
                 "autonomous": {
                     "enabled": True,
-                    "auto_approver": True,
-                    "auto_plan": False,
+                    "auto_pr": True,
                 },
                 "browser": {"backend": "agent-browser", "headless": True},
             }
@@ -426,7 +425,7 @@ class TestConfigGetEndpoint:
             assert data["agent"]["runtime"] == "codex"
             assert data["agent"]["default_mode"] == "plan"
             assert data["autonomous"]["enabled"] is True
-            assert data["autonomous"]["auto_approver"] is True
+            assert data["autonomous"]["auto_pr"] is True
             assert data["browser"]["backend"] == "agent-browser"
             assert data["browser"]["headless"] is True
 

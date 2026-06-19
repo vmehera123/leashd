@@ -125,13 +125,10 @@ async def evaluate_plan_tool(
     session_mode: str,
     task_run_id: str | None,
     working_directory: str | None,
-    plan_origin: str | None,
     session_id: str,
     chat_id: str,
     user_id: str,
-    task_description: str,
     interaction_coordinator: Any,
-    config: Any,
     discover_plan_file_fn: Callable[..., str | None] = discover_plan_file,
     on_clear_context: Callable[[], None] | None = None,
     responder: Any = None,
@@ -169,9 +166,9 @@ async def evaluate_plan_tool(
     if tool_name in ("Write", "Edit"):
         file_path = tool_input.get("file_path", "")
         is_plan_file = file_path.endswith(".plan") or ".claude/plans/" in file_path
-        # v3 task-memory file is the plan file in v3's model — the orchestrator
-        # reads it directly, so we don't mirror into plan_file_path (that
-        # channel is for the AutoPlanReviewer flow).
+        # The task-memory file is the orchestrator's plan in the task model —
+        # it reads it directly, so we don't mirror it into plan_file_path (that
+        # channel feeds the human plan-review flow).
         is_task_memory_file = "/.leashd/tasks/" in file_path
         if is_plan_file:
             plan_state.plan_file_path = file_path
@@ -240,40 +237,11 @@ async def evaluate_plan_tool(
         if deadline:
             deadline.pause()
         try:
-            result: PermissionDeny | PlanReviewDecision
-            if (
-                config.auto_plan
-                and interaction_coordinator._auto_plan_reviewer
-                and plan_origin != "user"
-            ):
-                auto_result = await interaction_coordinator.handle_plan_review_auto(
-                    chat_id,
-                    tool_input,
-                    plan_content=plan_content or "",
-                    task_description=task_description,
-                    session_id=session_id,
-                )
-                if isinstance(auto_result, PermissionDeny):
-                    logger.info(
-                        "auto_plan_review_rejected_skipping_human",
-                        chat_id=chat_id,
-                        session_id=session_id,
-                        feedback=auto_result.message,
-                    )
-                    result = auto_result
-                else:
-                    logger.info(
-                        "auto_plan_review_approved_forwarding_to_human",
-                        chat_id=chat_id,
-                        session_id=session_id,
-                    )
-                    result = await interaction_coordinator.handle_plan_review(
-                        chat_id, tool_input, plan_content=plan_content
-                    )
-            else:
-                result = await interaction_coordinator.handle_plan_review(
-                    chat_id, tool_input, plan_content=plan_content
-                )
+            result: (
+                PermissionDeny | PlanReviewDecision
+            ) = await interaction_coordinator.handle_plan_review(
+                chat_id, tool_input, plan_content=plan_content
+            )
         finally:
             if deadline:
                 deadline.reset()

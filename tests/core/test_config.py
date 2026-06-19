@@ -23,7 +23,9 @@ class TestLeashdConfig:
         assert config.default_mode == "auto"
         assert config.approval_timeout_seconds is None
         assert config.interaction_timeout_seconds is None
-        assert config.tmux_no_progress_timeout_seconds == 600
+        assert config.tmux_no_progress_timeout_seconds == 0
+        assert config.tmux_turn_ceiling_seconds == 0
+        assert config.task_phase_timeout_seconds == 0
         assert config.log_level == "INFO"
         assert config.system_prompt is None
         assert config.allowed_tools == []

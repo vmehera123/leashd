@@ -25,11 +25,10 @@ def _cfg(*, auto_plan=False):
 
 
 class _Interactions:
-    def __init__(self, *, question=None, review=None, auto=None, has_reviewer=False):
+    def __init__(self, *, question=None, review=None, auto=None):
         self._question = question
         self._review = review
         self._auto = auto
-        self._auto_plan_reviewer = object() if has_reviewer else None
         self.calls: list[str] = []
 
     async def handle_question(
@@ -75,13 +74,10 @@ async def _run(
         session_mode=mode,
         task_run_id=task_run_id,
         working_directory=working_directory,
-        plan_origin=plan_origin,
         session_id="s1",
         chat_id="web:c1",
         user_id="u1",
-        task_description="do x",
         interaction_coordinator=interactions,
-        config=config or _cfg(),
         on_clear_context=on_clear_context,
         responder=None,
         deadline=None,
@@ -206,46 +202,6 @@ async def test_exit_plan_mode_adjustment_returns_feedback():
     assert res.message == "tighten scope"
     assert st.plan_approved is False
     assert st.plan_adjustment_feedback == "tighten scope"
-
-
-async def test_auto_plan_review_rejection_skips_human():
-    inter = _Interactions(
-        auto=PermissionDeny(message="auto: scope creep"), has_reviewer=True
-    )
-    res = await _run(
-        "ExitPlanMode",
-        {},
-        mode="plan",
-        interactions=inter,
-        config=_cfg(auto_plan=True),
-        plan_origin="task",
-    )
-    assert isinstance(res, PermissionDeny)
-    assert res.message == "auto: scope creep"
-    assert inter.calls == ["auto"]  # human review NOT reached
-
-
-async def test_auto_plan_review_approval_forwards_to_human():
-    inter = _Interactions(
-        auto=PermissionAllow(updated_input={}),
-        review=PlanReviewDecision(
-            permission=PermissionAllow(updated_input={}),
-            clear_context=False,
-            target_mode="edit",
-        ),
-        has_reviewer=True,
-    )
-    res = await _run(
-        "ExitPlanMode",
-        {},
-        mode="plan",
-        interactions=inter,
-        config=_cfg(auto_plan=True),
-        plan_origin="task",
-    )
-    assert isinstance(res, PermissionDeny)
-    assert "Plan approved" in res.message
-    assert inter.calls == ["auto", "review"]  # auto first, then human
 
 
 async def test_enter_plan_mode_denied_in_accept_edits():

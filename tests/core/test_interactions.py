@@ -35,6 +35,29 @@ class TestQuestionHandling:
         assert result.behavior == "allow"
         assert result.updated_input["answers"]["Which framework?"] == "FastAPI"
 
+    async def test_pending_kind_reports_question(
+        self, interaction_coordinator, mock_connector
+    ):
+        tool_input = {
+            "questions": [
+                {"question": "Which?", "options": [{"label": "A"}, {"label": "B"}]}
+            ]
+        }
+
+        async def check_then_answer():
+            await asyncio.sleep(0.05)
+            # While pending, the kind is 'question' (not an approval) so the
+            # tmux resume note can say "answer", not "approved".
+            assert interaction_coordinator.has_pending("chat1")
+            assert interaction_coordinator.pending_kind("chat1") == "question"
+            req = mock_connector.question_requests[0]
+            await interaction_coordinator.resolve_option(req["interaction_id"], "A")
+
+        task = asyncio.create_task(check_then_answer())
+        await interaction_coordinator.handle_question("chat1", tool_input)
+        await task
+        assert interaction_coordinator.pending_kind("chat1") is None
+
     async def test_text_answer(self, interaction_coordinator, mock_connector):
         tool_input = {
             "questions": [
@@ -880,106 +903,6 @@ class TestInteractionTimeoutBehavior:
         # Late resolve attempts should return False and not crash
         assert await coord.resolve_option(iid, "A") is False
         assert await coord.resolve_text("chat1", "late answer") is False
-
-
-class TestHandlePlanReviewAuto:
-    """Tests for handle_plan_review_auto — AI-powered plan review pathway."""
-
-    async def test_approved_returns_plan_review_decision(self, mock_connector, config):
-        from unittest.mock import AsyncMock, MagicMock
-
-        from leashd.core.interactions import InteractionCoordinator, PlanReviewDecision
-
-        coord = InteractionCoordinator(mock_connector, config)
-
-        mock_reviewer = MagicMock()
-        mock_result = MagicMock()
-        mock_result.approved = True
-        mock_result.feedback = None
-        mock_reviewer.review_plan = AsyncMock(return_value=mock_result)
-        coord._auto_plan_reviewer = mock_reviewer
-
-        result = await coord.handle_plan_review_auto(
-            "chat1",
-            {"allowedPrompts": []},
-            plan_content="1. Read file\n2. Fix bug",
-            task_description="Fix login",
-            session_id="sess-1",
-        )
-
-        assert isinstance(result, PlanReviewDecision)
-        assert result.permission.behavior == "allow"
-        assert result.clear_context is True
-        assert result.target_mode == "edit"
-
-    async def test_revision_requested_returns_deny_with_feedback(
-        self, mock_connector, config
-    ):
-        from unittest.mock import AsyncMock, MagicMock
-
-        from leashd.core.interactions import InteractionCoordinator
-
-        coord = InteractionCoordinator(mock_connector, config)
-
-        mock_reviewer = MagicMock()
-        mock_result = MagicMock()
-        mock_result.approved = False
-        mock_result.feedback = "Add error handling step"
-        mock_reviewer.review_plan = AsyncMock(return_value=mock_result)
-        coord._auto_plan_reviewer = mock_reviewer
-
-        result = await coord.handle_plan_review_auto(
-            "chat1",
-            {},
-            plan_content="1. Read file\n2. Change code",
-            task_description="Fix login",
-            session_id="sess-1",
-        )
-
-        assert result.behavior == "deny"
-        assert "Add error handling step" in result.message
-
-    async def test_no_reviewer_returns_deny(self, mock_connector, config):
-        from leashd.core.interactions import InteractionCoordinator
-
-        coord = InteractionCoordinator(mock_connector, config)
-        result = await coord.handle_plan_review_auto(
-            "chat1",
-            {},
-            plan_content="some plan",
-            task_description="task",
-            session_id="sess-1",
-        )
-
-        assert result.behavior == "deny"
-        assert "not configured" in result.message.lower()
-
-    async def test_empty_feedback_uses_default_message(self, mock_connector, config):
-        from unittest.mock import AsyncMock, MagicMock
-
-        from leashd.core.interactions import InteractionCoordinator
-
-        coord = InteractionCoordinator(mock_connector, config)
-
-        mock_reviewer = MagicMock()
-        mock_result = MagicMock()
-        mock_result.approved = False
-        mock_result.feedback = None
-        mock_reviewer.review_plan = AsyncMock(return_value=mock_result)
-        coord._auto_plan_reviewer = mock_reviewer
-
-        result = await coord.handle_plan_review_auto(
-            "chat1",
-            {},
-            plan_content="plan text",
-            task_description="task desc",
-            session_id="sess-1",
-        )
-
-        assert result.behavior == "deny"
-        assert "revise the plan" in result.message.lower()
-        assert coord.pending == {}
-        assert coord._chat_index == {}
 
 
 class TestInteractionTimeoutExtended:

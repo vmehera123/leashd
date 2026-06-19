@@ -318,7 +318,7 @@ class TestPrompts:
         assert "ExitPlanMode" in p  # mentions it (to say: don't call it)
 
     def test_plan_prompt_drops_revision_feedback(self):
-        """v3 bypasses AutoPlanReviewer; revision_feedback was dead code."""
+        """The plan prompt takes no revision_feedback — that channel is gone."""
         with pytest.raises(TypeError):
             plan_prompt("abc", revision_feedback="should not be accepted")  # type: ignore[call-arg]
 
@@ -1465,6 +1465,30 @@ class TestPhaseExecution:
         assert "Read, Grep, and Glob" in mode_instruction
         assert "NEVER Bash" in mode_instruction
 
+    async def test_execute_phase_clears_pending_before_dispatch(
+        self, orchestrator, mock_engine, tmp_path
+    ):
+        """T-9: a straggler interaction from the prior phase's pane (e.g. a tmux
+        native-dialog the hook path already resolved, leaking a blocked
+        handle_question) must be cleared BEFORE the phase prompt is dispatched —
+        otherwise handle_message routes the prompt into it via resolve_text and
+        the phase never runs (no SESSION_COMPLETED → permanent hang)."""
+        task = _make_task(tmp_path, phase="verify")
+        task_memory.seed(task.run_id, task.task, str(tmp_path), version="v3")
+
+        order: list[str] = []
+        mock_engine.clear_pending_interactions = AsyncMock(
+            side_effect=lambda *a, **k: order.append("clear")
+        )
+        mock_engine.handle_message = AsyncMock(
+            side_effect=lambda *a, **k: order.append("dispatch") or "ok"
+        )
+
+        await orchestrator._execute_phase(task)
+
+        mock_engine.clear_pending_interactions.assert_awaited_once_with(task.chat_id)
+        assert order == ["clear", "dispatch"]
+
     async def test_execute_phase_syncs_task_session_id_to_phase_session(
         self, orchestrator, mock_engine, task_store, tmp_path
     ):
@@ -1524,7 +1548,7 @@ class TestPhaseExecution:
         await orchestrator._execute_phase(task)
 
         call = mock_engine.session_manager.begin_phase_session.await_args
-        assert call.kwargs["mode"] == "test"
+        assert call.kwargs["mode"] == "auto"
         instruction = call.kwargs["mode_instruction"]
         assert instruction is not None
         assert "PHASE 6 — AGENTIC E2E TESTING" in instruction
@@ -1553,7 +1577,7 @@ class TestPhaseExecution:
         await orchestrator._execute_phase(task)
 
         call = mock_engine.session_manager.begin_phase_session.await_args
-        assert call.kwargs["mode"] == "test"
+        assert call.kwargs["mode"] == "auto"
         assert call.kwargs["mode_instruction"] is None
 
     async def test_execute_phase_verify_docs_only_skips_test_workflow(
@@ -2273,81 +2297,3 @@ class TestHandleTerminalSessionCleanup:
         assert session.plan_origin is None
         mock_engine.session_manager.save.assert_awaited_with(session)
         mock_engine.disable_auto_approve.assert_called_with(task.chat_id)
-
-
-class TestApprovalContextProvider:
-    """v3 provides working_directory, phase, and plan excerpt to the AI
-    auto-approver so it can judge relevance against the real task context
-    instead of guessing from the generic phase prompt.
-    """
-
-    async def test_set_engine_registers_provider(self, mock_engine, task_store):
-        orch = TaskV3Orchestrator(task_store=task_store)
-        orch.set_engine(mock_engine)
-        mock_engine.set_approval_context_provider.assert_called_once_with(
-            orch._build_approval_context
-        )
-
-    def test_returns_none_when_no_active_task(self, orchestrator):
-        """Non-task sessions must yield None so the gatekeeper falls back
-        to minimal context — don't leak stale context across chats."""
-        assert orchestrator._build_approval_context("s1", "unknown-chat") is None
-
-    def test_returns_none_when_task_is_terminal(self, orchestrator, tmp_path):
-        task = _make_task(tmp_path, phase="completed")
-        orchestrator._active_tasks[task.chat_id] = task
-        assert (
-            orchestrator._build_approval_context(task.session_id, task.chat_id) is None
-        )
-
-    def test_populates_context_from_active_task(self, orchestrator, tmp_path):
-        task = _make_task(
-            tmp_path,
-            phase="implement",
-            task="please apply redesign_v4 and verify mobile",
-        )
-        orchestrator._active_tasks[task.chat_id] = task
-        task_memory.seed(task.run_id, task.task, str(tmp_path), version="v3")
-        task_memory.update_section(
-            task.run_id,
-            str(tmp_path),
-            section="Plan",
-            content="Step 1: apply CSS\nStep 2: browser check at 375x667",
-        )
-
-        ctx = orchestrator._build_approval_context(task.session_id, task.chat_id)
-
-        assert ctx is not None
-        assert ctx.task_description == "please apply redesign_v4 and verify mobile"
-        assert ctx.working_directory == str(tmp_path)
-        assert ctx.phase == "implement"
-        assert "browser check" in ctx.plan_excerpt
-
-    def test_plan_excerpt_truncated_to_1500_chars(self, orchestrator, tmp_path):
-        task = _make_task(tmp_path, phase="implement")
-        orchestrator._active_tasks[task.chat_id] = task
-        task_memory.seed(task.run_id, task.task, str(tmp_path), version="v3")
-        huge_plan = "A" * 5000
-        task_memory.update_section(
-            task.run_id, str(tmp_path), section="Plan", content=huge_plan
-        )
-
-        ctx = orchestrator._build_approval_context(task.session_id, task.chat_id)
-
-        assert ctx is not None
-        assert len(ctx.plan_excerpt) <= 1500
-
-    def test_empty_plan_section_yields_empty_excerpt(self, orchestrator, tmp_path):
-        """Plan phase hasn't run yet — excerpt is empty but context still
-        carries working_directory and phase."""
-        task = _make_task(tmp_path, phase="plan")
-        orchestrator._active_tasks[task.chat_id] = task
-        task_memory.seed(task.run_id, task.task, str(tmp_path), version="v3")
-        # Deliberately do NOT populate the Plan section.
-
-        ctx = orchestrator._build_approval_context(task.session_id, task.chat_id)
-
-        assert ctx is not None
-        assert ctx.working_directory == str(tmp_path)
-        assert ctx.phase == "plan"
-        assert ctx.plan_excerpt == ""

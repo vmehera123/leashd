@@ -12,7 +12,6 @@ from pydantic import ValidationError
 from leashd.core.task_profile import (
     STANDALONE,
     TaskProfile,
-    _merge_instructions,
     _profile_from_dict,
     load_project_task_config,
     merge_profiles,
@@ -115,10 +114,6 @@ class TestProfileFromDict:
         profile = _profile_from_dict({"initial_action": "bogus"})
         assert profile.initial_action is None
 
-    def test_conductor_instructions(self):
-        profile = _profile_from_dict({"conductor_instructions": "Be concise."})
-        assert profile.conductor_instructions == "Be concise."
-
     def test_action_instructions(self):
         profile = _profile_from_dict({"action_instructions": {"test": "Use pytest -x"}})
         assert profile.action_instructions["test"] == "Use pytest -x"
@@ -145,13 +140,6 @@ class TestMergeProfiles:
         b = TaskProfile(initial_action=None)
         assert merge_profiles(a, b).initial_action == "plan"
 
-    def test_conductor_instructions_concatenated(self):
-        a = TaskProfile(conductor_instructions="Be safe.")
-        b = TaskProfile(conductor_instructions="Be fast.")
-        merged = merge_profiles(a, b)
-        assert "Be safe." in merged.conductor_instructions
-        assert "Be fast." in merged.conductor_instructions
-
     def test_action_instructions_merged(self):
         a = TaskProfile(action_instructions={"test": "pytest"})
         b = TaskProfile(action_instructions={"test": "npm test", "implement": "TDD"})
@@ -163,22 +151,6 @@ class TestMergeProfiles:
         a = TaskProfile(docker_compose_available=False)
         b = TaskProfile(docker_compose_available=True)
         assert merge_profiles(a, b).docker_compose_available is True
-
-
-class TestMergeInstructions:
-    def test_both_empty(self):
-        assert _merge_instructions("", "") == ""
-
-    def test_only_base(self):
-        assert _merge_instructions("base", "") == "base"
-
-    def test_only_override(self):
-        assert _merge_instructions("", "override") == "override"
-
-    def test_both_present(self):
-        result = _merge_instructions("base", "override")
-        assert "base" in result
-        assert "override" in result
 
 
 class TestLoadProjectTaskConfig:
@@ -193,7 +165,6 @@ class TestLoadProjectTaskConfig:
             textwrap.dedent("""\
             initial_action: plan
             disabled_actions: [verify, pr]
-            conductor_instructions: "Focus on tests"
             action_instructions:
               test: "Run pytest -x"
             """)
@@ -203,7 +174,6 @@ class TestLoadProjectTaskConfig:
         assert profile.initial_action == "plan"
         assert "verify" not in profile.enabled_actions
         assert "pr" not in profile.enabled_actions
-        assert profile.conductor_instructions == "Focus on tests"
         assert profile.action_instructions["test"] == "Run pytest -x"
 
     def test_returns_none_on_invalid_yaml(self, tmp_path: Path):

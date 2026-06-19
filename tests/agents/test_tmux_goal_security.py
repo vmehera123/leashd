@@ -8,6 +8,7 @@ import os
 
 from leashd.agents.runtimes.tmux import TmuxAgent
 from leashd.agents.runtimes.tmux_session import (
+    _GOAL_INDICATOR_CLEAR_GRACE_S,
     TmuxClaudeSession,
     TmuxSessionManager,
     TmuxTurn,
@@ -162,17 +163,38 @@ def test_note_goal_indicator_releases_only_after_seen(tmp_path):
     cs.goal_active = True
 
     # Absent before ever seen → no premature release (covers startup lag).
-    assert cs.note_goal_indicator("booting...") is False
+    assert cs.note_goal_indicator("booting...", now=100.0) is False
     assert cs.goal_active is True
 
     # Indicator appears.
-    assert cs.note_goal_indicator("◎ /goal active 1m") is False
+    assert cs.note_goal_indicator("◎ /goal active 1m", now=101.0) is False
     assert cs._goal_indicator_seen is True
     assert cs.goal_active is True
 
-    # Indicator vanishes after being seen → goal cleared, finalize the turn.
-    assert cs.note_goal_indicator("done.") is True
+    # Absent but within the debounce grace → NOT cleared (a single dropped
+    # frame must not end a live goal).
+    assert cs.note_goal_indicator("done.", now=102.0) is False
+    assert cs.goal_active is True
+
+    # Sustained absence past the grace → goal cleared, finalize the turn.
+    after = 101.0 + _GOAL_INDICATOR_CLEAR_GRACE_S + 0.1
+    assert cs.note_goal_indicator("done.", now=after) is True
     assert cs.goal_active is False
+
+
+def test_note_goal_indicator_transient_miss_then_reappears_keeps_goal(tmp_path):
+    cs = _cs(tmp_path)
+    cs.goal_active = True
+    cs.note_goal_indicator("◎ /goal active 2m", now=100.0)
+
+    # A dropped frame past the grace from the FIRST sighting would clear if the
+    # timer were absolute — but the marker reappears, refreshing the recency...
+    assert cs.note_goal_indicator("(tool output)", now=103.0) is False
+    cs.note_goal_indicator("◎ /goal active 2m", now=103.5)
+    # ...so even now-well-past-grace from the first sighting, the goal is alive.
+    after = 100.0 + _GOAL_INDICATOR_CLEAR_GRACE_S + 1.0
+    assert cs.note_goal_indicator("(tool output)", now=after) is False
+    assert cs.goal_active is True
 
 
 def test_note_goal_indicator_noop_when_inactive(tmp_path):

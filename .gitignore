@@ -17,8 +17,10 @@ htmlcov/
 .coverage.*
 
 # IDE
-.claude/
+.claude/*
 !.claude/commands/
+!.claude/skills/
+.claude/skills/docx/
 
 # Specs
 specs/

@@ -58,10 +58,9 @@ def plan_prompt(
 ) -> str:
     """Plan-phase prompt.
 
-    v3 deliberately bypasses the AutoPlanReviewer loop — the agent does
-    not call ExitPlanMode, so there is no plan-review feedback channel.
-    Plan adequacy is checked by the orchestrator reading the Plan
-    section (empty → escalate).
+    The plan phase deliberately does not call ExitPlanMode — there is no
+    interactive plan-review feedback channel here. Plan adequacy is checked
+    by the orchestrator reading the Plan section (empty → escalate).
     """
     prompt = _base(run_id, "plan") + (
         "\n"

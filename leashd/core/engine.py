@@ -43,7 +43,7 @@ from leashd.core.runtime_settings import (
     resolve_settings,
 )
 from leashd.core.safety.audit import AuditLogger
-from leashd.core.safety.gatekeeper import ApprovalContextProvider, ToolGatekeeper
+from leashd.core.safety.gatekeeper import ToolGatekeeper
 from leashd.core.safety.policy import PolicyEngine
 from leashd.core.safety.sandbox import SandboxEnforcer
 from leashd.core.workspace import load_workspaces
@@ -60,7 +60,6 @@ if TYPE_CHECKING:
     from leashd.core.session import Session, SessionManager
     from leashd.git.handler import GitCommandHandler
     from leashd.middleware.base import MiddlewareChain
-    from leashd.plugins.builtin.auto_approver import AutoApprover
     from leashd.plugins.registry import PluginRegistry
     from leashd.storage.base import SessionStore
 
@@ -133,18 +132,6 @@ _MAX_STREAMING_DISPLAY = 4000
 # ``/goal <word>`` forms that CLEAR rather than set a goal (Claude Code aliases).
 _GOAL_CLEAR_WORDS = frozenset({"clear", "stop", "off", "reset", "none", "cancel"})
 _TRANSIENT_MESSAGE_DELAY = 5.0  # seconds before auto-deleting status messages (longer than connector's 4.0s approval cleanup)
-
-
-def _is_goal_command_prompt(text: str) -> bool:
-    """True when a turn's prompt is a ``/goal <condition>`` directive.
-
-    ``_handle_goal_command`` submits the goal verbatim as the turn prompt. A
-    goal IS the autonomous directive, so it must bypass ``auto_plan`` — letting
-    auto_plan flip a goal into plan mode derails the run (and, in the tmux
-    runtime, hangs on Claude's native plan-execute selector, which leashd does
-    not drive)."""
-    stripped = text.lstrip()
-    return stripped == "/goal" or stripped.startswith("/goal ")
 
 
 class AgentDeadline:
@@ -470,7 +457,6 @@ class Engine:
         sandbox: SandboxEnforcer | None = None,
         audit: AuditLogger | None = None,
         approval_coordinator: ApprovalCoordinator | None = None,
-        auto_approver: AutoApprover | None = None,
         interaction_coordinator: InteractionCoordinator | None = None,
         event_bus: EventBus | None = None,
         plugin_registry: PluginRegistry | None = None,
@@ -519,7 +505,6 @@ class Engine:
             event_bus=self.event_bus,
             policy_engine=self.policy_engine,
             approval_coordinator=self.approval_coordinator,
-            auto_approver=auto_approver,
             approval_timeout=config.approval_timeout_seconds,
         )
 
@@ -606,15 +591,6 @@ class Engine:
         """Return (blanket, per_tool) auto-approve state for a chat."""
         return self._gatekeeper.get_auto_approve_status(chat_id)
 
-    def set_approval_context_provider(self, provider: ApprovalContextProvider) -> None:
-        """Register an AI-approver context provider (plugin-facing API).
-
-        Used by the v3 task orchestrator to expose working directory,
-        phase, and plan excerpt so the AI approver can judge relevance
-        against the real task context instead of guessing.
-        """
-        self._gatekeeper.set_approval_context_provider(provider)
-
     def get_executing_session_id(self, chat_id: str) -> str | None:
         """Return the session_id currently executing for *chat_id*, or None."""
         return self._executing_sessions.get(chat_id)
@@ -673,6 +649,22 @@ class Engine:
                 data={"user_id": user_id, "chat_id": chat_id, "text": "/cancel"},
             )
         )
+
+    async def clear_pending_interactions(self, chat_id: str) -> None:
+        """Cancel any pending approval / interaction prompt for this chat.
+
+        The autonomous orchestrator calls this immediately before dispatching
+        each phase prompt. A straggler left by a prior phase's pane — e.g. a
+        tmux native-dialog the hook path already resolved, which leaks a blocked
+        ``handle_question`` ``PendingInteraction`` — would otherwise be answered
+        BY the phase prompt (``handle_message`` routes text to a pending
+        interaction first, via ``resolve_text``), so the prompt never reaches
+        the agent and the phase hangs with no ``SESSION_COMPLETED``. See T-9.
+        """
+        if self.approval_coordinator:
+            await self.approval_coordinator.cancel_pending(chat_id)
+        if self.interaction_coordinator:
+            self.interaction_coordinator.cancel_pending(chat_id)
 
     async def _cleanup_session(self, session: Session, chat_id: str) -> None:
         """Cancel active work, shut down browser, and clean up state for a chat."""
@@ -850,7 +842,14 @@ class Engine:
             caps = getattr(self.agent, "capabilities", None)
             live = bool(getattr(caps, "accepts_input_while_busy", False))
             session_id = self._executing_sessions.get(chat_id)
-            if live and session_id and hasattr(self.agent, "inject_followup"):
+            active_session = self.session_manager.get(user_id, chat_id)
+            is_autonomous_task = bool(active_session and active_session.task_run_id)
+            if (
+                live
+                and session_id
+                and not is_autonomous_task
+                and hasattr(self.agent, "inject_followup")
+            ):
                 injected = await self.agent.inject_followup(
                     session_id, text, attachments
                 )
@@ -996,7 +995,6 @@ class Engine:
         text: str,
         chat_id: str,
         *,
-        _skip_auto_plan: bool = False,
         attachments: list[Attachment] | None = None,
         _plan_exit_retries: int = 0,
     ) -> str:
@@ -1035,25 +1033,6 @@ class Engine:
         self._executing_sessions[chat_id] = session.session_id
         structlog.contextvars.bind_contextvars(session_id=session.session_id)
 
-        if (
-            self.config.auto_plan
-            and session.mode == "auto"
-            and session.agent_resume_token is None
-            and session.plan_origin is None
-            and session.task_run_id is None
-            and not _skip_auto_plan
-            and not _is_goal_command_prompt(text)
-        ):
-            session.mode = "plan"
-            session.plan_origin = "auto"
-            await self.session_manager.save(session)
-            logger.info(
-                "auto_plan_mode_activated",
-                session_id=session.session_id,
-                chat_id=chat_id,
-                task_run_id=session.task_run_id,
-            )
-
         responder = None
         on_text_chunk = None
         on_tool_activity = None
@@ -1069,7 +1048,7 @@ class Engine:
 
         deadline = AgentDeadline(self.config.agent_timeout_seconds)
         can_use_tool, tool_state = self._build_can_use_tool(
-            session, chat_id, responder, task_description=text, deadline=deadline
+            session, chat_id, responder, deadline=deadline
         )
         if attachments:
             tool_state.plan_attachments = attachments
@@ -1155,7 +1134,6 @@ class Engine:
                     user_id,
                     tool_state.plan_adjustment_feedback,
                     chat_id,
-                    _skip_auto_plan=True,
                 )
 
             await self.session_manager.update_from_result(
@@ -1312,9 +1290,7 @@ class Engine:
                         attachments=tool_state.plan_attachments,
                     )
                 if isinstance(review, PermissionDeny):
-                    return await self._execute_turn(
-                        user_id, review.message, chat_id, _skip_auto_plan=True
-                    )
+                    return await self._execute_turn(user_id, review.message, chat_id)
 
             return response.content
 
@@ -1347,7 +1323,6 @@ class Engine:
                     user_id,
                     tool_state.plan_adjustment_feedback,
                     chat_id,
-                    _skip_auto_plan=True,
                 )
             if tool_state.clean_proceed or tool_state.proceed_in_context:
                 if _plan_exit_retries >= 2:
@@ -1720,7 +1695,7 @@ class Engine:
             cancel_chat = getattr(self.agent, "cancel_chat", None)
             if cancel_chat is not None:
                 await cancel_chat(chat_id)
-            session.mode = "task"
+            session.mode = "auto"
             session.task_run_id = None
             await self.session_manager.save(session)
             event_data: dict[str, Any] = {
@@ -1889,7 +1864,6 @@ class Engine:
                     f"Messages: {session.message_count}",
                     f"Total cost: {cost}",
                     f"Auto-approve: {auto_str}",
-                    f"Auto-approver: {'enabled' if self.config.auto_approver else 'disabled'}",
                     f"Autonomous loop: {'enabled' if self.config.autonomous_loop else 'disabled'}",
                 ]
             )
@@ -2440,7 +2414,6 @@ class Engine:
             user_id,
             self._build_implementation_prompt(plan_content),
             chat_id,
-            _skip_auto_plan=True,
             attachments=attachments,
             _plan_exit_retries=_plan_exit_retries,
         )
@@ -2453,7 +2426,6 @@ class Engine:
         session: Session,
         chat_id: str,
         responder: _StreamingResponder | None = None,
-        task_description: str = "",
         deadline: AgentDeadline | None = None,
     ) -> tuple[Any, _ToolCallbackState]:
         state = _ToolCallbackState()
@@ -2494,13 +2466,10 @@ class Engine:
                 session_mode=session.mode,
                 task_run_id=session.task_run_id,
                 working_directory=session.working_directory,
-                plan_origin=session.plan_origin,
                 session_id=session.session_id,
                 chat_id=chat_id,
                 user_id=session.user_id,
-                task_description=task_description,
                 interaction_coordinator=self.interaction_coordinator,
-                config=self.config,
                 discover_plan_file_fn=self._discover_plan_file,
                 on_clear_context=lambda: setattr(session, "agent_resume_token", None),
                 responder=responder,
@@ -2531,8 +2500,8 @@ class Engine:
                     tool_input,
                     session.session_id,
                     chat_id,
-                    task_description=task_description,
                     session_mode=session.mode,
+                    task_run_id=session.task_run_id,
                 )
             finally:
                 if deadline:

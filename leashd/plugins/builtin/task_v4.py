@@ -43,10 +43,10 @@ from leashd.plugins.builtin.browser_tools import (
     BROWSER_MUTATION_TOOLS,
     BROWSER_READONLY_TOOLS,
 )
-from leashd.plugins.builtin.task_orchestrator import IMPLEMENT_BASH_AUTO_APPROVE
 from leashd.plugins.builtin.task_v3 import (
     _REVIEW_BASH_AUTO_APPROVE,
     _VERIFY_BLOCKED_RE,
+    IMPLEMENT_BASH_AUTO_APPROVE,
     TaskV3Orchestrator,
     _has_visual_evidence,
     _parse_verify_status,
@@ -72,30 +72,6 @@ _V4_PHASES: tuple[TaskPhase, ...] = ("implement", "verify")
 # Phases v4 knows about (default + opt-in). Used to gate `_resolve_pipeline_v4`
 # against profile-supplied phase lists.
 _V4_ALL_PHASES: tuple[TaskPhase, ...] = ("implement", "verify", "review")
-
-_V4_PHASE_TO_MODE: dict[TaskPhase, str] = {
-    "implement": "auto",
-    "verify": "test",
-    "review": "default",
-}
-
-# v4 mirrors v3's discovery instruction for implement; verify and review
-# use the self-contained prompt bodies, no extra mode instruction.
-_V4_DISCOVERY_INSTRUCTION: str = (
-    "For reading, searching, or listing files in this task phase, use the "
-    "Read, Grep, and Glob tools — NEVER Bash grep/sed/find/awk/ls/cat/"
-    "for-loops. For broad multi-file exploration, use the Agent tool "
-    "(subagents). Bash is reserved for running the project's own "
-    "commands — tests, linters, build steps, git — not for discovery "
-    "or file I/O."
-)
-
-_V4_PHASE_TO_MODE_INSTRUCTION: dict[TaskPhase, str | None] = {
-    "implement": _V4_DISCOVERY_INSTRUCTION,
-    "verify": None,
-    "review": None,
-}
-
 
 _V4_KNOWN: frozenset[str] = frozenset(_V4_ALL_PHASES)
 

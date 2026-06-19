@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import structlog
 
 from leashd.agents.types import PermissionAllow, PermissionDeny
 from leashd.core.events import (
-    APPROVAL_ESCALATED,
     TOOL_ALLOWED,
     TOOL_DENIED,
     TOOL_GATED,
@@ -25,12 +23,6 @@ if TYPE_CHECKING:
     from leashd.core.safety.audit import AuditLogger
     from leashd.core.safety.policy import PolicyEngine
     from leashd.core.safety.sandbox import SandboxEnforcer
-    from leashd.plugins.builtin.auto_approver import ApprovalContext, AutoApprover
-
-# (session_id, chat_id) → per-call task/phase context for the AI approver.
-# Defined at module scope (not under TYPE_CHECKING) so runtime isinstance /
-# Callable use works without forward-reference gymnastics.
-ApprovalContextProvider = Callable[[str, str], "ApprovalContext | None"]
 
 logger = structlog.get_logger()
 
@@ -116,33 +108,18 @@ class ToolGatekeeper:
         *,
         policy_engine: PolicyEngine | None = None,
         approval_coordinator: ApprovalCoordinator | None = None,
-        auto_approver: AutoApprover | None = None,
         approval_timeout: int | None = None,
         path_tools: frozenset[str] | None = None,
-        approval_context_provider: ApprovalContextProvider | None = None,
     ) -> None:
         self._sandbox = sandbox
         self._audit = audit
         self._event_bus = event_bus
         self._policy_engine = policy_engine
         self._approval_coordinator = approval_coordinator
-        self._auto_approver = auto_approver
         self._approval_timeout = approval_timeout
         self._path_tools = path_tools or DEFAULT_PATH_TOOLS
         self._auto_approved_chats: set[str] = set()
         self._auto_approved_tools: dict[str, set[str]] = {}
-        self._approval_context_provider = approval_context_provider
-
-    def set_approval_context_provider(self, provider: ApprovalContextProvider) -> None:
-        """Register a late-bound provider for AI-approver context.
-
-        Plugins like the v3 task orchestrator register themselves here
-        once they've been wired to the engine. The provider is invoked
-        per approval with ``(session_id, chat_id)`` and may return ``None``
-        when it has no relevant context (e.g. no active task for the chat),
-        in which case the approver falls back to minimal context.
-        """
-        self._approval_context_provider = provider
 
     def enable_auto_approve(self, chat_id: str) -> None:
         self._auto_approved_chats.add(chat_id)
@@ -171,8 +148,8 @@ class ToolGatekeeper:
         session_id: str,
         chat_id: str,
         *,
-        task_description: str = "",
         session_mode: str | None = None,
+        task_run_id: str | None = None,
     ) -> PermissionAllow | PermissionDeny:
         normalized = normalize_tool_name(tool_name)
 
@@ -246,8 +223,7 @@ class ToolGatekeeper:
             tool_name,
             tool_input,
             classification,
-            task_description=task_description,
-            session_mode=session_mode,
+            task_run_id=task_run_id,
         )
 
     async def check_auto_gated(
@@ -257,8 +233,8 @@ class ToolGatekeeper:
         session_id: str,
         chat_id: str,
         *,
-        task_description: str = "",
         session_mode: str | None = None,
+        task_run_id: str | None = None,
     ) -> PermissionAllow | PermissionDeny | None:
         """Hybrid gate for tmux ``auto`` mode.
 
@@ -362,8 +338,7 @@ class ToolGatekeeper:
             tool_name,
             tool_input,
             classification,
-            task_description=task_description,
-            session_mode=session_mode,
+            task_run_id=task_run_id,
         )
 
     def _check_sandbox(
@@ -439,8 +414,7 @@ class ToolGatekeeper:
         tool_input: dict[str, Any],
         classification: Any,
         *,
-        task_description: str = "",
-        session_mode: str | None = None,
+        task_run_id: str | None = None,
     ) -> PermissionAllow | PermissionDeny:
         blanket = chat_id in self._auto_approved_chats
         key = _approval_key(tool_name, tool_input)
@@ -457,18 +431,17 @@ class ToolGatekeeper:
             )
             return await self._emit_and_allow(session_id, tool_name, tool_input)
 
-        if self._auto_approver and session_mode in ("auto", "task"):
-            ai_result = await self._try_ai_approval(
+        if task_run_id is not None:
+            logger.info(
+                "tool_auto_allowed_autonomous",
                 session_id=session_id,
                 chat_id=chat_id,
                 tool_name=tool_name,
-                tool_input=tool_input,
-                key=key,
-                classification=classification,
-                task_description=task_description,
             )
-            if ai_result is not None:
-                return ai_result
+            self._audit.log_approval(
+                session_id, tool_name, True, chat_id, approver_type="autonomous_auto"
+            )
+            return await self._emit_and_allow(session_id, tool_name, tool_input)
 
         return await self._request_human_approval(
             session_id=session_id,
@@ -477,151 +450,6 @@ class ToolGatekeeper:
             tool_input=tool_input,
             key=key,
             classification=classification,
-        )
-
-    async def _try_ai_approval(
-        self,
-        session_id: str,
-        chat_id: str,
-        tool_name: str,
-        tool_input: dict[str, Any],
-        key: str,
-        classification: Any,
-        task_description: str,
-    ) -> PermissionAllow | PermissionDeny | None:
-        """AI approval with human escalation on denial. Returns None to fall through."""
-        assert self._auto_approver is not None  # noqa: S101
-
-        audit_summary = ""
-        recent = self._audit.get_recent_entries(session_id)
-        if recent:
-            # AuditLogger returns ``str``; ``str(...)`` is a no-op for that
-            # and a safe fallback for drop-in mocks or future implementations
-            # that might return bytes or typed summaries.
-            audit_summary = str(self._audit.summarize_entries(recent))
-
-        context = self._build_approval_context(
-            session_id=session_id,
-            chat_id=chat_id,
-            fallback_description=task_description,
-            audit_summary=audit_summary,
-        )
-
-        result = await self._auto_approver.evaluate(
-            tool_name=tool_name,
-            tool_input=tool_input,
-            session_id=session_id,
-            chat_id=chat_id,
-            context=context,
-        )
-        if result.approved:
-            await self._event_bus.emit(
-                Event(
-                    name=TOOL_ALLOWED,
-                    data={
-                        "session_id": session_id,
-                        "tool_name": tool_name,
-                        "via": "ai_approver",
-                    },
-                )
-            )
-            return PermissionAllow(updated_input=tool_input)
-
-        ai_reason = result.reason or "AI approver denied the operation"
-        logger.info(
-            "ai_denial_escalating_to_human",
-            session_id=session_id,
-            tool_name=tool_name,
-            ai_reason=ai_reason,
-        )
-        await self._event_bus.emit(
-            Event(
-                name=APPROVAL_ESCALATED,
-                data={
-                    "session_id": session_id,
-                    "tool_name": tool_name,
-                    "ai_reason": ai_reason,
-                },
-            )
-        )
-
-        if not self._approval_coordinator:
-            return await self._emit_and_deny(
-                session_id, tool_name, "ai_denied", message=ai_reason
-            )
-
-        human_result = await self._approval_coordinator.request_approval(
-            chat_id=chat_id,
-            tool_name=key,
-            tool_input=tool_input,
-            classification=classification,
-            timeout=self._approval_timeout,
-            ai_denial_reason=ai_reason,
-        )
-        self._audit.log_approval(
-            session_id,
-            tool_name,
-            human_result.approved,
-            chat_id,
-            rejection_reason=human_result.reason,
-            approver_type="human_escalation",
-        )
-        if human_result.approved:
-            await self._event_bus.emit(
-                Event(
-                    name=TOOL_ALLOWED,
-                    data={
-                        "session_id": session_id,
-                        "tool_name": tool_name,
-                        "via": "human_escalation",
-                    },
-                )
-            )
-            return PermissionAllow(updated_input=tool_input)
-
-        deny_message = human_result.reason or "User denied the operation"
-        return await self._emit_and_deny(
-            session_id, tool_name, "user_denied", message=deny_message
-        )
-
-    def _build_approval_context(
-        self,
-        *,
-        session_id: str,
-        chat_id: str,
-        fallback_description: str,
-        audit_summary: str,
-    ) -> ApprovalContext:
-        """Return the AI-approver context for this call.
-
-        If a provider is registered and returns a non-None context, use it
-        (with the current audit summary merged in — the provider can't see
-        session audit state). Otherwise fall back to a minimal context
-        constructed from the legacy ``task_description`` kwarg the engine
-        already passes through.
-        """
-        # Local import — auto_approver is a plugin layer above the safety
-        # layer; keeping the import call-local preserves the DAG.
-        from leashd.plugins.builtin.auto_approver import ApprovalContext
-
-        if self._approval_context_provider is not None:
-            try:
-                provided = self._approval_context_provider(session_id, chat_id)
-            except Exception:
-                # A misbehaving provider must never block the approval
-                # pipeline; log and fall through to the minimal context.
-                logger.exception(
-                    "approval_context_provider_failed",
-                    session_id=session_id,
-                    chat_id=chat_id,
-                )
-                provided = None
-            if provided is not None:
-                return provided.model_copy(update={"audit_summary": audit_summary})
-
-        return ApprovalContext(
-            task_description=(fallback_description or "")[:2000],
-            audit_summary=audit_summary,
         )
 
     async def _request_human_approval(

@@ -3104,8 +3104,6 @@ const SettingsManager = {
     return `<div class="settings-section">
       <h3>Autonomous</h3>
       ${toggleRow("Enabled", "enabled", auto.enabled)}
-      ${toggleRow("Auto Approver", "auto_approver", auto.auto_approver)}
-      ${toggleRow("Auto Plan", "auto_plan", auto.auto_plan)}
       ${toggleRow("Auto PR", "auto_pr", auto.auto_pr)}
       <div class="setting-row" id="base-branch-row" ${!auto.auto_pr ? 'style="display:none"' : ''}>
         <div><div class="setting-label">PR Base Branch</div></div>

@@ -103,8 +103,6 @@ class TestInjectAutonomousEnv:
         for key in (
             "LEASHD_TASK_ORCHESTRATOR",
             "LEASHD_POLICY_FILES",
-            "LEASHD_AUTO_APPROVER",
-            "LEASHD_AUTO_PLAN",
             "LEASHD_AUTO_PR",
             "LEASHD_AUTONOMOUS_LOOP",
             "LEASHD_TASK_MAX_RETRIES",
@@ -115,8 +113,6 @@ class TestInjectAutonomousEnv:
 
         assert os.environ["LEASHD_TASK_ORCHESTRATOR"] == "true"
         assert "autonomous.yaml" in os.environ["LEASHD_POLICY_FILES"]
-        assert os.environ["LEASHD_AUTO_APPROVER"] == "true"
-        assert os.environ["LEASHD_AUTO_PLAN"] == "true"
         assert os.environ["LEASHD_AUTO_PR"] == "false"
         assert os.environ["LEASHD_AUTONOMOUS_LOOP"] == "true"
         assert os.environ["LEASHD_TASK_MAX_RETRIES"] == "5"
@@ -140,13 +136,13 @@ class TestInjectAutonomousEnv:
         assert "LEASHD_TASK_ORCHESTRATOR" not in os.environ
 
     def test_force_overwrites_existing(self, fake_config_dir, monkeypatch):
-        save_global_config({"autonomous": {"enabled": True, "auto_approver": True}})
-        monkeypatch.setenv("LEASHD_AUTO_APPROVER", "false")
+        save_global_config({"autonomous": {"enabled": True, "auto_pr": True}})
+        monkeypatch.setenv("LEASHD_AUTO_PR", "false")
         monkeypatch.setenv("LEASHD_TASK_ORCHESTRATOR", "false")
 
         inject_global_config_as_env(force=True)
 
-        assert os.environ["LEASHD_AUTO_APPROVER"] == "true"
+        assert os.environ["LEASHD_AUTO_PR"] == "true"
         assert os.environ["LEASHD_TASK_ORCHESTRATOR"] == "true"
 
     def test_no_force_preserves_existing(self, fake_config_dir, monkeypatch):
@@ -159,15 +155,15 @@ class TestInjectAutonomousEnv:
 
     def test_bool_lowercased(self, fake_config_dir, monkeypatch):
         save_global_config(
-            {"autonomous": {"enabled": True, "auto_pr": True, "auto_plan": False}}
+            {"autonomous": {"enabled": True, "auto_pr": True, "autonomous_loop": False}}
         )
         monkeypatch.delenv("LEASHD_AUTO_PR", raising=False)
-        monkeypatch.delenv("LEASHD_AUTO_PLAN", raising=False)
+        monkeypatch.delenv("LEASHD_AUTONOMOUS_LOOP", raising=False)
 
         inject_global_config_as_env()
 
         assert os.environ["LEASHD_AUTO_PR"] == "true"
-        assert os.environ["LEASHD_AUTO_PLAN"] == "false"
+        assert os.environ["LEASHD_AUTONOMOUS_LOOP"] == "false"
 
     def test_task_orchestrator_always_set(self, fake_config_dir, monkeypatch):
         """task_orchestrator is set even when not explicitly in autonomous config."""
@@ -216,8 +212,6 @@ class TestConfigureAutonomous:
         result = _configure_autonomous({}, input_fn=lambda _: next(inputs))
         assert result["enabled"] is True
         assert result["policy"] == "autonomous"
-        assert result["auto_approver"] is True
-        assert result["auto_plan"] is True
         assert result["auto_pr"] is True
         assert result["auto_pr_base_branch"] == "main"
         assert result["autonomous_loop"] is True

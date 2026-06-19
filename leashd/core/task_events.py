@@ -1,7 +1,7 @@
 """JSONL event log for task lifecycle tracking.
 
 Each task gets a ``.leashd/tasks/{run_id}.jsonl`` file that records
-phase transitions, conductor decisions, timing, and costs.  This is the
+phase transitions, timing, and costs.  This is the
 structured counterpart to the human-readable ``{run_id}.md`` memory file.
 
 The JSONL format matches Claude Code's native event format and serves as

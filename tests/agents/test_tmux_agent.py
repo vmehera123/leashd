@@ -29,6 +29,19 @@ def _fast_poll(monkeypatch):
     monkeypatch.setattr("leashd.agents.runtimes.tmux.LIVENESS_POLL_INTERVAL", 0.0)
 
 
+@pytest.fixture
+def _advancing_clock(monkeypatch):
+    """Jump the monotonic clock forward on every read so a positive
+    no-progress / ceiling threshold trips on the first poll. The backstops are
+    opt-in now that the defaults are 0 (disabled), so firing them in a test
+    needs a positive value plus a clock that actually advances."""
+    import itertools
+    import time as _time
+
+    ticks = itertools.count(_time.monotonic(), 1_000_000.0)
+    monkeypatch.setattr(_time, "monotonic", lambda: next(ticks))
+
+
 def _cfg(tmp_path, **over):
     return LeashdConfig(
         approved_directories=[tmp_path],
@@ -78,13 +91,23 @@ class FakeCS:
         # Per-turn adjustment feedback the fake "rejects" with, consumed once
         # so the re-prompt loop revises then converges (None = no rejection).
         self._reject_feedback: list[str] = []
+        # /goal state — inert for most tests. goal_active drives the TmuxTurn
+        # defer; _goal_indicator_seen selects the goal backstop branch.
+        self.goal_active = False
+        self._goal_indicator_seen = False
+
+    @property
+    def goal_indicator_seen(self):
+        return self._goal_indicator_seen
 
     def pane_is_dead(self):
         return False
 
     def begin_turn(self, *, on_text_chunk, on_tool_activity):
         self.turn = TmuxTurn(
-            on_text_chunk=on_text_chunk, on_tool_activity=on_tool_activity
+            on_text_chunk=on_text_chunk,
+            on_tool_activity=on_tool_activity,
+            goal_active_cb=lambda: self.goal_active,
         )
         self.plan_state = PlanState()
         if self._reject_feedback:
@@ -149,6 +172,12 @@ class FakeTSM:
 
     def has_pending_human(self, chat_id):
         return False
+
+    def pending_human_kind(self, chat_id):
+        return "approval"
+
+    def last_approval_approved(self, chat_id):
+        return None
 
 
 def _agent(cfg, tsm):
@@ -221,14 +250,14 @@ async def test_execute_auto_mode_passes_native_perm_mode(tmp_path):
 async def test_execute_auto_mode_non_opus_model_downgrades(tmp_path):
     # Verified against claude CLI 2.1.145: Sonnet/Haiku panes show
     # ``auto mode unavailable for this model``. Leashd downgrades the
-    # interactive permission mode. On tmux, the downgraded mode then goes
-    # through the bypassPermissions override (so claude TUI's native
-    # gates don't surface in-pane where leashd can't bridge them), and the
-    # YAML pipeline + PreToolUse hook owns approvals.
+    # interactive permission mode to acceptEdits so the leashd hook +
+    # pane-selector drive owns approvals (under Claude Code 2.1.x
+    # bypassPermissions no longer blocks on PreToolUse hooks, so it can't
+    # gate — see tmux.py).
     tsm = FakeTSM(FakeCS(text="ok"))
     agent = _agent(_cfg(tmp_path, claude_model="claude-sonnet-4-6"), tsm)
     await agent.execute("go", _session(tmp_path, mode="auto"))
-    assert tsm.spawn_kwargs["perm_mode"] == "bypassPermissions"
+    assert tsm.spawn_kwargs["perm_mode"] == "acceptEdits"
     assert tsm.spawn_kwargs["model"] == "claude-sonnet-4-6"
 
 
@@ -242,32 +271,48 @@ async def test_execute_auto_mode_explicit_opus_keeps_auto(tmp_path):
     assert tsm.spawn_kwargs["model"] == "claude-opus-4-7"
 
 
-async def test_execute_auto_task_phase_uses_bypass_permissions(tmp_path):
+async def test_execute_auto_task_phase_uses_accept_edits(tmp_path):
     # Orchestrated auto phases (task_run_id set) no longer use native auto —
-    # they go through the full leashd pipeline. On tmux that pipeline drives
-    # ``--permission-mode bypassPermissions`` so claude TUI's native gates
-    # don't surface in the pane (where leashd can't bridge them); the
-    # PreToolUse hook + AI auto-approver / YAML policy is authoritative.
+    # they go through the full leashd pipeline at acceptEdits, where claude
+    # blocks on its native prompt and leashd's PreToolUse hook + selector
+    # drive (with the AI auto-approver) gates. bypassPermissions is NOT used:
+    # under Claude Code 2.1.x it stops blocking on hooks, so it can't gate.
     tsm = FakeTSM(FakeCS(text="ok"))
     agent = _agent(_cfg(tmp_path), tsm)
     await agent.execute("go", _session(tmp_path, mode="auto", task_run_id="t1"))
-    assert tsm.spawn_kwargs["perm_mode"] == "bypassPermissions"
+    assert tsm.spawn_kwargs["perm_mode"] == "acceptEdits"
 
 
 @pytest.mark.parametrize(
-    "session_mode",
-    ["default", "edit", "test", "task", "web"],
+    ("session_mode", "expected_perm_mode"),
+    [
+        ("default", "default"),
+        ("edit", "acceptEdits"),
+        ("test", "acceptEdits"),
+    ],
 )
-async def test_execute_execution_modes_use_bypass_permissions(tmp_path, session_mode):
-    """All tmux *execution* modes (anything that runs tools) use
-    bypassPermissions so claude TUI's native gates (WebFetch domain
-    consent, Bash command consent, …) don't surface in-pane where leashd
-    can't bridge them to Telegram. The PreToolUse hook + YAML policy is
-    the sole permission authority. ``auto`` and ``plan`` keep their own
-    semantics and are tested separately."""
+async def test_execute_execution_modes_keep_real_perm_mode(
+    tmp_path, session_mode, expected_perm_mode
+):
+    """tmux execution modes keep their REAL permission mode (not bypass):
+    claude blocks on its native in-pane prompt and leashd drives the pane
+    selector to match the human/AI decision while the PreToolUse hook gates.
+    Under Claude Code 2.1.x bypassPermissions no longer blocks on hooks, so
+    it cannot gate require_approval or the hard-deny floor — opt back into it
+    only via LEASHD_TMUX_BYPASS_PERMISSIONS=1."""
     tsm = FakeTSM(FakeCS(text="ok"))
     agent = _agent(_cfg(tmp_path), tsm)
     await agent.execute("go", _session(tmp_path, mode=session_mode))
+    assert tsm.spawn_kwargs["perm_mode"] == expected_perm_mode
+
+
+async def test_execute_bypass_permissions_opt_in_via_env(tmp_path, monkeypatch):
+    """LEASHD_TMUX_BYPASS_PERMISSIONS=1 restores the legacy bypassPermissions
+    spawn for default/acceptEdits modes (escape hatch; unsafe under 2.1.x)."""
+    monkeypatch.setenv("LEASHD_TMUX_BYPASS_PERMISSIONS", "1")
+    tsm = FakeTSM(FakeCS(text="ok"))
+    agent = _agent(_cfg(tmp_path), tsm)
+    await agent.execute("go", _session(tmp_path, mode="default"))
     assert tsm.spawn_kwargs["perm_mode"] == "bypassPermissions"
 
 
@@ -346,12 +391,13 @@ async def test_execute_reused_pane_no_reinject_when_unchanged(tmp_path):
     assert "[leashd]" not in cs.sent[0][0]
 
 
+@pytest.mark.usefixtures("_advancing_clock")
 async def test_execute_timeout_soft_error_keeps_pane(tmp_path):
     cs = FakeCS()
     cs._complete_on_enter = False  # turn never completes
     tsm = FakeTSM(cs)
     cfg = _cfg(tmp_path)
-    cfg.agent_timeout_seconds = 0  # wait_for fires immediately
+    cfg.tmux_turn_ceiling_seconds = 1  # opt the absolute ceiling back in
     agent = _agent(cfg, tsm)
 
     resp = await agent.execute("hang", _session(tmp_path))
@@ -537,21 +583,117 @@ async def test_execute_aborts_when_jsonl_tailer_dead(tmp_path):
     assert cs.complete_calls == 1
 
 
+@pytest.mark.usefixtures("_advancing_clock")
 async def test_execute_no_progress_backstop_when_no_human(tmp_path):
     # A hung-but-alive pane (no JSONL progress, no human) must hit the
-    # no-progress backstop well before the 60-minute ceiling.
+    # no-progress backstop when it is opted in (ceiling stays disabled, so it
+    # is NOT the trigger).
     cs = FakeCS()
     cs._complete_on_enter = False
     tsm = FakeTSM(cs)
     cfg = _cfg(tmp_path)
-    cfg.agent_timeout_seconds = 3600  # ceiling NOT the trigger
-    cfg.tmux_no_progress_timeout_seconds = 0  # any idle trips the backstop
+    cfg.tmux_no_progress_timeout_seconds = 1  # opt the no-progress backstop in
     agent = _agent(cfg, tsm)
 
     resp = await agent.execute("stalls", _session(tmp_path))
     assert resp.is_error is True
     assert "no output" in resp.content
     assert cs.complete_calls == 1
+
+
+# ── /goal backstop (indicator-aware) ─────────────────────────────
+
+
+def test_goal_backstop_action():
+    # Pure decision. THE regression: while the `◎ /goal active` indicator has
+    # been SEEN, a short idle gap (the 25-28s post-tool / native-judge gaps that
+    # killed live goals) must NOT finalize the turn. Once seen, only the long
+    # stuck ceiling applies; the idle grace is a fallback for a never-seen marker.
+    from leashd.agents.runtimes.tmux import _goal_backstop_action as act
+
+    base = {
+        "deferred_at": 10.0,
+        "last_activity": 10.0,
+        "idle_grace": 60.0,
+        "stuck_ceiling": 240.0,
+    }
+
+    # Not a deferred goal → never act.
+    assert act(now=9_999.0, indicator_seen=True, **{**base, "deferred_at": None}) == ""
+
+    # Indicator never seen → idle fallback only after the grace.
+    assert act(now=50.0, indicator_seen=False, **base) == ""  # 40s idle < 60
+    assert act(now=80.0, indicator_seen=False, **base) == "idle"  # 70s idle > 60
+
+    # Indicator SEEN → the short idle never fires (the regression guard)...
+    assert act(now=80.0, indicator_seen=True, **base) == ""  # 70s idle, but seen
+    # ...only the stuck ceiling, measured from the deferred Stop.
+    assert act(now=300.0, indicator_seen=True, **base) == "stuck"  # 290s > 240
+
+    # Disabling either net (0) turns off its branch.
+    assert act(now=9_999.0, indicator_seen=True, **{**base, "stuck_ceiling": 0.0}) == ""
+    assert act(now=9_999.0, indicator_seen=False, **{**base, "idle_grace": 0.0}) == ""
+
+
+@pytest.mark.usefixtures("_advancing_clock")
+async def test_goal_with_indicator_seen_finalizes_via_stuck_not_idle(tmp_path):
+    # End-to-end: a deferred goal whose indicator was seen finalizes via the
+    # stuck ceiling, NOT the idle grace — a live goal survives idle gaps.
+    from structlog.testing import capture_logs
+
+    cs = FakeCS()
+    cs.goal_active = True
+    cs._goal_indicator_seen = True
+    agent = _agent(_cfg(tmp_path), FakeTSM(cs))
+    with capture_logs() as logs:
+        resp = await agent.execute("/goal ship it", _session(tmp_path))
+
+    events = [e["event"] for e in logs]
+    assert "tmux_goal_stuck_finalized" in events
+    assert "tmux_goal_idle_finalized" not in events
+    assert resp.is_error is False
+
+
+@pytest.mark.usefixtures("_advancing_clock")
+async def test_goal_without_indicator_finalizes_via_idle_fallback(tmp_path):
+    # No indicator ever observed (detection broke / no marker) → the idle grace
+    # is the fallback completion signal.
+    from structlog.testing import capture_logs
+
+    cs = FakeCS()
+    cs.goal_active = True
+    cs._goal_indicator_seen = False
+    agent = _agent(_cfg(tmp_path), FakeTSM(cs))
+    with capture_logs() as logs:
+        await agent.execute("/goal ship it", _session(tmp_path))
+
+    events = [e["event"] for e in logs]
+    assert "tmux_goal_idle_finalized" in events
+    assert "tmux_goal_stuck_finalized" not in events
+
+
+# ── Human-wait feedback wording (kind-aware) ─────────────────────
+
+
+def test_wait_and_resume_notes_reflect_what_the_user_did():
+    # THE reported bug: a question answer was streamed back as "Approved —
+    # continuing". The resume line must reflect the actual action by kind.
+    from leashd.agents.runtimes.tmux import _resume_note, _wait_note
+
+    # Resume:
+    assert _resume_note("question", None) == "✅ Got your answer — continuing."
+    assert "Approved" not in _resume_note("question", None)  # the fix
+    assert _resume_note("approval", True) == "✅ Approved — continuing."
+    assert _resume_note("approval", False) == "🚫 Rejected — continuing."
+    assert "Plan" in _resume_note("plan_review", None)
+    assert _resume_note(None, None) == "▶️ Continuing."
+
+    # Wait line phrased per kind (a question isn't framed as Approve/Reject):
+    assert "Approve/Reject" in _wait_note("approval")
+    assert "answer" in _wait_note("question").lower()
+    assert "Approve/Reject" not in _wait_note("question")
+    assert "plan" in _wait_note("plan_review").lower()
+    assert _wait_note(None)
 
 
 # ── Reuse-instruction wording (per-mode) ─────────────────────────

@@ -41,8 +41,6 @@ _VALID_CONFIG_SECTIONS = {"agent", "autonomous", "browser"}
 _SETTING_FIELDS = {"effort", "claude_model", "codex_model"}
 _AUTONOMOUS_BOOLEANS = {
     "enabled",
-    "auto_approver",
-    "auto_plan",
     "auto_pr",
     "autonomous_loop",
 }
@@ -251,8 +249,6 @@ def create_rest_router(
                 },
                 "autonomous": {
                     "enabled": autonomous.get("enabled", False),
-                    "auto_approver": autonomous.get("auto_approver", False),
-                    "auto_plan": autonomous.get("auto_plan", False),
                     "auto_pr": autonomous.get("auto_pr", False),
                     "auto_pr_base_branch": autonomous.get(
                         "auto_pr_base_branch", "main"

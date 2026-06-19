@@ -22,13 +22,15 @@ import contextlib
 import importlib.util
 import json
 import os
+import random
 import re
 import secrets
 import shutil
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import structlog
 
@@ -79,6 +81,8 @@ _ASYNC_HOOK_EVENTS = (
 _HOOK_NO_EXPIRY_SECONDS = 365 * 24 * 3600
 _ORPHAN_REAP_DEBOUNCE_SECONDS = 30.0
 
+_SEND_KEYS_INLINE_LIMIT = 4096
+
 # Claude Code marketplace plugin that reviews Claude's own code changes for
 # vulnerabilities in-session (per-edit pattern match → end-of-turn diff review
 # → agentic commit review). Opt-in via ``LEASHD_SECURITY_GUIDANCE_ENABLED``;
@@ -123,6 +127,119 @@ def _parse_version(text: str) -> tuple[int, ...] | None:
     return tuple(int(g) for g in m.groups() if g is not None)
 
 
+_CREDENTIAL_DENY_GLOBS: tuple[str, ...] = (
+    "**/.env",
+    "**/.env.*",
+    "**/.ssh/**",
+    "~/.ssh/**",
+    "**/.aws/**",
+    "~/.aws/**",
+    "**/.gnupg/**",
+    "~/.gnupg/**",
+    "**/*.key",
+    "**/*.pem",
+    "**/*.p12",
+    "**/*.pfx",
+    "**/*.keystore",
+    "**/*id_rsa*",
+    "**/*id_ed25519*",
+    "**/*credentials*",
+    "**/*secret.*",
+    "**/*secrets.*",
+    "**/*token.json",
+)
+_CREDENTIAL_DENY_TOOLS: tuple[str, ...] = ("Read", "Edit", "Write")
+
+
+def _credential_deny_rules() -> list[str]:
+    """Native claude ``permissions.deny`` rules mirroring the analyzer's
+    credential floor (``core.safety.analyzer._CREDENTIAL_PATTERNS``).
+
+    Under Claude Code 2.1.x the interactive TUI auto-runs "safe" reads
+    (Read/Glob/Grep) WITHOUT awaiting the ``PreToolUse`` hook, so the
+    hook-based hard-deny of a credential READ is silently bypassed (verified
+    live 2026-06-14 on claude 2.1.177: a hook-denied ``.env`` read still
+    returned the secret to the agent). ``permissions.deny`` is enforced by
+    claude itself regardless of hook or permission mode, and merges as a union
+    across scopes, so injecting it closes the gap without loosening anything
+    (T-8). This is the load-bearing hard-deny floor for autonomous ``auto``
+    mode, where there is no AI/human approver.
+    """
+    return [
+        f"{tool}({glob})"
+        for tool in _CREDENTIAL_DENY_TOOLS
+        for glob in _CREDENTIAL_DENY_GLOBS
+    ]
+
+
+TYPING_MODE_TYPE = "type"
+TYPING_MODE_PASTE = "paste"
+TYPING_MODE_LEGACY = "legacy"
+
+
+@dataclass(frozen=True)
+class HumanTypingProfile:
+    enabled: bool = True
+    min_delay_s: float = 0.02
+    max_delay_s: float = 0.09
+    max_type_chars: int = 280
+    paste_probability: float = 0.4
+    hybrid_probability: float = 0.25
+    min_chunk: int = 1
+    max_chunk: int = 6
+    seed: int | None = None
+
+
+class TypingStep(NamedTuple):
+    text: str
+    delay: float
+    mode: str
+
+
+def _typing_profile_from_config(config: LeashdConfig) -> HumanTypingProfile:
+    return HumanTypingProfile(
+        enabled=config.tmux_human_typing_enabled,
+        min_delay_s=max(0.0, config.tmux_human_typing_min_delay_ms / 1000.0),
+        max_delay_s=max(0.0, config.tmux_human_typing_max_delay_ms / 1000.0),
+        max_type_chars=config.tmux_human_typing_max_chars,
+        seed=config.tmux_human_typing_seed,
+    )
+
+
+def plan_human_typing(
+    text: str, profile: HumanTypingProfile, rng: random.Random
+) -> list[TypingStep]:
+    if not profile.enabled or not text:
+        return [TypingStep(text, 0.0, TYPING_MODE_LEGACY)]
+    if "\n" in text or len(text) > profile.max_type_chars:
+        return [TypingStep(text, 0.0, TYPING_MODE_PASTE)]
+
+    roll = rng.random()
+    if roll < profile.paste_probability:
+        return [TypingStep(text, 0.0, TYPING_MODE_PASTE)]
+
+    type_part, paste_tail = text, ""
+    if roll < profile.paste_probability + profile.hybrid_probability and len(text) > 2:
+        split = rng.randint(1, len(text) - 1)
+        type_part, paste_tail = text[:split], text[split:]
+
+    steps: list[TypingStep] = []
+    i = 0
+    n = len(type_part)
+    while i < n:
+        size = max(1, rng.randint(profile.min_chunk, profile.max_chunk))
+        chunk = type_part[i : i + size]
+        i += size
+        is_last = i >= n and not paste_tail
+        delay = (
+            0.0 if is_last else rng.uniform(profile.min_delay_s, profile.max_delay_s)
+        )
+        steps.append(TypingStep(chunk, delay, TYPING_MODE_TYPE))
+    if paste_tail:
+        steps.append(TypingStep(paste_tail, 0.0, TYPING_MODE_PASTE))
+    return steps
+
+
 # ---------------------------------------------------------------------------
 # Native claude TUI dialog bridge (Stage 2 — "suspenders" half of the
 # belt-and-suspenders gating contract).
@@ -154,6 +271,10 @@ _NATIVE_DIALOG_TOOL_INPUT_KEY = "__leashd_native_dialog__"
 # CLEARING, so assistant text that happens to mention the phrase can never
 # start a deferral. See TmuxTurn.complete and _dialog_watcher_loop.
 _GOAL_ACTIVE_MARKER = "/goal active"
+# A capture must lack the marker for at least this long AFTER it has been seen
+# before the goal counts as cleared — debounces a transient capture miss so one
+# dropped frame mid-run can't end a live goal early (note_goal_indicator).
+_GOAL_INDICATOR_CLEAR_GRACE_S = 4.0
 # ``/goal <word>`` forms that CLEAR rather than set a goal (Claude Code aliases).
 _GOAL_CLEAR_WORDS = frozenset({"clear", "stop", "off", "reset", "none", "cancel"})
 
@@ -351,6 +472,7 @@ class TmuxTurn:
         self.cost_usd: float = 0.0
         self.num_turns: int = 0
         self.is_error: bool = False
+        self.result_seen: bool = False
         # Count of additional claude responses still to absorb because the
         # human typed follow-up(s) into the live composer mid-turn (native
         # queue). While >0, a completion signal defers instead of ending the
@@ -426,6 +548,7 @@ class TmuxTurn:
             if self.pending_followups > 0:
                 self.pending_followups -= 1
                 self.mark_activity()
+                self.goal_completion_deferred_at = time.monotonic()
                 return
             # A Claude Code `/goal` is active: Claude auto-starts another turn
             # until its condition holds. Defer ending the leashd turn so the
@@ -476,6 +599,7 @@ class TmuxClaudeSession:
         tmux_name: str,
         settings_path: Path,
         native_auto_allowed: bool = False,
+        typing: HumanTypingProfile | None = None,
     ) -> None:
         self.session_id = session_id
         self.chat_id = chat_id
@@ -504,12 +628,16 @@ class TmuxClaudeSession:
         # startup lag can't release the deferral early. See TmuxTurn.complete.
         self.goal_active: bool = False
         self._goal_indicator_seen: bool = False
+        self._goal_indicator_last_present_at: float | None = None
         # Latest user prompt — fed to the gatekeeper / plan gate as
         # task_description (parity with the engine, which passes the user
         # message text; see engine handle_message task_description=text).
         self.last_prompt = ""
+        self._typing = typing or HumanTypingProfile()
+        self._rng = random.Random(self._typing.seed)  # noqa: S311
         self.tmux_name = tmux_name
         self.settings_path = settings_path
+        self.append_system_prompt_path: Path | None = None
         self.claude_uuid: str | None = None
         self.turn: TmuxTurn | None = None
         # Per-turn plan-gate state — shared logic with the engine's
@@ -566,9 +694,88 @@ class TmuxClaudeSession:
     def send_keys(self, keys: str, *, literal: bool = True) -> None:
         if self._pane is None:
             raise AgentError("tmux pane is not available")
-        # libtmux send_keys defaults to literal=True; tmux key-names
-        # (Enter/BTab/C-c/Escape) require literal=False.
+        if literal and len(keys) > _SEND_KEYS_INLINE_LIMIT:
+            self._paste_via_buffer(keys)
+            return
         self._pane.send_keys(keys, enter=False, literal=literal)
+
+    def _tmux_pane_argv(self, *args: str) -> list[str]:
+        server = self._pane.server
+        socket_args: list[str] = []
+        if server.socket_path:
+            socket_args = ["-S", str(server.socket_path)]
+        elif server.socket_name:
+            socket_args = ["-L", str(server.socket_name)]
+        tmux_bin = server.tmux_bin or shutil.which("tmux") or "tmux"
+        return [tmux_bin, *socket_args, *args]
+
+    def _load_paste_buffer(self, text: str, *, bracketed: bool) -> None:
+        if self._pane is None:
+            raise AgentError("tmux pane is not available")
+        buffer_name = f"leashd_paste_{secrets.token_hex(8)}"
+        load = subprocess.run(  # noqa: S603
+            self._tmux_pane_argv("load-buffer", "-b", buffer_name, "-"),
+            input=text,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if load.returncode != 0:
+            raise AgentError(
+                f"tmux load-buffer failed: {load.stderr.strip() or load.returncode}"
+            )
+        paste_flags = ["-p", "-d"] if bracketed else ["-d"]
+        paste = subprocess.run(  # noqa: S603
+            self._tmux_pane_argv(
+                "paste-buffer",
+                *paste_flags,
+                "-b",
+                buffer_name,
+                "-t",
+                str(self._pane.pane_id),
+            ),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if paste.returncode != 0:
+            subprocess.run(  # noqa: S603
+                self._tmux_pane_argv("delete-buffer", "-b", buffer_name),
+                capture_output=True,
+                check=False,
+            )
+            raise AgentError(
+                f"tmux paste-buffer failed: {paste.stderr.strip() or paste.returncode}"
+            )
+
+    def _send_literal_chunk(self, text: str) -> None:
+        self._load_paste_buffer(text, bracketed=False)
+
+    def _paste_via_buffer(self, text: str) -> None:
+        self._load_paste_buffer(text, bracketed=True)
+
+    def apply_typing_profile(self, profile: HumanTypingProfile) -> None:
+        self._typing = profile
+        self._rng = random.Random(profile.seed)  # noqa: S311
+
+    async def _deliver_prompt(self, text: str) -> None:
+        steps = plan_human_typing(text, self._typing, self._rng)
+        if len(steps) != 1 or steps[0].mode != TYPING_MODE_LEGACY:
+            logger.debug(
+                "tmux_human_typing",
+                tmux_name=self.tmux_name,
+                steps=len(steps),
+                chars=len(text),
+            )
+        for step in steps:
+            if step.mode == TYPING_MODE_PASTE:
+                self._paste_via_buffer(step.text)
+            elif step.mode == TYPING_MODE_TYPE:
+                self._send_literal_chunk(step.text)
+            else:
+                self.send_keys(step.text, literal=True)
+            if step.delay > 0:
+                await asyncio.sleep(step.delay)
 
     def capture(self) -> str:
         """Current visible pane contents (for readiness / submit checks)."""
@@ -651,16 +858,8 @@ class TmuxClaudeSession:
         return False
 
     async def submit(self, text: str) -> None:
-        """Type ``text`` into the composer and reliably submit it.
-
-        Claude Code receives the text as a bracketed paste; an Enter sent in
-        the same burst (the previous behavior) is consumed by the paste and
-        the prompt is never sent. Paste, let it settle, press Enter, then
-        confirm the agent actually started — re-pressing Enter a few times if
-        the composer still holds the prompt.
-        """
         self._maybe_update_goal_state(text)
-        self.send_keys(text, literal=True)
+        await self._deliver_prompt(text)
         await asyncio.sleep(0.5)
         tail = " ".join(text.split())[-48:]
         for _ in range(5):
@@ -755,6 +954,7 @@ class TmuxClaudeSession:
     # (verified claude 2.1.148; the headless `updatedInput.answers` contract is
     # SDK-only). So leashd selects the human's already-collected answer in-pane.
     _QUESTION_SELECTOR_MARKERS = ("Enter to select", "to navigate")
+    _QUESTION_FREETEXT_MARKER = "type something"
     _QUESTION_ROW_RE = re.compile(r"^\s*(❯)?\s*(\d+)\.\s")
     # claude 2.1.150 wraps a multi-question AskUserQuestion with a final
     # "Review your answers" page: every individual selector lands the answer
@@ -815,6 +1015,26 @@ class TmuxClaudeSession:
         if not any(m in s for m in self._PLAN_SELECTOR_MARKERS):
             return False
         return "1. Yes" in s and ("2. " in s or "❯ 2." in s)
+
+    def dedicated_selector_present(self, screen: str | None = None) -> bool:
+        """True iff the screen is a dialog already owned by a dedicated
+        hook-driven drive — the binary permission selector
+        (``answer_perm_selector``), the AskUserQuestion selector or its
+        submission-review page (``answer_question_selector``), or the
+        ExitPlanMode plan dialog (``answer_plan_selector``).
+
+        The Stage-2 native-dialog watcher must leave these alone: bridging one
+        a second time double-asks the human AND leaks a ``handle_question``
+        ``PendingInteraction`` that the next ``/task`` phase prompt is then
+        consumed by (resolve_text), wedging the orchestrator. See T-9.
+        """
+        s = self.capture() if screen is None else screen
+        return (
+            self.perm_selector_present(s)
+            or self.question_selector_present(s)
+            or self.submit_review_present(s)
+            or self.plan_selector_present(s)
+        )
 
     def _plan_target_row(self, screen: str, target_mode: str) -> int:
         """The plan-dialog row to select. Row ORDER is stable across claude
@@ -924,11 +1144,8 @@ class TmuxClaudeSession:
                     continue
                 idx = self._match_option_row(chosen, options)
                 if idx is None:
-                    # A free-text reply (the user typed something instead of
-                    # tapping a button) or — historically — a label silently
-                    # mid-string truncated by Telegram's 64-byte callback_data
-                    # limit lands here. Log loudly so the next hang is one log
-                    # line away from diagnosis instead of a silent stall.
+                    if await self._answer_via_type_something(chosen, deadline):
+                        continue
                     logger.warning(
                         "tmux_question_selector_no_match",
                         tmux_name=self.tmux_name,
@@ -1029,6 +1246,39 @@ class TmuxClaudeSession:
             return True
         return False
 
+    def _find_freetext_row(self, screen: str) -> int | None:
+        """Row number of the AskUserQuestion dialog's built-in "Type something"
+        free-text entry, or None when the dialog offers no such row."""
+        for line in screen.splitlines():
+            m = self._QUESTION_ROW_RE.match(line)
+            if m and self._QUESTION_FREETEXT_MARKER in line.lower():
+                return int(m.group(2))
+        return None
+
+    async def _answer_via_type_something(self, text: str, deadline: float) -> bool:
+        """Route a free-text answer (one that matched no discrete option) into
+        the dialog's own "Type something" entry: select that row, enter the
+        text, submit. Returns False when the dialog has no such row, so the
+        caller falls back to logging the unmatched answer."""
+        row = self._find_freetext_row(self.capture())
+        if row is None:
+            return False
+        if not await self._select_option_row(
+            row - 1, deadline, log_event="tmux_question_freetext_row_selected"
+        ):
+            return False
+        await asyncio.sleep(0.3)
+        self.send_keys(text, literal=True)
+        await asyncio.sleep(0.2)
+        self.send_keys("Enter", literal=False)
+        logger.info(
+            "tmux_question_freetext_submitted",
+            tmux_name=self.tmux_name,
+            chars=len(text),
+        )
+        await asyncio.sleep(0.6)
+        return True
+
     def begin_turn(
         self,
         *,
@@ -1054,27 +1304,42 @@ class TmuxClaudeSession:
         if self.turn is not None:
             self.turn.complete(is_error=is_error)
 
-    def note_goal_indicator(self, screen: str) -> bool:
+    def note_goal_indicator(self, screen: str, now: float | None = None) -> bool:
         """Update ``/goal`` state from a pane capture.
 
-        Returns True iff the goal just cleared (its indicator appeared and then
-        vanished) so the caller finalizes the turn that ``TmuxTurn.complete``
-        deferred — Claude starts no further turn once a goal is met, so nothing
-        else would release that deferral. Only ever clears ``goal_active`` (it
-        is set on inject), so assistant text mentioning the phrase, or a
-        transient capture miss before the indicator first renders, cannot end a
-        goal run early.
+        Returns True iff the goal just cleared — the ``◎ /goal active`` marker
+        was seen and has since been absent for ``_GOAL_INDICATOR_CLEAR_GRACE_S``
+        — so the caller finalizes the turn that ``TmuxTurn.complete`` deferred.
+        Only ever clears ``goal_active`` (set on inject) and requires SUSTAINED
+        absence, so assistant text mentioning the phrase, a miss before the
+        indicator first renders, or a single dropped frame mid-run cannot end a
+        goal early.
         """
         if not self.goal_active:
             return False
+        t = time.monotonic() if now is None else now
         if _GOAL_ACTIVE_MARKER in screen:
             self._goal_indicator_seen = True
+            self._goal_indicator_last_present_at = t
             return False
-        if self._goal_indicator_seen:
+        if (
+            self._goal_indicator_seen
+            and self._goal_indicator_last_present_at is not None
+            and t - self._goal_indicator_last_present_at
+            >= _GOAL_INDICATOR_CLEAR_GRACE_S
+        ):
             self.goal_active = False
             self._goal_indicator_seen = False
+            self._goal_indicator_last_present_at = None
             return True
         return False
+
+    @property
+    def goal_indicator_seen(self) -> bool:
+        """True once the ``◎ /goal active`` marker has been observed this run —
+        the watch loop picks the idle fallback (never seen) vs. the stuck ceiling
+        (seen) backstop from this. See tmux._goal_backstop_action."""
+        return self._goal_indicator_seen
 
     def _maybe_update_goal_state(self, text: str) -> None:
         """Seed/clear ``/goal`` state from a submitted prompt.
@@ -1179,6 +1444,9 @@ class TmuxSessionManager:
 
     def update_config(self, config: LeashdConfig) -> None:
         self._config = config
+        profile = _typing_profile_from_config(config)
+        for cs in self._sessions.values():
+            cs.apply_typing_profile(profile)
 
     def bind_safety(
         self,
@@ -1272,6 +1540,23 @@ class TmuxSessionManager:
         return (
             self._interactions.has_pending(chat_id) if self._interactions else False
         ) or (self._approvals.has_pending(chat_id) if self._approvals else False)
+
+    def pending_human_kind(self, chat_id: str) -> str | None:
+        """Which kind of human wait is in flight for this chat — 'approval',
+        'question', 'plan_review', or None. Lets the turn loop describe the wait
+        and the resume by what the user actually did, not a blanket 'approved'."""
+        if self._approvals and self._approvals.has_pending(chat_id):
+            return "approval"
+        if self._interactions and self._interactions.has_pending(chat_id):
+            return self._interactions.pending_kind(chat_id) or "question"
+        return None
+
+    def last_approval_approved(self, chat_id: str) -> bool | None:
+        """Most recent approve (True) / reject (False) decision for this chat,
+        or None if unknown — used to label the resume note accurately."""
+        if self._approvals is None:
+            return None
+        return self._approvals.last_outcome.get(chat_id)
 
     # -- preflight -----------------------------------------------------------
 
@@ -1436,7 +1721,10 @@ class TmuxSessionManager:
                 }
             ]
         path = self._socket_dir / f"{session_id}.settings.json"
-        payload: dict[str, Any] = {"hooks": hooks}
+        payload: dict[str, Any] = {
+            "hooks": hooks,
+            "permissions": {"deny": _credential_deny_rules()},
+        }
         enabled = self._security_enabled_plugins()
         if enabled:
             payload["enabledPlugins"] = enabled
@@ -1460,7 +1748,10 @@ class TmuxSessionManager:
             "PermissionRequest": [self._sync_hook_block("PermissionRequest")],
         }
         path = self._socket_dir / f"{session_id}.cli.settings.json"
-        payload: dict[str, Any] = {"hooks": hooks}
+        payload: dict[str, Any] = {
+            "hooks": hooks,
+            "permissions": {"deny": _credential_deny_rules()},
+        }
         enabled = self._security_enabled_plugins()
         if enabled:
             payload["enabledPlugins"] = enabled
@@ -1512,6 +1803,7 @@ class TmuxSessionManager:
             tmux_name=f"cli_{session_id}",
             settings_path=settings_path,
             native_auto_allowed=native_auto_allowed,
+            typing=_typing_profile_from_config(self._config),
         )
         cs.last_prompt = last_prompt
         self._sessions[session_id] = cs
@@ -1529,6 +1821,9 @@ class TmuxSessionManager:
         if cs is not None:
             with contextlib.suppress(Exception):
                 cs.settings_path.unlink(missing_ok=True)
+            if cs.append_system_prompt_path is not None:
+                with contextlib.suppress(Exception):
+                    cs.append_system_prompt_path.unlink(missing_ok=True)
 
     # -- session lifecycle ---------------------------------------------------
 
@@ -1677,9 +1972,18 @@ class TmuxSessionManager:
                 return
         logger.warning("tmux_orphan_reap_incomplete", tmux_name=name)
 
+    _APPEND_SYSPROMPT_INLINE_MAX = 4096
+
+    def _write_append_system_prompt_file(self, session_id: str, text: str) -> Path:
+        self._socket_dir.mkdir(parents=True, exist_ok=True)
+        path = self._socket_dir / f"{session_id}.append-system-prompt.txt"
+        path.write_text(text)
+        return path
+
     def _build_claude_command(
         self,
         *,
+        session_id: str,
         session: Session,
         settings: RuntimeSettings | None,
         perm_mode: str,
@@ -1687,20 +1991,13 @@ class TmuxSessionManager:
         model: str | None,
         resume_uuid: str | None,
         append_system_prompt: str | None,
-    ) -> str:
+    ) -> tuple[str, Path | None]:
         import shlex
 
         from leashd.agents.runtimes._helpers import build_agent_cli_args
 
-        # `--settings <managed>` is tmux-only: it carries the PreToolUse HTTP
-        # hook bridge (claude_cli uses --permission-prompt-tool stdio). Every
-        # agent/model/instruction-shaping flag comes from the SAME builder
-        # claude_cli uses, so a /test (or any) session is identical across
-        # runtimes — bar the two interactive-inherent differences documented
-        # in build_agent_cli_args (no --max-turns; Task/Agent suppressed).
         parts = [self._claude_path, "--settings", str(settings_path)]
         parts += build_agent_cli_args(
-            config=self._config,
             session=session,
             settings=settings,
             perm_mode=perm_mode,
@@ -1708,11 +2005,25 @@ class TmuxSessionManager:
             append_system_prompt=append_system_prompt,
             resume_token=resume_uuid,
             interactive=True,
+            config=self._config,
         )
+
+        sysprompt_path: Path | None = None
+        if (
+            append_system_prompt
+            and len(append_system_prompt) > self._APPEND_SYSPROMPT_INLINE_MAX
+        ):
+            for i in range(len(parts) - 1):
+                if parts[i] == "--append-system-prompt":
+                    sysprompt_path = self._write_append_system_prompt_file(
+                        session_id, append_system_prompt
+                    )
+                    parts[i] = "--append-system-prompt-file"
+                    parts[i + 1] = str(sysprompt_path)
+                    break
+
         quoted = " ".join(shlex.quote(p) for p in parts)
-        # `env VAR= ` clears CLAUDECODE so claude does not refuse as a
-        # nested session; pin the canonical entrypoint (see claude_cli).
-        return f"env CLAUDECODE= CLAUDE_CODE_ENTRYPOINT=cli {quoted}"
+        return f"env CLAUDECODE= CLAUDE_CODE_ENTRYPOINT=cli {quoted}", sysprompt_path
 
     async def spawn(
         self,
@@ -1743,7 +2054,8 @@ class TmuxSessionManager:
 
         tmux_name = f"leashd_{session_id}"
         settings_path = self.write_managed_settings(session_id)
-        command = self._build_claude_command(
+        command, sysprompt_path = self._build_claude_command(
+            session_id=session_id,
             session=session,
             settings=settings,
             perm_mode=perm_mode,
@@ -1806,8 +2118,10 @@ class TmuxSessionManager:
             tmux_name=tmux_name,
             settings_path=settings_path,
             native_auto_allowed=session.native_auto_allowed,
+            typing=_typing_profile_from_config(self._config),
         )
         cs.applied_system_prompt = append_system_prompt
+        cs.append_system_prompt_path = sysprompt_path
         cs.native_auto_active = perm_mode == "auto"
         cs.attach(tmux_session, pane)
         self._sessions[session_id] = cs
@@ -1853,14 +2167,26 @@ class TmuxSessionManager:
         )
         return cs
 
-    def _bind_uuid(self, cwd: str, claude_uuid: str) -> TmuxClaudeSession | None:
+    def _bind_uuid(
+        self, cwd: str, claude_uuid: str, *, allow_pending_bind: bool = True
+    ) -> TmuxClaudeSession | None:
         """Resolve a hook's Claude UUID to a leashd session.
 
         First by known mapping, else by the in-flight spawn for that cwd
         (Claude mints a fresh UUID we haven't seen until the first hook).
+
+        ``allow_pending_bind`` gates that cwd fallback. Only events meaning "a
+        pane is starting or running" (SessionStart, UserPromptSubmit, tool use)
+        may adopt an unseen UUID for the in-flight spawn. A *terminal* event
+        (Stop, SessionEnd) must not: spawning a new phase pane reaps the prior
+        one and evicts its UUID, so that pane's still-in-flight Stop arrives
+        with a now-unknown UUID and would otherwise bind to the freshly-spawned
+        pane via this fallback and complete its turn before the agent has run —
+        the empty ``num_turns=0`` turn that makes a /task verify phase read an
+        unwritten result and falsely escalate.
         """
         sid = self._by_uuid.get(claude_uuid)
-        if sid is None:
+        if sid is None and allow_pending_bind:
             sid = self._pending_by_cwd.get(cwd)
             if sid is not None:
                 self._by_uuid[claude_uuid] = sid
@@ -1986,6 +2312,17 @@ class TmuxSessionManager:
             tool_input = {}
         cwd = str(body.get("cwd", ""))
         cs = self._bind_uuid(cwd, claude_uuid)
+        if cs is not None and cs.turn is not None:
+            cs.turn.mark_activity()
+            if cs.turn.on_tool_activity is not None:
+                await safe_callback(
+                    cs.turn.on_tool_activity,
+                    ToolActivity(
+                        tool_name=tool_name,
+                        description=describe_tool(tool_name, tool_input),
+                    ),
+                    log_event="tmux_pre_tool_activity_error",
+                )
         key = _tool_identity_key(claude_uuid, tool_name, tool_input)
 
         # Register an in-flight future BEFORE the (possibly human-blocking)
@@ -2078,13 +2415,10 @@ class TmuxSessionManager:
             session_mode=cs.mode,
             task_run_id=cs.task_run_id,
             working_directory=cs.working_directory,
-            plan_origin=cs.plan_origin,
             session_id=cs.session_id,
             chat_id=cs.chat_id,
             user_id=cs.user_id,
-            task_description=cs.last_prompt,
             interaction_coordinator=self._interactions,
-            config=self._config,
             discover_plan_file_fn=plan_gate.discover_plan_file,
             responder=None,
             deadline=None,
@@ -2110,8 +2444,8 @@ class TmuxSessionManager:
                     tool_input,
                     cs.session_id,
                     cs.chat_id,
-                    task_description=cs.last_prompt,
                     session_mode=cs.mode,
+                    task_run_id=cs.task_run_id,
                 )
                 if gated is None:
                     return _hook_decision(
@@ -2135,8 +2469,8 @@ class TmuxSessionManager:
                 tool_input,
                 cs.session_id,
                 cs.chat_id,
-                task_description=cs.last_prompt,
                 session_mode=cs.mode,
+                task_run_id=cs.task_run_id,
             )
             return _permission_to_hook(result)
 
@@ -2266,13 +2600,10 @@ class TmuxSessionManager:
             session_mode=cs.mode,
             task_run_id=cs.task_run_id,
             working_directory=cs.working_directory,
-            plan_origin=cs.plan_origin,
             session_id=cs.session_id,
             chat_id=cs.chat_id,
             user_id=cs.user_id,
-            task_description=cs.last_prompt,
             interaction_coordinator=self._interactions,
-            config=self._config,
             discover_plan_file_fn=plan_gate.discover_plan_file,
             responder=None,
             deadline=None,
@@ -2287,8 +2618,8 @@ class TmuxSessionManager:
             tool_input,
             cs.session_id,
             cs.chat_id,
-            task_description=cs.last_prompt,
             session_mode=cs.mode,
+            task_run_id=cs.task_run_id,
         )
         self._spawn_perm_selector_drive(cs, _permission_to_hook(result))
         return _permission_to_permreq(result)
@@ -2321,7 +2652,11 @@ class TmuxSessionManager:
         """Handle async lifecycle hooks (Stop, SessionStart, …)."""
         claude_uuid = str(body.get("session_id", ""))
         cwd = str(body.get("cwd", ""))
-        cs = self._bind_uuid(cwd, claude_uuid)
+        cs = self._bind_uuid(
+            cwd,
+            claude_uuid,
+            allow_pending_bind=event in ("SessionStart", "UserPromptSubmit"),
+        )
         if cs is None:
             if event not in ("SessionStart", "UserPromptSubmit"):
                 self._schedule_orphan_reap()
@@ -2365,6 +2700,8 @@ class TmuxSessionManager:
                     turn = cs.turn
                     if turn is not None and not turn.stop_event.is_set():
                         turn.complete()
+                if cs.dedicated_selector_present(screen):
+                    continue
                 match = _detect_native_dialog(screen)
                 if match is None:
                     continue
@@ -2539,6 +2876,7 @@ class TmuxSessionManager:
                 turn.cost_usd = float(obj.get("total_cost_usd") or 0.0)
                 turn.num_turns = int(obj.get("num_turns") or 0)
                 turn.is_error = bool(obj.get("is_error", False))
+                turn.result_seen = True
                 # Fallback completion if the Stop hook was lost.
                 turn.complete(is_error=turn.is_error)
             return
@@ -2554,6 +2892,7 @@ class TmuxSessionManager:
         # clear its idle stamp so the watch loop does not finalize mid-run.
         if turn._completion_seen_this_response:
             turn._completion_seen_this_response = False
+            turn.result_seen = False
             turn.goal_completion_deferred_at = None
         for block in blocks:
             if not isinstance(block, dict):

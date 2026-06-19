@@ -684,18 +684,18 @@ class TestModelSupportsNativeAuto:
 
 class TestSessionToPermissionMode:
     def test_all_modes_mapped(self):
-        for mode in ("auto", "edit", "test", "task", "web", "plan", "default"):
+        for mode in ("auto", "edit", "plan", "default", "test"):
             assert mode in SESSION_TO_PERMISSION_MODE
 
     def test_modes_mirror_claude_modes(self):
-        # leashd modes mirror Claude Code permission modes: auto↔native auto,
-        # edit↔acceptEdits, plan↔plan, default↔default.
+        # leashd's user-facing modes mirror Claude Code permission modes:
+        # auto↔native auto, edit↔acceptEdits, plan↔plan, default↔default.
         assert SESSION_TO_PERMISSION_MODE["auto"] == "auto"
         assert SESSION_TO_PERMISSION_MODE["edit"] == "acceptEdits"
         assert SESSION_TO_PERMISSION_MODE["plan"] == "plan"
         assert SESSION_TO_PERMISSION_MODE["default"] == "default"
-        # accept-edits-style orchestrator phases stay acceptEdits.
-        assert SESSION_TO_PERMISSION_MODE["task"] == "acceptEdits"
+        # /test workflow keeps an acceptEdits perm mode.
+        assert SESSION_TO_PERMISSION_MODE["test"] == "acceptEdits"
 
 
 class TestCancelShutdown:

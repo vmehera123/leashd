@@ -24,8 +24,8 @@ from leashd.core.task import TaskRun, TaskStore
 from leashd.core.task_profile import STANDALONE, TaskProfile
 from leashd.plugins.base import PluginContext
 from leashd.plugins.builtin._task_v4_prompts import implement_prompt, verify_prompt
+from leashd.plugins.builtin.task_v3 import _V3_PHASE_TO_MODE
 from leashd.plugins.builtin.task_v4 import (
-    _V4_PHASE_TO_MODE,
     _V4_PHASES,
     TaskV4Orchestrator,
     _resolve_pipeline_v4,
@@ -141,11 +141,11 @@ class TestResolvePipelineV4:
         )
         assert _resolve_pipeline_v4(profile) == ["verify", "review"]
 
-    def test_v4_phase_to_mode_uses_auto_for_implement(self):
-        assert _V4_PHASE_TO_MODE["implement"] == "auto"
-
-    def test_v4_phase_to_mode_uses_test_for_verify(self):
-        assert _V4_PHASE_TO_MODE["verify"] == "test"
+    def test_phase_modes_are_auto(self):
+        # /task runs every phase in claude's auto mode (R4); the autonomous
+        # tmux runtime still downgrades to acceptEdits + the hook pipeline.
+        assert _V3_PHASE_TO_MODE["implement"] == "auto"
+        assert _V3_PHASE_TO_MODE["verify"] == "auto"
 
     def test_v4_phases_does_not_include_review(self):
         assert "review" not in _V4_PHASES
@@ -232,7 +232,7 @@ class TestNativeAutoSignal:
         await orchestrator._execute_phase(task)
 
         kwargs = mock_engine.session_manager.begin_phase_session.call_args.kwargs
-        assert kwargs["mode"] == "test"
+        assert kwargs["mode"] == "auto"
         assert kwargs["native_auto_allowed"] is False
 
 

@@ -50,6 +50,7 @@ class ApprovalCoordinator:
         self.config = config
         self._event_bus = event_bus
         self.pending: dict[str, PendingApproval] = {}
+        self.last_outcome: dict[str, bool] = {}
 
     async def request_approval(
         self,
@@ -58,7 +59,6 @@ class ApprovalCoordinator:
         tool_input: dict[str, Any],
         classification: Classification,
         timeout: int | None = None,
-        ai_denial_reason: str | None = None,
     ) -> ApprovalResult:
         # Preserve an explicit timeout (incl. 0); only fall back when unset so
         # config None propagates as "no expiry" (parity with claude-cli).
@@ -75,9 +75,7 @@ class ApprovalCoordinator:
         )
         self.pending[approval_id] = pending
 
-        description = self._format_description(
-            tool_name, tool_input, classification, ai_denial_reason=ai_denial_reason
-        )
+        description = self._format_description(tool_name, tool_input, classification)
         pending.description = description
 
         msg_id = await self.connector.request_approval(
@@ -116,6 +114,7 @@ class ApprovalCoordinator:
                 await asyncio.wait_for(pending.event.wait(), timeout=timeout)
             approved = pending.decision is True
             reason = pending.rejection_reason if not approved else None
+            self.last_outcome[chat_id] = approved
             logger.info(
                 "approval_resolved",
                 approval_id=approval_id,
@@ -131,6 +130,7 @@ class ApprovalCoordinator:
             )
             if pending.message_id:
                 await self.connector.delete_message(chat_id, pending.message_id)
+            self.last_outcome[chat_id] = False
             return ApprovalResult(approved=False)
         finally:
             self.pending.pop(approval_id, None)
@@ -170,13 +170,8 @@ class ApprovalCoordinator:
         tool_name: str,
         tool_input: dict[str, Any],
         classification: Classification,
-        *,
-        ai_denial_reason: str | None = None,
     ) -> str:
-        parts = []
-        if ai_denial_reason:
-            parts.append(f"\u26a0\ufe0f AI reviewer denied: {ai_denial_reason}")
-        parts.append(f"Tool: {tool_name}")
+        parts = [f"Tool: {tool_name}"]
 
         if classification.description:
             parts.append(f"Action: {classification.description}")

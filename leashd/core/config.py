@@ -60,7 +60,7 @@ class LeashdConfig(BaseSettings):
 
     approved_directories: list[Path]
 
-    agent_runtime: str = "claude-cli"
+    agent_runtime: str = "tmux"
     max_turns: int = 250
     max_tool_calls: int = -1  # -1 = unlimited
     web_max_turns: int = 300
@@ -97,18 +97,33 @@ class LeashdConfig(BaseSettings):
     # OUTLIVE an explicit finite window (see _pre_tool_hook_timeout)
     tmux_terminal_cols: int = 160
     tmux_terminal_rows: int = 48
-    tmux_no_progress_timeout_seconds: int = 600  # 10 min — autonomous-path
-    # backstop: aborts a hung-but-alive pane (no JSONL progress) when NO human
-    # is pending. Never preempts the no-expiry-while-a-human-is-pending
-    # guarantee; agent_timeout_seconds stays the absolute ceiling.
-    tmux_goal_idle_grace_seconds: int = 25
-    # A Claude Code ``/goal`` keeps the leashd turn open across sub-turns
-    # (TmuxTurn.complete defers while the goal is active). When the goal run
-    # goes idle (Stop fired, no new sub-turn starts), finalize the leashd turn
-    # after this grace instead of waiting out tmux_no_progress_timeout_seconds —
-    # the grace just has to outlast the gap between auto-continued goal turns
-    # (typically 1-5s). Cleanly returns the agent's summary; see
-    # TmuxAgent.execute's watch loop.
+    tmux_no_progress_timeout_seconds: int = 0  # 0 = disabled (default). When
+    # >0, aborts a hung-but-alive pane after N seconds with no JSONL/tool
+    # progress and NO human pending. Disabled by default so a long autonomous
+    # phase is never killed mid-work; the dead-pane / dead-tailer liveness
+    # checks (genuine "can never complete") still apply regardless.
+    tmux_turn_ceiling_seconds: int = 0  # 0 = disabled (default). When >0, the
+    # absolute wall-clock ceiling for a single tmux turn regardless of progress.
+    # Disabled by default so a legitimately long turn is never force-stopped;
+    # /stop and /cancel remain the manual escape hatch.
+    tmux_goal_idle_grace_seconds: int = 60
+    # Fallback only: applies when leashd NEVER observes the ``◎ /goal active``
+    # indicator for a run (detection regressed, or a claude build that renders no
+    # marker) — note_goal_indicator can then never clean-clear, so a deferred goal
+    # idle this long is finalized. While the indicator IS seen the dialog watcher
+    # owns completion and this grace does NOT apply, so a normal between-sub-turn
+    # gap (post-tool reasoning, the native /goal judge) can no longer cut a live
+    # goal short. See tmux._goal_backstop_action.
+    tmux_goal_stuck_ceiling_seconds: int = 240
+    # Wedge net: a deferred ``/goal`` whose indicator stays lit but streams no new
+    # sub-turn for this long (measured from the deferred Stop, reset by each
+    # sub-turn) is force-finalized. Set well above the real between-turn gap so a
+    # healthy goal is never cut; 0 disables.
+    tmux_human_typing_enabled: bool = True
+    tmux_human_typing_min_delay_ms: int = 20
+    tmux_human_typing_max_delay_ms: int = 90
+    tmux_human_typing_max_chars: int = 280
+    tmux_human_typing_seed: int | None = None
 
     policy_files: list[Path] = []
     approval_timeout_seconds: int | None = None
@@ -125,6 +140,7 @@ class LeashdConfig(BaseSettings):
     rate_limit_burst: int = 5
 
     telegram_bot_token: str | None = None
+    telegram_api_base_url: str | None = None
 
     web_enabled: bool = False
     web_host: str = "0.0.0.0"  # noqa: S104
@@ -147,13 +163,8 @@ class LeashdConfig(BaseSettings):
     browser_headless: bool = True
 
     # Autonomous mode
-    auto_approver: bool = False
-    auto_approver_model: str | None = None
-    auto_approver_max_calls: int = 50
     autonomous_loop: bool = False
     autonomous_max_retries: int = 3
-    auto_plan: bool = False
-    auto_plan_model: str | None = None
     auto_pr: bool = False
     auto_pr_base_branch: str = "main"
 
@@ -170,15 +181,11 @@ class LeashdConfig(BaseSettings):
 
     # Task orchestration
     task_orchestrator: bool = False
-    task_orchestrator_version: Literal["v1", "v2", "v3", "v4"] = "v4"
     task_max_retries: int = 3
-    task_phase_timeout_seconds: int = 3600  # 60 minutes per phase
-    task_conductor_model: str | None = None
-    task_conductor_timeout: float = 45.0
-    task_memory_max_chars: int = 8000
+    task_phase_timeout_seconds: int = 0  # 0 = disabled (default); when >0, the
+    # per-phase wall-clock cap the task orchestrator enforces around a phase.
     task_profile: str = "standalone"
-    task_conductor_instructions: str = ""
-    # v3-specific retry caps — all default to 1 (same as hardcoded v2 behaviour)
+    # Per-phase retry caps — all default to 1.
     task_plan_max_retries: int = 1
     task_implement_max_retries: int = 1
     task_verify_max_retries: int = 1

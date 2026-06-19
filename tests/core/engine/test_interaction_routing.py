@@ -142,6 +142,47 @@ class TestEngineInteractionRouting:
         assert result.behavior == "allow"
         assert result.updated_input["answers"]["Q?"] == "custom answer"
 
+    async def test_clear_pending_interactions_unblocks_next_message(
+        self, config, fake_agent, policy_engine, audit_logger, mock_connector
+    ):
+        """T-9: a leaked PendingInteraction (e.g. a tmux native-dialog the hook
+        path already resolved, leaving handle_question blocked) would make the
+        NEXT message get consumed as its answer via resolve_text. The
+        orchestrator calls clear_pending_interactions before each phase prompt
+        so that prompt reaches the agent instead of being silently eaten —
+        which is what wedged /task in the verify phase forever."""
+        from leashd.core.interactions import InteractionCoordinator, PendingInteraction
+        from leashd.core.safety.approvals import ApprovalCoordinator
+
+        approval_coord = ApprovalCoordinator(mock_connector, config)
+        interaction_coord = InteractionCoordinator(mock_connector, config)
+        eng = Engine(
+            connector=mock_connector,
+            agent=fake_agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            approval_coordinator=approval_coord,
+            interaction_coordinator=interaction_coord,
+        )
+
+        leaked = PendingInteraction(
+            interaction_id="leak-1",
+            chat_id="chat1",
+            kind="question",
+        )
+        interaction_coord.pending["leak-1"] = leaked
+        interaction_coord._chat_index["chat1"] = "leak-1"
+        assert interaction_coord.has_pending("chat1") is True
+
+        await eng.clear_pending_interactions("chat1")
+        assert interaction_coord.has_pending("chat1") is False
+
+        result = await eng.handle_message("user1", "AUTONOMOUS TASK verify", "chat1")
+        assert result == "Echo: AUTONOMOUS TASK verify"
+        assert leaked.answer is None
+
     async def test_agent_crash_cancels_interactions(
         self, config, policy_engine, audit_logger, mock_connector
     ):

@@ -97,11 +97,9 @@ PermissionMode = Literal["default", "acceptEdits", "plan", "auto", "bypassPermis
 SESSION_TO_PERMISSION_MODE: dict[str, PermissionMode] = {
     "auto": "auto",
     "edit": "acceptEdits",
-    "test": "acceptEdits",
-    "task": "acceptEdits",
-    "web": "acceptEdits",
     "plan": "plan",
     "default": "default",
+    "test": "acceptEdits",
 }
 
 

@@ -20,11 +20,9 @@ from leashd.core.events import (
 )
 from leashd.core.test_output import detect_test_failure
 from leashd.plugins.base import PluginContext
-from leashd.plugins.builtin._cli_evaluator import PhaseDecision
 from leashd.plugins.builtin.autonomous_loop import AutonomousLoop, _LoopState
 from tests.conftest import MockConnector
 
-_EVAL_TARGET = "leashd.plugins.builtin.autonomous_loop.evaluate_phase_outcome"
 _BACKOFF_TARGET = (
     "leashd.plugins.builtin.autonomous_loop.AutonomousLoop._compute_backoff_delay"
 )
@@ -212,16 +210,12 @@ class TestTestResultEvaluation:
             user_id="user-1",
         )
 
-        with patch(
-            _EVAL_TARGET,
-            return_value=PhaseDecision(action="advance", reason="pass"),
-        ):
-            await loop_plugin._evaluate_test_results(
-                chat_id="chat-1",
-                session_id="sess-1",
-                user_id="user-1",
-                response_content="All tests pass. Build succeeded.",
-            )
+        await loop_plugin._evaluate_test_results(
+            chat_id="chat-1",
+            session_id="sess-1",
+            user_id="user-1",
+            response_content="All tests pass. Build succeeded.",
+        )
         assert "chat-1" not in loop_plugin.session_states
         assert len(mock_connector.sent_messages) == 0
 
@@ -235,16 +229,12 @@ class TestTestResultEvaluation:
             user_id="user-1",
         )
 
-        with patch(
-            _EVAL_TARGET,
-            return_value=PhaseDecision(action="advance", reason="pass"),
-        ):
-            await loop_plugin._evaluate_test_results(
-                chat_id="chat-1",
-                session_id="sess-1",
-                user_id="user-1",
-                response_content="All tests pass after fixes.",
-            )
+        await loop_plugin._evaluate_test_results(
+            chat_id="chat-1",
+            session_id="sess-1",
+            user_id="user-1",
+            response_content="All tests pass after fixes.",
+        )
         assert "chat-1" not in loop_plugin.session_states
         assert len(mock_connector.sent_messages) == 1
         assert "tests pass after" in mock_connector.sent_messages[0]["text"].lower()
@@ -259,13 +249,7 @@ class TestTestResultEvaluation:
             user_id="user-1",
         )
 
-        with (
-            patch(
-                _EVAL_TARGET,
-                return_value=PhaseDecision(action="retry", reason="failures"),
-            ),
-            patch(_BACKOFF_TARGET, return_value=0.0),
-        ):
+        with patch(_BACKOFF_TARGET, return_value=0.0):
             await loop_plugin._evaluate_test_results(
                 chat_id="chat-1",
                 session_id="sess-1",
@@ -294,16 +278,12 @@ class TestEscalation:
             user_id="user-1",
         )
 
-        with patch(
-            _EVAL_TARGET,
-            return_value=PhaseDecision(action="escalate", reason="persistent failure"),
-        ):
-            await loop_plugin._evaluate_test_results(
-                chat_id="chat-1",
-                session_id="sess-1",
-                user_id="user-1",
-                response_content="FAILED: test_login - still broken",
-            )
+        await loop_plugin._evaluate_test_results(
+            chat_id="chat-1",
+            session_id="sess-1",
+            user_id="user-1",
+            response_content="FAILED: test_login - still broken",
+        )
         assert len(mock_connector.sent_messages) == 1
         assert "stuck" in mock_connector.sent_messages[0]["text"].lower()
         assert "chat-1" not in loop_plugin.session_states
@@ -796,96 +776,6 @@ class TestEventUnsubscribe:
         await loop.stop()
 
 
-class TestEvaluatorIntegration:
-    """Tests for AI-driven evaluation in the autonomous loop."""
-
-    async def test_evaluator_advance_takes_success_path(
-        self, loop_plugin, mock_connector
-    ):
-        """When evaluator returns ADVANCE, loop takes success path."""
-        from unittest.mock import patch
-
-        from leashd.plugins.builtin._cli_evaluator import PhaseDecision
-
-        loop_plugin._session_states["chat-1"] = _LoopState(
-            phase="testing",
-            retry_count=0,
-            chat_id="chat-1",
-            session_id="sess-1",
-            user_id="user-1",
-        )
-
-        with patch(
-            "leashd.plugins.builtin.autonomous_loop.evaluate_phase_outcome",
-            new_callable=AsyncMock,
-            return_value=PhaseDecision(action="advance", reason="tests pass"),
-        ):
-            await loop_plugin._evaluate_test_results(
-                chat_id="chat-1",
-                session_id="sess-1",
-                user_id="user-1",
-                response_content="All tests pass.",
-            )
-
-        assert "chat-1" not in loop_plugin.session_states
-
-    async def test_evaluator_retry_takes_retry_path(self, loop_plugin, mock_engine):
-        """When evaluator returns RETRY, loop triggers retry."""
-        loop_plugin._session_states["chat-1"] = _LoopState(
-            phase="testing",
-            retry_count=0,
-            chat_id="chat-1",
-            session_id="sess-1",
-            user_id="user-1",
-        )
-
-        with (
-            patch(
-                _EVAL_TARGET,
-                new_callable=AsyncMock,
-                return_value=PhaseDecision(action="retry", reason="3 tests failed"),
-            ),
-            patch(_BACKOFF_TARGET, return_value=0.0),
-        ):
-            await loop_plugin._evaluate_test_results(
-                chat_id="chat-1",
-                session_id="sess-1",
-                user_id="user-1",
-                response_content="FAILED: test_x",
-            )
-
-        mock_engine.handle_message.assert_called_once()
-        state = loop_plugin.session_states.get("chat-1")
-        assert state is not None
-        assert state.phase == "retrying"
-
-    async def test_evaluator_fallback_on_error(self, loop_plugin, mock_connector):
-        """When evaluator raises, falls back to heuristic."""
-        from unittest.mock import patch
-
-        loop_plugin._session_states["chat-1"] = _LoopState(
-            phase="testing",
-            retry_count=0,
-            chat_id="chat-1",
-            session_id="sess-1",
-            user_id="user-1",
-        )
-
-        with patch(
-            "leashd.plugins.builtin.autonomous_loop.evaluate_phase_outcome",
-            new_callable=AsyncMock,
-            side_effect=RuntimeError("CLI down"),
-        ):
-            await loop_plugin._evaluate_test_results(
-                chat_id="chat-1",
-                session_id="sess-1",
-                user_id="user-1",
-                response_content="All tests pass. Build succeeded.",
-            )
-
-        assert "chat-1" not in loop_plugin.session_states
-
-
 class TestOrphanCleanup:
     """_MAX_SESSION_STATES=500 cleanup."""
 
@@ -1204,13 +1094,7 @@ class TestTestRunnerCompletionFlow:
             },
         )
 
-        with (
-            patch(
-                _EVAL_TARGET,
-                return_value=PhaseDecision(action="retry", reason="test failures"),
-            ),
-            patch(_BACKOFF_TARGET, return_value=0.0),
-        ):
+        with patch(_BACKOFF_TARGET, return_value=0.0):
             await loop_plugin._on_session_completed(event)
             await asyncio.sleep(0.05)
 

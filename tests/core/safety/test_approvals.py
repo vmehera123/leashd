@@ -43,6 +43,7 @@ class TestApprovalCoordinator:
         assert result.approved is True
         assert result.reason is None
         assert approval_coordinator.pending_count == 0
+        assert approval_coordinator.last_outcome["test_chat"] is True
 
     async def test_approval_denied(
         self, approval_coordinator, mock_connector, classification
@@ -66,6 +67,7 @@ class TestApprovalCoordinator:
 
         assert result.approved is False
         assert result.reason is None
+        assert approval_coordinator.last_outcome["test_chat"] is False
 
     async def test_approval_timeout_denies(
         self, approval_coordinator, mock_connector, classification
@@ -674,29 +676,6 @@ class TestRejectWithReason:
         )
         assert "Bash::uv run" in desc
         assert "Command: uv run pytest" in desc
-
-    async def test_format_description_with_ai_denial_reason(
-        self, approval_coordinator, classification
-    ):
-        desc = approval_coordinator._format_description(
-            "Bash",
-            {"command": "npm ci"},
-            classification,
-            ai_denial_reason="npm ci modifies node_modules without lockfile check",
-        )
-        assert "\u26a0\ufe0f AI reviewer denied:" in desc
-        assert "npm ci modifies node_modules" in desc
-
-    async def test_format_description_without_ai_denial_reason(
-        self, approval_coordinator, classification
-    ):
-        desc = approval_coordinator._format_description(
-            "Bash",
-            {"command": "npm ci"},
-            classification,
-            ai_denial_reason=None,
-        )
-        assert "AI reviewer denied" not in desc
 
 
 class TestApprovalCancellationExtended:

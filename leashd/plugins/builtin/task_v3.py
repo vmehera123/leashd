@@ -1,5 +1,8 @@
 """Claude-Code-native linear task orchestrator (v3).
 
+Retained only as the base class for :class:`TaskV4Orchestrator` — v3 is no
+longer registered or instantiated on its own (see ``plugins/registry.py``).
+
 Drives autonomous coding tasks through four phases:
 
     pending → plan → implement → verify → review → completed
@@ -26,11 +29,10 @@ Session-failure handling:
     the task would hang waiting for a ``SESSION_COMPLETED`` that never arrives.
 
 Plan review:
-    v3 deliberately bypasses :class:`AutoPlanReviewer`.  The plan prompt
-    tells the agent *not* to call ``ExitPlanMode`` (which would trigger
-    the reviewer); plan adequacy is instead checked by the orchestrator
-    reading the ``## Plan`` section — empty section → escalate.
-    AutoPlanReviewer remains live for user-initiated ``/plan`` sessions.
+    The plan prompt tells the agent *not* to call ``ExitPlanMode`` (in a
+    task session the plan gate denies it anyway); plan adequacy is instead
+    checked by the orchestrator reading the ``## Plan`` section — empty
+    section → escalate.
 
 PR creation:
     Handled by :class:`AutonomousLoop`, not v3.  v3's pipeline ends at
@@ -80,13 +82,11 @@ from leashd.plugins.builtin._task_v3_prompts import (
     review_prompt,
     verify_prompt,
 )
-from leashd.plugins.builtin.auto_approver import ApprovalContext
 from leashd.plugins.builtin.browser_tools import (
     AGENT_BROWSER_AUTO_APPROVE,
     BROWSER_MUTATION_TOOLS,
     BROWSER_READONLY_TOOLS,
 )
-from leashd.plugins.builtin.task_orchestrator import IMPLEMENT_BASH_AUTO_APPROVE
 from leashd.plugins.builtin.test_config_loader import (
     discover_api_specs,
     load_project_test_config,
@@ -99,7 +99,6 @@ from leashd.plugins.builtin.test_runner import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
     from typing import Protocol
 
     from leashd.connectors.base import BaseConnector
@@ -114,15 +113,13 @@ if TYPE_CHECKING:
             self, user_id: str, text: str, chat_id: str, attachments: Any = None
         ) -> str: ...
 
+        async def clear_pending_interactions(self, chat_id: str) -> None: ...
+
         def enable_tool_auto_approve(self, chat_id: str, tool_name: str) -> None: ...
 
         def disable_auto_approve(self, chat_id: str) -> None: ...
 
         def get_executing_session_id(self, chat_id: str) -> str | None: ...
-
-        def set_approval_context_provider(
-            self, provider: Callable[[str, str], Any]
-        ) -> None: ...
 
 
 logger = structlog.get_logger()
@@ -134,6 +131,52 @@ _STALE_TASK_HOURS = 24
 # without a cap a long task description balloons the system prompt budget.
 _VERIFY_FOCUS_MAX_CHARS = 500
 
+IMPLEMENT_BASH_AUTO_APPROVE: frozenset[str] = frozenset(
+    {
+        "Bash::uv run pytest",
+        "Bash::uv run python",
+        "Bash::uv run ruff",
+        "Bash::uv run mypy",
+        "Bash::pytest",
+        "Bash::python",
+        "Bash::npm run",
+        "Bash::npm test",
+        "Bash::npm exec",
+        "Bash::npx tsc",
+        "Bash::npx jest",
+        "Bash::npx vitest",
+        "Bash::yarn run",
+        "Bash::yarn test",
+        "Bash::pnpm run",
+        "Bash::pnpm test",
+        "Bash::go test",
+        "Bash::go fmt",
+        "Bash::go vet",
+        "Bash::cargo test",
+        "Bash::cargo fmt",
+        "Bash::cargo clippy",
+        "Bash::make",
+        "Bash::node",
+        "Bash::cat",
+        "Bash::ls",
+        "Bash::head",
+        "Bash::tail",
+        "Bash::wc",
+        "Bash::grep",
+        "Bash::find",
+        "Bash::docker compose",
+        "Bash::docker-compose",
+        "Bash::docker build",
+        "Bash::docker run",
+        "Bash::docker ps",
+        "Bash::docker logs",
+        "Bash::docker exec",
+        "Bash::docker stop",
+        "Bash::docker start",
+        "Bash::docker restart",
+    }
+)
+
 # Ordered list of phases v3 can drive.  Terminal states are appended by
 # ``transition_to`` when appropriate.
 _V3_PHASES: tuple[TaskPhase, ...] = ("plan", "implement", "verify", "review")
@@ -141,8 +184,8 @@ _V3_PHASES: tuple[TaskPhase, ...] = ("plan", "implement", "verify", "review")
 _V3_PHASE_TO_MODE: dict[TaskPhase, str] = {
     "plan": "plan",
     "implement": "auto",
-    "verify": "test",
-    "review": "default",
+    "verify": "auto",
+    "review": "auto",
 }
 
 # System-prompt instruction prepended to plan and implement phase sessions.
@@ -438,41 +481,6 @@ class TaskV3Orchestrator(LeashdPlugin):
 
     def set_engine(self, engine: _EngineProtocol) -> None:
         self._engine = engine
-        # Register the AI-approver context provider so the gatekeeper can
-        # enrich approval decisions with task-specific context (working
-        # directory, phase, plan excerpt) instead of guessing from the
-        # generic phase prompt.
-        engine.set_approval_context_provider(self._build_approval_context)
-
-    def _build_approval_context(
-        self, session_id: str, chat_id: str
-    ) -> ApprovalContext | None:
-        """Build AI-approver context for an active task on *chat_id*.
-
-        Returns ``None`` for non-task sessions (or terminal tasks) so the
-        gatekeeper falls back to minimal context. Reads the ``## Plan``
-        section from the task memory file; truncates to 1500 chars so the
-        approver's context stays compact.
-        """
-        del session_id  # Reserved for future cross-check against task.session_id.
-        task = self._active_tasks.get(chat_id)
-        if task is None or task.is_terminal():
-            return None
-        plan = task_memory.read_section(
-            task.run_id, task.working_directory, section="Plan"
-        )
-        # Skip the seeded ``<!-- pending:plan -->`` placeholder — showing it
-        # to the AI approver is worse than showing an empty plan, since it
-        # suggests authoritative-looking content that isn't there yet.
-        if plan and task_memory.is_placeholder(plan):
-            plan = ""
-        plan_excerpt = (plan or "")[:1500]
-        return ApprovalContext(
-            task_description=task.task,
-            working_directory=task.working_directory,
-            phase=str(task.phase),
-            plan_excerpt=plan_excerpt,
-        )
 
     async def initialize(self, context: PluginContext) -> None:
         self._event_bus = context.event_bus
@@ -1030,10 +1038,16 @@ class TaskV3Orchestrator(LeashdPlugin):
 
         prompt = self._build_prompt_for(task)
 
+        await self._engine.clear_pending_interactions(task.chat_id)
+
         try:
             # asyncio.timeout is Python 3.11+; mypy is pinned to 3.10 in
             # pyproject.toml for broader type checking but runtime is 3.11+.
-            async with asyncio.timeout(self._phase_timeout_seconds):  # type: ignore[attr-defined]
+            # 0 (or less) disables the per-phase cap entirely (asyncio.timeout(None)).
+            phase_timeout = (
+                self._phase_timeout_seconds if self._phase_timeout_seconds > 0 else None
+            )
+            async with asyncio.timeout(phase_timeout):  # type: ignore[attr-defined]
                 await self._engine.handle_message(task.user_id, prompt, task.chat_id)
         except TimeoutError:
             logger.warning(
@@ -1100,7 +1114,6 @@ class TaskV3Orchestrator(LeashdPlugin):
         if _classify_change_shape(impl_summary) == "docs_only":
             return None
 
-        # Mirrors v2's _setup_test_phase / agentic_orchestrator's verify path.
         # ``focus`` is capped — task descriptions can be arbitrarily long and
         # build_test_instruction interpolates them verbatim into USER HINTS.
         config = TestConfig(

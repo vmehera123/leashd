@@ -1,10 +1,10 @@
-"""TaskProfile — declarative contract for conductor behavior.
+"""TaskProfile — declarative contract for the task orchestrator.
 
-A TaskProfile tells leashd's conductor what actions are available, what to
-prioritize, and how to behave.  Predefined profiles handle common scenarios:
+A TaskProfile tells the orchestrator which phases/actions are available and
+where to start.  Predefined profiles handle common scenarios:
 
-- **STANDALONE** (default): Full autonomy — all actions enabled, conductor
-  decides everything.  Used when leashd runs on its own.
+- **STANDALONE** (default): all actions enabled.  Used when leashd runs on
+  its own.
 - **PLATFORM**: For hosting platforms that handle Docker
   verification and PR creation externally.  Disables verify/pr,
   starts with plan.
@@ -16,12 +16,22 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import structlog
 from pydantic import BaseModel, ConfigDict
 
-from leashd.plugins.builtin._conductor import ConductorAction
+ConductorAction = Literal[
+    "plan",
+    "implement",
+    "test",
+    "verify",
+    "fix",
+    "review",
+    "pr",
+    "complete",
+    "escalate",
+]
 
 logger = structlog.get_logger()
 
@@ -41,13 +51,12 @@ _ALL_ACTIONS: frozenset[str] = frozenset(
 
 
 class TaskProfile(BaseModel):
-    """Declares what the conductor should and shouldn't do."""
+    """Declares which actions/phases the task orchestrator may run."""
 
     model_config = ConfigDict(frozen=True)
 
     enabled_actions: frozenset[str] = _ALL_ACTIONS
     initial_action: ConductorAction | None = None
-    conductor_instructions: str = ""
     action_instructions: dict[str, str] = {}
     docker_compose_available: bool = False
 
@@ -105,7 +114,6 @@ def _profile_from_dict(data: dict[str, Any]) -> TaskProfile:
     return TaskProfile(
         enabled_actions=enabled,
         initial_action=initial,
-        conductor_instructions=str(data.get("conductor_instructions", "")),
         action_instructions={
             str(k): str(v) for k, v in data.get("action_instructions", {}).items()
         },
@@ -147,9 +155,6 @@ def merge_profiles(base: TaskProfile, override: TaskProfile) -> TaskProfile:
     return TaskProfile(
         enabled_actions=base.enabled_actions & override.enabled_actions,
         initial_action=override.initial_action or base.initial_action,
-        conductor_instructions=_merge_instructions(
-            base.conductor_instructions, override.conductor_instructions
-        ),
         action_instructions={
             **base.action_instructions,
             **override.action_instructions,
@@ -158,11 +163,3 @@ def merge_profiles(base: TaskProfile, override: TaskProfile) -> TaskProfile:
             base.docker_compose_available or override.docker_compose_available
         ),
     )
-
-
-def _merge_instructions(base: str, override: str) -> str:
-    if not base:
-        return override
-    if not override:
-        return base
-    return f"{base}\n\n{override}"

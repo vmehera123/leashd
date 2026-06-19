@@ -194,8 +194,9 @@ class SessionManager:
         (``working_directory``, ``workspace_name``, ``workspace_directories``)
         so CLAUDE.md loading and MCP discovery keep working.
 
-        When ``mode`` is ``"plan"`` this also sets ``plan_origin = "task"``
-        so the engine routes ``ExitPlanMode`` to the AutoPlanReviewer.
+        When ``mode`` is ``"plan"`` this also sets ``plan_origin = "task"``.
+        The orchestrator owns phase transitions, so a task session's
+        ``ExitPlanMode`` is denied by the plan gate (keyed on ``task_run_id``).
         """
         key = self._key(user_id, chat_id)
         session = self._sessions.get(key)

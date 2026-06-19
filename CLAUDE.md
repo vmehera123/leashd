@@ -26,6 +26,14 @@ uv run mypy leashd/
 
 # Full check (lint + format + mypy + tests) — ALWAYS run after implementation work
 make check
+
+# E2E tests (Playwright, real browser vs WebUI) — NOT included in `make check`
+uv run playwright install chromium   # one-time setup
+uv run pytest -m e2e -v
+make check-all                       # = make check + E2E
+
+# JS unit tests (WebUI utils.js, Vitest) — NOT included in `make check`
+cd tests/js && npm install && npm test
 ```
 
 CLI commands are discoverable via `leashd --help` and `leashd <subcommand> --help`.
@@ -34,33 +42,22 @@ CLI commands are discoverable via `leashd --help` and `leashd <subcommand> --hel
 
 Before exploring the codebase, read the relevant spec in `specs/app/`. Start with `specs/app/00-quick-reference.md` for the file-to-class map, then consult the numbered spec for whichever subsystem you're working on. These are detailed technical references that save significant exploration time. **Always verify spec information against the actual source code** — specs can drift from the implementation, so treat them as a starting point, not the source of truth.
 
-## Code Exploration (codebase-memory-mcp)
+## Code Exploration
 
-**For the initial observation pass, use `codebase-memory-mcp` first.** It is a fast structural index over the codebase graph and answers "where does this live, what calls it, what shape is it" without blind `Grep` sweeps.
+For structural "where does this live / what calls it / what shape is it" questions, reach for `codebase-memory-mcp` first (a SessionStart hook re-injects its tool list each session, so it isn't repeated here). The graph tells you *where*; it can lag the working tree, so **always `Read` the file to confirm against disk before you `Edit`** — that validation step is mandatory for any non-trivial change. Skip the graph and go straight to `Read`/`Grep`/`Glob` for non-code files (Markdown, YAML, config) and when you already know the path.
 
-**`Read`, `Grep`, `Glob`, `Edit`, and `Write` remain fully available and are the right tools once you know where to look.** The graph tells you *where*; the file tools let you actually *read, verify, and change* code. The graph can be stale, partial, or out of date with the working tree — never treat it as a substitute for reading the file before you edit.
+## Skills
 
-**Typical flow:** graph lookup (first pass) → `Read` the file to validate against current disk state → `Edit`. The validation step is mandatory for any non-trivial change.
+This repo ships Claude Code skills in `.claude/skills/`. They hold architecture knowledge and procedures that aren't obvious from the code — **consult the relevant skill instead of re-deriving the same context.** Each loads automatically when relevant, or invoke it directly with `/<name>`.
 
-Primary `codebase-memory-mcp` tools (first-pass only):
-
-1. **`search_graph(name_pattern=..., label=..., qn_pattern=...)`** — find functions, classes, routes, or modules by name or label
-2. **`get_code_snippet(qualified_name=...)`** — fast first glance at a specific symbol's source (follow up with `Read` if you need surrounding context or to confirm against disk)
-3. **`trace_path(function_name=..., mode="calls|data_flow|cross_service")`** — trace call chains, data flow, or cross-service paths
-4. **`get_architecture(aspects=...)`** — high-level project structure
-5. **`query_graph(query=...)`** — Cypher queries for complex structural patterns
-6. **`search_code(pattern=...)`** — graph-augmented text search
-
-Go straight to `Read`/`Grep`/`Glob` (skip the graph) when:
-
-- Working with non-code files — Markdown, YAML, `.env`, `pyproject.toml`, docs, configs. The graph doesn't index these.
-- You already know the exact file path and just want its current content.
-- Verifying a symbol the graph returned (signature, surrounding context, current disk state).
-- The project isn't indexed yet — either run `index_repository` first if you need the graph, or just read directly.
+- **`architecture`** — read before any change that spans subsystems, or when deciding where new code belongs.
+- **`tmux-runtime`** — read before touching `tmux*.py`, streaming, or approvals, or when debugging the default runtime.
+- **`telegram-harness`** — run to verify Telegram / Web-UI behavior end-to-end against the real pipeline.
+- **`debug-leashd`** / **`debug-task`** — diagnose runtime and `/task` issues from SQLite, `audit.jsonl`, and logs.
 
 ## Mandatory Post-Implementation Check
 
-**ALWAYS run `make check` after finishing any implementation work and fix ALL issues before considering the task complete.** Non-negotiable. `make check` runs ruff, mypy, and pytest. mypy runs with `|| true` in the Makefile but you should still fix any type errors it reports.
+**ALWAYS run `make check` after finishing any implementation work and fix ALL issues before considering the task complete.** Non-negotiable. `make check` runs ruff, mypy, and unit pytest — it does **not** run the E2E (`pytest -m e2e`) or JS (`tests/js`, Vitest) tiers, so run those too when you touch the WebUI, browser automation, or `data/webui/*.js`. mypy runs with `|| true` in the Makefile but you should still fix any type errors it reports.
 
 ## Architecture
 
@@ -69,6 +66,10 @@ Three-layer safety pipeline: **Sandbox → Policy → Approval**. All tool calls
 Bootstrap: `main.py:run()` → `cli.py:main()` → `main.py:start()` → `app.py:build_engine()`. The `app.py` wires all subsystems (config, storage, connectors, middleware, plugins, safety pipeline, engine).
 
 Engine (`core/engine.py`) is the central orchestrator — receives messages from connectors, routes through middleware, dispatches to the agent runtime, sends responses back.
+
+Agent runtimes (`agents/runtimes/`, resolved by `agents/registry.py:get_agent`): `tmux` (default), `claude-cli`, `claude-code` (SDK), `codex`. The default `tmux` runtime drives a real interactive `claude` TUI in a tmux pane and routes every tool call back through the gatekeeper via Claude Code PreToolUse hooks — so the same safety pipeline applies across all runtimes. It's the largest/most active subsystem; the **`tmux-runtime`** skill covers it.
+
+Autonomous and `/task` work lives in `plugins/builtin/` (`task_v4.py` is the current default orchestrator; `autonomous_loop.py` is the post-task test-and-retry loop). The v1/v2 task orchestrator + "conductor", `AutoApprover`, and `auto_plan_reviewer` were removed in the 1.0 refactor — `README.md`, `docs/`, and `specs/app/` still describe them, so trust `plugins/registry.py` and the source over those.
 
 Config layering: `~/.leashd/config.yaml` → `.env` → environment variables (highest priority). `config_store.py:inject_global_config_as_env()` bridges YAML to `os.environ` so pydantic-settings picks them up. All env vars prefixed with `LEASHD_`.
 

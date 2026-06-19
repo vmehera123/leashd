@@ -83,6 +83,20 @@ async def test_pending_followup_defers_completion_until_next_response():
     assert turn.stop_event.is_set()
 
 
+async def test_pending_followup_defer_stamps_deferred_at_for_idle_grace():
+    """The pending-followup deferral must stamp the deferred marker so the
+    watch-loop idle grace can finalize a turn whose follow-up never produced a
+    response — otherwise it hangs forever once the no-progress/ceiling timeouts
+    are disabled (T-7)."""
+    turn = TmuxTurn(on_text_chunk=None, on_tool_activity=None)
+    turn.pending_followups = 1
+    assert turn.goal_completion_deferred_at is None
+
+    turn.complete()
+    assert not turn.stop_event.is_set()
+    assert turn.goal_completion_deferred_at is not None
+
+
 async def test_is_error_completes_immediately_despite_pending():
     """`/stop` / cancel (complete_turn(is_error=True)) must end the turn now."""
     turn = TmuxTurn(on_text_chunk=None, on_tool_activity=None)

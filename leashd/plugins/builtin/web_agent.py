@@ -507,7 +507,7 @@ class WebAgentPlugin(LeashdPlugin):
             recipe = None
 
         session = event.data["session"]
-        session.mode = "web"
+        session.mode = "auto"
         session.browser_backend = self._browser_backend
         session.browser_fresh = config.fresh
         if not config.resume:

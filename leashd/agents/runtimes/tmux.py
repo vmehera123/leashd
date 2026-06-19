@@ -65,11 +65,79 @@ PANE_READY_TIMEOUT = 45.0
 # human approval is pending, and not after a 60-minute blind wait).
 LIVENESS_POLL_INTERVAL = 5.0
 
-# Backstop on the plan-adjustment re-prompt loop. Each revision is already
-# gated upstream (a human reject, or the AutoPlanReviewer's own 5-revision
-# circuit breaker that flips to auto-approve), so this only guards against an
-# unforeseen state that keeps re-setting feedback — finalize rather than spin.
+# The Stop lifecycle hook can fire before the JSONL tailer has drained claude's
+# final assistant ``text`` block (already on disk, lands just before the
+# authoritative ``result`` line). Poll for that ``result`` line before reading
+# the assembled text, so a turn that ended with a tool call followed by a text
+# answer doesn't surface only the tool markers (a non-empty assembled_text that
+# is missing the real reply). Bounded; breaks the instant the result lands.
+FINAL_TEXT_GRACE_SECONDS = 2.0
+FINAL_TEXT_POLL_INTERVAL = 0.1
+
+# Backstop on the plan-adjustment re-prompt loop. Each revision is gated
+# upstream by a human reject, so this only guards against an unforeseen state
+# that keeps re-setting feedback — finalize rather than spin.
 MAX_PLAN_REVISIONS = 10
+
+
+def _goal_backstop_action(
+    *,
+    deferred_at: float | None,
+    last_activity: float,
+    now: float,
+    indicator_seen: bool,
+    idle_grace: float,
+    stuck_ceiling: float,
+) -> str:
+    """Decide how a deferred ``/goal`` turn should finalize from the watch loop.
+
+    Returns ``""`` to keep waiting, ``"idle"`` to finalize as the fallback when
+    leashd has NEVER observed the ``◎ /goal active`` indicator (detection broke,
+    or a claude build that renders no marker — so the dialog watcher's clean
+    clear can never fire and the run has gone quiet), or ``"stuck"`` when the
+    indicator was seen but no sub-turn has streamed for ``stuck_ceiling`` (a
+    wedged goal). Once the indicator has been seen, the short ``idle_grace``
+    never applies: a healthy goal streams its sub-turns with gaps far longer than
+    25s (post-tool reasoning, the native ``/goal`` judge), and the clean clear —
+    not an idle timer — is the authoritative completion signal.
+    """
+    if deferred_at is None:
+        return ""
+    if not indicator_seen:
+        return "idle" if idle_grace > 0 and now - last_activity > idle_grace else ""
+    if stuck_ceiling > 0 and now - deferred_at > stuck_ceiling:
+        return "stuck"
+    return ""
+
+
+def _wait_note(kind: str | None) -> str:
+    """Line shown while a turn is blocked on the human, phrased by the kind of
+    wait so a question isn't framed as an 'Approve/Reject'."""
+    if kind == "approval":
+        return "⏳ Waiting for your approval — tap Approve/Reject (or /stop to abort)."
+    if kind == "plan_review":
+        return (
+            "⏳ Waiting for your plan review — Approve or Reject (or /stop to abort)."
+        )
+    if kind == "question":
+        return (
+            "⏳ Waiting for your answer — pick an option or reply (or /stop to abort)."
+        )
+    return "⏳ Waiting for your response in this chat (or /stop to abort)."
+
+
+def _resume_note(kind: str | None, approved: bool | None) -> str:
+    """Line shown when the block clears, reflecting what the user actually did —
+    an answered question or a plan review is not an 'approval'."""
+    if kind == "approval":
+        if approved is False:
+            return "🚫 Rejected — continuing."
+        return "✅ Approved — continuing."
+    if kind == "plan_review":
+        return "✅ Plan reviewed — continuing."
+    if kind == "question":
+        return "✅ Got your answer — continuing."
+    return "▶️ Continuing."
 
 
 class TmuxAgent(BaseAgent):
@@ -224,19 +292,22 @@ class TmuxAgent(BaseAgent):
         # pass-through is interactive-only (task_run_id is None).
         if session.task_run_id and perm_mode == "auto":
             perm_mode = "acceptEdits"
-        # Tmux-only override: claude TUI's NATIVE permission gates (WebFetch
-        # per-domain consent, Bash command consent, etc.) render in the pane
-        # and never fire any hook, so leashd can't bridge them to Telegram /
-        # Web — the user sees the agent as "stuck". Bypass claude's native
-        # gates and rely on the PreToolUse hook (which still fires under
-        # bypassPermissions; the hard-deny floor is enforced in on_pre_tool
-        # before any policy check) as the SOLE permission authority. ``auto``
-        # and ``plan`` keep their existing values: auto uses claude's
-        # classifier + PermissionRequest escalation pipeline; plan is read-
-        # only by design. The SDK runtimes (claude-code, claude-cli) keep
-        # their original mappings because they have a ``can_use_tool``
-        # callback that bridges natively without rendering pane dialogs.
-        if perm_mode in ("default", "acceptEdits"):
+        # Claude Code 2.1.x behaviour change: under ``bypassPermissions`` the
+        # interactive TUI no longer BLOCKS on PreToolUse hook decisions — it
+        # fires them informationally and runs the tool regardless. That makes
+        # the leashd hook unable to gate: verified live, both an un-approved
+        # ``Write`` (require_approval) and a hard-denied credential ``Read``
+        # executed, the latter leaking the file's contents. So keep the real
+        # ``default`` / ``acceptEdits`` perm_mode: claude blocks on its native
+        # in-pane prompt, the PreToolUse hook still fires (→ Telegram/Web
+        # approval), and leashd drives the pane selector to match the human
+        # decision (perm_selector / answer_question_selector). ``auto`` and
+        # ``plan`` keep their existing values. Opt back into the old (now
+        # unsafe) bypass with ``LEASHD_TMUX_BYPASS_PERMISSIONS=1``.
+        if (
+            perm_mode in ("default", "acceptEdits")
+            and os.environ.get("LEASHD_TMUX_BYPASS_PERMISSIONS") == "1"
+        ):
             perm_mode = "bypassPermissions"
 
         if need_spawn:
@@ -261,11 +332,14 @@ class TmuxAgent(BaseAgent):
                     reason="model_not_opus",
                     model=model,
                 )
-                # Apply the tmux bypassPermissions override (see above) to
-                # the late-bound fallback too — non-Opus auto sessions
-                # must NOT regress to a perm_mode that surfaces native
-                # pane gates leashd can't bridge.
-                perm_mode = "bypassPermissions"
+                # Degrade to acceptEdits so the leashd hook + pane-selector
+                # drive owns approvals (see the bypass note above — bypass no
+                # longer gates under Claude Code 2.1.x).
+                perm_mode = (
+                    "bypassPermissions"
+                    if os.environ.get("LEASHD_TMUX_BYPASS_PERMISSIONS") == "1"
+                    else "acceptEdits"
+                )
             spawn_native_auto = (
                 session.mode == "auto"
                 and session.task_run_id is None
@@ -325,13 +399,14 @@ class TmuxAgent(BaseAgent):
         )
 
         cs.last_prompt = prompt
-        ceiling = float(self._config.agent_timeout_seconds)
+        ceiling = float(self._config.tmux_turn_ceiling_seconds)
         no_progress = float(self._config.tmux_no_progress_timeout_seconds)
         goal_idle_grace = float(self._config.tmux_goal_idle_grace_seconds)
+        goal_stuck_ceiling = float(self._config.tmux_goal_stuck_ceiling_seconds)
 
-        # Plan-adjustment re-prompt loop. A rejected plan (human or the
-        # AutoPlanReviewer) leaves ``plan_state.plan_adjustment_feedback`` set
-        # with no approval; re-submit it to the same plan-mode pane so claude
+        # Plan-adjustment re-prompt loop. A human-rejected plan leaves
+        # ``plan_state.plan_adjustment_feedback`` set with no approval; re-submit
+        # it to the same plan-mode pane so claude
         # revises — the tmux parity for the engine's plan_adjustment_restart,
         # which never fires here (it reads the engine's tool_state, not this
         # session's plan_state). The reject drive already returned the pane to
@@ -371,6 +446,7 @@ class TmuxAgent(BaseAgent):
                 ceiling=ceiling,
                 no_progress=no_progress,
                 goal_idle_grace=goal_idle_grace,
+                goal_stuck_ceiling=goal_stuck_ceiling,
             )
             if early is not None:
                 return early
@@ -400,6 +476,14 @@ class TmuxAgent(BaseAgent):
             session.agent_resume_token = None
         elif cs.claude_uuid:
             session.agent_resume_token = cs.claude_uuid
+
+        if not turn.is_error and not turn.result_seen and cs.jsonl_task is not None:
+            waited = 0.0
+            while waited < FINAL_TEXT_GRACE_SECONDS:
+                await asyncio.sleep(FINAL_TEXT_POLL_INTERVAL)
+                waited += FINAL_TEXT_POLL_INTERVAL
+                if turn.result_seen:
+                    break
 
         content = turn.assembled_text or "(no text in turn — see the terminal)"
         logger.info(
@@ -432,6 +516,7 @@ class TmuxAgent(BaseAgent):
         ceiling: float,
         no_progress: float,
         goal_idle_grace: float,
+        goal_stuck_ceiling: float,
     ) -> AgentResponse | None:
         """Block until the live turn completes (Stop / JSONL result) or can
         never complete (dead pane, dead tailer, no-progress, or the absolute
@@ -442,6 +527,7 @@ class TmuxAgent(BaseAgent):
         started = time.monotonic()
         notified_blocked = False
         blocked_since: float | None = None
+        blocked_kind: str | None = None
 
         async def _abort(event: str, content: str, **fields: Any) -> AgentResponse:
             """End a turn that can never legitimately complete: log, unblock
@@ -508,12 +594,14 @@ class TmuxAgent(BaseAgent):
             if self._tsm.has_pending_human(session.chat_id):
                 if blocked_since is None:
                     blocked_since = time.monotonic()
+                kind_now = self._tsm.pending_human_kind(session.chat_id)
+                if kind_now is not None:
+                    blocked_kind = kind_now
                 if not notified_blocked and on_text_chunk is not None:
                     notified_blocked = True
                     await safe_callback(
                         on_text_chunk,
-                        "\n\n⏳ Waiting for your approval/answer in this "
-                        "chat — tap Approve/Reject (or /stop to abort).\n",
+                        f"\n\n{_wait_note(blocked_kind)}\n",
                         log_event="tmux_blocked_notice_failed",
                     )
                 logger.warning(
@@ -525,36 +613,64 @@ class TmuxAgent(BaseAgent):
                 continue
 
             # No human pending. If we told the user we were waiting, the block
-            # just cleared — give a short "continuing" beat and re-arm so a
-            # later block notifies again. (The streamed "⏳ Waiting…" chunk
-            # can't be retracted from the message, so this is the signal that
-            # work resumed after an approval.)
+            # just cleared — emit a resume line reflecting what the user did
+            # (approved/rejected vs answered a question), then re-arm so a later
+            # block notifies again. (The streamed "⏳ Waiting…" chunk can't be
+            # retracted, so this is the signal that work resumed.)
             if notified_blocked:
                 notified_blocked = False
                 blocked_since = None
+                approved = self._tsm.last_approval_approved(session.chat_id)
+                logger.info(
+                    "tmux_human_wait_resolved",
+                    session_id=session.session_id,
+                    chat_id=session.chat_id,
+                    kind=blocked_kind,
+                    approved=approved if blocked_kind == "approval" else None,
+                )
                 if on_text_chunk is not None:
                     await safe_callback(
                         on_text_chunk,
-                        "\n\n✅ Approved — continuing.\n",
+                        f"\n\n{_resume_note(blocked_kind, approved)}\n",
                         log_event="tmux_unblock_notice_failed",
                     )
+                blocked_kind = None
 
             now = time.monotonic()
 
-            # 4a. Goal idle backstop. A `/goal` keeps the turn open across
-            #     sub-turns (TmuxTurn.complete defers each Stop). If the goal
-            #     run goes idle — a completion was deferred and no new sub-turn
-            #     streamed within the grace — finalize cleanly with the
-            #     assembled summary instead of waiting out the no-progress
-            #     ceiling. Backstops the case where the `/goal active` indicator
-            #     never clears, so note_goal_indicator never releases the turn.
+            # 4a. Goal backstops. While the `◎ /goal active` indicator is on
+            #     screen the goal is genuinely live — the dialog watcher's clean
+            #     clear owns completion, so a short idle gap (post-tool
+            #     reasoning, the native /goal judge) must NOT finalize the turn.
+            #     The idle grace applies only as a fallback when the indicator
+            #     was never observed; a seen-but-wedged goal is caught by the
+            #     much larger stuck ceiling.
             deferred_at = turn.goal_completion_deferred_at
-            if deferred_at is not None and now - deferred_at > goal_idle_grace:
+            goal_action = _goal_backstop_action(
+                deferred_at=deferred_at,
+                last_activity=turn.last_activity,
+                now=now,
+                indicator_seen=cs.goal_indicator_seen,
+                idle_grace=goal_idle_grace,
+                stuck_ceiling=goal_stuck_ceiling,
+            )
+            if goal_action == "idle":
                 logger.info(
                     "tmux_goal_idle_finalized",
                     session_id=session.session_id,
                     chat_id=session.chat_id,
-                    idle_s=int(now - deferred_at),
+                    idle_s=int(now - turn.last_activity),
+                    indicator_seen=False,
+                )
+                cs.goal_active = False
+                turn.force_complete()
+                break
+            if goal_action == "stuck" and deferred_at is not None:
+                logger.warning(
+                    "tmux_goal_stuck_finalized",
+                    session_id=session.session_id,
+                    chat_id=session.chat_id,
+                    stuck_s=int(now - deferred_at),
                 )
                 cs.goal_active = False
                 turn.force_complete()
@@ -565,7 +681,7 @@ class TmuxAgent(BaseAgent):
             #     output before going quiet (a finished run with no clean Stop),
             #     return that as a normal response rather than the misleading
             #     "produced no output" error.
-            if now - turn.last_activity > no_progress:
+            if no_progress > 0 and now - turn.last_activity > no_progress:
                 if turn.assembled_text:
                     logger.info(
                         "tmux_turn_no_progress_finalized_with_text",
@@ -579,7 +695,7 @@ class TmuxAgent(BaseAgent):
                     "agent produced no output — turn aborted; resend to retry",
                     idle_s=int(now - turn.last_activity),
                 )
-            if now - started > ceiling:
+            if ceiling > 0 and now - started > ceiling:
                 logger.warning(
                     "tmux_turn_timeout",
                     session_id=session.session_id,

@@ -427,7 +427,7 @@ class TestWebAgentPlugin:
         )
         await event_bus.emit(event)
 
-        assert session.mode == "web"
+        assert session.mode == "auto"
         assert "WEB MODE" in session.mode_instruction
         assert "CONTENT REVIEW RULE" in session.mode_instruction
 
@@ -610,7 +610,7 @@ class TestWebAgentPlugin:
         )
         await event_bus.emit(event)
 
-        assert session.mode == "web"
+        assert session.mode == "auto"
         assert "log in manually" in session.mode_instruction
         assert "https://example.com" in event.data["prompt"]
 
@@ -810,7 +810,7 @@ class TestRecipeNotFound:
         )
         await event_bus.emit(event)
 
-        assert session.mode == "web"
+        assert session.mode == "auto"
         assert "log in manually" in session.mode_instruction
 
 

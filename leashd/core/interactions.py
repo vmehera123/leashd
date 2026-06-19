@@ -17,7 +17,6 @@ if TYPE_CHECKING:
     from leashd.core.config import LeashdConfig
     from leashd.core.events import EventBus
     from leashd.core.message_logger import MessageLogger
-    from leashd.plugins.builtin.auto_plan_reviewer import AutoPlanReviewer
 
 logger = structlog.get_logger()
 
@@ -69,7 +68,6 @@ class InteractionCoordinator:
         connector: BaseConnector,
         config: LeashdConfig,
         event_bus: EventBus | None = None,
-        auto_plan_reviewer: AutoPlanReviewer | None = None,
         message_logger: MessageLogger | None = None,
     ) -> None:
         self.connector = connector
@@ -77,7 +75,6 @@ class InteractionCoordinator:
         self._event_bus = event_bus
         self.pending: dict[str, PendingInteraction] = {}
         self._chat_index: dict[str, str] = {}
-        self._auto_plan_reviewer = auto_plan_reviewer
         self._message_logger = message_logger
 
     def _effective_timeout(self) -> int | None:
@@ -287,53 +284,6 @@ class InteractionCoordinator:
         await self._resolve_and_emit(chat_id, interaction_id, "cancelled")
         return PermissionDeny(message="Plan review cancelled")
 
-    async def handle_plan_review_auto(
-        self,
-        chat_id: str,
-        tool_input: dict[str, Any],
-        *,
-        plan_content: str,
-        task_description: str,
-        session_id: str,
-    ) -> PermissionDeny | PlanReviewDecision:
-        """AI-powered plan review — delegates to AutoPlanReviewer instead of Telegram."""
-        if not self._auto_plan_reviewer:
-            return PermissionDeny(message="AutoPlanReviewer not configured")
-
-        logger.info(
-            "auto_plan_review_started",
-            session_id=session_id,
-            chat_id=chat_id,
-            plan_length=len(plan_content),
-        )
-
-        result = await self._auto_plan_reviewer.review_plan(
-            plan_content=plan_content,
-            task_description=task_description,
-            session_id=session_id,
-            chat_id=chat_id,
-        )
-
-        if result.approved:
-            logger.info(
-                "auto_plan_review_approved",
-                session_id=session_id,
-                chat_id=chat_id,
-            )
-            return PlanReviewDecision(
-                permission=PermissionAllow(updated_input=tool_input),
-                clear_context=True,
-                target_mode="edit",
-            )
-
-        logger.info(
-            "auto_plan_review_revision_requested",
-            session_id=session_id,
-            chat_id=chat_id,
-            feedback=result.feedback,
-        )
-        return PermissionDeny(message=result.feedback or "Please revise the plan.")
-
     async def resolve_option(self, interaction_id: str, answer: str) -> bool:
         pending = self.pending.get(interaction_id)
         if not pending:
@@ -462,6 +412,14 @@ class InteractionCoordinator:
     def has_pending(self, chat_id: str) -> bool:
         interaction_id = self._chat_index.get(chat_id)
         return interaction_id is not None and interaction_id in self.pending
+
+    def pending_kind(self, chat_id: str) -> str | None:
+        """Kind ('question' | 'plan_review') of the interaction awaiting this
+        chat, or None — lets a caller describe the wait/resume by what the user
+        is actually doing rather than assuming an approval."""
+        interaction_id = self._chat_index.get(chat_id)
+        pending = self.pending.get(interaction_id) if interaction_id else None
+        return pending.kind if pending else None
 
     def cancel_pending(self, chat_id: str) -> list[str]:
         cancelled: list[str] = []

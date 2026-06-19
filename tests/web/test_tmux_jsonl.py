@@ -163,7 +163,8 @@ async def test_fallback_discovery_picks_newest_jsonl(tmp_path, monkeypatch):
 
     # Skip the 3-second grace window.
     monkeypatch.setattr("leashd.web.tmux_jsonl._DISCOVER_AFTER", 0.0)
-    tailer._started = 0.0  # so file mtimes pass the >= started - 5.0 gate
+    tailer._started = 0.0
+    tailer._started_wall = 0.0  # so file mtimes pass the >= started_wall - 5.0 gate
 
     proj = root / encode_project_dir("/work")
     proj.mkdir(parents=True)
@@ -180,6 +181,31 @@ async def test_fallback_discovery_picks_newest_jsonl(tmp_path, monkeypatch):
     path = tailer._resolve_path()
     assert path == newer
     assert sess.claude_uuid == "uuid-newer"
+
+
+async def test_fallback_discovery_skips_stale_jsonl(tmp_path, monkeypatch):
+    # Regression: the mtime gate compared st_mtime (epoch) against
+    # time.monotonic() (always true), so discovery grabbed a stale session
+    # file from a previous conversation and replayed it. With a real
+    # wall-clock start, a file modified well before the tailer started must
+    # NOT be adopted.
+    sess = _fake_session("/work", uuid=None)
+    tailer, _events, root = _tailer(tmp_path, sess)
+    from leashd.agents.runtimes.tmux_session import encode_project_dir
+
+    monkeypatch.setattr("leashd.web.tmux_jsonl._DISCOVER_AFTER", 0.0)
+
+    proj = root / encode_project_dir("/work")
+    proj.mkdir(parents=True)
+    stale = proj / "uuid-stale.jsonl"
+    stale.write_text("{}\n")
+    import os
+    import time
+
+    os.utime(stale, (time.time() - 3600, time.time() - 3600))
+
+    assert tailer._resolve_path() is None
+    assert sess.claude_uuid is None
 
 
 async def test_drain_tolerates_truncated_json_line(tmp_path):

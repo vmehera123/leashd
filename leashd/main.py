@@ -114,7 +114,10 @@ async def _run_cli(config: LeashdConfig) -> None:
 async def _run_telegram(config: LeashdConfig) -> None:
     from leashd.connectors.telegram import TelegramConnector
 
-    connector = TelegramConnector(config.telegram_bot_token)  # type: ignore[arg-type]
+    connector = TelegramConnector(
+        config.telegram_bot_token,  # type: ignore[arg-type]
+        api_base_url=config.telegram_api_base_url,
+    )
     engine = build_engine(config, connector=connector)
     hook_server = await _maybe_start_tmux_hook_server(config)
     await engine.startup()
@@ -265,7 +268,10 @@ async def _run_multi(config: LeashdConfig) -> None:
 
     message_store = await _create_message_store(config)
     tmux_sm = _maybe_tmux_session_manager(config)
-    telegram_connector = TelegramConnector(config.telegram_bot_token)  # type: ignore[arg-type]
+    telegram_connector = TelegramConnector(
+        config.telegram_bot_token,  # type: ignore[arg-type]
+        api_base_url=config.telegram_api_base_url,
+    )
     web_connector = WebConnector(
         config, message_store=message_store, tmux_session_manager=tmux_sm
     )
@@ -354,8 +360,19 @@ async def _main() -> None:
 
     # leashd spawns Claude Code as subprocesses — it must never be
     # treated as a nested Claude Code session, even when started from
-    # a Claude Code terminal.
-    os.environ.pop("CLAUDECODE", None)
+    # a Claude Code terminal. Claude Code 2.1.x flags a child session via
+    # CLAUDE_CODE_SESSION_ID + CLAUDE_CODE_CHILD_SESSION (not just CLAUDECODE)
+    # and a nested child writes NO transcript JSONL — which is the tmux
+    # runtime's only source of the assistant's reply text + cost, so the leak
+    # silently breaks streaming (stale-transcript replay). Strip the whole set.
+    for _nesting_var in (
+        "CLAUDECODE",
+        "CLAUDE_CODE_SESSION_ID",
+        "CLAUDE_CODE_CHILD_SESSION",
+        "CLAUDE_CODE_ENTRYPOINT",
+        "CLAUDE_CODE_SSE_PORT",
+    ):
+        os.environ.pop(_nesting_var, None)
 
     inject_global_config_as_env()
 

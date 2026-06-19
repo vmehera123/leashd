@@ -289,7 +289,6 @@ def build_engine(
             connector,
             config,
             event_bus,
-            auto_plan_reviewer=builtins.auto_plan_reviewer,
             message_logger=message_logger,
         )
 
@@ -331,7 +330,6 @@ def build_engine(
         sandbox=sandbox,
         audit=audit,
         approval_coordinator=approval_coordinator,
-        auto_approver=builtins.auto_approver,
         interaction_coordinator=interaction_coordinator,
         event_bus=event_bus,
         plugin_registry=builtins.registry,

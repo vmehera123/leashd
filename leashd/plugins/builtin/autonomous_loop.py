@@ -38,7 +38,6 @@ from leashd.core.events import (
 )
 from leashd.core.test_output import detect_test_failure
 from leashd.plugins.base import LeashdPlugin, PluginMeta
-from leashd.plugins.builtin._cli_evaluator import evaluate_phase_outcome
 
 if TYPE_CHECKING:
     from typing import Protocol
@@ -280,17 +279,7 @@ class AutonomousLoop(LeashdPlugin):
         if not state:
             return
 
-        try:
-            decision = await evaluate_phase_outcome(
-                response_content,
-                current_phase="test",
-                retry_count=state.retry_count,
-                max_retries=self._max_retries,
-            )
-            test_failed = decision.action in ("retry", "escalate")
-        except Exception:
-            logger.exception("phase_evaluator_failed_in_loop")
-            test_failed = detect_test_failure(response_content)
+        test_failed = detect_test_failure(response_content)
 
         if not test_failed:
             await self._handle_success(chat_id, state)

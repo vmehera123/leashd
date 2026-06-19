@@ -69,7 +69,7 @@ Sessions are **multi-turn**: the agent remembers the full conversation context, 
 
 - **Python 3.10+**
 - **At least one agent runtime:**
-  - **[Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)** — installed and authenticated. The `claude` command must work in your terminal. *(default runtime)*
+  - **[Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)** — installed and authenticated. The `claude` command must work in your terminal. The default `tmux` runtime also needs **`tmux`** installed; the other Claude runtimes (`claude-cli`, `claude-code`) need only `claude`.
   - **[Codex CLI](https://developers.openai.com/codex/cli)** — installed and authenticated. The `codex` command must work in your terminal.
 
 ### 1. Install
@@ -151,7 +151,7 @@ Restart the daemon and both connectors run simultaneously — same engine, same 
 
 **`tmux` runtime** — runs a real interactive `claude` TUI in a tmux pane (`leashd runtime set tmux`, experimental). Tool calls still flow through leashd's sandbox/policy/approval/audit pipeline via Claude Code `PreToolUse` hooks — approval parity with `claude-cli`. Selectable from the Web UI runtime dropdown; works without a running WebUI. A shared `build_agent_cli_args` helper ensures `tmux` and `claude-cli` launch identical `claude` invocations (same effort, tools, MCP, plugins).
 
-**Task orchestrator v4 (new default)** — slim `implement → verify` pipeline with no plan or review phases by default. Implement runs under Claude's native `auto` permission policy (degrades gracefully to `acceptEdits` on SDK runtimes); verify always exercises the change via agent-browser plus a code-quality diff review — no change-shape gating. Opt review back in with `--phases implement,verify,review`. Roll back to v3 with `leashd task version set v3`.
+**Task orchestrator v4 (new default)** — slim `implement → verify` pipeline with no plan or review phases by default. Implement runs under Claude's native `auto` permission policy (degrades gracefully to `acceptEdits` on SDK runtimes); verify always exercises the change via agent-browser plus a code-quality diff review — no change-shape gating. Opt review back in with `--phases implement,verify,review`.
 
 **`/auto` mode** — new mode that mirrors Claude Code's native `auto` permission policy. Safe actions run without prompting; when Claude escalates a risky action leashd applies its full YAML policy and approval pipeline. Modes now map directly to Claude modes: `auto` ↔ auto, `edit` ↔ acceptEdits, `plan` ↔ plan. The non-overridable hard-deny floor (credentials, `rm -rf`, `sudo`, force-push) still applies in `auto`.
 
@@ -175,10 +175,10 @@ leashd runtime set claude-cli    # switch to Claude CLI (default)
 
 | Runtime | Backend | Session Resume | Autonomous Mode | Install | Stability |
 |---|---|---|---|---|---|
-| **claude-cli** *(default)* | Claude CLI (native subprocess) | NDJSON session IDs | Full (task orchestrator, auto-approver) | `claude` CLI authenticated | beta |
+| **tmux** *(default)* | Interactive `claude` TUI in a tmux pane | Session tokens | Full (PreToolUse hook bridge, auto-approver) | `claude` CLI + `tmux` | beta |
+| **claude-cli** | Claude CLI (native subprocess) | NDJSON session IDs | Full (task orchestrator, auto-approver) | `claude` CLI authenticated | beta |
 | **claude-code** | Claude Code CLI (SDK) | SDK sessions | Full (task orchestrator, auto-approver) | `claude` CLI + `claude-agent-sdk` | stable |
 | **codex** | Codex CLI | Thread IDs | Full (streaming + approval bridge) | `codex` CLI authenticated | beta |
-| **tmux** *(experimental)* | Interactive `claude` TUI in a tmux pane | Session tokens | Full (PreToolUse hook bridge, auto-approver) | `claude` CLI + `tmux` | experimental |
 
 All runtimes support interactive approval, streaming responses, and the full autonomous pipeline. Each runtime declares its capabilities via an agent capabilities model — leashd adapts features like session resume and approval routing automatically.
 
@@ -303,18 +303,11 @@ leashd turns set <N>     # set max turns to N (positive integer)
 
 Max turns can also be adjusted from the WebUI Settings page.
 
-### Task orchestrator version
+### Task orchestrator
 
-```bash
-leashd task version show       # display current version (v1, v2, v3, or v4)
-leashd task version set v4     # default — linear implement→verify with native auto + always-browser verify
-leashd task version set v3     # linear plan→implement→verify→review pipeline
-leashd task version set v2     # LLM-driven think-act-observe loop
-```
-
-Restart the daemon (`leashd restart`) to pick up the new version. v4 is the
-default for new installs; existing configs with an explicit `v2` / `v3`
-value are preserved. Pass `--phases implement,verify,review` to a v4
+`/task` runs a single linear `implement → verify` pipeline — Claude's native
+`auto` permission policy in implement and an always-on agent-browser e2e +
+code-quality review in verify. Pass `--phases implement,verify,review` to a
 `/task` to opt the review phase back in.
 
 ### Thinking effort

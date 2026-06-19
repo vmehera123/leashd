@@ -178,9 +178,10 @@ async def _retry_on_network_error(
 
 
 class TelegramConnector(BaseConnector):
-    def __init__(self, bot_token: str) -> None:
+    def __init__(self, bot_token: str, api_base_url: str | None = None) -> None:
         super().__init__()
         self._token = bot_token
+        self._api_base_url = api_base_url
         self._app: Application | None = None  # type: ignore[type-arg]
         self._cleanup_tasks: set[asyncio.Task[None]] = set()
         self._activity_message_id: dict[str, str] = {}
@@ -190,9 +191,12 @@ class TelegramConnector(BaseConnector):
         self._approval_tool_names: dict[str, str] = {}  # approval_id -> tool_name
 
     async def start(self) -> None:
-        self._app = (
-            Application.builder().token(self._token).concurrent_updates(True).build()
-        )
+        builder = Application.builder().token(self._token).concurrent_updates(True)
+        if self._api_base_url:
+            builder = builder.base_url(f"{self._api_base_url}/bot").base_file_url(
+                f"{self._api_base_url}/file/bot"
+            )
+        self._app = builder.build()
         self._app.add_handler(
             CommandHandler(
                 [

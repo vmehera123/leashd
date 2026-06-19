@@ -101,6 +101,49 @@ async def test_followup_injected_not_queued(config, audit_logger, tmp_path):
     await store.teardown()
 
 
+async def test_followup_not_injected_during_autonomous_task(
+    config, audit_logger, tmp_path
+):
+    """A chat reply during an autonomous /task phase (task_run_id set) must NOT
+    be merged into the phase turn — the orchestrator owns the phase lifecycle.
+    It is queued instead, so the phase turn cannot deadlock on an un-processed
+    follow-up (T-7)."""
+    store = SqliteSessionStore(tmp_path / "fu_task.db")
+    await store.setup()
+    gate = asyncio.Event()
+    agent = _live_agent(gate, inject_result=True)
+    conn = MockConnector(support_streaming=True)
+
+    eng = Engine(
+        connector=conn,
+        agent=agent,
+        config=config,
+        session_manager=SessionManager(),
+        audit=audit_logger,
+        store=store,
+    )
+
+    task = asyncio.create_task(eng.handle_message("u1", "first", "c1"))
+    while not agent.prompts:
+        await asyncio.sleep(0)
+
+    # Mark the executing session as part of an autonomous task run.
+    active = eng.session_manager.get("u1", "c1")
+    assert active is not None
+    active.task_run_id = "run-1"
+
+    result = await eng.handle_message("u1", "commit this", "c1")
+    assert result == ""
+
+    # Not merged into the phase turn — queued for after instead.
+    assert agent.injected == []
+    assert eng._pending_messages.get("c1")
+
+    gate.set()
+    await task
+    await store.teardown()
+
+
 async def test_followup_falls_back_to_queue_when_inject_declined(config, audit_logger):
     """If inject_followup returns False (no live turn), fall back to the queue +
     re-submit path — but still without the Send-now interrupt prompt."""

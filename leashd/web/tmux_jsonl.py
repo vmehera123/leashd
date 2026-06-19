@@ -67,6 +67,7 @@ class JSONLTailer:
         self._inode: int | None = None
         self._seen: set[str] = set()
         self._started = time.monotonic()
+        self._started_wall = time.time()
         self._skip_history_on_resume_pending = resume
 
     def _resolve_path(self) -> Path | None:
@@ -91,7 +92,7 @@ class JSONLTailer:
         candidates = [
             p
             for p in proj_dir.glob("*.jsonl")
-            if p.stat().st_mtime >= self._started - 5.0
+            if p.stat().st_mtime >= self._started_wall - 5.0
         ]
         if not candidates:
             return None

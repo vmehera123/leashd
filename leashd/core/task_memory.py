@@ -2,7 +2,7 @@
 
 Each task gets a ``.leashd/tasks/{run_id}.md`` file in the project directory.
 The coding agent writes progress into this file; the orchestrator reads it
-back to build context for the conductor and subsequent agent prompts.
+back to build context for subsequent agent/phase prompts.
 """
 
 import re
@@ -149,8 +149,8 @@ def seed(run_id: str, task: str, working_dir: str, *, version: str = "v1") -> Pa
 
     ``version`` selects the template layout:
 
-    - ``"v1"`` / ``"v2"`` (default) — legacy 10-section layout used by the
-      conductor-driven orchestrator.
+    - ``"v1"`` / ``"v2"`` (default) — legacy 10-section layout from the
+      removed v1/v2 orchestrators; no current orchestrator requests it.
     - ``"v3"`` — slim 4-phase layout (Plan / Implementation Summary /
       Verification / Review) used by the linear Claude-Code-native
       orchestrator.
@@ -245,8 +245,8 @@ def read(run_id: str, working_dir: str, *, max_chars: int = 8000) -> str | None:
     The head contains the most important context (task description,
     assessment, codebase context, plan) while the tail contains recent
     progress and the checkpoint section.  When the file exceeds
-    *max_chars*, keep 60% head + 40% tail so the conductor always sees
-    both the original plan and the latest status.
+    *max_chars*, keep 60% head + 40% tail so the next phase prompt always
+    sees both the original plan and the latest status.
 
     Returns ``None`` if the file doesn't exist.
     """
@@ -351,7 +351,7 @@ def update_checkpoint(
     ``True`` on success.
 
     When *completed_phases* and *pending_phases* are provided, the section
-    includes explicit phase-tracking lines so the conductor can see at a
+    includes explicit phase-tracking lines so the orchestrator can see at a
     glance which mandatory phases (test, verify) have not yet run.
     """
     fp = path(run_id, working_dir)

@@ -1,8 +1,9 @@
-# Autonomous mode policy — minimal interruption for AI-driven approval.
+# Autonomous mode policy — minimal interruption for unattended /task runs.
 #
-# Routine dev actions are auto-allowed so the AutoApprover plugin is only
-# consulted for genuinely risky operations.  Hard blocks are absolute and
-# cannot be overridden by any approver.
+# Routine dev actions are auto-allowed by policy; a `require_approval` rule is
+# auto-allowed under /task (the gatekeeper auto-approves because a task is
+# running) and routed to the human in interactive modes. Hard blocks are
+# absolute and cannot be overridden by any approver.
 #
 # Usage:
 #   LEASHD_POLICY_FILES=leashd/policies/autonomous.yaml

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import shutil
 from unittest.mock import MagicMock
 
 import pytest
@@ -10,9 +12,11 @@ import pytest
 from leashd.agents.base import ToolActivity
 from leashd.agents.runtimes.tmux_session import (
     _HOOK_NO_EXPIRY_SECONDS,
+    HumanTypingProfile,
     TmuxClaudeSession,
     TmuxSessionManager,
     TmuxTurn,
+    TypingStep,
     _hook_decision,
     _hook_is_decisive,
     _hook_to_permreq,
@@ -20,6 +24,7 @@ from leashd.agents.runtimes.tmux_session import (
     encode_project_dir,
     find_session_jsonl,
     get_or_create_tmux_session_manager,
+    plan_human_typing,
     reset_tmux_session_manager,
 )
 from leashd.agents.types import PermissionAllow, PermissionDeny
@@ -89,6 +94,7 @@ class _StubGatekeeper:
         *,
         task_description=None,
         session_mode=None,
+        task_run_id=None,
     ):
         self.calls.append((tool_name, tool_input, session_id, chat_id, session_mode))
         self.task_descriptions.append(task_description)
@@ -159,6 +165,66 @@ def test_write_managed_settings(cfg):
     stop = data["hooks"]["Stop"][0]["hooks"][0]
     assert stop["async"] is True
     assert stop["headers"]["X-Leashd-Token"] == "s3cr3t-token"
+
+
+def test_credential_deny_rules_mirror_analyzer_floor():
+    """T-8: the native deny globs must cover the same credential files the
+    analyzer flags (_CREDENTIAL_PATTERNS) and must NOT over-block ordinary
+    source files. Drift here is a silent security gap (hook-denied reads are
+    bypassed under claude 2.1.x; the native floor is what actually blocks)."""
+    from pathlib import PurePosixPath
+
+    from leashd.agents.runtimes.tmux_session import _credential_deny_rules
+    from leashd.core.safety.analyzer import analyze_path
+
+    rules = _credential_deny_rules()
+    assert rules
+    assert all(r.startswith(("Read(", "Edit(", "Write(")) for r in rules)
+    read_globs = [r[len("Read(") : -1] for r in rules if r.startswith("Read(")]
+
+    def covered(path: str) -> bool:
+        p = PurePosixPath(path)
+        return any(p.full_match(g.lstrip("~/")) for g in read_globs)
+
+    credentials = [
+        ".env",
+        "config/.env.local",
+        "server.key",
+        "tls/cert.pem",
+        "keys/id_rsa",
+        "keys/id_ed25519",
+        "aws/credentials",
+        "app/secrets.json",
+        "store.keystore",
+        "auth/token.json",
+        ".ssh/config",
+        ".aws/credentials",
+        "client.p12",
+        "client.pfx",
+    ]
+    for c in credentials:
+        assert analyze_path(c).is_credential, f"analyzer should flag {c}"
+        assert covered(c), f"deny globs should cover {c}"
+
+    for ordinary in ["main.py", "src/app.ts", "README.md", "docs/guide.md"]:
+        assert not analyze_path(ordinary).is_credential, f"{ordinary} is not a cred"
+        assert not covered(ordinary), f"deny globs must not over-block {ordinary}"
+
+
+def test_managed_settings_carry_credential_deny_floor(cfg):
+    """T-8: both the tmux and the claude-cli auto-floor managed settings inject
+    a native permissions.deny floor for credential reads/writes."""
+    tsm = TmuxSessionManager(cfg)
+    deny = json.loads(tsm.write_managed_settings("s1").read_text())["permissions"][
+        "deny"
+    ]
+    assert "Read(**/.env)" in deny
+    assert "Read(**/*.key)" in deny
+    assert "Write(**/.env)" in deny
+    cli_deny = json.loads(tsm.write_auto_floor_settings("s2").read_text())[
+        "permissions"
+    ]["deny"]
+    assert "Read(**/.env)" in cli_deny
 
 
 def test_pre_tool_hook_timeout_outlives_human_window(cfg):
@@ -424,7 +490,6 @@ async def test_on_pre_tool_exit_plan_mode_approved_allows_interactive(cfg):
     tsm._by_uuid["u1"] = cs.session_id
 
     interactions = MagicMock()
-    interactions._auto_plan_reviewer = None
 
     async def _hpr(chat_id, tool_input, *, plan_content=None):
         return PlanReviewDecision(
@@ -545,26 +610,6 @@ async def test_on_pre_tool_plan_mode_blocks_write_before_approval(cfg):
     assert cs.plan_state.plan_file_path == "/work/.claude/plans/p.md"
 
 
-async def test_on_pre_tool_threads_task_description_to_gatekeeper(cfg):
-    """GAP 5: the live pane's latest prompt is passed as task_description."""
-    tsm = TmuxSessionManager(cfg)
-    cs = _session(tsm)
-    cs.last_prompt = "refactor the auth module"
-    tsm._by_uuid["u1"] = cs.session_id
-    gk = _StubGatekeeper(PermissionAllow(updated_input={}))
-    _bind(tsm, gk, MagicMock())
-
-    await tsm.on_pre_tool(
-        {
-            "session_id": "u1",
-            "cwd": "/work",
-            "tool_name": "Bash",
-            "tool_input": {"command": "ls"},
-        }
-    )
-    assert gk.task_descriptions == ["refactor the auth module"]
-
-
 async def test_on_pre_tool_exit_plan_mode_discovers_disk_plan(cfg, tmp_path):
     """Parity: real plan content is discovered from ~/.claude/plans/*.md when
     ExitPlanMode carries no inline plan."""
@@ -581,7 +626,6 @@ async def test_on_pre_tool_exit_plan_mode_discovers_disk_plan(cfg, tmp_path):
 
     seen = {}
     interactions = MagicMock()
-    interactions._auto_plan_reviewer = None
 
     async def _hpr(chat_id, tool_input, *, plan_content=None):
         seen["plan_content"] = plan_content
@@ -634,6 +678,42 @@ async def test_on_lifecycle_stop_completes_turn_subagent_does_not(cfg):
     await tsm.on_lifecycle("SessionStart", {"session_id": "u1", "cwd": "/work"})
     assert not turn.stop_event.is_set()
     await tsm.on_lifecycle("Stop", {"session_id": "u1", "cwd": "/work"})
+    assert turn.stop_event.is_set()
+
+
+def test_bind_uuid_terminal_event_skips_pending_cwd_fallback(cfg):
+    """A terminal hook (Stop/SessionEnd) with an unseen UUID must NOT adopt the
+    in-flight spawn via the cwd fallback — that stale hook from a reaped prior
+    pane would otherwise complete the fresh pane's turn before it ran."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm, cwd="/work")
+    tsm._pending_by_cwd["/work"] = cs.session_id
+
+    assert tsm._bind_uuid("/work", "stale-uuid", allow_pending_bind=False) is None
+    assert "stale-uuid" not in tsm._by_uuid
+    assert cs.claude_uuid is None
+    assert tsm._bind_uuid("/work", "fresh-uuid") is cs
+
+
+async def test_on_lifecycle_stale_stop_does_not_complete_fresh_pane_turn(cfg):
+    """Verify-phase false-escalation regression: a new phase pane is spawned
+    (pending_by_cwd points at it) and a just-reaped prior pane's in-flight Stop
+    arrives with a now-unknown UUID. It must NOT complete the fresh turn — that
+    empty num_turns=0 turn made /task verify read an unwritten result and
+    falsely escalate 'missing Status: line'."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm, session_id="verify2", cwd="/work")
+    tsm._pending_by_cwd["/work"] = "verify2"
+    turn = cs.begin_turn(on_text_chunk=None, on_tool_activity=None)
+
+    await tsm.on_lifecycle("Stop", {"session_id": "stale-impl-uuid", "cwd": "/work"})
+    assert not turn.stop_event.is_set()
+    assert "stale-impl-uuid" not in tsm._by_uuid
+
+    await tsm.on_lifecycle(
+        "SessionStart", {"session_id": "verify2-uuid", "cwd": "/work"}
+    )
+    await tsm.on_lifecycle("Stop", {"session_id": "verify2-uuid", "cwd": "/work"})
     assert turn.stop_event.is_set()
 
 
@@ -887,7 +967,8 @@ def test_build_agent_cli_args_web_mode_disallows_webfetch(cfg, tmp_path):
 def test_build_claude_command_has_parity_flags(cfg, tmp_path):
     tsm = TmuxSessionManager(cfg)
     tsm._claude_path = "/usr/bin/claude"
-    cmd = tsm._build_claude_command(
+    cmd, sysprompt_path = tsm._build_claude_command(
+        session_id="parity",
         session=_parity_session(tmp_path),
         settings=None,
         perm_mode="acceptEdits",
@@ -897,12 +978,38 @@ def test_build_claude_command_has_parity_flags(cfg, tmp_path):
         append_system_prompt="SYS",
     )
     assert cmd.startswith("env CLAUDECODE= CLAUDE_CODE_ENTRYPOINT=cli ")
-    assert "--settings" in cmd  # tmux-only hook bridge retained
+    assert "--settings" in cmd
     for flag in ("--effort", "--setting-sources", "--model", "--disallowedTools"):
         assert flag in cmd, flag
-    assert "--max-turns" not in cmd  # interactive: never turn-bounded
-    assert "Task" in cmd  # subagent fan-out suppressed
+    assert "--max-turns" not in cmd
+    assert "Task" in cmd
     assert "Agent" in cmd
+    assert sysprompt_path is None
+    assert "--append-system-prompt-file" not in cmd
+    assert "--append-system-prompt SYS" in cmd
+
+
+def test_build_claude_command_swaps_large_sysprompt_for_file(cfg, tmp_path):
+    tsm = TmuxSessionManager(cfg)
+    tsm._claude_path = "/usr/bin/claude"
+    tsm._socket_dir = tmp_path / "sock"
+    long_sys = "X" * (tsm._APPEND_SYSPROMPT_INLINE_MAX + 1)
+    cmd, sysprompt_path = tsm._build_claude_command(
+        session_id="huge",
+        session=_parity_session(tmp_path),
+        settings=None,
+        perm_mode="acceptEdits",
+        settings_path=tmp_path / "managed.json",
+        model="claude-x",
+        resume_uuid=None,
+        append_system_prompt=long_sys,
+    )
+    assert sysprompt_path is not None
+    assert sysprompt_path.read_text() == long_sys
+    assert "--append-system-prompt-file" in cmd
+    assert "--append-system-prompt " not in cmd
+    assert "XXXXX" not in cmd
+    assert len(cmd) < 4 * 1024
 
 
 class _FakePane:
@@ -1007,7 +1114,7 @@ async def test_await_ready_recognizes_bypass_footer_as_ready(cfg, no_real_sleep)
 async def test_submit_pastes_then_enters_until_started(cfg, no_real_sleep):
     tsm = TmuxSessionManager(cfg)
     cs = _session(tsm)
-    # Composer still echoes the prompt until the agent starts working.
+    cs.apply_typing_profile(HumanTypingProfile(enabled=False))
     pane = _FakePane(
         [
             "> run the tests",
@@ -1017,9 +1124,353 @@ async def test_submit_pastes_then_enters_until_started(cfg, no_real_sleep):
     )
     cs.attach(object(), pane)
     await cs.submit("run the tests")
-    assert pane.sent[0] == ("run the tests", True)  # pasted literally
-    assert ("Enter", False) in pane.sent  # and submitted
+    assert pane.sent[0] == ("run the tests", True)
+    assert ("Enter", False) in pane.sent
     assert sum(1 for k, _ in pane.sent if k == "Enter") >= 1
+
+
+class _ScriptedRNG:
+    def __init__(self, *, random_val=0.0, randint_seq=None, uniform_val=0.0):
+        self._random_val = random_val
+        self._randint_seq = list(randint_seq or [])
+        self._uniform_val = uniform_val
+
+    def random(self):
+        return self._random_val
+
+    def randint(self, a, _b):
+        return self._randint_seq.pop(0) if self._randint_seq else a
+
+    def uniform(self, _a, _b):
+        return self._uniform_val
+
+
+_TYPING_SAMPLES = [
+    "fix the login bug",
+    "a",
+    "-rf is a tricky leading dash",
+    "deploy --force then --rollback if it breaks",
+    "emoji 🚀 and unicode ünïcödé stay intact",
+    'run `pytest -q` && echo "done"; rm note.txt',
+    "x" * 280,
+]
+
+
+@pytest.mark.parametrize("text", _TYPING_SAMPLES)
+@pytest.mark.parametrize("seed", range(25))
+def test_plan_human_typing_preserves_text_and_bounds(text, seed):
+    import random as _random
+
+    profile = HumanTypingProfile(seed=seed)
+    steps = plan_human_typing(text, profile, _random.Random(seed))  # noqa: S311
+    assert "".join(s.text for s in steps) == text
+    for s in steps:
+        assert s.text != "" or text == ""
+        assert s.delay >= 0.0
+        assert s.mode in ("type", "paste", "legacy")
+        if s.mode == "type":
+            assert 1 <= len(s.text) <= profile.max_chunk
+
+
+def test_plan_human_typing_disabled_is_single_legacy_burst():
+    profile = HumanTypingProfile(enabled=False)
+    steps = plan_human_typing("hello world", profile, _ScriptedRNG())
+    assert steps == [TypingStep("hello world", 0.0, "legacy")]
+
+
+def test_plan_human_typing_multiline_is_single_paste():
+    profile = HumanTypingProfile()
+    text = "line one\nline two\nline three"
+    steps = plan_human_typing(text, profile, _ScriptedRNG(random_val=0.99))
+    assert steps == [TypingStep(text, 0.0, "paste")]
+
+
+def test_plan_human_typing_overlong_is_single_paste():
+    profile = HumanTypingProfile(max_type_chars=10)
+    steps = plan_human_typing("this is well over ten chars", profile, _ScriptedRNG())
+    assert steps == [TypingStep("this is well over ten chars", 0.0, "paste")]
+
+
+def test_plan_human_typing_paste_strategy_when_roll_low():
+    profile = HumanTypingProfile(paste_probability=0.4)
+    steps = plan_human_typing("short prompt", profile, _ScriptedRNG(random_val=0.1))
+    assert steps == [TypingStep("short prompt", 0.0, "paste")]
+
+
+def test_plan_human_typing_type_strategy_chunks_whole_text():
+    profile = HumanTypingProfile(paste_probability=0.4, hybrid_probability=0.25)
+    rng = _ScriptedRNG(random_val=0.99, uniform_val=0.05)
+    steps = plan_human_typing("abc", profile, rng)
+    assert [s.mode for s in steps] == ["type", "type", "type"]
+    assert "".join(s.text for s in steps) == "abc"
+    assert steps[-1].delay == 0.0
+    assert all(s.delay == 0.05 for s in steps[:-1])
+
+
+def test_plan_human_typing_hybrid_types_prefix_then_pastes_tail():
+    profile = HumanTypingProfile(paste_probability=0.4, hybrid_probability=0.25)
+    rng = _ScriptedRNG(random_val=0.5, randint_seq=[3])
+    steps = plan_human_typing("abcdefg", profile, rng)
+    assert [s.mode for s in steps] == ["type", "type", "type", "paste"]
+    assert "".join(s.text for s in steps) == "abcdefg"
+    assert steps[-1] == TypingStep("defg", 0.0, "paste")
+
+
+def test_send_literal_chunk_delivers_content_via_stdin_unbracketed(cfg, monkeypatch):
+    from leashd.agents.runtimes import tmux_session as ts
+
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    pane = _FakePaneWithServer(["composer"])
+    cs.attach(object(), pane)
+
+    calls: list[tuple[list[str], str | None]] = []
+
+    def fake_run(argv, **kwargs):
+        from types import SimpleNamespace
+
+        calls.append((list(argv), kwargs.get("input")))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(ts.subprocess, "run", fake_run)
+
+    chunk = "-rf ; danger"
+    cs._send_literal_chunk(chunk)
+    load = next(a for a, _ in calls if "load-buffer" in a)
+    paste = next(a for a, _ in calls if "paste-buffer" in a)
+    load_stdin = next(s for a, s in calls if "load-buffer" in a)
+    assert load_stdin == chunk
+    assert chunk not in load
+    assert chunk not in paste
+    assert "-p" not in paste
+    assert paste[paste.index("-t") + 1] == pane.pane_id
+
+
+def _record_delivery(monkeypatch):
+    from leashd.agents.runtimes import tmux_session as ts
+
+    calls: list[tuple[list[str], str | None]] = []
+
+    def fake_run(argv, **kwargs):
+        from types import SimpleNamespace
+
+        calls.append((list(argv), kwargs.get("input")))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(ts.subprocess, "run", fake_run)
+    return calls
+
+
+def _reconstruct(calls) -> str:
+    out = []
+    for argv, stdin in calls:
+        if "send-keys" in argv and "-l" in argv:
+            out.append(argv[-1])
+        elif "load-buffer" in argv:
+            out.append(stdin or "")
+    return "".join(out)
+
+
+async def test_deliver_prompt_type_path_delivers_full_text_unbracketed(
+    cfg, monkeypatch
+):
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    pane = _FakePaneWithServer(["composer"])
+    cs.attach(object(), pane)
+    cs.apply_typing_profile(HumanTypingProfile())
+    cs._rng = _ScriptedRNG(random_val=0.99, uniform_val=0.0)
+
+    calls = _record_delivery(monkeypatch)
+    await cs._deliver_prompt("type all of this -x flag included")
+
+    assert _reconstruct(calls) == "type all of this -x flag included"
+    assert pane.sent == []
+    paste_calls = [argv for argv, _ in calls if "paste-buffer" in argv]
+    assert paste_calls
+    assert all("-p" not in argv for argv in paste_calls)
+
+
+async def test_deliver_prompt_paste_path_uses_bracketed_buffer(cfg, monkeypatch):
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    pane = _FakePaneWithServer(["composer"])
+    cs.attach(object(), pane)
+    cs.apply_typing_profile(HumanTypingProfile())
+    cs._rng = _ScriptedRNG(random_val=0.0)
+
+    calls = _record_delivery(monkeypatch)
+    await cs._deliver_prompt("paste me as one block")
+
+    assert _reconstruct(calls) == "paste me as one block"
+    subcmds = [argv[argv.index("-S") + 2] for argv, _ in calls]
+    assert "load-buffer" in subcmds
+    assert "paste-buffer" in subcmds
+    paste_call = next(argv for argv, _ in calls if "paste-buffer" in argv)
+    assert "-p" in paste_call
+
+
+async def test_submit_human_typing_delivers_full_text_then_enter(
+    cfg, monkeypatch, no_real_sleep
+):
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    pane = _FakePaneWithServer(["typing...", "Working... (esc to interrupt)"])
+    cs.attach(object(), pane)
+    cs.apply_typing_profile(HumanTypingProfile())
+    cs._rng = _ScriptedRNG(random_val=0.99, uniform_val=0.0)
+
+    calls = _record_delivery(monkeypatch)
+    await cs.submit("run the tests please")
+
+    assert _reconstruct(calls) == "run the tests please"
+    assert ("Enter", False) in pane.sent
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="requires a real tmux binary")
+async def test_real_tmux_typing_delivers_exact_bytes(tmp_path):
+    import contextlib
+    import os
+    import secrets
+
+    import libtmux
+
+    sock_path = f"/tmp/leashd_it_{secrets.token_hex(4)}.sock"
+    server = libtmux.Server(socket_path=sock_path)
+    sess = server.new_session(
+        session_name="leashd_typing_it",
+        start_directory=str(tmp_path),
+        window_command="cat",
+        attach=False,
+        x=120,
+        y=30,
+    )
+    try:
+        cs = TmuxClaudeSession(
+            session_id="it",
+            chat_id="c",
+            user_id="u",
+            working_directory=str(tmp_path),
+            mode="default",
+            task_run_id=None,
+            plan_origin=None,
+            tmux_name=sess.name,
+            settings_path=tmp_path / "x",
+            typing=HumanTypingProfile(
+                seed=5,
+                min_delay_s=0.0,
+                max_delay_s=0.0,
+                paste_probability=0.0,
+                hybrid_probability=0.0,
+            ),
+        )
+        cs.attach(sess, sess.active_window.active_pane)
+        await asyncio.sleep(0.3)
+        text = 'deploy -rf and --force; echo "ok" && ls'
+        await cs._deliver_prompt(text)
+        captured = ""
+        for _ in range(20):
+            await asyncio.sleep(0.1)
+            captured = cs.capture()
+            if text in captured:
+                break
+        assert text in captured
+    finally:
+        server.kill()
+        with contextlib.suppress(OSError):
+            os.unlink(sock_path)
+
+
+class _FakePaneWithServer(_FakePane):
+    """``_FakePane`` carrying a fake ``server`` so the paste-buffer route
+    can resolve a socket / tmux bin without touching the real system."""
+
+    def __init__(self, screens, *, socket_path="/tmp/leashd.sock", pane_id="%42"):
+        super().__init__(screens)
+        from types import SimpleNamespace
+
+        self.server = SimpleNamespace(
+            socket_path=socket_path, socket_name=None, tmux_bin="/usr/bin/tmux"
+        )
+        self.pane_id = pane_id
+
+
+def test_send_keys_long_text_routes_through_paste_buffer(cfg, monkeypatch):
+    """tmux's ``send-keys -l`` rejects an argv past its internal limit
+    (`['command too long']`). Anything above ``_SEND_KEYS_INLINE_LIMIT``
+    must route through ``load-buffer`` / ``paste-buffer`` instead so a
+    pane-reuse with a long mode-instruction preamble (`/web`) submits
+    cleanly."""
+    from leashd.agents.runtimes import tmux_session as ts
+
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    pane = _FakePaneWithServer(["composer"])
+    cs.attach(object(), pane)
+
+    calls: list[list[str]] = []
+    stdin_seen: list[str | None] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        stdin_seen.append(kwargs.get("input"))
+        from types import SimpleNamespace
+
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(ts.subprocess, "run", fake_run)
+
+    long_text = "x" * (ts._SEND_KEYS_INLINE_LIMIT + 1)
+    cs.send_keys(long_text, literal=True)
+
+    assert pane.sent == []  # libtmux.send_keys NOT used for the long path
+    subcommands = [c[c.index("-S") + 2] if "-S" in c else c[1] for c in calls]
+    assert subcommands[0] == "load-buffer"
+    assert subcommands[1] == "paste-buffer"
+    load_call = calls[0]
+    assert load_call[-1] == "-"  # load-buffer reads from stdin
+    assert stdin_seen[0] == long_text
+    paste_call = calls[1]
+    assert "-p" in paste_call
+    assert "-d" in paste_call
+    assert "-t" in paste_call
+    assert paste_call[paste_call.index("-t") + 1] == pane.pane_id
+
+
+def test_send_keys_short_text_uses_inline_send_keys(cfg, monkeypatch):
+    from leashd.agents.runtimes import tmux_session as ts
+
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    pane = _FakePaneWithServer(["composer"])
+    cs.attach(object(), pane)
+
+    called: list[list[str]] = []
+    monkeypatch.setattr(
+        ts.subprocess, "run", lambda argv, **_: called.append(list(argv))
+    )
+
+    cs.send_keys("short prompt", literal=True)
+    assert pane.sent == [("short prompt", True)]
+    assert called == []  # never falls through to the paste-buffer path
+
+
+def test_send_keys_long_text_load_buffer_failure_raises(cfg, monkeypatch):
+    from leashd.agents.runtimes import tmux_session as ts
+
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    pane = _FakePaneWithServer(["composer"])
+    cs.attach(object(), pane)
+
+    def fake_run(argv, **_):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(returncode=1, stdout="", stderr="no server")
+
+    monkeypatch.setattr(ts.subprocess, "run", fake_run)
+    with pytest.raises(AgentError, match="load-buffer"):
+        cs.send_keys("x" * (ts._SEND_KEYS_INLINE_LIMIT + 1), literal=True)
 
 
 class _FakeCompleted:
@@ -1096,7 +1547,9 @@ def _prep_spawn(tsm, server, monkeypatch):
     monkeypatch.setattr(
         tsm, "write_managed_settings", lambda sid: tsm._socket_dir / f"{sid}.json"
     )
-    monkeypatch.setattr(tsm, "_build_claude_command", lambda **k: "claude --foo")
+    monkeypatch.setattr(
+        tsm, "_build_claude_command", lambda **k: ("claude --foo", None)
+    )
     monkeypatch.setattr(tj, "JSONLTailer", _FakeTailer)
 
 
@@ -1355,6 +1808,7 @@ class _StubFloorGatekeeper:
         *,
         task_description=None,
         session_mode=None,
+        task_run_id=None,
     ):
         self.check_calls.append((tool_name, session_mode))
         return self.check_result
@@ -1368,6 +1822,7 @@ class _StubFloorGatekeeper:
         *,
         task_description=None,
         session_mode=None,
+        task_run_id=None,
     ):
         # Returns None to signal "defer to native", or a PermissionAllow/Deny
         # for an explicit-rule gate (mirrors the real check_auto_gated).
@@ -1489,6 +1944,59 @@ async def test_on_pre_tool_auto_task_run_id_uses_full_pipeline(cfg):
     assert out["hookSpecificOutput"]["permissionDecision"] == "allow"
     assert gk.check_calls
     assert not gk.floor_calls
+
+
+async def test_on_pre_tool_marks_turn_activity(cfg):
+    """Every tool call is progress: PreToolUse must refresh the turn's
+    last_activity so the no-progress watchdog never finalizes an
+    actively-tool-calling turn (the implement-phase 'no summary' regression,
+    where ~79 tool calls did not reset the 600s idle timer)."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm, mode="auto", task_run_id="t1")
+    tsm._by_uuid["u1"] = cs.session_id
+    turn = cs.begin_turn(on_text_chunk=None, on_tool_activity=None)
+    turn.last_activity = 0.0
+    gk = _StubFloorGatekeeper(check_result=PermissionAllow(updated_input={}))
+    _bind(tsm, gk)
+
+    await tsm.on_pre_tool(
+        {
+            "session_id": "u1",
+            "cwd": "/work",
+            "tool_name": "Write",
+            "tool_input": {"file_path": "/work/x.py"},
+            "permission_mode": "default",
+        }
+    )
+    assert turn.last_activity > 0.0
+
+
+async def test_on_pre_tool_streams_tool_activity(cfg):
+    """The PreToolUse hook drives the live tool-activity indicator directly, so
+    /task shows progress even when the JSONL transcript tailer never finds the
+    session file (T-3) — the hook is the only reliable signal under tmux."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm, mode="auto", task_run_id="t1")
+    tsm._by_uuid["u1"] = cs.session_id
+    activities: list = []
+
+    async def on_act(a):
+        activities.append(a)
+
+    cs.begin_turn(on_text_chunk=None, on_tool_activity=on_act)
+    gk = _StubFloorGatekeeper(check_result=PermissionAllow(updated_input={}))
+    _bind(tsm, gk)
+
+    await tsm.on_pre_tool(
+        {
+            "session_id": "u1",
+            "cwd": "/work",
+            "tool_name": "Bash",
+            "tool_input": {"command": "git log --oneline -20"},
+            "permission_mode": "default",
+        }
+    )
+    assert any(a is not None and a.tool_name == "Bash" for a in activities)
 
 
 async def test_on_pre_tool_auto_payload_mismatch_full_pipeline(cfg):
@@ -2349,12 +2857,12 @@ def pane_enters(pane) -> int:
     return sum(1 for k in pane.sent if k == ("Enter", False))
 
 
-async def test_answer_question_selector_no_match_logs_warning(cfg, no_real_sleep):
-    """A truly unmappable answer (free-text the model never offered, no
-    prefix overlap with any option) used to bail silently — the agent then
-    hung on the in-pane selector with no log evidence. Now leashd logs a
-    ``tmux_question_selector_no_match`` warning so the next hang is one log
-    line away from diagnosis."""
+async def test_answer_question_selector_no_match_routes_to_type_something(
+    cfg, no_real_sleep
+):
+    """A free-text answer matching no discrete option is driven into the
+    dialog's own "Type something" row (3 here) — select it, enter the text,
+    submit — instead of leaving the selector open and stranding the turn."""
     import structlog.testing
 
     tsm = TmuxSessionManager(cfg)
@@ -2363,12 +2871,52 @@ async def test_answer_question_selector_no_match_logs_warning(cfg, no_real_sleep
     with structlog.testing.capture_logs() as captured:
         ok = await cs.answer_question_selector(
             questions=[_AUQ_QUESTION],
+            answers={"Which database should I use?": "whatever you think is best"},
+            timeout=5.0,
+        )
+    assert ok is True
+    # ❯ row 1 → "Type something" row 3: two Downs, Enter, then the free text + Enter.
+    assert cs._pane.sent == [
+        ("Down", False),
+        ("Down", False),
+        ("Enter", False),
+        ("whatever you think is best", True),
+        ("Enter", False),
+    ]
+    events = [e["event"] for e in captured]
+    assert "tmux_question_freetext_submitted" in events
+    assert "tmux_question_selector_no_match" not in events
+
+
+_AUQ_SELECTOR_NO_FREETEXT = (
+    " Which database should I use?\n"
+    " ❯ 1. Postgres\n"
+    "      Use PostgreSQL.\n"
+    "   2. MySQL\n"
+    "      Use MySQL.\n"
+    " Enter to select · ↑/↓ to navigate · Esc to cancel"
+)
+
+
+async def test_answer_question_selector_no_match_no_freetext_logs_warning(
+    cfg, no_real_sleep
+):
+    """A dialog with no "Type something" row can't absorb free text — leashd
+    then logs the unmatched answer (one log line from diagnosis) and drives
+    nothing, rather than silently bailing."""
+    import structlog.testing
+
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    cs.attach(object(), _FakePane([_AUQ_SELECTOR_NO_FREETEXT]))
+    with structlog.testing.capture_logs() as captured:
+        ok = await cs.answer_question_selector(
+            questions=[_AUQ_QUESTION],
             answers={"Which database should I use?": "totally-different"},
             timeout=0.5,
         )
-    # No row picked → no keystrokes sent; but the drive still completes.
     assert cs._pane.sent == []
-    assert ok is True  # nothing matched, but no row to navigate either
+    assert ok is True
     events = [e["event"] for e in captured]
     assert "tmux_question_selector_no_match" in events
 
@@ -2913,6 +3461,86 @@ async def test_dialog_watcher_loop_dedups_same_fingerprint(cfg, monkeypatch):
     # is that no other tasks leaked.
     leaked = [t for t in tsm._perm_drive_tasks if not t.done() and not t.cancelled()]
     assert leaked == []
+
+
+def test_dedicated_selector_present_covers_hook_owned_dialogs(cfg):
+    """T-9: the four in-pane dialogs already driven by a dedicated hook path —
+    binary permission selector, AskUserQuestion selector + its submit-review
+    page, and the ExitPlanMode plan dialog — must report present so the Stage-2
+    watcher leaves them alone. A WebFetch consent (distinct wording, no
+    dedicated drive), a future generic dialog, and the idle composer must NOT,
+    so the watcher still bridges those."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    for hook_owned in (
+        _BASH_CONSENT_SCREEN,
+        _AUQ_SELECTOR,
+        _SUBMIT_REVIEW_SCREEN,
+        _PLAN_DIALOG,
+    ):
+        cs.attach(object(), _FakePane([hook_owned]))
+        assert cs.dedicated_selector_present() is True
+    for watcher_owned in (
+        _WEBFETCH_SCREEN,
+        _GENERIC_DIALOG_SCREEN,
+        "❯ \n ⏵⏵ accept edits on",
+    ):
+        cs.attach(object(), _FakePane([watcher_owned]))
+        assert cs.dedicated_selector_present() is False
+
+
+async def test_dialog_watcher_loop_skips_dedicated_selector(cfg, monkeypatch):
+    """Regression for T-9 (the reported verify-phase hang). While claude's
+    native binary permission selector is on screen the hook path
+    (answer_perm_selector) owns it; the watcher must NOT also bridge it via
+    handle_question. That second bridge blocks forever (the hook dismisses the
+    dialog, so no human ever answers the watcher's question), leaking a
+    PendingInteraction whose chat_index then makes the next /task phase prompt
+    get consumed by resolve_text — wedging the orchestrator with no
+    SESSION_COMPLETED. Contrast: a WebFetch consent IS still bridged
+    (test_dialog_watcher_loop_dedups_same_fingerprint)."""
+    import asyncio as _asyncio
+
+    from leashd.agents.runtimes.tmux_session import TmuxSessionManager
+
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+
+    captures = 0
+
+    class _PermSelectorPane:
+        def __init__(self):
+            self.sent: list[tuple[str, bool]] = []
+
+        def cmd(self, *args):
+            nonlocal captures
+            from types import SimpleNamespace
+
+            if args[0] == "list-panes":
+                return SimpleNamespace(stdout=["0" if captures < 4 else "1"])
+            captures += 1
+            return SimpleNamespace(stdout=_BASH_CONSENT_SCREEN.split("\n"))
+
+        def send_keys(self, *_a, **_k):
+            pass
+
+    cs.attach(object(), _PermSelectorPane())
+
+    bridge_calls: list[str] = []
+
+    async def _stub_bridge(_cs, match):
+        bridge_calls.append(match.fingerprint)
+
+    tsm._bridge_native_dialog = _stub_bridge  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        "leashd.agents.runtimes.tmux_session._NATIVE_DIALOG_POLL_INTERVAL_S",
+        0.001,
+    )
+
+    task = _asyncio.create_task(tsm._dialog_watcher_loop(cs))
+    await _asyncio.wait_for(task, timeout=2.0)
+
+    assert bridge_calls == []
 
 
 def test_sessions_for_chat_filters_by_chat(cfg):

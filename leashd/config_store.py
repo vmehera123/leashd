@@ -165,15 +165,6 @@ def inject_global_config_as_env(*, force: bool = False) -> None:
     ):
         os.environ["LEASHD_MAX_TOOL_CALLS"] = str(max_tool_calls)
 
-    # task_orchestrator_version lives at top level (CLI writes it there).
-    # Must be bridged here, not via _AUTONOMOUS_FIELD_MAP — the autonomous
-    # injector only sees keys under `autonomous:`.
-    orchestrator_version = data.get("task_orchestrator_version")
-    if orchestrator_version and (
-        force or "LEASHD_TASK_ORCHESTRATOR_VERSION" not in os.environ
-    ):
-        os.environ["LEASHD_TASK_ORCHESTRATOR_VERSION"] = str(orchestrator_version)
-
     _inject_autonomous_config(data, force=force)
     _inject_browser_config(data, force=force)
     _inject_web_config(data, force=force)
@@ -182,15 +173,10 @@ def inject_global_config_as_env(*, force: bool = False) -> None:
 
 
 _AUTONOMOUS_FIELD_MAP: dict[str, str] = {
-    "auto_approver": "LEASHD_AUTO_APPROVER",
-    "auto_plan": "LEASHD_AUTO_PLAN",
     "auto_pr": "LEASHD_AUTO_PR",
     "auto_pr_base_branch": "LEASHD_AUTO_PR_BASE_BRANCH",
     "autonomous_loop": "LEASHD_AUTONOMOUS_LOOP",
     "task_max_retries": "LEASHD_TASK_MAX_RETRIES",
-    "task_conductor_model": "LEASHD_TASK_CONDUCTOR_MODEL",
-    "task_conductor_timeout": "LEASHD_TASK_CONDUCTOR_TIMEOUT",
-    "task_memory_max_chars": "LEASHD_TASK_MEMORY_MAX_CHARS",
 }
 
 
@@ -496,8 +482,6 @@ _CONFIG_SECTION_MAP: dict[str, dict[str, str]] = {
 
 _AUTONOMOUS_KEYS = {
     "enabled",
-    "auto_approver",
-    "auto_plan",
     "auto_pr",
     "auto_pr_base_branch",
     "autonomous_loop",

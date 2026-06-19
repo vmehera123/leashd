@@ -194,8 +194,6 @@ def _configure_autonomous(
     config = dict(existing)
     config["enabled"] = True
     config.setdefault("policy", "autonomous")
-    config.setdefault("auto_approver", True)
-    config.setdefault("auto_plan", True)
 
     if _prompt_yes_no(
         "  Auto-create PRs when tasks complete?", default=True, input_fn=input_fn

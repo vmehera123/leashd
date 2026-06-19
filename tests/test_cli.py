@@ -1536,44 +1536,6 @@ class TestModelCli:
         assert all_dirs[str(tmp_path.resolve())]["claude_model"] == "opus"
 
 
-class TestTaskVersion:
-    def test_task_version_show_default(self, fake_config_dir, capsys):
-        from leashd.cli import _handle_task_version_show
-
-        _handle_task_version_show()
-        captured = capsys.readouterr()
-        # v4 is the default since the auto-mode orchestrator shipped.
-        assert "v4" in captured.out
-
-    def test_task_version_show_custom(self, fake_config_dir, capsys):
-        from leashd.cli import _handle_task_version_show
-
-        save_global_config({"task_orchestrator_version": "v3"})
-        _handle_task_version_show()
-        captured = capsys.readouterr()
-        assert "v3" in captured.out
-
-    def test_task_version_set_valid(self, fake_config_dir, capsys):
-        from leashd.cli import _handle_task_version_set
-
-        with patch("leashd.cli._notify_daemon_reload"):
-            _handle_task_version_set("v3")
-        captured = capsys.readouterr()
-        assert "\u2713" in captured.out
-        assert "v3" in captured.out
-        from leashd.config_store import load_global_config
-
-        data = load_global_config()
-        assert data["task_orchestrator_version"] == "v3"
-
-    def test_task_version_set_invalid(self, fake_config_dir):
-        from leashd.cli import _handle_task_version_set
-
-        with pytest.raises(SystemExit) as exc_info:
-            _handle_task_version_set("v999")
-        assert exc_info.value.code == 1
-
-
 class TestToolCalls:
     def test_tool_calls_show_default(self, fake_config_dir, capsys):
         from leashd.cli import _handle_tool_calls_show

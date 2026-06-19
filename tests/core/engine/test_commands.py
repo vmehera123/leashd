@@ -2455,9 +2455,9 @@ class TestTasksCommand:
     async def test_tasks_no_tasks_found(
         self, config, audit_logger, policy_engine, mock_connector
     ):
-        from leashd.plugins.builtin.task_orchestrator import TaskOrchestrator
+        from leashd.plugins.builtin.task_v4 import TaskV4Orchestrator
 
-        orch = create_autospec(TaskOrchestrator, instance=True)
+        orch = create_autospec(TaskV4Orchestrator, instance=True)
         orch.meta.name = "task_orchestrator"
         orch._store = AsyncMock()
         orch._store.load_recent_for_chat = AsyncMock(return_value=[])
@@ -2484,7 +2484,7 @@ class TestTasksCommand:
         self, config, audit_logger, policy_engine, mock_connector
     ):
         from leashd.core.task import TaskRun
-        from leashd.plugins.builtin.task_orchestrator import TaskOrchestrator
+        from leashd.plugins.builtin.task_v4 import TaskV4Orchestrator
 
         task = TaskRun(
             run_id="abcdef1234567890",
@@ -2497,7 +2497,7 @@ class TestTasksCommand:
             working_directory="/tmp",
         )
 
-        orch = create_autospec(TaskOrchestrator, instance=True)
+        orch = create_autospec(TaskV4Orchestrator, instance=True)
         orch.meta.name = "task_orchestrator"
         orch._store = AsyncMock()
         orch._store.load_recent_for_chat = AsyncMock(return_value=[task])
@@ -2571,7 +2571,7 @@ class TestTaskCommand:
 
         assert result == ""
         session = eng.session_manager.get("user1", "chat1")
-        assert session.mode == "task"
+        assert session.mode == "auto"
         assert len(captured_events) == 1
         assert captured_events[0].data["task"] == "Build a widget"
         assert captured_events[0].data["chat_id"] == "chat1"
@@ -4135,4 +4135,4 @@ class TestTaskTakesOverPriorWork:
 
         agent.cancel_chat.assert_awaited_once_with("chat1")
         session = eng.session_manager.get("user1", "chat1")
-        assert session.mode == "task"
+        assert session.mode == "auto"
