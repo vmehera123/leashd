@@ -371,9 +371,7 @@ class TestPushService:
 
         monkeypatch.setattr("os.write", _failing_write)
         with pytest.raises(OSError, match="No space"):
-            push_service.subscribe(
-                "web:full", {"endpoint": "https://e.co", "keys": {}}
-            )
+            push_service.subscribe("web:full", {"endpoint": "https://e.co", "keys": {}})
         assert list(tmp_path.glob("*.tmp")) == []
 
     def test_loads_subscriptions_from_disk(self, tmp_path, monkeypatch):

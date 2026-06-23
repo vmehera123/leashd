@@ -88,9 +88,7 @@ def create_tmux_hook_router(tsm: TmuxSessionManager) -> APIRouter:
         try:
             await tsm.on_lifecycle(event, body)
         except Exception:
-            logger.warning(
-                "tmux_hook_lifecycle_error", hook_event=event, exc_info=True
-            )
+            logger.warning("tmux_hook_lifecycle_error", hook_event=event, exc_info=True)
         return JSONResponse(content={})
 
     return router
