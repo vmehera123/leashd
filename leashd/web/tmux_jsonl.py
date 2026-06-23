@@ -133,7 +133,7 @@ class JSONLTailer:
                 obj = json.loads(line)
             except json.JSONDecodeError:
                 continue  # partial trailing line — retried next poll
-            if not isinstance(obj, dict):
+            if not isinstance(obj, dict):  # pragma: no cover
                 continue
             uid = obj.get("uuid")
             if isinstance(uid, str):
@@ -164,7 +164,7 @@ class JSONLTailer:
             self._resume_drop_pending = False
             return False
         self._resume_drop_pending = False
-        return record_type == "assistant"
+        return bool(record_type == "assistant")
 
     def _skip_resume_history(self, path: Path) -> None:
         if not self._skip_history_on_resume_pending:

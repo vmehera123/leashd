@@ -249,3 +249,75 @@ class TestTaskStore:
         assert loaded.started_at is not None
         assert loaded.phase_started_at is not None
         assert loaded.started_at.tzinfo is not None
+
+    async def test_load_recent_for_chat_empty(self, store):
+        result = await store.load_recent_for_chat("no-such-chat")
+        assert result == []
+
+    async def test_load_recent_for_chat_active_first(self, store):
+        done = _make_task(run_id="done", chat_id="chat1", phase="completed")
+        active = _make_task(run_id="active", chat_id="chat1", phase="implement")
+        await store.save(done)
+        await store.save(active)
+        result = await store.load_recent_for_chat("chat1")
+        assert len(result) == 2
+        assert result[0].run_id == "active"
+        assert result[1].run_id == "done"
+
+    async def test_load_recent_for_chat_limit(self, store):
+        for i in range(5):
+            t = _make_task(run_id=f"t{i}", chat_id="chat1", phase="completed")
+            await store.save(t)
+        result = await store.load_recent_for_chat("chat1", limit=2)
+        assert len(result) == 2
+
+    async def test_load_recent_for_chat_ignores_other_chats(self, store):
+        await store.save(_make_task(run_id="mine", chat_id="chat1"))
+        await store.save(_make_task(run_id="other", chat_id="chat2"))
+        result = await store.load_recent_for_chat("chat1")
+        assert len(result) == 1
+        assert result[0].run_id == "mine"
+
+    async def test_corrupted_json_fields_return_defaults(self, store):
+        task = _make_task()
+        await store.save(task)
+        await store._db.execute(
+            "UPDATE task_runs SET phase_context=?, phase_pipeline=?, "
+            "workspace_directories=?, settings_override=? WHERE run_id=?",
+            ("not-json", "not-json", "not-json", "not-json", task.run_id),
+        )
+        await store._db.commit()
+        loaded = await store.load(task.run_id)
+        assert loaded is not None
+        assert loaded.phase_context == {}
+        assert loaded.phase_pipeline == []
+        assert loaded.workspace_directories == []
+        assert loaded.settings_override is None
+
+    async def test_null_json_fields_return_defaults(self, store):
+        task = _make_task()
+        await store.save(task)
+        await store._db.execute(
+            "UPDATE task_runs SET phase_context=NULL, phase_pipeline=NULL, "
+            "workspace_directories=NULL, settings_override=NULL WHERE run_id=?",
+            (task.run_id,),
+        )
+        await store._db.commit()
+        loaded = await store.load(task.run_id)
+        assert loaded is not None
+        assert loaded.phase_context == {}
+        assert loaded.phase_pipeline == []
+        assert loaded.workspace_directories == []
+        assert loaded.settings_override is None
+
+    async def test_non_dict_settings_override_returns_none(self, store):
+        task = _make_task()
+        await store.save(task)
+        await store._db.execute(
+            "UPDATE task_runs SET settings_override=? WHERE run_id=?",
+            ("[1, 2, 3]", task.run_id),
+        )
+        await store._db.commit()
+        loaded = await store.load(task.run_id)
+        assert loaded is not None
+        assert loaded.settings_override is None

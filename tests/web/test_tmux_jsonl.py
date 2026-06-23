@@ -525,3 +525,51 @@ async def test_non_resume_still_replays_existing_history(tmp_path):
     tailer._skip_resume_history(path)
     await tailer._drain(path)
     assert [e["uuid"] for e in events] == ["a"]
+
+
+async def test_drain_skips_non_dict_json_lines(tmp_path):
+    sess = _fake_session("/work")
+    tailer, events, root = _tailer(tmp_path, sess)
+    from leashd.agents.runtimes.tmux_session import encode_project_dir
+
+    proj = root / encode_project_dir("/work")
+    proj.mkdir(parents=True)
+    jsonl = proj / "uuid-1.jsonl"
+    jsonl.write_text('[1, 2, 3]\n{"uuid": "a", "type": "assistant"}\n')
+
+    path = tailer._resolve_path()
+    await tailer._drain(path)
+    assert [e["uuid"] for e in events] == ["a"]
+
+
+async def test_skip_resume_history_handles_missing_file(tmp_path):
+    sess = _fake_session("/work", uuid="gone-uuid")
+    tailer, _events, _root = _resume_tailer(tmp_path, sess)
+    missing = tmp_path / "nonexistent.jsonl"
+    tailer._skip_resume_history(missing)
+    assert tailer._offset == 0
+
+
+async def test_resolve_path_fallback_preserves_existing_uuid(tmp_path):
+    from leashd.agents.runtimes.tmux_session import encode_project_dir
+
+    cwd = "/work"
+    proj_root = tmp_path / "myprojects"
+    proj_root.mkdir()
+    proj = proj_root / encode_project_dir(cwd)
+    proj.mkdir(parents=True)
+    other_jsonl = proj / "different-name.jsonl"
+    other_jsonl.write_text('{"uuid": "x"}\n')
+
+    events: list[dict] = []
+
+    async def on_event(_sess, obj):
+        events.append(obj)
+
+    sess = _fake_session(cwd, uuid="existing-uuid")
+    tailer = JSONLTailer(projects_root=proj_root, on_event=on_event, session=sess)
+    tailer._started -= 5.0
+
+    path = tailer._resolve_path()
+    assert path == other_jsonl
+    assert sess.claude_uuid == "existing-uuid"
