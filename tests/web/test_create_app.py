@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -60,8 +60,6 @@ class TestCreateApp:
 
     def test_no_static_mount_when_dir_missing(self, tmp_path):
         config = _config(tmp_path)
-        from unittest.mock import patch
-
         with patch("leashd.web.app.Path.is_dir", return_value=False):
             app = create_app(config, _ws_handler())
         route_types = [type(r).__name__ for r in app.routes]
@@ -81,7 +79,14 @@ class TestCreateApp:
         assert resp.status_code in (200, 403, 404)
 
     def test_websocket_endpoint_calls_handler(self, tmp_path):
-        handler = _ws_handler()
+        from fastapi import WebSocket
+
+        async def _accept_and_close(ws: WebSocket) -> None:
+            await ws.accept()
+            await ws.close()
+
+        handler = MagicMock()
+        handler.handle = AsyncMock(side_effect=_accept_and_close)
         config = _config(tmp_path)
         app = create_app(config, handler)
         client = TestClient(app, raise_server_exceptions=False)
