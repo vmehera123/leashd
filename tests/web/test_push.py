@@ -361,6 +361,21 @@ class TestPushService:
             svc = PushService()
         assert not svc.has_subscription("any-chat")
 
+    def test_save_subscriptions_cleanup_on_write_failure(
+        self, push_service, tmp_path, monkeypatch
+    ):
+        """Disk full mid-save — temp file cleaned up and error propagates."""
+
+        def _failing_write(fd, data):
+            raise OSError("No space left on device")
+
+        monkeypatch.setattr("os.write", _failing_write)
+        with pytest.raises(OSError, match="No space"):
+            push_service.subscribe(
+                "web:full", {"endpoint": "https://e.co", "keys": {}}
+            )
+        assert list(tmp_path.glob("*.tmp")) == []
+
     def test_loads_subscriptions_from_disk(self, tmp_path, monkeypatch):
         keys_path = tmp_path / "vapid_keys.json"
         keys_path.write_text(json.dumps({"private_key": "p", "public_key": "k"}))

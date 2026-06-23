@@ -9,7 +9,9 @@ import pytest
 
 from leashd.cc_plugins import (
     PluginInfo,
+    _parse_manifest,
     _safe_extractall,
+    _validate_name,
     disable_plugin,
     enable_plugin,
     get_enabled_plugin_paths,
@@ -332,6 +334,39 @@ class TestGetEnabledPluginPaths:
     def test_empty_when_none(self, fake_config_dir):
         paths = get_enabled_plugin_paths()
         assert paths == []
+
+    def test_skips_non_dict_config_entries(self, fake_plugins_dir):
+        with patch(
+            "leashd.cc_plugins.get_cc_plugins_config",
+            return_value={"junk": "not-a-dict"},
+        ):
+            assert get_enabled_plugin_paths() == []
+
+
+class TestValidateName:
+    def test_name_too_long_rejected(self):
+        with pytest.raises(ValueError, match="too long"):
+            _validate_name("a" * 200)
+
+    def test_invalid_characters_rejected(self):
+        with pytest.raises(ValueError, match="Invalid plugin name"):
+            _validate_name("Has Spaces!")
+
+    def test_valid_name_accepted(self):
+        _validate_name("my-plugin-1")
+
+
+class TestParseManifest:
+    def test_invalid_json_rejected(self):
+        with pytest.raises(ValueError, match=r"Invalid plugin\.json"):
+            _parse_manifest("not json {{{")
+
+    def test_non_object_rejected(self):
+        with pytest.raises(ValueError, match="must be a JSON object"):
+            _parse_manifest("[1, 2, 3]")
+
+    def test_valid_object_parsed(self):
+        assert _parse_manifest('{"name": "x"}') == {"name": "x"}
 
     def test_excludes_missing_dir(self, tmp_path, fake_config_dir, fake_plugins_dir):
         """Plugin in config but directory deleted from disk."""

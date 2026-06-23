@@ -93,6 +93,9 @@ class TestParseFrontmatter:
         assert _parse_frontmatter("---\nname: foo\n") == {}
 
     def test_invalid_yaml(self):
+        assert _parse_frontmatter("---\nname: foo\nname: [1, 2\n---\n") == {}
+
+    def test_non_string_scalar_frontmatter(self):
         assert _parse_frontmatter("---\n:::bad{{\n---\n") == {}
 
     def test_non_dict_frontmatter(self):
@@ -340,3 +343,17 @@ class TestBuiltinAgentBrowserSkill:
         from leashd.skills import remove_agent_browser_skill
 
         remove_agent_browser_skill()  # should not raise
+
+    def test_ensure_replaces_partial_install(self, fake_config_dir, fake_skills_dir):
+        """A target dir without SKILL.md (interrupted install) is wiped and
+        re-copied rather than left half-populated."""
+        from leashd.skills import ensure_agent_browser_skill
+
+        stale = fake_skills_dir / "agent-browser"
+        stale.mkdir(parents=True)
+        (stale / "leftover.txt").write_text("stale")
+
+        ensure_agent_browser_skill()
+
+        assert (stale / "SKILL.md").is_file()
+        assert not (stale / "leftover.txt").exists()

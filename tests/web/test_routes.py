@@ -280,6 +280,63 @@ class TestSessionsEndpoint:
             assert data["sessions"][0]["message_count"] == 5
             assert data["sessions"][1]["session_id"] == "s2"
 
+    def test_workspace_query_filters_by_workspace_name(self, tmp_path, config):
+        leashd_dir = tmp_path / ".leashd"
+        leashd_dir.mkdir(exist_ok=True)
+
+        async def _seed():
+            async with aiosqlite.connect(str(leashd_dir / "sessions.db")) as db:
+                await db.execute(
+                    "CREATE TABLE sessions ("
+                    "  user_id TEXT, chat_id TEXT, session_id TEXT,"
+                    "  working_directory TEXT, workspace_name TEXT,"
+                    "  agent_resume_token TEXT, created_at TEXT, last_used TEXT,"
+                    "  total_cost REAL DEFAULT 0.0,"
+                    "  message_count INTEGER DEFAULT 0,"
+                    "  is_active INTEGER DEFAULT 1,"
+                    "  PRIMARY KEY (user_id, chat_id))"
+                )
+                await db.execute(
+                    "INSERT INTO sessions"
+                    " (user_id, chat_id, session_id, working_directory,"
+                    "  workspace_name, created_at, last_used, message_count,"
+                    "  total_cost, is_active)"
+                    " VALUES ('web', 'web:w1', 'w1', ?, 'myws',"
+                    "  '2026-03-17', '2026-03-17', 3, 0.0, 1)",
+                    (str(tmp_path),),
+                )
+                await db.commit()
+
+        asyncio.run(_seed())
+
+        with patch("leashd.web.routes.Path.home", return_value=tmp_path):
+            app = FastAPI()
+            app.include_router(create_rest_router(config, None))
+            c = TestClient(app)
+            resp = c.get("/api/sessions?workspace=myws", headers=_AUTH_HEADER)
+            data = resp.json()
+            assert len(data["sessions"]) == 1
+            assert data["sessions"][0]["session_id"] == "w1"
+
+    def test_operational_error_returns_empty(self, tmp_path, config):
+        leashd_dir = tmp_path / ".leashd"
+        leashd_dir.mkdir(exist_ok=True)
+
+        async def _seed():
+            async with aiosqlite.connect(str(leashd_dir / "sessions.db")) as db:
+                await db.execute("CREATE TABLE unrelated (x INTEGER)")
+                await db.commit()
+
+        asyncio.run(_seed())
+
+        with patch("leashd.web.routes.Path.home", return_value=tmp_path):
+            app = FastAPI()
+            app.include_router(create_rest_router(config, None))
+            c = TestClient(app)
+            resp = c.get(f"/api/sessions?path={tmp_path}", headers=_AUTH_HEADER)
+            assert resp.status_code == 200
+            assert resp.json()["sessions"] == []
+
     def test_includes_previews(self, tmp_path, config):
         leashd_dir = tmp_path / ".leashd"
         leashd_dir.mkdir(exist_ok=True)

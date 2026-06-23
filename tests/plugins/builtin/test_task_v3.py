@@ -39,6 +39,19 @@ from leashd.storage.sqlite import SqliteSessionStore
 from tests.conftest import MockConnector
 
 
+async def _wait_until(predicate, *, timeout: float = 5.0, interval: float = 0.01):
+    """Poll ``predicate`` until truthy or ``timeout`` elapses.
+
+    Replaces fixed ``asyncio.sleep`` waits that race the orchestrator's
+    background escalation task on a loaded CI runner.
+    """
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(interval)
+
+
 @pytest.fixture
 def event_bus() -> EventBus:
     return EventBus()
@@ -779,7 +792,7 @@ class TestAdvancement:
                 },
             )
         )
-        await asyncio.sleep(0.05)
+        await _wait_until(lambda: len(captured) >= 1)
 
         assert len(captured) == 1
         assert captured[0].data["reason"] == "Plan phase produced no plan content"

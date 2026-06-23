@@ -10,7 +10,7 @@ if TYPE_CHECKING:
 
 
 @runtime_checkable
-class SessionStore(Protocol):  # pragma: no cover
+class SessionStore(Protocol):
     async def save(self, session: Session) -> None: ...
 
     async def load(self, user_id: str, chat_id: str) -> Session | None: ...
@@ -23,7 +23,7 @@ class SessionStore(Protocol):  # pragma: no cover
 
 
 @runtime_checkable
-class MessageStore(Protocol):  # pragma: no cover
+class MessageStore(Protocol):
     async def save_message(
         self,
         *,

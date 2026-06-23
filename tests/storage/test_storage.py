@@ -134,6 +134,32 @@ class TestSqliteSessionStore:
         finally:
             await store.teardown()
 
+    async def test_legacy_claude_session_id_column_renamed(self, tmp_path):
+        """A pre-rename DB with claude_session_id is migrated to
+        agent_resume_token on setup()."""
+        import aiosqlite
+
+        db_path = tmp_path / "legacy.db"
+        async with aiosqlite.connect(str(db_path)) as db:
+            await db.execute(
+                "CREATE TABLE sessions ("
+                " user_id TEXT, chat_id TEXT, session_id TEXT,"
+                " claude_session_id TEXT, working_directory TEXT,"
+                " created_at TEXT, last_used TEXT, message_count INTEGER,"
+                " total_cost REAL, is_active INTEGER)"
+            )
+            await db.commit()
+
+        store = SqliteSessionStore(db_path)
+        await store.setup()
+        try:
+            cursor = await store._db.execute("PRAGMA table_info(sessions)")
+            cols = {row[1] for row in await cursor.fetchall()}
+            assert "agent_resume_token" in cols
+            assert "claude_session_id" not in cols
+        finally:
+            await store.teardown()
+
 
 class TestSessionManagerWithStore:
     async def test_get_or_create_without_store(self):

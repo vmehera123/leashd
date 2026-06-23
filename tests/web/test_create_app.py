@@ -94,16 +94,16 @@ class TestCreateApp:
             pass
         handler.handle.assert_called_once()
 
-    def test_dev_mode_no_cache_middleware_added(self, tmp_path):
+    def test_dev_mode_sets_no_cache_header(self, tmp_path):
         config = _config(tmp_path, web_dev_mode=True)
         app = create_app(config, _ws_handler())
-        mw_classes = [m.cls.__name__ for m in app.user_middleware]
-        assert (
-            any(
-                "no_cache" in name.lower()
-                or "cache" in name.lower()
-                or "http" in name.lower()
-                for name in mw_classes
-            )
-            or len(app.user_middleware) >= 0
-        )
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/health")
+        assert resp.headers["Cache-Control"] == "no-cache, no-store, must-revalidate"
+
+    def test_no_dev_mode_omits_no_cache_header(self, tmp_path):
+        config = _config(tmp_path, web_dev_mode=False)
+        app = create_app(config, _ws_handler())
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/health")
+        assert "no-store" not in resp.headers.get("Cache-Control", "")

@@ -96,6 +96,32 @@ def test_invalid_json_body_tolerated(client_tsm):
     assert r.status_code == 200
 
 
+def test_non_dict_json_body_coerced_to_empty(client_tsm):
+    client, tsm = client_tsm
+    r = client.post(
+        "/internal/tmux/hook/Stop",
+        json=[1, 2, 3],
+        headers={"X-Leashd-Token": "good-secret"},
+    )
+    assert r.status_code == 200
+    assert tsm.lifecycle_calls == [("Stop", {})]
+
+
+def test_lifecycle_error_tolerated():
+    class _BoomTSM(StubTSM):
+        async def on_lifecycle(self, event, body):
+            raise RuntimeError("lifecycle exploded")
+
+    client = _client(_BoomTSM())
+    r = client.post(
+        "/internal/tmux/hook/SessionEnd",
+        json={"session_id": "u1"},
+        headers={"X-Leashd-Token": "good-secret"},
+    )
+    assert r.status_code == 200
+    assert r.json() == {}
+
+
 def test_permission_request_returns_decision(client_tsm):
     client, _ = client_tsm
     r = client.post(
