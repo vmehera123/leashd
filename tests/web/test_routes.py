@@ -412,10 +412,6 @@ class TestConfigGetEndpoint:
                 "effort": "high",
                 "agent_runtime": "codex",
                 "default_mode": "plan",
-                "autonomous": {
-                    "enabled": True,
-                    "auto_pr": True,
-                },
                 "browser": {"backend": "agent-browser", "headless": True},
             }
             resp = client.get("/api/config", headers=_AUTH_HEADER)
@@ -424,8 +420,6 @@ class TestConfigGetEndpoint:
             assert data["agent"]["effort"] == "high"
             assert data["agent"]["runtime"] == "codex"
             assert data["agent"]["default_mode"] == "plan"
-            assert data["autonomous"]["enabled"] is True
-            assert data["autonomous"]["auto_pr"] is True
             assert data["browser"]["backend"] == "agent-browser"
             assert data["browser"]["headless"] is True
 
@@ -442,7 +436,6 @@ class TestConfigGetEndpoint:
             data = resp.json()
             assert data["agent"]["effort"] == "xhigh"
             assert data["agent"]["runtime"] == "claude-code"
-            assert data["autonomous"]["enabled"] is False
             assert data["browser"]["backend"] == "playwright"
 
 
@@ -517,20 +510,6 @@ class TestConfigPutEndpoint:
         assert data["success"] is False
         assert "backend" in data["reason"]
 
-    def test_updates_autonomous_section(self, client):
-        with (
-            patch("leashd.web.routes.update_config_sections") as mock_update,
-            patch("leashd.web.routes.signal_reload"),
-        ):
-            resp = client.put(
-                "/api/config",
-                headers=_AUTH_HEADER,
-                json={"autonomous": {"enabled": True, "auto_plan": True}},
-            )
-            data = resp.json()
-            assert data["success"] is True
-            mock_update.assert_called_once()
-
     def test_auth_required(self, client):
         resp = client.put(
             "/api/config",
@@ -584,28 +563,6 @@ class TestConfigPutEndpoint:
             data = resp.json()
             assert data["success"] is False
             assert "disk full" in data["reason"]
-
-    def test_validates_non_bool_autonomous_enabled(self, client):
-        resp = client.put(
-            "/api/config",
-            headers=_AUTH_HEADER,
-            json={"autonomous": {"enabled": "yes"}},
-        )
-        assert resp.status_code == 400
-        data = resp.json()
-        assert data["success"] is False
-        assert "boolean" in data["reason"]
-
-    def test_validates_non_int_max_retries(self, client):
-        resp = client.put(
-            "/api/config",
-            headers=_AUTH_HEADER,
-            json={"autonomous": {"max_retries": "five"}},
-        )
-        assert resp.status_code == 400
-        data = resp.json()
-        assert data["success"] is False
-        assert "integer" in data["reason"]
 
     def test_validates_non_bool_headless(self, client):
         resp = client.put(

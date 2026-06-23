@@ -69,6 +69,8 @@ class JSONLTailer:
         self._started = time.monotonic()
         self._started_wall = time.time()
         self._skip_history_on_resume_pending = resume
+        self._resume_drop_pending = resume
+        self._resume_saw_synthetic = False
 
     def _resolve_path(self) -> Path | None:
         if self._path is not None and self._path.is_file():
@@ -138,6 +140,8 @@ class JSONLTailer:
                 if uid in self._seen:
                     continue
                 self._seen.add(uid)
+            if self._resume_drop_pending and self._drop_resume_artifact(obj):
+                continue
             try:
                 await self._on_event(self._session, obj)
             except Exception:
@@ -146,6 +150,21 @@ class JSONLTailer:
                     session_id=self._session.session_id,
                     exc_info=True,
                 )
+
+    def _drop_resume_artifact(self, obj: dict[str, Any]) -> bool:
+        """Return True for a record of claude's post-resume auto-continuation —
+        its synthetic ``isMeta`` prompt and the single reply that follows."""
+        record_type = obj.get("type")
+        if record_type not in ("user", "assistant"):
+            return False
+        if not self._resume_saw_synthetic:
+            if record_type == "user" and obj.get("isMeta") is True:
+                self._resume_saw_synthetic = True
+                return True
+            self._resume_drop_pending = False
+            return False
+        self._resume_drop_pending = False
+        return record_type == "assistant"
 
     def _skip_resume_history(self, path: Path) -> None:
         if not self._skip_history_on_resume_pending:

@@ -291,6 +291,7 @@ _NATIVE_DIALOG_SKIP_SETS: tuple[tuple[str, ...], ...] = (
     ("trust the files in this folder",),
     # ExitPlanMode / plan review live behind the plan-gate path.
     ("ExitPlanMode",),
+    ("Resume from summary", "Resume full session as-is"),
 )
 
 # Numbered-option row: optional ``❯`` highlight, then ``N.`` then label.
@@ -816,6 +817,8 @@ class TmuxClaudeSession:
     # text before the auto-accept fires, so the bypass mode is never
     # silently engaged.
     _BYPASS_DIALOG_MARKERS = ("Yes, I accept", "Bypass Permissions mode")
+    _RESUME_PICKER_MARKERS = ("Resume from summary", "Resume full session as-is")
+    _IDLE_MARKERS = ("shift+tab to cycle", "for shortcuts", "bypass permissions on")
 
     async def await_ready(self, timeout: float) -> bool:
         """Block until the Claude Code TUI can accept a prompt.
@@ -828,12 +831,34 @@ class TmuxClaudeSession:
         """
         deadline = time.monotonic() + timeout
         bypass_handled = False
+        resume_handled = False
         while time.monotonic() < deadline:
             screen = self.capture()
             if any(m in screen for m in self._TRUST_MARKERS):
                 # Accept the trust prompt (default highlighted = proceed).
                 self.send_keys("Enter", literal=False)
                 await asyncio.sleep(0.6)
+                continue
+            if not resume_handled and all(
+                m in screen for m in self._RESUME_PICKER_MARKERS
+            ):
+                self.send_keys("2", literal=True)
+                await asyncio.sleep(0.3)
+                self.send_keys("Enter", literal=False)
+                logger.info(
+                    "tmux_resume_picker_dismissed",
+                    tmux_name=self.tmux_name,
+                    choice="resume_full_as_is",
+                )
+                resume_handled = True
+                await asyncio.sleep(1.0)
+                while time.monotonic() < deadline:
+                    drained = self.capture()
+                    if "esc to interrupt" not in drained and any(
+                        m in drained for m in self._IDLE_MARKERS
+                    ):
+                        break
+                    await asyncio.sleep(0.4)
                 continue
             if not bypass_handled and all(
                 m in screen for m in self._BYPASS_DIALOG_MARKERS
@@ -1035,6 +1060,12 @@ class TmuxClaudeSession:
             or self.submit_review_present(s)
             or self.plan_selector_present(s)
         )
+
+    def is_idle_at_composer(self, screen: str | None = None) -> bool:
+        """True iff the pane shows the idle composer — a ready footer marker and
+        no ``esc to interrupt`` (claude is done, not mid-turn)."""
+        s = self.capture() if screen is None else screen
+        return "esc to interrupt" not in s and any(m in s for m in self._IDLE_MARKERS)
 
     def _plan_target_row(self, screen: str, target_mode: str) -> int:
         """The plan-dialog row to select. Row ORDER is stable across claude

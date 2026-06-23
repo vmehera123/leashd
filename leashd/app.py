@@ -348,9 +348,6 @@ def build_engine(
         ),
     )
 
-    if builtins.autonomous_loop:
-        builtins.autonomous_loop.set_engine(engine)
-
     if builtins.task_orchestrator:
         builtins.task_orchestrator.set_engine(engine)
 

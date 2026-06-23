@@ -308,18 +308,6 @@ class TestCreateBuiltinPlugins:
         assert result.task_orchestrator is not None
         assert isinstance(result.task_orchestrator, TaskV4Orchestrator)
 
-    def test_autonomous_loop_when_enabled(self, tmp_path):
-        audit = AuditLogger(tmp_path / "audit.jsonl")
-        config = LeashdConfig(approved_directories=[tmp_path], autonomous_loop=True)
-        result = create_builtin_plugins(
-            audit=audit,
-            config=config,
-            connector=None,
-            session_db_path=str(tmp_path / "s.db"),
-        )
-        assert result.autonomous_loop is not None
-        assert result.registry.get("autonomous_loop") is result.autonomous_loop
-
     def test_extra_plugins_appended(self, tmp_path):
         audit = AuditLogger(tmp_path / "audit.jsonl")
         config = LeashdConfig(approved_directories=[tmp_path])

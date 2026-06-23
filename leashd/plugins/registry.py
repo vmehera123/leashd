@@ -14,7 +14,6 @@ if TYPE_CHECKING:
     from leashd.core.config import LeashdConfig
     from leashd.core.safety.audit import AuditLogger
     from leashd.plugins.base import LeashdPlugin, PluginContext
-    from leashd.plugins.builtin.autonomous_loop import AutonomousLoop
     from leashd.plugins.builtin.task_v4 import TaskV4Orchestrator
 
 logger = structlog.get_logger()
@@ -71,7 +70,6 @@ class PluginRegistry:
 class BuiltinPlugins(BaseModel):
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
     registry: PluginRegistry
-    autonomous_loop: AutonomousLoop | None
     task_orchestrator: TaskV4Orchestrator | None
 
 
@@ -85,7 +83,6 @@ def create_builtin_plugins(
 ) -> BuiltinPlugins:
     """Instantiate and register all builtin plugins in one shot."""
     from leashd.plugins.builtin.audit_plugin import AuditPlugin
-    from leashd.plugins.builtin.autonomous_loop import AutonomousLoop
     from leashd.plugins.builtin.browser_tools import BrowserToolsPlugin
     from leashd.plugins.builtin.merge_resolver import MergeResolverPlugin
     from leashd.plugins.builtin.task_v4 import TaskV4Orchestrator
@@ -106,21 +103,6 @@ def create_builtin_plugins(
         MergeResolverPlugin(),
     ]:
         registry.register(plugin)
-
-    autonomous_loop = None
-    if config.autonomous_loop:
-        autonomous_loop = AutonomousLoop(
-            connector,
-            max_retries=config.autonomous_max_retries,
-            auto_pr=config.auto_pr,
-            auto_pr_base_branch=config.auto_pr_base_branch,
-        )
-        registry.register(autonomous_loop)
-        logger.info(
-            "autonomous_loop_enabled",
-            max_retries=config.autonomous_max_retries,
-            auto_pr=config.auto_pr,
-        )
 
     task_orchestrator: TaskV4Orchestrator | None = None
     if config.task_orchestrator:
@@ -148,6 +130,5 @@ def create_builtin_plugins(
 
     return BuiltinPlugins(
         registry=registry,
-        autonomous_loop=autonomous_loop,
         task_orchestrator=task_orchestrator,
     )

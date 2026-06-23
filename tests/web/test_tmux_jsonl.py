@@ -48,6 +48,106 @@ async def test_drain_dedups_and_tolerates_partial_lines(tmp_path):
     assert len(events) == 2
 
 
+def _resume_tailer(tmp_path, session):
+    events: list[dict] = []
+
+    async def on_event(_sess, obj):
+        events.append(obj)
+
+    root = tmp_path / "projects"
+    root.mkdir()
+    tailer = JSONLTailer(
+        projects_root=root, on_event=on_event, session=session, resume=True
+    )
+    return tailer, events, root
+
+
+async def test_drain_drops_resume_auto_continuation(tmp_path):
+    """On --resume, claude runs its own synthetic (``isMeta``) continuation turn
+    → 'No response requested.' before the user's real prompt. The tailer drops
+    that artifact (keyed on ``isMeta``, not text) so it never streams as the
+    resumed turn's reply."""
+    import json as _json
+
+    from leashd.agents.runtimes.tmux_session import encode_project_dir
+
+    sess = _fake_session("/work")
+    tailer, events, root = _resume_tailer(tmp_path, sess)
+    proj = root / encode_project_dir("/work")
+    proj.mkdir(parents=True)
+    jsonl = proj / "uuid-1.jsonl"
+    jsonl.write_text(
+        '{"uuid":"u1","type":"user","isMeta":true,"message":{"role":"user",'
+        '"content":"Continue from where you left off."}}\n'
+        '{"uuid":"a1","type":"assistant","message":{"role":"assistant",'
+        '"content":[{"type":"text","text":"No response requested."}]}}\n'
+        '{"uuid":"u2","type":"user","message":{"role":"user",'
+        '"content":"build the discovery script"}}\n'
+        '{"uuid":"a2","type":"assistant","message":{"role":"assistant",'
+        '"content":[{"type":"text","text":"Here is the discovery script."}]}}\n'
+    )
+    await tailer._drain(jsonl)
+    assert [e["uuid"] for e in events] == ["u2", "a2"]  # artifact u1/a1 dropped
+    assert "No response requested." not in _json.dumps(events)
+
+
+async def test_drain_drops_resume_artifact_after_metadata_preamble(tmp_path):
+    """Real `claude --resume` writes a metadata preamble (file-history-snapshot,
+    mode, permission-mode, …) BEFORE the synthetic prompt. The gate must not let
+    that preamble open it early — otherwise the artifact streams (the exact leak
+    from the bug transcript). The synthetic prompt here uses DIFFERENT wording to
+    prove detection is by ``isMeta``, not the hard-coded text."""
+    import json as _json
+
+    from leashd.agents.runtimes.tmux_session import encode_project_dir
+
+    sess = _fake_session("/work")
+    tailer, events, root = _resume_tailer(tmp_path, sess)
+    proj = root / encode_project_dir("/work")
+    proj.mkdir(parents=True)
+    jsonl = proj / "uuid-1.jsonl"
+    jsonl.write_text(
+        '{"uuid":"m1","type":"file-history-snapshot"}\n'
+        '{"uuid":"m2","type":"mode"}\n'
+        '{"uuid":"m3","type":"permission-mode"}\n'
+        '{"uuid":"u1","type":"user","isMeta":true,"message":{"role":"user",'
+        '"content":"Resume the prior session and keep going."}}\n'
+        '{"uuid":"a1","type":"assistant","message":{"role":"assistant",'
+        '"content":[{"type":"text","text":"No response requested."}]}}\n'
+        '{"uuid":"u2","type":"user","message":{"role":"user",'
+        '"content":"build the discovery script"}}\n'
+        '{"uuid":"a2","type":"assistant","message":{"role":"assistant",'
+        '"content":[{"type":"text","text":"Here is the discovery script."}]}}\n'
+    )
+    await tailer._drain(jsonl)
+    uuids = [e["uuid"] for e in events]
+    assert "u1" not in uuids
+    assert "a1" not in uuids
+    assert "No response requested." not in _json.dumps(events)
+    assert "a2" in uuids
+    assert "Here is the discovery script." in _json.dumps(events)
+
+
+async def test_drain_resume_without_artifact_keeps_real_reply(tmp_path):
+    """No auto-continuation (real prompt first) must NOT be dropped — the gate
+    can never strand the genuine response."""
+    from leashd.agents.runtimes.tmux_session import encode_project_dir
+
+    sess = _fake_session("/work")
+    tailer, events, root = _resume_tailer(tmp_path, sess)
+    proj = root / encode_project_dir("/work")
+    proj.mkdir(parents=True)
+    jsonl = proj / "uuid-1.jsonl"
+    jsonl.write_text(
+        '{"uuid":"u1","type":"user","message":{"role":"user",'
+        '"content":"the real prompt"}}\n'
+        '{"uuid":"a1","type":"assistant","message":{"role":"assistant",'
+        '"content":[{"type":"text","text":"the real answer"}]}}\n'
+    )
+    await tailer._drain(jsonl)
+    assert [e["uuid"] for e in events] == ["u1", "a1"]
+
+
 async def test_drain_handles_rotation(tmp_path):
     sess = _fake_session("/work")
     tailer, events, root = _tailer(tmp_path, sess)

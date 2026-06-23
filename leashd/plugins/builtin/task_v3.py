@@ -35,8 +35,7 @@ Plan review:
     section → escalate.
 
 PR creation:
-    Handled by :class:`AutonomousLoop`, not v3.  v3's pipeline ends at
-    ``review`` → ``completed``.
+    Not handled here.  v3's pipeline ends at ``review`` → ``completed``.
 
 Terminal states: ``completed``, ``failed``, ``escalated``, ``cancelled``.
 """

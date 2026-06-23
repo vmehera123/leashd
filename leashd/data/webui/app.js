@@ -2777,7 +2777,6 @@ const SettingsManager = {
       ${this._renderNotificationSection()}
       ${this._renderAgentSection(config.agent)}
       ${this._renderScopedSettingsSection(config)}
-      ${this._renderAutonomousSection(config.autonomous)}
       ${this._renderBrowserSection(config.browser)}
     </div>`;
     settingsBody.innerHTML = html;
@@ -3091,32 +3090,6 @@ const SettingsManager = {
     }
   },
 
-  _renderAutonomousSection(auto) {
-    const toggleRow = (label, key, value) => `
-      <div class="setting-row">
-        <div><div class="setting-label">${escapeHtml(label)}</div></div>
-        <label class="toggle-switch">
-          <input type="checkbox" data-setting="autonomous.${key}" ${value ? 'checked' : ''}>
-          <span class="toggle-slider"></span>
-        </label>
-      </div>`;
-
-    return `<div class="settings-section">
-      <h3>Autonomous</h3>
-      ${toggleRow("Enabled", "enabled", auto.enabled)}
-      ${toggleRow("Auto PR", "auto_pr", auto.auto_pr)}
-      <div class="setting-row" id="base-branch-row" ${!auto.auto_pr ? 'style="display:none"' : ''}>
-        <div><div class="setting-label">PR Base Branch</div></div>
-        <input type="text" class="text-input" data-setting="autonomous.auto_pr_base_branch" value="${escapeHtml(auto.auto_pr_base_branch || 'main')}">
-      </div>
-      ${toggleRow("Autonomous Loop", "autonomous_loop", auto.autonomous_loop)}
-      <div class="setting-row">
-        <div><div class="setting-label">Max Retries</div></div>
-        <input type="number" class="number-input" data-setting="autonomous.max_retries" value="${auto.max_retries || 3}" min="0" max="10">
-      </div>
-    </div>`;
-  },
-
   _renderBrowserSection(browser) {
     const backend = browser.backend || "playwright";
     return `<div class="settings-section">
@@ -3163,14 +3136,7 @@ const SettingsManager = {
 
     // Toggles
     for (const input of settingsBody.querySelectorAll('input[type="checkbox"]')) {
-      input.onchange = () => {
-        this._markDirty();
-        // Show/hide base branch row
-        if (input.dataset.setting === "autonomous.auto_pr") {
-          const row = document.getElementById("base-branch-row");
-          if (row) row.style.display = input.checked ? "" : "none";
-        }
-      };
+      input.onchange = () => this._markDirty();
     }
 
     // Text / number inputs
@@ -3270,20 +3236,6 @@ const SettingsManager = {
     const codexInput = settingsBody.querySelector('[data-setting="agent.codex_model"]');
     if (codexInput) agent.codex_model = codexInput.value.trim();
     if (Object.keys(agent).length) updates.agent = agent;
-
-    // Collect autonomous settings
-    const autonomous = {};
-    for (const input of settingsBody.querySelectorAll('[data-setting^="autonomous."]')) {
-      const key = input.dataset.setting.replace("autonomous.", "");
-      if (input.type === "checkbox") {
-        autonomous[key] = input.checked;
-      } else if (input.type === "number") {
-        autonomous[key] = parseInt(input.value, 10) || 0;
-      } else {
-        autonomous[key] = input.value;
-      }
-    }
-    if (Object.keys(autonomous).length) updates.autonomous = autonomous;
 
     // Collect browser settings
     const browser = {};

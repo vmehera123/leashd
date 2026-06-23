@@ -95,10 +95,15 @@ class FakeCS:
         # defer; _goal_indicator_seen selects the goal backstop branch.
         self.goal_active = False
         self._goal_indicator_seen = False
+        self._idle_at_composer = False
+        self._stream_text_on_submit = False
 
     @property
     def goal_indicator_seen(self):
         return self._goal_indicator_seen
+
+    def is_idle_at_composer(self, screen=None):
+        return self._idle_at_composer
 
     def pane_is_dead(self):
         return False
@@ -131,6 +136,9 @@ class FakeCS:
 
     async def submit(self, text):
         self.sent.append((text, True))
+        if self._stream_text_on_submit and self.turn is not None:
+            self.turn.text_parts.append(self._text)
+            self.turn.mark_activity()
         self.send_keys("Enter", literal=False)
 
     def complete_turn(self, *, is_error=False):
@@ -599,6 +607,43 @@ async def test_execute_no_progress_backstop_when_no_human(tmp_path):
     assert resp.is_error is True
     assert "no output" in resp.content
     assert cs.complete_calls == 1
+
+
+@pytest.mark.usefixtures("_advancing_clock")
+async def test_execute_idle_completion_backstop_when_stop_missed(tmp_path):
+    """Stop hook missed but claude finished (idle composer + assembled text):
+    the turn finalizes and delivers the reply instead of hanging forever."""
+    from structlog.testing import capture_logs
+
+    cs = FakeCS(text="the finished reply")
+    cs._complete_on_enter = False
+    cs._stream_text_on_submit = True
+    cs._idle_at_composer = True
+    agent = _agent(_cfg(tmp_path), FakeTSM(cs))
+
+    with capture_logs() as logs:
+        resp = await agent.execute("do it", _session(tmp_path))
+
+    assert "tmux_turn_idle_completed" in [e["event"] for e in logs]
+    assert resp.is_error is False
+    assert "the finished reply" in resp.content
+
+
+@pytest.mark.usefixtures("_advancing_clock")
+async def test_execute_idle_backstop_does_not_fire_while_busy(tmp_path):
+    """A pane still showing ``esc to interrupt`` (not idle) must not trip the
+    backstop — only the real Stop completes it."""
+    cs = FakeCS(text="streaming…")
+    cs._complete_on_enter = False
+    cs._stream_text_on_submit = True
+    cs._idle_at_composer = False
+    cfg = _cfg(tmp_path, tmux_turn_ceiling_seconds=1)
+    agent = _agent(cfg, FakeTSM(cs))
+
+    resp = await agent.execute("do it", _session(tmp_path))
+
+    assert resp.is_error is True
+    assert "timed out" in resp.content
 
 
 # ── /goal backstop (indicator-aware) ─────────────────────────────

@@ -1098,6 +1098,53 @@ async def test_await_ready_accepts_bypass_permissions_dialog(cfg, no_real_sleep)
     assert ("Enter", False) in pane.sent
 
 
+async def test_await_ready_dismisses_resume_picker_and_drains(cfg, no_real_sleep):
+    """Claude 2.1.x `--resume` shows a session picker. await_ready must
+    auto-select row 2 ("Resume full session as-is") — never ask the human —
+    then DRAIN claude's follow-on "Continue from where you left off." turn,
+    only returning once the composer is idle (NOT mid-turn). Without the drain,
+    that artifact would be captured as the real response ("No response
+    requested."), which is the exact failure observed."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    pane = _FakePane(
+        [
+            (
+                "Resume a previous conversation\n"
+                " ❯ 1. Resume from summary (recommended)\n"
+                "   2. Resume full session as-is\n"
+                "   3. Don't ask me again\n"
+                " Enter to confirm · Esc to cancel"
+            ),
+            "⏺ Continue from where you left off.\n  Working… (esc to interrupt)",
+            "> \n  shift+tab to cycle · ? for shortcuts",
+        ]
+    )
+    cs.attach(object(), pane)
+    assert await cs.await_ready(timeout=5.0) is True
+    assert ("2", True) in pane.sent
+    assert ("Enter", False) in pane.sent
+
+
+def test_is_idle_at_composer(cfg):
+    """Idle composer (a footer marker, no 'esc to interrupt') ⇒ True; a busy
+    pane (even with a footer marker) or an unrelated screen ⇒ False. The
+    busy/idle footers below are the REAL claude 2.1.185 strings — a working pane
+    co-renders 'esc to interrupt' on the same mode-footer line, which is the
+    invariant the backstop's no-false-positive guarantee depends on."""
+    cs = _session(TmuxSessionManager(cfg))
+    assert cs.is_idle_at_composer("> \n  shift+tab to cycle · ? for shortcuts") is True
+    assert cs.is_idle_at_composer("⏵⏵ accept edits on (shift+tab to cycle)") is True
+    assert (
+        cs.is_idle_at_composer(
+            "⏵⏵ accept edits on (shift+tab to cycle) · esc to interrupt"
+        )
+        is False
+    )
+    assert cs.is_idle_at_composer("⏺ Working… (esc to interrupt)") is False
+    assert cs.is_idle_at_composer("just some text") is False
+
+
 async def test_await_ready_recognizes_bypass_footer_as_ready(cfg, no_real_sleep):
     """``bypass permissions on`` is the bypass-mode footer marker; it must
     count as composer-ready alongside ``? for shortcuts`` / ``shift+tab
@@ -3032,6 +3079,22 @@ def test_detect_native_dialog_skips_trust_prompt():
     from leashd.agents.runtimes.tmux_session import _detect_native_dialog
 
     screen = "Do you trust the files in this folder?\n ❯ 1. Yes, proceed"
+    assert _detect_native_dialog(screen) is None
+
+
+def test_detect_native_dialog_skips_resume_picker():
+    """Claude 2.1.x `--resume` session picker is auto-handled in await_ready;
+    the dialog watcher must NOT bridge it to the human (the bug that surfaced
+    it as a spurious question and dropped the user's real prompt)."""
+    from leashd.agents.runtimes.tmux_session import _detect_native_dialog
+
+    screen = (
+        "Resume a previous conversation\n"
+        " ❯ 1. Resume from summary (recommended)\n"
+        "   2. Resume full session as-is\n"
+        "   3. Don't ask me again\n"
+        " Enter to confirm · Esc to cancel"
+    )
     assert _detect_native_dialog(screen) is None
 
 

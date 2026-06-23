@@ -1,7 +1,6 @@
 """Shared heuristic for detecting test failures in command output.
 
-Used by both ``TaskOrchestrator`` and ``AutonomousLoop`` to decide whether
-to retry, escalate, or proceed after a test run.
+Used to decide whether to retry, escalate, or proceed after a test run.
 """
 
 _FAILURE_INDICATORS = [

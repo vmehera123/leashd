@@ -1864,7 +1864,6 @@ class Engine:
                     f"Messages: {session.message_count}",
                     f"Total cost: {cost}",
                     f"Auto-approve: {auto_str}",
-                    f"Autonomous loop: {'enabled' if self.config.autonomous_loop else 'disabled'}",
                 ]
             )
             sid = self._executing_sessions.get(chat_id) or session.session_id

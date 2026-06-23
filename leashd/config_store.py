@@ -5,9 +5,12 @@ import os
 from pathlib import Path
 from typing import Any
 
+import structlog
 import yaml
 
 from leashd.exceptions import ConfigError
+
+logger = structlog.get_logger()
 
 _POLICIES_DIR = Path(__file__).parent / "policies"
 
@@ -165,19 +168,11 @@ def inject_global_config_as_env(*, force: bool = False) -> None:
     ):
         os.environ["LEASHD_MAX_TOOL_CALLS"] = str(max_tool_calls)
 
-    _inject_autonomous_config(data, force=force)
+    _inject_task_orchestrator_config(data, force=force)
     _inject_browser_config(data, force=force)
     _inject_web_config(data, force=force)
     _inject_codebase_memory_config(data, force=force)
     _inject_security_config(data, force=force)
-
-
-_AUTONOMOUS_FIELD_MAP: dict[str, str] = {
-    "auto_pr": "LEASHD_AUTO_PR",
-    "auto_pr_base_branch": "LEASHD_AUTO_PR_BASE_BRANCH",
-    "autonomous_loop": "LEASHD_AUTONOMOUS_LOOP",
-    "task_max_retries": "LEASHD_TASK_MAX_RETRIES",
-}
 
 
 def resolve_policy_name(name: str) -> Path:
@@ -196,45 +191,43 @@ def resolve_policy_name(name: str) -> Path:
     return path
 
 
-def get_autonomous_config(data: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Read the ``autonomous`` section from global config.
+def _inject_task_orchestrator_config(
+    data: dict[str, Any], *, force: bool = False
+) -> None:
+    """Bridge ``task_orchestrator`` + ``policy_files`` (and the deprecated
+    ``autonomous`` section) to ``LEASHD_*`` env vars."""
+    task_orchestrator = data.get("task_orchestrator")
+    policy_files = data.get("policy_files")
 
-    Returns an empty dict when the section is missing or not a dict.
-    """
-    if data is None:
-        data = load_global_config()
-    autonomous = data.get("autonomous", {})
-    if not isinstance(autonomous, dict):
-        return {}
-    return autonomous
+    legacy = data.get("autonomous")
+    if isinstance(legacy, dict):
+        used_legacy = False
+        if task_orchestrator is None and "enabled" in legacy:
+            task_orchestrator = legacy.get("enabled")
+            used_legacy = True
+        if not policy_files and legacy.get("policy"):
+            policy_files = [legacy["policy"]]
+            used_legacy = True
+        if used_legacy:
+            logger.warning(
+                "config_autonomous_section_deprecated",
+                hint=(
+                    "the `autonomous:` config block is deprecated — replace it "
+                    "with top-level `task_orchestrator: true` and "
+                    "`policy_files: [...]`"
+                ),
+            )
 
+    if task_orchestrator is not None:
+        key = "LEASHD_TASK_ORCHESTRATOR"
+        if force or key not in os.environ:
+            os.environ[key] = str(bool(task_orchestrator)).lower()
 
-def _inject_autonomous_config(data: dict[str, Any], *, force: bool = False) -> None:
-    """Bridge autonomous YAML config → LEASHD_* env vars."""
-    autonomous = get_autonomous_config(data)
-    if not autonomous.get("enabled"):
-        return
-
-    key = "LEASHD_TASK_ORCHESTRATOR"
-    if force or key not in os.environ:
-        os.environ[key] = "true"
-
-    policy = autonomous.get("policy")
-    if policy:
+    if isinstance(policy_files, list) and policy_files:
         key = "LEASHD_POLICY_FILES"
         if force or key not in os.environ:
-            resolved = resolve_policy_name(str(policy))
-            os.environ[key] = json.dumps([str(resolved)])
-
-    for yaml_key, env_key in _AUTONOMOUS_FIELD_MAP.items():
-        value = autonomous.get(yaml_key)
-        if value is None:
-            continue
-        if force or env_key not in os.environ:
-            if isinstance(value, bool):
-                os.environ[env_key] = str(value).lower()
-            else:
-                os.environ[env_key] = str(value)
+            resolved = [str(resolve_policy_name(str(p))) for p in policy_files]
+            os.environ[key] = json.dumps(resolved)
 
 
 def get_browser_config(data: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -480,14 +473,6 @@ _CONFIG_SECTION_MAP: dict[str, dict[str, str]] = {
     },
 }
 
-_AUTONOMOUS_KEYS = {
-    "enabled",
-    "auto_pr",
-    "auto_pr_base_branch",
-    "autonomous_loop",
-    "max_retries",
-}
-
 
 def update_config_sections(updates: dict[str, Any]) -> None:
     """Deep-merge section updates into the global config and save atomically.
@@ -521,20 +506,6 @@ def update_config_sections(updates: dict[str, Any]) -> None:
                         data["codex_model"] = value
                     else:
                         data.pop("codex_model", None)
-
-    if "autonomous" in updates:
-        auto_update = updates["autonomous"]
-        if isinstance(auto_update, dict):
-            autonomous = data.get("autonomous", {})
-            if not isinstance(autonomous, dict):
-                autonomous = {}
-            for key, value in auto_update.items():
-                if key in _AUTONOMOUS_KEYS:
-                    if key == "max_retries":
-                        autonomous["task_max_retries"] = value
-                    else:
-                        autonomous[key] = value
-            data["autonomous"] = autonomous
 
     if "browser" in updates:
         browser_update = updates["browser"]

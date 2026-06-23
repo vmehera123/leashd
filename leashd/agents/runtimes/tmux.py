@@ -401,6 +401,7 @@ class TmuxAgent(BaseAgent):
         cs.last_prompt = prompt
         ceiling = float(self._config.tmux_turn_ceiling_seconds)
         no_progress = float(self._config.tmux_no_progress_timeout_seconds)
+        completion_idle_grace = float(self._config.tmux_completion_idle_grace_seconds)
         goal_idle_grace = float(self._config.tmux_goal_idle_grace_seconds)
         goal_stuck_ceiling = float(self._config.tmux_goal_stuck_ceiling_seconds)
 
@@ -415,15 +416,11 @@ class TmuxAgent(BaseAgent):
         staged_attachments = False
         plan_revisions = 0
         while True:
+            await cs.await_ready(PANE_READY_TIMEOUT)
+
             turn = cs.begin_turn(
                 on_text_chunk=on_text_chunk, on_tool_activity=on_tool_activity
             )
-
-            # Wait for the Claude Code TUI to be interactive. On a fresh spawn
-            # it is still booting (config/MCP/splash); typing into that screen
-            # drops the submit Enter and the prompt sits unsent — the agent
-            # never starts. A reused pane returns near-instantly.
-            await cs.await_ready(PANE_READY_TIMEOUT)
 
             # Attachments belong to the original message only — never re-stage
             # them on a plan-revision re-prompt.
@@ -445,6 +442,7 @@ class TmuxAgent(BaseAgent):
                 on_text_chunk,
                 ceiling=ceiling,
                 no_progress=no_progress,
+                completion_idle_grace=completion_idle_grace,
                 goal_idle_grace=goal_idle_grace,
                 goal_stuck_ceiling=goal_stuck_ceiling,
             )
@@ -515,6 +513,7 @@ class TmuxAgent(BaseAgent):
         *,
         ceiling: float,
         no_progress: float,
+        completion_idle_grace: float,
         goal_idle_grace: float,
         goal_stuck_ceiling: float,
     ) -> AgentResponse | None:
@@ -673,6 +672,22 @@ class TmuxAgent(BaseAgent):
                     stuck_s=int(now - deferred_at),
                 )
                 cs.goal_active = False
+                turn.force_complete()
+                break
+
+            if (
+                completion_idle_grace > 0
+                and not cs.goal_active
+                and turn.assembled_text
+                and now - turn.last_activity > completion_idle_grace
+                and cs.is_idle_at_composer()
+            ):
+                logger.info(
+                    "tmux_turn_idle_completed",
+                    session_id=session.session_id,
+                    chat_id=session.chat_id,
+                    idle_s=int(now - turn.last_activity),
+                )
                 turn.force_complete()
                 break
 

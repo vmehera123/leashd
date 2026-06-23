@@ -20,7 +20,6 @@ from leashd.config_store import (
     config_path,
     get_all_directory_settings,
     get_approved_directories,
-    get_autonomous_config,
     get_browser_config,
     get_codebase_memory_config,
     get_security_config,
@@ -180,11 +179,10 @@ def _print_resolved_config(config: LeashdConfig, yaml_data: dict[str, Any]) -> N
     )
     print(f"Max tool calls: {tc_label}{tc_hint}")
 
-    autonomous = get_autonomous_config(yaml_data)
-    if autonomous.get("enabled"):
-        print("\nAutonomous mode: ENABLED")
+    if yaml_data.get("task_orchestrator"):
+        print("\nTask orchestrator: ENABLED")
     else:
-        print("\nAutonomous mode: disabled")
+        print("\nTask orchestrator: disabled")
 
     skills = get_skills_config(yaml_data)
     if skills:
@@ -219,11 +217,10 @@ def _print_yaml_only_config(yaml_data: dict[str, Any]) -> None:
     runtime = yaml_data.get("agent_runtime", "claude-code")
     print(f"Agent runtime: {runtime}")
 
-    autonomous = get_autonomous_config(yaml_data)
-    if autonomous.get("enabled"):
-        print("\nAutonomous mode: ENABLED")
+    if yaml_data.get("task_orchestrator"):
+        print("\nTask orchestrator: ENABLED")
     else:
-        print("\nAutonomous mode: disabled")
+        print("\nTask orchestrator: disabled")
 
     skills = get_skills_config(yaml_data)
     if skills:
@@ -234,102 +231,62 @@ def _print_yaml_only_config(yaml_data: dict[str, Any]) -> None:
                 print(f"  {name}: {desc}")
 
 
-def _handle_autonomous(args: argparse.Namespace) -> None:
-    """Route autonomous subcommands."""
-    sub = getattr(args, "auto_command", None)
+def _handle_orchestrator(args: argparse.Namespace) -> None:
+    """Route task-orchestrator subcommands."""
+    sub = getattr(args, "orchestrator_command", None)
     if sub is None or sub == "show":
-        _handle_autonomous_show()
-    elif sub == "setup":
-        _handle_autonomous_setup()
+        _handle_orchestrator_show()
     elif sub == "enable":
-        _handle_autonomous_enable()
+        _handle_orchestrator_enable()
     elif sub == "disable":
-        _handle_autonomous_disable()
+        _handle_orchestrator_disable()
 
 
-def _handle_autonomous_show() -> None:
-    """Display all autonomous settings."""
+def _handle_orchestrator_show() -> None:
+    """Display task-orchestrator settings."""
     data = load_global_config()
-    autonomous = get_autonomous_config(data)
 
-    if not autonomous.get("enabled"):
-        print("Autonomous mode: disabled")
-        print(
-            "Run 'leashd autonomous enable' or 'leashd autonomous setup' to configure."
-        )
+    if not data.get("task_orchestrator"):
+        print("Task orchestrator: disabled")
+        print("Run 'leashd orchestrator enable' to enable /task.")
         return
 
-    print("Autonomous mode: ENABLED\n")
-    _yn = {True: "yes", False: "no"}
-    print(f"  Policy: {autonomous.get('policy', 'autonomous')}")
-    print(f"  Auto PR: {_yn.get(autonomous.get('auto_pr', False), 'no')}")
-    print(f"  PR base branch: {autonomous.get('auto_pr_base_branch', 'main')}")
-    print(
-        f"  Test-and-retry loop: "
-        f"{_yn.get(autonomous.get('autonomous_loop', False), 'no')}"
-    )
-    print(f"  Max retries (task): {autonomous.get('task_max_retries', 3)}")
+    print("Task orchestrator: ENABLED\n")
+    policy_files = data.get("policy_files") or []
+    if policy_files:
+        print(f"  Policy files: {', '.join(str(p) for p in policy_files)}")
+    else:
+        print("  Policy files: (default)")
 
 
-def _handle_autonomous_setup() -> None:
-    """Run the autonomous config wizard."""
-    from leashd.setup import _configure_autonomous
-
+def _handle_orchestrator_enable() -> None:
+    """Enable the task orchestrator (/task). Leaves the global policy alone \u2014 a
+    task run auto-allows its own tools via ``task_run_id``, so it does not need a
+    permissive global policy (which would also loosen interactive sessions)."""
     data = load_global_config()
-    existing = get_autonomous_config(data)
 
-    if existing.get("enabled"):
-        try:
-            answer = input("Autonomous mode already configured. Reconfigure? [y/N] ")
-        except (EOFError, KeyboardInterrupt):
-            answer = "n"
-        if answer.strip().lower() not in ("y", "yes"):
-            print("Kept existing configuration.")
-            return
-
-    autonomous = _configure_autonomous(existing, input_fn=input)
-    data["autonomous"] = autonomous
-    save_global_config(data)
-    inject_global_config_as_env(force=True)
-    print("\u2713 Autonomous mode configured")
-
-
-def _handle_autonomous_enable() -> None:
-    """Quick-enable autonomous mode with defaults."""
-    data = load_global_config()
-    autonomous = get_autonomous_config(data)
-
-    if autonomous.get("enabled"):
-        print("\u2713 Autonomous mode already enabled")
+    if data.get("task_orchestrator"):
+        print("\u2713 Task orchestrator already enabled")
         return
 
-    autonomous.setdefault("policy", "autonomous")
-    autonomous.setdefault("auto_pr", True)
-    autonomous.setdefault("auto_pr_base_branch", "main")
-    autonomous.setdefault("autonomous_loop", True)
-    autonomous.setdefault("task_max_retries", 3)
-    autonomous["enabled"] = True
-
-    data["autonomous"] = autonomous
+    data["task_orchestrator"] = True
     save_global_config(data)
     inject_global_config_as_env(force=True)
-    print("\u2713 Autonomous mode enabled")
+    print("\u2713 Task orchestrator enabled")
 
 
-def _handle_autonomous_disable() -> None:
-    """Disable autonomous mode, preserving config for re-enable."""
+def _handle_orchestrator_disable() -> None:
+    """Disable the task orchestrator, preserving policy for re-enable."""
     data = load_global_config()
-    autonomous = get_autonomous_config(data)
 
-    if not autonomous.get("enabled"):
-        print("\u2713 Autonomous mode already disabled")
+    if not data.get("task_orchestrator"):
+        print("\u2713 Task orchestrator already disabled")
         return
 
-    autonomous["enabled"] = False
-    data["autonomous"] = autonomous
+    data["task_orchestrator"] = False
     save_global_config(data)
     inject_global_config_as_env(force=True)
-    print("\u2713 Autonomous mode disabled")
+    print("\u2713 Task orchestrator disabled")
 
 
 def _handle_browser(args: argparse.Namespace) -> None:
@@ -1832,14 +1789,13 @@ def main() -> None:
         help="Send the public URL to your Telegram chat",
     )
 
-    auto_parser = subparsers.add_parser(
-        "autonomous", help="Manage autonomous mode settings"
+    orch_parser = subparsers.add_parser(
+        "orchestrator", help="Enable/disable the task orchestrator (/task)"
     )
-    auto_sub = auto_parser.add_subparsers(dest="auto_command")
-    auto_sub.add_parser("show", help="Show autonomous mode settings (default)")
-    auto_sub.add_parser("setup", help="Run autonomous mode setup wizard")
-    auto_sub.add_parser("enable", help="Quick-enable autonomous mode with defaults")
-    auto_sub.add_parser("disable", help="Disable autonomous mode")
+    orch_sub = orch_parser.add_subparsers(dest="orchestrator_command")
+    orch_sub.add_parser("show", help="Show task-orchestrator settings (default)")
+    orch_sub.add_parser("enable", help="Enable the task orchestrator (/task)")
+    orch_sub.add_parser("disable", help="Disable the task orchestrator")
 
     browser_parser = subparsers.add_parser(
         "browser", help="Manage browser profile settings"
@@ -2115,8 +2071,8 @@ def main() -> None:
         print(f"leashd {__version__}")
     elif args.command == "webui":
         _handle_webui(args)
-    elif args.command == "autonomous":
-        _handle_autonomous(args)
+    elif args.command == "orchestrator":
+        _handle_orchestrator(args)
     elif args.command == "browser":
         _handle_browser(args)
     elif args.command == "codebase-memory":

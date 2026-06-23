@@ -14,7 +14,6 @@ from leashd.config_store import (
     clear_directory_setting,
     clear_workspace_settings,
     get_all_directory_settings,
-    get_autonomous_config,
     get_browser_config,
     get_workspace_settings,
     get_workspaces,
@@ -37,13 +36,8 @@ if TYPE_CHECKING:
 _VALID_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 _VALID_MODES = {"default", "plan", "auto"}
 _VALID_BROWSER_BACKENDS = {"playwright", "agent-browser"}
-_VALID_CONFIG_SECTIONS = {"agent", "autonomous", "browser"}
+_VALID_CONFIG_SECTIONS = {"agent", "browser"}
 _SETTING_FIELDS = {"effort", "claude_model", "codex_model"}
-_AUTONOMOUS_BOOLEANS = {
-    "enabled",
-    "auto_pr",
-    "autonomous_loop",
-}
 
 
 def _check_auth(api_key: str, config: LeashdConfig) -> str | None:
@@ -227,7 +221,6 @@ def create_rest_router(
             return JSONResponse(status_code=401, content={"error": err})
 
         raw = load_global_config()
-        autonomous = get_autonomous_config(raw)
         browser = get_browser_config(raw)
 
         return JSONResponse(
@@ -246,15 +239,6 @@ def create_rest_router(
                     name: get_workspace_settings(name)
                     for name in get_workspaces()
                     if get_workspace_settings(name)
-                },
-                "autonomous": {
-                    "enabled": autonomous.get("enabled", False),
-                    "auto_pr": autonomous.get("auto_pr", False),
-                    "auto_pr_base_branch": autonomous.get(
-                        "auto_pr_base_branch", "main"
-                    ),
-                    "autonomous_loop": autonomous.get("autonomous_loop", False),
-                    "max_retries": autonomous.get("task_max_retries", 3),
                 },
                 "browser": {
                     "backend": browser.get("backend", "playwright"),
@@ -537,16 +521,6 @@ def _validate_config_update(body: dict[str, Any]) -> str | None:
                 val = agent[field]
                 if val is not None and not isinstance(val, str):
                     return f"{field} must be a string or null"
-
-    if "autonomous" in body:
-        auto = body["autonomous"]
-        if not isinstance(auto, dict):
-            return "autonomous must be an object"
-        for key, val in auto.items():
-            if key in _AUTONOMOUS_BOOLEANS and not isinstance(val, bool):
-                return f"autonomous.{key} must be a boolean"
-            if key == "max_retries" and not isinstance(val, int):
-                return "autonomous.max_retries must be an integer"
 
     if "browser" in body:
         browser = body["browser"]

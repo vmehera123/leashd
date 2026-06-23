@@ -283,14 +283,6 @@ class TestInjectGlobalConfigAsEnv:
         inject_global_config_as_env()
         assert os.environ["LEASHD_TASK_ORCHESTRATOR_VERSION"] == "v2"
 
-    def test_task_orchestrator_version_not_in_autonomous_field_map(self):
-        """Regression guard: the key must NOT be in the autonomous map.
-        Otherwise the autonomous injector would silently no-op (the key
-        lives at top level) and we'd be back where we started."""
-        from leashd.config_store import _AUTONOMOUS_FIELD_MAP
-
-        assert "task_orchestrator_version" not in _AUTONOMOUS_FIELD_MAP
-
 
 class TestLoadSaveYamlLabels:
     def test_workspace_error_messages_contain_label(self, fake_config_dir):
@@ -827,26 +819,6 @@ class TestUpdateConfigSections:
         data = load_global_config()
         assert data["default_mode"] == "plan"
 
-    def test_creates_autonomous_section(self, fake_config_dir):
-        save_global_config({})
-        update_config_sections({"autonomous": {"enabled": True, "auto_pr": True}})
-        data = load_global_config()
-        assert data["autonomous"]["enabled"] is True
-        assert data["autonomous"]["auto_pr"] is True
-
-    def test_merges_into_existing_autonomous(self, fake_config_dir):
-        save_global_config({"autonomous": {"enabled": True, "auto_pr": False}})
-        update_config_sections({"autonomous": {"auto_pr": True}})
-        data = load_global_config()
-        assert data["autonomous"]["enabled"] is True
-        assert data["autonomous"]["auto_pr"] is True
-
-    def test_maps_max_retries_to_task_max_retries(self, fake_config_dir):
-        save_global_config({})
-        update_config_sections({"autonomous": {"max_retries": 5}})
-        data = load_global_config()
-        assert data["autonomous"]["task_max_retries"] == 5
-
     def test_updates_browser_section(self, fake_config_dir):
         save_global_config({"browser": {"backend": "playwright"}})
         update_config_sections(
@@ -861,20 +833,14 @@ class TestUpdateConfigSections:
             {
                 "effort": "medium",
                 "approved_directories": ["/tmp/a"],
-                "autonomous": {"enabled": True},
+                "task_orchestrator": True,
             }
         )
         update_config_sections({"browser": {"headless": True}})
         data = load_global_config()
         assert data["effort"] == "medium"
         assert data["approved_directories"] == ["/tmp/a"]
-        assert data["autonomous"]["enabled"] is True
-
-    def test_handles_non_dict_autonomous(self, fake_config_dir):
-        save_global_config({"autonomous": "garbage"})
-        update_config_sections({"autonomous": {"enabled": True}})
-        data = load_global_config()
-        assert data["autonomous"]["enabled"] is True
+        assert data["task_orchestrator"] is True
 
     def test_handles_non_dict_browser(self, fake_config_dir):
         save_global_config({"browser": "garbage"})
@@ -899,13 +865,11 @@ class TestUpdateConfigSections:
         update_config_sections(
             {
                 "agent": {"effort": "max"},
-                "autonomous": {"enabled": True},
                 "browser": {"headless": True},
             }
         )
         data = load_global_config()
         assert data["effort"] == "max"
-        assert data["autonomous"]["enabled"] is True
         assert data["browser"]["headless"] is True
 
     def test_creates_config_if_missing(self, fake_config_dir):

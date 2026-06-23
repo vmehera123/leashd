@@ -304,8 +304,6 @@ def build_config() -> Any:
         default_mode=os.environ.get("DEFAULT_MODE", "auto"),
         streaming_enabled=True,
         task_orchestrator=os.environ.get("TASK_ORCH", "1") == "1",
-        autonomous_loop=False,
-        task_max_retries=1,
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
     )  # type: ignore[call-arg]
 

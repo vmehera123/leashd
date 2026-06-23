@@ -106,6 +106,7 @@ class LeashdConfig(BaseSettings):
     # absolute wall-clock ceiling for a single tmux turn regardless of progress.
     # Disabled by default so a legitimately long turn is never force-stopped;
     # /stop and /cancel remain the manual escape hatch.
+    tmux_completion_idle_grace_seconds: int = 45
     tmux_goal_idle_grace_seconds: int = 60
     # Fallback only: applies when leashd NEVER observes the ``◎ /goal active``
     # indicator for a run (detection regressed, or a claude build that renders no
@@ -162,12 +163,6 @@ class LeashdConfig(BaseSettings):
     browser_user_data_dir: str | None = None
     browser_headless: bool = True
 
-    # Autonomous mode
-    autonomous_loop: bool = False
-    autonomous_max_retries: int = 3
-    auto_pr: bool = False
-    auto_pr_base_branch: str = "main"
-
     # Security-guidance plugin (Claude Code marketplace plugin).
     # OFF by default — opt-in. When on, leashd installs and enables
     # ``security-guidance@claude-plugins-official`` via its managed Claude
@@ -181,7 +176,6 @@ class LeashdConfig(BaseSettings):
 
     # Task orchestration
     task_orchestrator: bool = False
-    task_max_retries: int = 3
     task_phase_timeout_seconds: int = 0  # 0 = disabled (default); when >0, the
     # per-phase wall-clock cap the task orchestrator enforces around a phase.
     task_profile: str = "standalone"

