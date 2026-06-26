@@ -36,6 +36,7 @@ import structlog
 
 from leashd.agents.base import ToolActivity
 from leashd.agents.runtimes._helpers import describe_tool, safe_callback
+from leashd.core.safety.gatekeeper import FILE_EDIT_TOOLS, normalize_tool_name
 from leashd.exceptions import AgentError
 
 if TYPE_CHECKING:
@@ -543,13 +544,11 @@ class TmuxTurn:
             if self._completion_seen_this_response:
                 return
             self._completion_seen_this_response = True
-            # A human follow-up was typed into the live composer mid-turn;
-            # claude auto-processes it next. Defer ending the leashd turn so the
-            # follow-up's response merges into this turn (one continuous flow).
             if self.pending_followups > 0:
                 self.pending_followups -= 1
                 self.mark_activity()
-                self.goal_completion_deferred_at = time.monotonic()
+                if self.goal_active_cb is not None and self.goal_active_cb():
+                    self.goal_completion_deferred_at = time.monotonic()
                 return
             # A Claude Code `/goal` is active: Claude auto-starts another turn
             # until its condition holds. Defer ending the leashd turn so the
@@ -2459,17 +2458,13 @@ class TmuxSessionManager:
             native_auto = cs.mode == "auto" and (
                 cs.task_run_id is None or cs.native_auto_allowed
             )
-            if native_auto and str(body.get("permission_mode", "")) == "auto":
-                # Hybrid auto gate: sandbox + the non-overridable hard-deny floor
-                # + any EXPLICIT leashd policy rule (deny / require_approval)
-                # still apply, so agent-browser, file writes and other ruled
-                # tools stay gated by the YAML policy even in auto mode. Only an
-                # explicit ``allow`` rule or an unmatched tool returns None =
-                # `defer` to Claude's native auto classifier, which then runs
-                # routine actions without a leashd prompt (re-entering the full
-                # pipeline via PermissionRequest if it escalates). The
-                # payload-mode cross-check guards against resumed-pane mode
-                # drift — a mismatch falls through to the stricter full pipeline.
+            auto_passthrough = (
+                native_auto and str(body.get("permission_mode", "")) == "auto"
+            )
+            defer_file_edit = (
+                cs.mode != "plan" and normalize_tool_name(tool_name) in FILE_EDIT_TOOLS
+            )
+            if auto_passthrough or defer_file_edit:
                 gated = await self._gatekeeper.check_auto_gated(
                     tool_name,
                     tool_input,
@@ -2480,7 +2475,7 @@ class TmuxSessionManager:
                 )
                 if gated is None:
                     return _hook_decision(
-                        "defer", "leashd: deferring to Claude native auto"
+                        "defer", "leashd: deferring to Claude permission mode"
                     )
                 return _permission_to_hook(gated)
             # Not a gated interaction tool — run the normal safety pipeline.

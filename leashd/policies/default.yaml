@@ -101,11 +101,6 @@ rules:
     action: require_approval
     description: "Git mutation"
 
-  - name: file-writes
-    tools: [Write, Edit, NotebookEdit]
-    action: require_approval
-    description: "File modification"
-
   - name: network-bash
     tool: Bash
     command_patterns: ["^(curl|wget|ssh|scp|rsync)\\b"]

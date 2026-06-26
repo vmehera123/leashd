@@ -94,11 +94,9 @@ class TestGatekeeperWithPolicy:
         )
         assert result.behavior == "deny"
 
-    async def test_require_approval_without_coordinator_denied(
-        self, policy_gatekeeper, tmp_dir
-    ):
+    async def test_require_approval_without_coordinator_denied(self, policy_gatekeeper):
         result = await policy_gatekeeper.check(
-            "Write", {"file_path": str(tmp_dir / "main.py")}, "s1", "c1"
+            "Bash", {"command": "curl https://example.com"}, "s1", "c1"
         )
         assert result.behavior == "deny"
         assert "approval" in result.message.lower()
@@ -118,7 +116,7 @@ class TestGatekeeperApproval:
         )
 
     async def test_approval_granted(
-        self, approval_gatekeeper, mock_connector, approval_coordinator, tmp_dir
+        self, approval_gatekeeper, mock_connector, approval_coordinator
     ):
         import asyncio
 
@@ -129,13 +127,13 @@ class TestGatekeeperApproval:
 
         task = asyncio.create_task(approve())
         result = await approval_gatekeeper.check(
-            "Write", {"file_path": str(tmp_dir / "main.py")}, "s1", "c1"
+            "Bash", {"command": "curl https://example.com"}, "s1", "c1"
         )
         await task
         assert result.behavior == "allow"
 
     async def test_approval_denied(
-        self, approval_gatekeeper, mock_connector, approval_coordinator, tmp_dir
+        self, approval_gatekeeper, mock_connector, approval_coordinator
     ):
         import asyncio
 
@@ -146,7 +144,7 @@ class TestGatekeeperApproval:
 
         task = asyncio.create_task(deny())
         result = await approval_gatekeeper.check(
-            "Write", {"file_path": str(tmp_dir / "main.py")}, "s1", "c1"
+            "Bash", {"command": "curl https://example.com"}, "s1", "c1"
         )
         await task
         assert result.behavior == "deny"
@@ -275,9 +273,9 @@ class TestGatekeeperEdgeCases:
             await approval_coordinator.resolve_approval(req["approval_id"], False)
 
         task = asyncio.create_task(deny())
-        await gk.check("Write", {"file_path": str(tmp_dir / "main.py")}, "s1", "c1")
+        await gk.check("Bash", {"command": "curl https://example.com"}, "s1", "c1")
         await task
-        assert any(e.data["tool_name"] == "Write" for e in events)
+        assert any(e.data["tool_name"] == "Bash" for e in events)
 
     async def test_approval_granted_emits_via_approval(
         self,
@@ -314,7 +312,7 @@ class TestGatekeeperEdgeCases:
             await approval_coordinator.resolve_approval(req["approval_id"], True)
 
         task = asyncio.create_task(approve())
-        await gk.check("Write", {"file_path": str(tmp_dir / "main.py")}, "s1", "c1")
+        await gk.check("Bash", {"command": "curl https://example.com"}, "s1", "c1")
         await task
         approval_events = [e for e in events if e.data.get("via") == "approval"]
         assert len(approval_events) == 1
@@ -345,12 +343,12 @@ class TestGatekeeperEdgeCases:
             await approval_coordinator.resolve_approval(req["approval_id"], True)
 
         task = asyncio.create_task(approve())
-        await gk.check("Write", {"file_path": str(tmp_dir / "main.py")}, "s1", "c1")
+        await gk.check("Bash", {"command": "curl https://example.com"}, "s1", "c1")
         await task
         mock_audit.log_approval.assert_called_once()
         call_args = mock_audit.log_approval.call_args
         assert call_args[0][0] == "s1"  # session_id
-        assert call_args[0][1] == "Write"  # tool_name
+        assert call_args[0][1] == "Bash"  # tool_name
         assert call_args[0][2] is True  # approved
 
     async def test_empty_tool_input_no_crash(self, gatekeeper):
@@ -385,32 +383,29 @@ class TestGatekeeperAutoApprove:
         auto_approve_gatekeeper.disable_auto_approve("nonexistent")
 
     async def test_auto_approve_bypasses_approval_request(
-        self, auto_approve_gatekeeper, mock_connector, mock_audit, tmp_dir
+        self, auto_approve_gatekeeper, mock_connector, mock_audit
     ):
         gk = auto_approve_gatekeeper
         gk.enable_auto_approve("c1")
 
         result = await gk.check(
-            "Write", {"file_path": str(tmp_dir / "main.py")}, "s1", "c1"
+            "Bash", {"command": "curl https://example.com"}, "s1", "c1"
         )
 
         assert result.behavior == "allow"
-        # No approval request sent to connector
         assert len(mock_connector.approval_requests) == 0
-        # But audit was logged (with approver_type for auto-approve)
         mock_audit.log_approval.assert_called_once_with(
-            "s1", "Write", True, "c1", approver_type="auto_approve"
+            "s1", "Bash", True, "c1", approver_type="auto_approve"
         )
 
     async def test_auto_approve_does_not_affect_other_chats(
-        self, auto_approve_gatekeeper, mock_connector, approval_coordinator, tmp_dir
+        self, auto_approve_gatekeeper, mock_connector, approval_coordinator
     ):
         import asyncio
 
         gk = auto_approve_gatekeeper
         gk.enable_auto_approve("c1")
 
-        # c2 should still require normal approval
         async def approve():
             await asyncio.sleep(0.05)
             req = mock_connector.approval_requests[0]
@@ -418,7 +413,7 @@ class TestGatekeeperAutoApprove:
 
         task = asyncio.create_task(approve())
         result = await gk.check(
-            "Write", {"file_path": str(tmp_dir / "main.py")}, "s1", "c2"
+            "Bash", {"command": "curl https://example.com"}, "s1", "c2"
         )
         await task
         assert result.behavior == "allow"
@@ -448,38 +443,35 @@ class TestGatekeeperAutoApprove:
         assert "Write" in gk._auto_approved_tools.get("c1", set())
 
     async def test_per_tool_auto_approve_bypasses_for_matching_tool(
-        self, auto_approve_gatekeeper, mock_connector, mock_audit, tmp_dir
+        self, auto_approve_gatekeeper, mock_connector, mock_audit
     ):
         gk = auto_approve_gatekeeper
-        gk.enable_tool_auto_approve("c1", "Write")
+        gk.enable_tool_auto_approve("c1", "browser_navigate")
 
         result = await gk.check(
-            "Write", {"file_path": str(tmp_dir / "main.py")}, "s1", "c1"
+            "browser_navigate", {"url": "https://example.com"}, "s1", "c1"
         )
         assert result.behavior == "allow"
         assert len(mock_connector.approval_requests) == 0
         mock_audit.log_approval.assert_called_once_with(
-            "s1", "Write", True, "c1", approver_type="auto_approve"
+            "s1", "browser_navigate", True, "c1", approver_type="auto_approve"
         )
 
     async def test_per_tool_auto_approve_does_not_bypass_other_tools(
-        self, auto_approve_gatekeeper, mock_connector, approval_coordinator, tmp_dir
+        self, auto_approve_gatekeeper, mock_connector, approval_coordinator
     ):
         import asyncio
 
         gk = auto_approve_gatekeeper
-        gk.enable_tool_auto_approve("c1", "Write")
+        gk.enable_tool_auto_approve("c1", "browser_navigate")
 
-        # Bash should still require approval (not auto-approved)
         async def approve():
             await asyncio.sleep(0.05)
             req = mock_connector.approval_requests[0]
             await approval_coordinator.resolve_approval(req["approval_id"], True)
 
         task = asyncio.create_task(approve())
-        result = await gk.check(
-            "Edit", {"file_path": str(tmp_dir / "main.py")}, "s1", "c1"
-        )
+        result = await gk.check("browser_click", {"element": "btn"}, "s1", "c1")
         await task
         assert result.behavior == "allow"
         assert len(mock_connector.approval_requests) == 1
@@ -563,18 +555,18 @@ class TestGatekeeperAutoApprove:
         assert len(mock_connector.approval_requests) == 1
 
     async def test_non_bash_auto_approve_unchanged(
-        self, auto_approve_gatekeeper, mock_connector, mock_audit, tmp_dir
+        self, auto_approve_gatekeeper, mock_connector, mock_audit
     ):
         gk = auto_approve_gatekeeper
-        gk.enable_tool_auto_approve("c1", "Write")
+        gk.enable_tool_auto_approve("c1", "browser_navigate")
 
         result = await gk.check(
-            "Write", {"file_path": str(tmp_dir / "main.py")}, "s1", "c1"
+            "browser_navigate", {"url": "https://example.com"}, "s1", "c1"
         )
         assert result.behavior == "allow"
         assert len(mock_connector.approval_requests) == 0
         mock_audit.log_approval.assert_called_once_with(
-            "s1", "Write", True, "c1", approver_type="auto_approve"
+            "s1", "browser_navigate", True, "c1", approver_type="auto_approve"
         )
 
 
@@ -833,7 +825,7 @@ class TestGatekeeperSafetyInvariants:
             approval_coordinator=mock_coord,
         )
         with pytest.raises(RuntimeError, match="approval crash"):
-            await gk.check("Write", {"file_path": str(tmp_dir / "main.py")}, "s1", "c1")
+            await gk.check("Bash", {"command": "curl https://example.com"}, "s1", "c1")
 
     async def test_deny_always_wins_first_match(
         self, sandbox, mock_audit, event_bus, tmp_path
@@ -885,7 +877,6 @@ class TestGatekeeperRejectionReason:
         rejection_gatekeeper,
         mock_connector,
         approval_coordinator,
-        tmp_dir,
     ):
         import asyncio
 
@@ -895,7 +886,7 @@ class TestGatekeeperRejectionReason:
 
         task = asyncio.create_task(reject_with_text())
         result = await rejection_gatekeeper.check(
-            "Write", {"file_path": str(tmp_dir / "main.py")}, "s1", "c1"
+            "Bash", {"command": "curl https://example.com"}, "s1", "c1"
         )
         await task
         assert result.behavior == "deny"
@@ -906,7 +897,6 @@ class TestGatekeeperRejectionReason:
         rejection_gatekeeper,
         mock_connector,
         approval_coordinator,
-        tmp_dir,
     ):
         import asyncio
 
@@ -917,7 +907,7 @@ class TestGatekeeperRejectionReason:
 
         task = asyncio.create_task(deny_via_button())
         result = await rejection_gatekeeper.check(
-            "Write", {"file_path": str(tmp_dir / "main.py")}, "s1", "c1"
+            "Bash", {"command": "curl https://example.com"}, "s1", "c1"
         )
         await task
         assert result.behavior == "deny"
@@ -929,7 +919,6 @@ class TestGatekeeperRejectionReason:
         mock_connector,
         mock_audit,
         approval_coordinator,
-        tmp_dir,
     ):
         import asyncio
 
@@ -939,7 +928,7 @@ class TestGatekeeperRejectionReason:
 
         task = asyncio.create_task(reject_with_text())
         await rejection_gatekeeper.check(
-            "Write", {"file_path": str(tmp_dir / "main.py")}, "s1", "c1"
+            "Bash", {"command": "curl https://example.com"}, "s1", "c1"
         )
         await task
         mock_audit.log_approval.assert_called_once()
@@ -952,7 +941,6 @@ class TestGatekeeperRejectionReason:
         mock_connector,
         mock_audit,
         approval_coordinator,
-        tmp_dir,
     ):
         import asyncio
 
@@ -963,7 +951,7 @@ class TestGatekeeperRejectionReason:
 
         task = asyncio.create_task(approve())
         await rejection_gatekeeper.check(
-            "Write", {"file_path": str(tmp_dir / "main.py")}, "s1", "c1"
+            "Bash", {"command": "curl https://example.com"}, "s1", "c1"
         )
         await task
         mock_audit.log_approval.assert_called_once()
@@ -1279,11 +1267,11 @@ class TestGatekeeperAutonomousAutoAllow:
         )
 
     async def test_autonomous_task_auto_allows_require_approval(
-        self, gatekeeper, mock_audit, tmp_dir
+        self, gatekeeper, mock_audit
     ):
         result = await gatekeeper.check(
-            "Write",
-            {"file_path": str(tmp_dir / "main.py")},
+            "Bash",
+            {"command": "curl https://example.com"},
             "s1",
             "c1",
             session_mode="auto",
@@ -1291,17 +1279,15 @@ class TestGatekeeperAutonomousAutoAllow:
         )
         assert result.behavior == "allow"
         mock_audit.log_approval.assert_called_once_with(
-            "s1", "Write", True, "c1", approver_type="autonomous_auto"
+            "s1", "Bash", True, "c1", approver_type="autonomous_auto"
         )
 
-    async def test_interactive_require_approval_not_auto_allowed(
-        self, gatekeeper, tmp_dir
-    ):
+    async def test_interactive_require_approval_not_auto_allowed(self, gatekeeper):
         # No task_run_id (interactive) → require_approval routes to human; with
         # no approval coordinator wired that fails closed (deny), NOT auto-allow.
         result = await gatekeeper.check(
-            "Write",
-            {"file_path": str(tmp_dir / "main.py")},
+            "Bash",
+            {"command": "curl https://example.com"},
             "s1",
             "c1",
             session_mode="default",
@@ -1433,15 +1419,11 @@ class TestGatekeeperStateManagement:
             approval_coordinator=approval_coordinator,
         )
 
-    async def test_auto_approve_chat_isolation(
-        self, gk, mock_connector, mock_audit, tmp_dir
-    ):
+    async def test_auto_approve_chat_isolation(self, gk, mock_connector, mock_audit):
         import asyncio
 
         gk.enable_auto_approve("c1")
-        r1 = await gk.check(
-            "Write", {"file_path": str(tmp_dir / "main.py")}, "s1", "c1"
-        )
+        r1 = await gk.check("Bash", {"command": "curl https://a.example"}, "s1", "c1")
         assert r1.behavior == "allow"
         assert len(mock_connector.approval_requests) == 0
 
@@ -1451,9 +1433,7 @@ class TestGatekeeperStateManagement:
             await gk._approval_coordinator.resolve_approval(req["approval_id"], True)
 
         task = asyncio.create_task(approve_c2())
-        r2 = await gk.check(
-            "Write", {"file_path": str(tmp_dir / "other.py")}, "s1", "c2"
-        )
+        r2 = await gk.check("Bash", {"command": "curl https://b.example"}, "s1", "c2")
         await task
         assert r2.behavior == "allow"
         assert len(mock_connector.approval_requests) == 1
@@ -1529,15 +1509,14 @@ class TestGatekeeperEventsExtended:
 
 
 class TestAutoGated:
-    """`check_auto_gated` — the hybrid gate for tmux ``auto`` mode.
+    """`check_auto_gated` — the hybrid gate for deferring to Claude's mode.
 
     leashd's non-overridable layers AND its *explicit* policy verdicts win;
     only the cases leashd does not actively gate (explicit ``allow`` rule, or an
     unmatched tool that would otherwise hit ``default_action``) return ``None``
-    to defer to Claude Code's native auto classifier. An explicit
-    ``require_approval`` rule routes to the full approval pipeline — it is NOT
-    deferred (this is what keeps agent-browser / file writes policy-gated in
-    auto mode).
+    to defer to Claude Code's permission mode. File edits carry no policy rule,
+    so they are unmatched and defer here; ``deny`` (credentials) and the sandbox
+    still block.
     """
 
     @pytest.fixture
@@ -1587,14 +1566,10 @@ class TestAutoGated:
         )
 
     async def test_explicit_require_approval_is_gated_not_deferred(
-        self, policy_gatekeeper, tmp_dir
+        self, policy_gatekeeper
     ):
-        # A sandboxed Write classifies as require_approval (file-writes rule) —
-        # an EXPLICIT rule, so auto mode runs the approval pipeline rather than
-        # deferring. With no approval coordinator wired, that fails closed to a
-        # deny (and is therefore NOT None — proving it was gated, not deferred).
         result = await policy_gatekeeper.check_auto_gated(
-            "Write", {"file_path": str(tmp_dir / "main.py")}, "s1", "c1"
+            "Bash", {"command": "curl https://example.com"}, "s1", "c1"
         )
         assert result is not None
         assert result.behavior == "deny"
@@ -1608,3 +1583,21 @@ class TestAutoGated:
         mock_audit.log_approval.assert_called_once_with(
             "s1", "Read", True, "c1", approver_type="claude_native_auto"
         )
+
+    async def test_file_edit_defers_to_mode(
+        self, policy_gatekeeper, mock_audit, tmp_dir
+    ):
+        result = await policy_gatekeeper.check_auto_gated(
+            "Write", {"file_path": str(tmp_dir / "main.py")}, "s1", "c1"
+        )
+        assert result is None
+        mock_audit.log_approval.assert_called_once_with(
+            "s1", "Write", True, "c1", approver_type="claude_native_auto"
+        )
+
+    async def test_credential_file_edit_still_denied(self, policy_gatekeeper, tmp_dir):
+        result = await policy_gatekeeper.check_auto_gated(
+            "Write", {"file_path": str(tmp_dir / ".env")}, "s1", "c1"
+        )
+        assert result is not None
+        assert result.behavior == "deny"

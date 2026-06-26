@@ -397,8 +397,10 @@ leashd ships five policies in `policies/`:
 
 **`default.yaml`** *(recommended)* — balanced for everyday use.
 - Auto-allows: file reads, search, grep, git status/log/diff, read-only browser tools
-- Requires approval: file writes/edits, git push/rebase/merge, network commands, browser mutations
+- Requires approval: git push/rebase/merge, network commands, browser mutations
 - Hard-blocks: credential file access, `rm -rf`, `sudo`, force push, pipe-to-shell, SQL DROP/TRUNCATE
+
+  File edits are **not** a policy rule — they are owned by the active mode (Claude's permission mode): `/auto` runs them, `/edit` accepts them, `/default` prompts, `/plan` blocks them. The policy above is the guardrail layer that applies on top in *every* mode; the sandbox and the credential hard-deny gate every write regardless of mode.
 
 **`strict.yaml`** — maximum safety, more approval taps.
 - Auto-allows: only reads (`Read`, `Glob`, `Grep`, `LS`)

@@ -646,6 +646,51 @@ async def test_execute_idle_backstop_does_not_fire_while_busy(tmp_path):
     assert "timed out" in resp.content
 
 
+def _followup_begin(cs):
+    orig = cs.begin_turn
+
+    def begin_with_followup(**kw):
+        turn = orig(**kw)
+        turn.pending_followups = 1
+        return turn
+
+    cs.begin_turn = begin_with_followup
+
+
+@pytest.mark.usefixtures("_advancing_clock")
+async def test_execute_followup_deferral_not_killed_while_busy(tmp_path):
+    cs = FakeCS(text="ack — working on it")
+    cs._idle_at_composer = False
+    _followup_begin(cs)
+
+    cfg = _cfg(tmp_path, tmux_turn_ceiling_seconds=1)
+    agent = _agent(cfg, FakeTSM(cs))
+    resp = await agent.execute("do it", _session(tmp_path))
+
+    assert resp.is_error is True
+    assert "timed out" in resp.content
+    assert cs.turn.goal_completion_deferred_at is None
+
+
+@pytest.mark.usefixtures("_advancing_clock")
+async def test_execute_followup_deferral_finalizes_when_idle_at_composer(tmp_path):
+    from structlog.testing import capture_logs
+
+    cs = FakeCS(text="here is the merged answer")
+    cs._idle_at_composer = True
+    _followup_begin(cs)
+
+    agent = _agent(_cfg(tmp_path), FakeTSM(cs))
+    with capture_logs() as logs:
+        resp = await agent.execute("do it", _session(tmp_path))
+
+    events = [e["event"] for e in logs]
+    assert "tmux_turn_idle_completed" in events
+    assert "tmux_goal_idle_finalized" not in events
+    assert resp.is_error is False
+    assert "here is the merged answer" in resp.content
+
+
 # ── /goal backstop (indicator-aware) ─────────────────────────────
 
 

@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.2] - 2026-06-26
+- **changed**: file edits are now owned by Claude's permission **mode**, not by leashd policy — the `file-writes` rule was dropped from `default.yaml` and the `/edit` auto-approve registry seeding removed; the `tmux` runtime defers `Write`/`Edit`/`NotebookEdit` to the active `--permission-mode` (`auto` runs, `acceptEdits` accepts, `default` asks via the connector, `plan` blocks). The policy is now a pure guardrail layer applied on top in every mode: credential/`rm -rf` hard-deny + sandbox + require-approval for network/git-push/browser. This fixes `/auto` prompting for edits while keeping all four Claude modes faithfully mirrored
+- **changed**: `/stop` now resets the session back to the configured default mode (`auto`) instead of stranding it in the interrupted turn's plan/edit/web mode — `/dir`, `/ws`, and `/clear` already reset via the session reset path
+- **fixed**: a mid-turn follow-up message in the `tmux` runtime no longer gets force-completed early (dropping its work with `num_turns=0`) — the follow-up deferral overloaded the `/goal` idle backstop, which (since a follow-up shows no `/goal` indicator) applied an aggressive 60s idle-fallback and killed any follow-up that triggered a long silent step (a test suite, a quiet `Bash`). A pure follow-up no longer arms the goal backstop; it is finalized only by the composer-gated idle-completion backstop, which can't fire mid-step
+
 ## [1.0.1] - 2026-06-21
 - **fixed**: mypy error in `tmux_jsonl.py` — `_drop_resume_artifact` now wraps the `Any`-typed comparison in `bool()` to satisfy the declared `bool` return type
 - **fixed**: enabling the task orchestrator (`leashd orchestrator enable` / the setup wizard) no longer forces the global policy to `autonomous.yaml` — a `/task` run already auto-allows its own tools via `task_run_id`, so the permissive global policy was pre-1.0.0 leftover that ALSO loosened interactive sessions (file writes ran with no approval under `/default`). The global policy now stays at the gating `default.yaml` unless set explicitly; `/task` is unaffected

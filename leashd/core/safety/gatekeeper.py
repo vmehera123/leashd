@@ -98,6 +98,8 @@ DEFAULT_PATH_TOOLS = frozenset(
     {"Read", "Write", "Edit", "Glob", "Grep", "NotebookEdit"}
 )
 
+FILE_EDIT_TOOLS = frozenset({"Write", "Edit", "NotebookEdit"})
+
 
 class ToolGatekeeper:
     def __init__(
@@ -240,21 +242,22 @@ class ToolGatekeeper:
 
         leashd's non-overridable layers AND its *explicit* policy verdicts win;
         only the cases leashd does not actively gate hand off to Claude Code's
-        native auto classifier:
+        native permission mode:
 
           * sandbox violation                          → ``PermissionDeny``
           * explicit ``deny`` rule                     → ``PermissionDeny``
           * explicit ``require_approval`` rule         → human/AI approval pipeline
-          * explicit ``allow`` rule OR unmatched tool  → ``None`` (defer to native)
+          * explicit ``allow`` rule OR unmatched tool  → ``None`` (defer to mode)
 
         Returning ``None`` tells the caller to answer the PreToolUse hook with
-        ``defer`` so Claude's classifier runs safe actions without a leashd
-        prompt (re-entering the full pipeline via PermissionRequest if it
-        escalates). This keeps agent-browser, file writes and every other
-        explicitly-ruled tool under leashd's policy even in auto mode, while the
-        long tail of routine commands (``mkdir``, ``awk``, project scripts …)
-        stops prompting. ``default_action`` is intentionally NOT applied here —
-        an unmatched tool is the native classifier's call, not a leashd ask.
+        ``defer`` so Claude's permission mode runs (or asks for) the action
+        itself — re-entering the full pipeline via PermissionRequest if the mode
+        decides to ask. File edits carry no policy rule, so they are unmatched
+        and defer here: Claude's mode owns them (``auto`` runs, ``acceptEdits``
+        accepts, ``default`` asks, ``plan`` is blocked by the plan gate), while
+        the credential ``deny`` rule and the sandbox still block a dangerous
+        write. ``default_action`` is intentionally NOT applied here — an
+        unmatched tool is the mode's call, not a leashd ask.
         """
         normalized = normalize_tool_name(tool_name)
 

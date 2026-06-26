@@ -1950,10 +1950,6 @@ async def test_on_pre_tool_auto_hard_deny_blocks(cfg):
 
 
 async def test_on_pre_tool_auto_explicit_rule_gated_allows(cfg):
-    # Hybrid auto: an EXPLICIT require_approval rule routes through the leashd
-    # pipeline and (here) resolves to allow — the hook returns "allow", NOT
-    # "defer". This is what keeps agent-browser / file writes policy-gated in
-    # auto mode instead of handing them to Claude's native classifier.
     tsm = TmuxSessionManager(cfg)
     cs = _session(tsm, mode="auto")
     tsm._by_uuid["u1"] = cs.session_id
@@ -1971,6 +1967,66 @@ async def test_on_pre_tool_auto_explicit_rule_gated_allows(cfg):
         }
     )
     assert out["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+
+async def test_on_pre_tool_file_edit_defers_in_edit_mode(cfg):
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm, mode="edit")
+    tsm._by_uuid["u1"] = cs.session_id
+    gk = _StubFloorGatekeeper(floor_result=None)
+    _bind(tsm, gk)
+    out = await tsm.on_pre_tool(
+        {
+            "session_id": "u1",
+            "cwd": "/work",
+            "tool_name": "Write",
+            "tool_input": {"file_path": "/work/x.py", "content": "..."},
+            "permission_mode": "acceptEdits",
+        }
+    )
+    assert out["hookSpecificOutput"]["permissionDecision"] == "defer"
+    assert gk.floor_calls
+    assert not gk.check_calls
+
+
+async def test_on_pre_tool_file_edit_defers_in_default_mode(cfg):
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm, mode="default")
+    tsm._by_uuid["u1"] = cs.session_id
+    gk = _StubFloorGatekeeper(floor_result=None)
+    _bind(tsm, gk)
+    out = await tsm.on_pre_tool(
+        {
+            "session_id": "u1",
+            "cwd": "/work",
+            "tool_name": "Edit",
+            "tool_input": {"file_path": "/work/x.py"},
+            "permission_mode": "default",
+        }
+    )
+    assert out["hookSpecificOutput"]["permissionDecision"] == "defer"
+    assert gk.floor_calls
+    assert not gk.check_calls
+
+
+async def test_on_pre_tool_non_edit_default_mode_uses_full_check(cfg):
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm, mode="default")
+    tsm._by_uuid["u1"] = cs.session_id
+    gk = _StubFloorGatekeeper(check_result=PermissionAllow(updated_input={}))
+    _bind(tsm, gk)
+    out = await tsm.on_pre_tool(
+        {
+            "session_id": "u1",
+            "cwd": "/work",
+            "tool_name": "Bash",
+            "tool_input": {"command": "curl https://x.com"},
+            "permission_mode": "default",
+        }
+    )
+    assert out["hookSpecificOutput"]["permissionDecision"] == "allow"
+    assert gk.check_calls
+    assert not gk.floor_calls
 
 
 async def test_on_pre_tool_auto_task_run_id_uses_full_pipeline(cfg):

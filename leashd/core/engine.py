@@ -1741,9 +1741,9 @@ class Engine:
                 )
             )
             await self._cleanup_session(session, chat_id)
-            if session.agent_resume_token:
-                session.agent_resume_token = None
-                await self.session_manager.save(session)
+            session.agent_resume_token = None
+            self.session_manager.reset_mode(session)
+            await self.session_manager.save(session)
             logger.info("all_work_stopped", user_id=user_id, chat_id=chat_id)
             return "All work stopped."
 
@@ -1754,9 +1754,6 @@ class Engine:
             old_mode = session.mode
             session.mode = "edit"
             session.plan_origin = "edit"
-            self._gatekeeper.enable_tool_auto_approve(chat_id, "Write")
-            self._gatekeeper.enable_tool_auto_approve(chat_id, "Edit")
-            self._gatekeeper.enable_tool_auto_approve(chat_id, "NotebookEdit")
             logger.info(
                 "mode_switched",
                 user_id=user_id,
@@ -1797,9 +1794,10 @@ class Engine:
             )
             msg = (
                 "Auto mode on. Claude's built-in policy runs safe actions "
-                "without prompting; risky actions are reviewed by leashd; "
-                "hard-blocked actions (credentials, rm -rf, sudo, force-push) "
-                "are always denied."
+                "(including file edits) without prompting; risky actions "
+                "(network, git push, browser mutations) are reviewed by "
+                "leashd; hard-blocked actions (credentials, rm -rf, sudo, "
+                "force-push) are always denied."
             )
             if args.strip():
                 await self._send_transient(chat_id, msg)

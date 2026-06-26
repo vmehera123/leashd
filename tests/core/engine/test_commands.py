@@ -36,7 +36,7 @@ class TestHandleCommand:
         assert session.mode == "plan"
         assert "chat1" not in eng._gatekeeper._auto_approved_chats
 
-    async def test_accept_command_sets_mode_and_auto_approve(
+    async def test_accept_command_sets_mode_without_registry(
         self, config, audit_logger, policy_engine, mock_connector
     ):
         agent = FakeAgent()
@@ -54,8 +54,7 @@ class TestHandleCommand:
         assert "accept edits" in result.lower() or "auto-approve" in result.lower()
         session = eng.session_manager.get("user1", "chat1")
         assert session.mode == "edit"
-        auto_tools = eng._gatekeeper._auto_approved_tools.get("chat1", set())
-        assert auto_tools == {"Write", "Edit", "NotebookEdit"}
+        assert "chat1" not in eng._gatekeeper._auto_approved_tools
         assert "chat1" not in eng._gatekeeper._auto_approved_chats
 
     async def test_status_command_shows_info(
@@ -155,12 +154,8 @@ class TestHandleCommand:
             audit=audit_logger,
         )
 
-        # /edit first seeds the accept-edits auto-approve registry...
-        await eng.handle_command("user1", "edit", "", "chat1")
-        assert eng._gatekeeper._auto_approved_tools.get("chat1")
+        eng._gatekeeper.enable_tool_auto_approve("chat1", "Write")
 
-        # ...switching to /auto must clear it (native auto decides, not the
-        # leashd auto-approve registry).
         result = await eng.handle_command("user1", "auto", "", "chat1")
 
         assert "auto" in result.lower()
@@ -255,15 +250,8 @@ class TestHandleCommand:
             audit=audit_logger,
         )
 
-        # Enable auto-approve first via /edit
-        await eng.handle_command("user1", "edit", "", "chat1")
-        assert eng._gatekeeper._auto_approved_tools.get("chat1") == {
-            "Write",
-            "Edit",
-            "NotebookEdit",
-        }
+        eng._gatekeeper.enable_tool_auto_approve("chat1", "Write")
 
-        # Switch to default mode
         await eng.handle_command("user1", "default", "", "chat1")
         assert "chat1" not in eng._gatekeeper._auto_approved_tools
 
@@ -296,15 +284,8 @@ class TestHandleCommand:
             audit=audit_logger,
         )
 
-        # Enable auto-approve first
-        await eng.handle_command("user1", "edit", "", "chat1")
-        assert eng._gatekeeper._auto_approved_tools.get("chat1") == {
-            "Write",
-            "Edit",
-            "NotebookEdit",
-        }
+        eng._gatekeeper.enable_tool_auto_approve("chat1", "Write")
 
-        # Switch to plan mode
         await eng.handle_command("user1", "plan", "", "chat1")
         assert "chat1" not in eng._gatekeeper._auto_approved_chats
         assert "chat1" not in eng._gatekeeper._auto_approved_tools
@@ -1867,7 +1848,7 @@ class TestEditWithArgs:
         session = eng.session_manager.get("user1", "chat1")
         assert session.mode == "edit"
 
-    async def test_edit_with_args_auto_approves_tools(
+    async def test_edit_sets_accept_edits_mode_without_registry(
         self, config, audit_logger, policy_engine, mock_connector
     ):
         agent = FakeAgent()
@@ -1882,10 +1863,9 @@ class TestEditWithArgs:
 
         await eng.handle_command("user1", "edit", "fix bug", "chat1")
 
-        auto_tools = eng._gatekeeper._auto_approved_tools.get("chat1", set())
-        assert "Write" in auto_tools
-        assert "Edit" in auto_tools
-        assert "NotebookEdit" in auto_tools
+        session = eng.session_manager.get("user1", "chat1")
+        assert session.mode == "edit"
+        assert "chat1" not in eng._gatekeeper._auto_approved_tools
 
     async def test_edit_with_whitespace_only_args_returns_confirmation(
         self, config, audit_logger, policy_engine, mock_connector
@@ -2116,47 +2096,6 @@ class TestEditWithArgs:
         assert session.mode == "default"
         assert session.plan_origin is None
         assert "chat1" not in eng._gatekeeper._auto_approved_tools
-
-    async def test_edit_only_approves_file_tools(
-        self, config, audit_logger, policy_engine, mock_connector
-    ):
-        agent = FakeAgent()
-        eng = Engine(
-            connector=mock_connector,
-            agent=agent,
-            config=config,
-            session_manager=SessionManager(),
-            policy_engine=policy_engine,
-            audit=audit_logger,
-        )
-
-        await eng.handle_command("user1", "edit", "", "chat1")
-
-        auto_tools = eng._gatekeeper._auto_approved_tools.get("chat1", set())
-        assert "Write" in auto_tools
-        assert "Edit" in auto_tools
-        assert "NotebookEdit" in auto_tools
-        assert "Bash" not in auto_tools
-
-    async def test_edit_auto_approve_isolated_to_chat(
-        self, config, audit_logger, policy_engine, mock_connector
-    ):
-        agent = FakeAgent()
-        eng = Engine(
-            connector=mock_connector,
-            agent=agent,
-            config=config,
-            session_manager=SessionManager(),
-            policy_engine=policy_engine,
-            audit=audit_logger,
-        )
-
-        await eng.handle_command("user1", "edit", "", "chat1")
-
-        chat1_tools = eng._gatekeeper._auto_approved_tools.get("chat1", set())
-        chat2_tools = eng._gatekeeper._auto_approved_tools.get("chat2", set())
-        assert "Write" in chat1_tools
-        assert "Write" not in chat2_tools
 
     async def test_edit_preserves_agent_resume_token(
         self, config, audit_logger, policy_engine, mock_connector
@@ -2860,6 +2799,33 @@ class TestStopCommand:
         assert session_after.session_id == original_id
         assert session_after.agent_resume_token is None
         assert session_after.message_count == original_count
+
+    async def test_stop_resets_mode_to_default(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = FakeAgent()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(default_mode="auto"),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        session = await eng.session_manager.get_or_create(
+            "user1", "chat1", str(config.approved_directories[0])
+        )
+        session.mode = "plan"
+        session.mode_instruction = "stay in plan"
+        session.plan_origin = "user"
+
+        await eng.handle_command("user1", "stop", "", "chat1")
+
+        session_after = eng.session_manager.get("user1", "chat1")
+        assert session_after.mode == "auto"
+        assert session_after.mode_instruction is None
+        assert session_after.plan_origin is None
 
 
 class TestClearEmitsEvent:

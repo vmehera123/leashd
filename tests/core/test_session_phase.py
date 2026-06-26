@@ -103,3 +103,41 @@ class TestBeginPhaseSession:
                 task_run_id="run-abc",
                 mode="plan",
             )
+
+
+class TestResetMode:
+    async def test_restores_configured_default(self):
+        mgr = SessionManager(default_mode="auto")
+        session = await mgr.get_or_create("u1", "c1", "/tmp/proj")
+        session.mode = "plan"
+        session.mode_instruction = "do the thing"
+        session.plan_origin = "user"
+
+        mgr.reset_mode(session)
+
+        assert session.mode == "auto"
+        assert session.mode_instruction is None
+        assert session.plan_origin is None
+
+    async def test_preserves_conversation_state(self):
+        mgr = SessionManager(default_mode="auto")
+        session = await mgr.get_or_create("u1", "c1", "/tmp/proj")
+        session.mode = "edit"
+        session.message_count = 5
+        session.agent_resume_token = "resume-1"
+        original_id = session.session_id
+
+        mgr.reset_mode(session)
+
+        assert session.session_id == original_id
+        assert session.message_count == 5
+        assert session.agent_resume_token == "resume-1"
+
+    async def test_default_mode_default_is_default(self):
+        mgr = SessionManager()
+        session = await mgr.get_or_create("u1", "c1", "/tmp/proj")
+        session.mode = "web"
+
+        mgr.reset_mode(session)
+
+        assert session.mode == "default"

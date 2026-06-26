@@ -141,6 +141,13 @@ class SessionManager:
             has_resume_token=session.agent_resume_token is not None,
         )
 
+    def reset_mode(self, session: Session) -> None:
+        """Reset interactive mode to the configured default, preserving the
+        conversation (used by ``/stop``)."""
+        session.mode = self._default_mode
+        session.mode_instruction = None
+        session.plan_origin = None
+
     async def reset(self, user_id: str, chat_id: str) -> None:
         """Clear conversation state but preserve working_directory."""
         key = self._key(user_id, chat_id)
