@@ -4102,3 +4102,115 @@ class TestTaskTakesOverPriorWork:
         agent.cancel_chat.assert_awaited_once_with("chat1")
         session = eng.session_manager.get("user1", "chat1")
         assert session.mode == "auto"
+
+
+class TestNativeCommandPassthrough:
+    """Leashd-unknown slash commands relay to the claude TUI on runtimes that
+    expose ``run_native_command`` (tmux); others keep the Unknown-command
+    reply."""
+
+    @staticmethod
+    def _native_agent(reply="🖥 claude ▸ /model\n\nSelect model"):
+        agent = FakeAgent()
+        agent.native_calls = []
+
+        async def run_native_command(session, command_text):
+            agent.native_calls.append((session.session_id, command_text))
+            return reply
+
+        async def capture_screen(session):
+            return "SCREEN"
+
+        agent.run_native_command = run_native_command
+        agent.capture_screen = capture_screen
+        return agent
+
+    async def test_unknown_command_forwarded_to_tui(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = self._native_agent()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        result = await eng.handle_command("user1", "model", "opus", "chat1")
+
+        assert result.startswith("🖥 claude ▸ /model")
+        assert agent.native_calls == [
+            (eng.session_manager.get("user1", "chat1").session_id, "/model opus")
+        ]
+
+    async def test_forward_blocked_while_turn_running(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = self._native_agent()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+        eng._executing_chats.add("chat1")
+
+        result = await eng.handle_command("user1", "model", "", "chat1")
+
+        assert "busy" in result
+        assert agent.native_calls == []
+
+    async def test_registered_commands_never_forwarded(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = self._native_agent()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        result = await eng.handle_command("user1", "status", "", "chat1")
+
+        assert agent.native_calls == []
+        assert "Mode" in result or "mode" in result
+
+    async def test_screen_command_returns_snapshot(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        agent = self._native_agent()
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        result = await eng.handle_command("user1", "screen", "", "chat1")
+
+        assert result == "🖥 claude terminal\n\nSCREEN"
+
+    async def test_screen_command_without_runtime_support(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        eng = Engine(
+            connector=mock_connector,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        result = await eng.handle_command("user1", "screen", "", "chat1")
+
+        assert "tmux runtime" in result

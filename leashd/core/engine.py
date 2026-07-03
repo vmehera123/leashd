@@ -400,15 +400,8 @@ class _StreamingResponder:
         tail = source[offset:] if offset < len(source) else source
 
         summary = self._build_tools_summary()
-        if summary and not tail.rstrip().endswith(summary):
-            # The tmux runtime appends an identical ``🧰 …`` footer to its
-            # ``assembled_text`` (so a non-streaming send_message fallback also
-            # carries the summary). When ``final_text`` is that already-
-            # footered string, the buffer-vs-final_text branch above selects
-            # it as the source — appending the engine's own summary here
-            # produces the doubled ``🧰 Bash x2, Read x3, AskUserQuestion``
-            # the user sees on Telegram. Skip the append when the source
-            # already ends with the same line.
+        last_line = tail.rstrip().rsplit("\n", 1)[-1]
+        if summary and not last_line.startswith("\U0001f9f0 "):
             tail = tail + "\n\n" + summary
 
         try:
@@ -931,6 +924,7 @@ class Engine:
                     combined,
                     chat_id,
                     attachments=q_attachments or None,
+                    log_user_message=False,
                 )
 
             return result
@@ -996,6 +990,7 @@ class Engine:
         chat_id: str,
         *,
         attachments: list[Attachment] | None = None,
+        log_user_message: bool = True,
         _plan_exit_retries: int = 0,
     ) -> str:
         structlog.contextvars.clear_contextvars()
@@ -1018,12 +1013,13 @@ class Engine:
             )
         )
 
-        await self._message_logger.log(
-            user_id=user_id,
-            chat_id=chat_id,
-            role="user",
-            content=text,
-        )
+        if log_user_message:
+            await self._message_logger.log(
+                user_id=user_id,
+                chat_id=chat_id,
+                role="user",
+                content=text,
+            )
 
         session = await self.session_manager.get_or_create(
             user_id, chat_id, self._default_directory
@@ -1877,10 +1873,53 @@ class Engine:
         if command == "plugin":
             return self._handle_plugin_command(args)
 
+        if command == "screen":
+            return await self._handle_screen_command(session)
+
+        forwarded = await self._forward_native_command(session, command, args, chat_id)
+        if forwarded is not None:
+            return forwarded
+
         logger.warning(
             "unknown_command", user_id=user_id, chat_id=chat_id, command=command
         )
         return f"Unknown command: /{command}"
+
+    async def _handle_screen_command(self, session: Session) -> str:
+        capture = getattr(self.agent, "capture_screen", None)
+        if capture is None:
+            return "/screen is only available on the tmux runtime."
+        snapshot = await capture(session)
+        if not snapshot:
+            return "No active claude terminal for this chat yet — send a message first."
+        return f"🖥 claude terminal\n\n{snapshot}"
+
+    async def _forward_native_command(
+        self, session: Session, command: str, args: str, chat_id: str
+    ) -> str | None:
+        """Relay a leashd-unknown slash command to the agent's interactive
+        terminal (tmux runtime) so ``/model``, ``/compact``, ``/context``, …
+        behave exactly as if typed in the claude TUI. Returns ``None`` when
+        the active runtime has no terminal to forward to."""
+        runner = getattr(self.agent, "run_native_command", None)
+        if runner is None:
+            return None
+        if chat_id in self._executing_chats:
+            return (
+                "⏳ Claude is busy — wait for the current turn to finish "
+                "(or /stop), then resend the command."
+            )
+        command_text = f"/{command} {args}".strip()
+        logger.info(
+            "native_command_forwarding",
+            chat_id=chat_id,
+            command=command,
+            session_id=session.session_id,
+        )
+        try:
+            return str(await runner(session, command_text))
+        except AgentError as e:
+            return f"Could not forward /{command} to claude: {e}"
 
     async def _handle_goal_command(
         self,

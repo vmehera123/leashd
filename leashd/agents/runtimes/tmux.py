@@ -79,6 +79,55 @@ FINAL_TEXT_POLL_INTERVAL = 0.1
 # that keeps re-setting feedback — finalize rather than spin.
 MAX_PLAN_REVISIONS = 10
 
+NATIVE_COMMAND_RENDER_POLL = 0.4
+NATIVE_COMMAND_RENDER_TIMEOUT = 4.0
+NATIVE_COMMAND_IDLE_TIMEOUT = 6.0
+PANE_SNAPSHOT_MAX_LINES = 40
+
+
+def _format_pane_snapshot(
+    screen: str, *, max_lines: int = PANE_SNAPSHOT_MAX_LINES
+) -> str:
+    lines: list[str] = []
+    for raw in screen.splitlines():
+        ln = raw.rstrip()
+        if not ln and lines and not lines[-1]:
+            continue
+        lines.append(ln)
+    while lines and not lines[-1]:
+        lines.pop()
+    while lines and not lines[0]:
+        lines.pop(0)
+    if not lines:
+        return ""
+    return "\n".join(lines[-max_lines:])
+
+
+def _crop_to_command_view(snapshot: str, command_text: str) -> str:
+    """Trim a full-pane snapshot down to the forwarded command's own output.
+
+    The pane still shows the prior conversation above the command's screen —
+    banner, old prompts, spinner — which reads as noise in a chat message.
+    Anchor on the command's ``❯ /cmd`` transcript echo when present
+    (screen-style commands: /context, /cost), else on the last ``▔▔▔`` box
+    border (overlay dialogs: /model — the composer echo is consumed by the
+    dialog). No anchor → return the snapshot unchanged.
+    """
+    lines = snapshot.splitlines()
+    token = command_text.split()[0]
+    echo_idx: int | None = None
+    sep_idx: int | None = None
+    for i, ln in enumerate(lines):
+        s = ln.strip()
+        if s.startswith("❯") and token in s:
+            echo_idx = i
+        elif len(s) >= 8 and set(s) == {"▔"}:
+            sep_idx = i
+    start = echo_idx if echo_idx is not None else sep_idx
+    if start is None or start == 0:
+        return snapshot
+    return "\n".join(lines[start:]).strip("\n")
+
 
 def _goal_backstop_action(
     *,
@@ -245,41 +294,15 @@ class TmuxAgent(BaseAgent):
                 count += 1
         return count
 
-    async def execute(
-        self,
-        prompt: str,
-        session: Session,
-        *,
-        can_use_tool: Callable[..., Any] | None = None,
-        on_text_chunk: Callable[[str], Coroutine[Any, Any, None]] | None = None,
-        on_tool_activity: Callable[[ToolActivity | None], Coroutine[Any, Any, None]]
-        | None = None,
-        on_retry: Callable[[], Coroutine[Any, Any, None]] | None = None,
-        attachments: list[Attachment] | None = None,
-        settings: RuntimeSettings | None = None,
-    ) -> AgentResponse:
-        # Interactive claude never invokes a permission callback and the
-        # tmux runtime drives a persistent pane (no per-turn retry), so
-        # these BaseAgent hooks are intentionally unused here.
-        del can_use_tool, on_retry
-        os.environ.pop("CLAUDECODE", None)
+    async def _ensure_session_pane(
+        self, session: Session, settings: RuntimeSettings | None
+    ) -> tuple[TmuxClaudeSession, bool, str | None]:
+        """Return the chat's live pane, spawning one when absent or dead.
 
-        if not self._tsm.is_bound:
-            raise AgentError(
-                "tmux runtime safety pipeline is not bound — this indicates "
-                "a wiring error in build_engine()."
-            )
-
-        limit = self._config.max_concurrent_agents
-        if limit and self._active_turn_count() >= limit:
-            raise AgentError(
-                f"Too many concurrent agents ({limit}). "
-                "Use /stop in another conversation first."
-            )
-
+        Returns ``(cs, spawned, resume_uuid)``.
+        """
         cs = self._tsm.get(session.session_id)
         need_spawn = cs is None or cs.pane_is_dead()
-        reuse_preamble: str | None = None
         resume_uuid: str | None = None
         if need_spawn and session.agent_resume_token:
             resume_uuid = session.agent_resume_token
@@ -310,60 +333,83 @@ class TmuxAgent(BaseAgent):
         ):
             perm_mode = "bypassPermissions"
 
-        if need_spawn:
-            # tmux runs the interactive `claude` TUI; default it to opus
-            # when no model is pinned (per-task settings override > daemon
-            # claude_model > opus). claude-cli keeps Claude Code's own
-            # default — the model fallback is tmux-runtime-specific.
-            model = (
-                (settings.claude_model if settings else None)
-                or self._config.claude_model
-                or "opus"
-            )
-            # Native auto classifier ships only with Opus (verified against
-            # claude CLI 2.1.145: non-Opus panes show ``auto mode unavailable
-            # for this model``). Degrade to acceptEdits so the leashd YAML
-            # pipeline owns approvals instead of an interactive prompt on
-            # every tool call.
-            if perm_mode == "auto" and not model_supports_native_auto(model):
-                logger.info(
-                    "native_auto_unavailable_fell_back_to_accept_edits",
-                    session_id=session.session_id,
-                    reason="model_not_opus",
-                    model=model,
-                )
-                # Degrade to acceptEdits so the leashd hook + pane-selector
-                # drive owns approvals (see the bypass note above — bypass no
-                # longer gates under Claude Code 2.1.x).
-                perm_mode = (
-                    "bypassPermissions"
-                    if os.environ.get("LEASHD_TMUX_BYPASS_PERMISSIONS") == "1"
-                    else "acceptEdits"
-                )
-            spawn_native_auto = (
-                session.mode == "auto"
-                and session.task_run_id is None
-                and perm_mode == "auto"
-            )
-            cs = await self._tsm.spawn(
-                session_id=session.session_id,
-                chat_id=session.chat_id,
-                user_id=session.user_id,
-                working_directory=session.working_directory,
-                mode=session.mode,
-                task_run_id=session.task_run_id,
-                plan_origin=session.plan_origin,
-                perm_mode=perm_mode,
-                model=model,
-                session=session,
-                settings=settings,
-                resume_uuid=resume_uuid,
-                append_system_prompt=self._build_append_system_prompt(
-                    session, native_auto=spawn_native_auto
-                ),
-            )
-        else:
+        if not need_spawn:
             assert cs is not None  # noqa: S101
+            return cs, False, resume_uuid
+
+        model = (
+            (settings.claude_model if settings else None)
+            or self._config.claude_model
+            or "opus"
+        )
+        if perm_mode == "auto" and not model_supports_native_auto(model):
+            logger.info(
+                "native_auto_unavailable_fell_back_to_accept_edits",
+                session_id=session.session_id,
+                reason="model_not_opus",
+                model=model,
+            )
+            perm_mode = (
+                "bypassPermissions"
+                if os.environ.get("LEASHD_TMUX_BYPASS_PERMISSIONS") == "1"
+                else "acceptEdits"
+            )
+        spawn_native_auto = (
+            session.mode == "auto"
+            and session.task_run_id is None
+            and perm_mode == "auto"
+        )
+        cs = await self._tsm.spawn(
+            session_id=session.session_id,
+            chat_id=session.chat_id,
+            user_id=session.user_id,
+            working_directory=session.working_directory,
+            mode=session.mode,
+            task_run_id=session.task_run_id,
+            plan_origin=session.plan_origin,
+            perm_mode=perm_mode,
+            model=model,
+            session=session,
+            settings=settings,
+            resume_uuid=resume_uuid,
+            append_system_prompt=self._build_append_system_prompt(
+                session, native_auto=spawn_native_auto
+            ),
+        )
+        return cs, True, resume_uuid
+
+    async def execute(
+        self,
+        prompt: str,
+        session: Session,
+        *,
+        can_use_tool: Callable[..., Any] | None = None,
+        on_text_chunk: Callable[[str], Coroutine[Any, Any, None]] | None = None,
+        on_tool_activity: Callable[[ToolActivity | None], Coroutine[Any, Any, None]]
+        | None = None,
+        on_retry: Callable[[], Coroutine[Any, Any, None]] | None = None,
+        attachments: list[Attachment] | None = None,
+        settings: RuntimeSettings | None = None,
+    ) -> AgentResponse:
+        del can_use_tool, on_retry
+        os.environ.pop("CLAUDECODE", None)
+
+        if not self._tsm.is_bound:
+            raise AgentError(
+                "tmux runtime safety pipeline is not bound — this indicates "
+                "a wiring error in build_engine()."
+            )
+
+        limit = self._config.max_concurrent_agents
+        if limit and self._active_turn_count() >= limit:
+            raise AgentError(
+                f"Too many concurrent agents ({limit}). "
+                "Use /stop in another conversation first."
+            )
+
+        cs, spawned, resume_uuid = await self._ensure_session_pane(session, settings)
+        reuse_preamble: str | None = None
+        if not spawned:
             # Long-lived pane: refresh per-turn session context so the plan
             # gate / gatekeeper see the current mode, task and plan origin.
             cs.mode = session.mode
@@ -795,6 +841,90 @@ class TmuxAgent(BaseAgent):
         """True while a Claude Code ``/goal`` is running in this session's pane."""
         cs = self._tsm.get(session_id)
         return bool(cs and cs.goal_active)
+
+    async def run_native_command(self, session: Session, command_text: str) -> str:
+        """Type a claude-native slash command (``/model``, ``/compact``, …)
+        into the chat's TUI pane exactly as a terminal user would, then return
+        a snapshot of the resulting screen.
+
+        Spawns the pane when the chat has none yet (so ``/model`` works before
+        the first message). Refuses while a turn is live — typed text would
+        queue as a follow-up prompt instead of running as a command — and
+        while something other than the composer owns the screen (typing would
+        answer an open dialog). Actionable dialogs the command opens (model
+        picker, consent prompts) are bridged to the connector by the native
+        dialog watcher; ``/screen`` re-captures the pane at any time.
+        """
+        if not self._tsm.is_bound:
+            raise AgentError(
+                "tmux runtime safety pipeline is not bound — this indicates "
+                "a wiring error in build_engine()."
+            )
+        cs, _, _ = await self._ensure_session_pane(session, None)
+        if cs.turn is not None and not cs.turn.stop_event.is_set():
+            return (
+                "⏳ Claude is mid-turn — wait for it to finish (or /stop), "
+                "then resend the command."
+            )
+        await cs.await_ready(PANE_READY_TIMEOUT)
+        deadline = time.monotonic() + NATIVE_COMMAND_IDLE_TIMEOUT
+        while not cs.is_idle_at_composer():
+            if time.monotonic() >= deadline:
+                return (
+                    "Claude's terminal is not at the prompt (a dialog may be "
+                    "open) — check /screen and resolve it first."
+                )
+            await asyncio.sleep(0.3)
+        await cs.submit(command_text, max_enter_presses=1, plain_keys=True)
+        snapshot = await self._settled_snapshot(cs)
+        logger.info(
+            "tmux_native_command_forwarded",
+            session_id=session.session_id,
+            chat_id=session.chat_id,
+            command=command_text.split()[0],
+        )
+        if not snapshot:
+            return "(claude terminal is blank — check /screen in a moment)"
+        reply = f"🖥 claude ▸ {command_text}\n\n{_crop_to_command_view(snapshot, command_text)}"
+        if command_text.split()[0] == "/model":
+            reply += self._model_pin_note(cs)
+        return reply
+
+    def _model_pin_note(self, cs: TmuxClaudeSession) -> str:
+        pinned = self._config.claude_model
+        source = f"claude_model = {pinned}" if pinned else "built-in fallback: opus"
+        actual = (
+            f"\n\nℹ️ Model behind this session's last reply (ground truth): "
+            f"{cs.last_model}. After a mid-session switch, asking claude "
+            "which model it is can report a stale name — trust this field."
+            if cs.last_model
+            else ""
+        )
+        return (
+            f"{actual}\n\n⚠️ Note: a pick here applies to the current session "
+            "only. leashd launches every new session with an explicit --model "
+            f"({source}), which overrides the picker's saved default — change "
+            "it with `leashd model set <model>`, then `leashd reload`."
+        )
+
+    @staticmethod
+    async def _settled_snapshot(cs: TmuxClaudeSession) -> str:
+        previous = ""
+        deadline = time.monotonic() + NATIVE_COMMAND_RENDER_TIMEOUT
+        while time.monotonic() < deadline:
+            await asyncio.sleep(NATIVE_COMMAND_RENDER_POLL)
+            current = _format_pane_snapshot(cs.capture())
+            if current and current == previous:
+                return current
+            previous = current
+        return previous
+
+    async def capture_screen(self, session: Session) -> str | None:
+        """Snapshot the chat's live TUI pane, or ``None`` when it has none."""
+        cs = self._tsm.get(session.session_id)
+        if cs is None or cs.pane_is_dead():
+            return None
+        return _format_pane_snapshot(cs.capture())
 
     async def cancel(self, session_id: str) -> None:
         cs = self._tsm.get(session_id)

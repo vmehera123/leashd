@@ -22,6 +22,7 @@ from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 HARNESS_DIR = Path(os.environ.get("HARNESS_DIR", "/tmp/leashd_tmux_harness"))
 REPO = Path(os.environ.get("APPROVED_DIR", str(HARNESS_DIR / "repo")))
@@ -32,10 +33,16 @@ TOKEN = os.environ.get("TG_TOKEN", "TESTTOKEN")
 CHAT_ID = os.environ.get("CHAT_ID", "284184690")
 USER_ID = os.environ.get("USER_ID", "284184690")
 
+MAX_TEXT_LEN = 4096
+MAX_CALLBACK_DATA_BYTES = 64
+
 calls: list[dict[str, Any]] = []
 pending: list[dict[str, Any]] = []
 buttons: dict[int, list[dict[str, str]]] = {}
 msg_text: dict[int, str] = {}
+msg_markup: dict[int, str | None] = {}
+deleted_mids: set[int] = set()
+api_errors: list[dict[str, Any]] = []
 _uid = [1]
 _mid = [1000]
 
@@ -44,6 +51,39 @@ app = FastAPI()
 
 def ok(result: Any) -> dict[str, Any]:
     return {"ok": True, "result": result}
+
+
+def err(method: str, description: str, code: int = 400) -> JSONResponse:
+    """Telegram-shaped Bot API error: non-2xx HTTP status + ok=false body,
+    which python-telegram-bot surfaces as BadRequest — same as the real API."""
+    api_errors.append(
+        {
+            "seq": len(calls),
+            "ts": time.time(),
+            "method": method,
+            "error_code": code,
+            "description": description,
+        }
+    )
+    return JSONResponse(
+        status_code=code,
+        content={"ok": False, "error_code": code, "description": description},
+    )
+
+
+def _invalid_button_data(rm_raw: str | None) -> str | None:
+    if not rm_raw:
+        return None
+    try:
+        rm = json.loads(rm_raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    for row in rm.get("inline_keyboard") or []:
+        for b in row:
+            data = b.get("callback_data")
+            if data is not None and len(str(data).encode()) > MAX_CALLBACK_DATA_BYTES:
+                return str(data)
+    return None
 
 
 def _msg_obj(message_id: int, text: str, chat_id: int) -> dict[str, Any]:
@@ -73,7 +113,7 @@ def _store_buttons(message_id: int, rm_raw: str | None) -> None:
         buttons[message_id] = flat
 
 
-async def _handle(method: str, data: dict[str, Any]) -> dict[str, Any]:
+async def _handle(method: str, data: dict[str, Any]) -> dict[str, Any] | JSONResponse:
     if method == "getMe":
         return ok(
             {
@@ -92,21 +132,30 @@ async def _handle(method: str, data: dict[str, Any]) -> dict[str, Any]:
         return ok([])
     if method == "getUpdates":
         offset = int(data.get("offset", 0) or 0)
+        limit = int(data.get("limit", 0) or 0) or 100
         timeout = float(data.get("timeout", 0) or 0)
+        if offset > 0:
+            pending[:] = [u for u in pending if u["update_id"] >= offset]
         deadline = time.monotonic() + min(timeout, 20.0)
         while True:
             ready = [u for u in pending if u["update_id"] >= offset]
             if ready or time.monotonic() >= deadline:
                 break
             await asyncio.sleep(0.05)
-        for u in ready:
-            pending.remove(u)
-        return ok(ready)
+        return ok(ready[:limit])
     if method == "sendMessage":
+        text = data.get("text", "")
+        if not text:
+            return err(method, "Bad Request: message text is empty")
+        if len(text) > MAX_TEXT_LEN:
+            return err(method, "Bad Request: message is too long")
+        bad = _invalid_button_data(data.get("reply_markup"))
+        if bad is not None:
+            return err(method, "Bad Request: BUTTON_DATA_INVALID")
         mid = _mid[0]
         _mid[0] += 1
-        text = data.get("text", "")
         msg_text[mid] = text
+        msg_markup[mid] = data.get("reply_markup") or None
         _store_buttons(mid, data.get("reply_markup"))
         calls.append(
             {
@@ -120,10 +169,30 @@ async def _handle(method: str, data: dict[str, Any]) -> dict[str, Any]:
         return ok(_msg_obj(mid, text, int(data.get("chat_id", CHAT_ID))))
     if method in ("editMessageText", "editMessageReplyMarkup", "editMessageCaption"):
         mid = int(data.get("message_id", 0) or 0)
-        text = data.get("text", msg_text.get(mid, ""))
-        if mid:
-            msg_text[mid] = text
-            _store_buttons(mid, data.get("reply_markup"))
+        if mid not in msg_text or mid in deleted_mids:
+            return err(method, "Bad Request: message to edit not found")
+        new_markup = data.get("reply_markup") or None
+        bad = _invalid_button_data(new_markup)
+        if bad is not None:
+            return err(method, "Bad Request: BUTTON_DATA_INVALID")
+        if method == "editMessageText":
+            text = data.get("text", "")
+            if not text:
+                return err(method, "Bad Request: message text is empty")
+            if len(text) > MAX_TEXT_LEN:
+                return err(method, "Bad Request: message is too long")
+            if text == msg_text.get(mid) and new_markup == msg_markup.get(mid):
+                return err(
+                    method,
+                    "Bad Request: message is not modified: specified new "
+                    "message content and reply markup are exactly the same "
+                    "as a current content and reply markup of the message",
+                )
+        else:
+            text = msg_text.get(mid, "")
+        msg_text[mid] = text
+        msg_markup[mid] = new_markup
+        _store_buttons(mid, data.get("reply_markup"))
         calls.append(
             {
                 "seq": len(calls),
@@ -139,7 +208,16 @@ async def _handle(method: str, data: dict[str, Any]) -> dict[str, Any]:
             {"seq": len(calls), "ts": time.time(), "method": method, "data": data}
         )
         return ok(True)
-    if method in ("deleteMessage", "answerCallbackQuery", "pinChatMessage"):
+    if method == "deleteMessage":
+        mid = int(data.get("message_id", 0) or 0)
+        calls.append(
+            {"seq": len(calls), "ts": time.time(), "method": method, "data": data}
+        )
+        if mid not in msg_text or mid in deleted_mids:
+            return err(method, "Bad Request: message to delete not found")
+        deleted_mids.add(mid)
+        return ok(True)
+    if method in ("answerCallbackQuery", "pinChatMessage"):
         calls.append(
             {"seq": len(calls), "ts": time.time(), "method": method, "data": data}
         )
@@ -192,17 +270,20 @@ async def inject_message(payload: dict[str, Any]) -> dict[str, Any]:
     text = payload["text"]
     mid = _mid[0]
     _mid[0] += 1
-    uid = _enqueue(
-        {
-            "message": {
-                "message_id": mid,
-                "date": int(time.time()),
-                "chat": {"id": int(CHAT_ID), "type": "private"},
-                "from": {"id": int(USER_ID), "is_bot": False, "first_name": "Tester"},
-                "text": text,
-            }
-        }
-    )
+    msg_text[mid] = text
+    message: dict[str, Any] = {
+        "message_id": mid,
+        "date": int(time.time()),
+        "chat": {"id": int(CHAT_ID), "type": "private"},
+        "from": {"id": int(USER_ID), "is_bot": False, "first_name": "Tester"},
+        "text": text,
+    }
+    first_token = text.split()[0] if text.split() else ""
+    if text.startswith("/") and len(first_token) > 1:
+        message["entities"] = [
+            {"type": "bot_command", "offset": 0, "length": len(first_token)}
+        ]
+    uid = _enqueue({"message": message})
     return {"update_id": uid, "message_id": mid}
 
 
@@ -213,6 +294,7 @@ async def inject_command(payload: dict[str, Any]) -> dict[str, Any]:
     text = f"/{command}" + (f" {args}" if args else "")
     mid = _mid[0]
     _mid[0] += 1
+    msg_text[mid] = text
     uid = _enqueue(
         {
             "message": {
@@ -275,6 +357,8 @@ async def get_state() -> dict[str, Any]:
         "pending_updates": len(pending),
         "messages": {str(k): v for k, v in msg_text.items()},
         "buttons": {str(k): v for k, v in buttons.items()},
+        "deleted": sorted(deleted_mids),
+        "api_errors": api_errors,
     }
 
 
@@ -282,6 +366,8 @@ async def get_state() -> dict[str, Any]:
 async def reset() -> dict[str, Any]:
     calls.clear()
     pending.clear()
+    api_errors.clear()
+    deleted_mids.clear()
     return {"ok": True}
 
 
@@ -300,7 +386,7 @@ def build_config() -> Any:
         allowed_user_ids={USER_ID},
         storage_backend="memory",
         tmux_socket_dir=SOCK_DIR,
-        effort="low",
+        effort=os.environ.get("EFFORT", "low"),
         default_mode=os.environ.get("DEFAULT_MODE", "auto"),
         streaming_enabled=True,
         task_orchestrator=os.environ.get("TASK_ORCH", "1") == "1",

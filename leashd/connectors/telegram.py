@@ -186,6 +186,7 @@ class TelegramConnector(BaseConnector):
         self._cleanup_tasks: set[asyncio.Task[None]] = set()
         self._activity_message_id: dict[str, str] = {}
         self._activity_last_text: dict[str, str] = {}
+        self._activity_locks: dict[str, asyncio.Lock] = {}
         self._plan_message_ids: dict[str, list[str]] = {}
         self._question_message_ids: dict[str, str] = {}
         self._approval_tool_names: dict[str, str] = {}  # approval_id -> tool_name
@@ -221,6 +222,7 @@ class TelegramConnector(BaseConnector):
                 self._on_command,
             )
         )
+        self._app.add_handler(MessageHandler(filters.COMMAND, self._on_command))
         self._app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_message)
         )
@@ -370,6 +372,13 @@ class TelegramConnector(BaseConnector):
             )
             return None
 
+    def _activity_lock(self, chat_id: str) -> asyncio.Lock:
+        lock = self._activity_locks.get(chat_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._activity_locks[chat_id] = lock
+        return lock
+
     async def send_activity(
         self,
         chat_id: str,
@@ -382,22 +391,23 @@ class TelegramConnector(BaseConnector):
             return None
         emoji, verb = _activity_label(tool_name, description)
         text = f"{emoji} {verb}: {description}"
-        existing = self._activity_message_id.get(chat_id)
-        if existing:
-            if self._activity_last_text.get(chat_id) == text:
-                return existing
-            edited = await self._try_edit_message(chat_id, existing, text)
-            if edited:
+        async with self._activity_lock(chat_id):
+            existing = self._activity_message_id.get(chat_id)
+            if existing:
+                if self._activity_last_text.get(chat_id) == text:
+                    return existing
+                edited = await self._try_edit_message(chat_id, existing, text)
+                if edited:
+                    self._activity_last_text[chat_id] = text
+                    return existing
+                await self._try_delete_message(chat_id, existing)
+                self._activity_message_id.pop(chat_id, None)
+                self._activity_last_text.pop(chat_id, None)
+            msg_id = await self.send_message_with_id(chat_id, text)
+            if msg_id:
+                self._activity_message_id[chat_id] = msg_id
                 self._activity_last_text[chat_id] = text
-                return existing
-            # Edit failed — message is gone, clear stale state and create new
-            self._activity_message_id.pop(chat_id, None)
-            self._activity_last_text.pop(chat_id, None)
-        msg_id = await self.send_message_with_id(chat_id, text)
-        if msg_id:
-            self._activity_message_id[chat_id] = msg_id
-            self._activity_last_text[chat_id] = text
-        return msg_id
+            return msg_id
 
     async def _try_delete_message(self, chat_id: str, message_id: str) -> bool:
         """Delete a message with retry on transient errors. Returns True on success."""
@@ -451,13 +461,14 @@ class TelegramConnector(BaseConnector):
             return False
 
     async def clear_activity(self, chat_id: str) -> None:
-        msg_id = self._activity_message_id.get(chat_id)
-        if not msg_id:
+        async with self._activity_lock(chat_id):
+            msg_id = self._activity_message_id.get(chat_id)
+            if not msg_id:
+                self._activity_last_text.pop(chat_id, None)
+                return
+            deleted = await self._try_delete_message(chat_id, msg_id)
+            self._activity_message_id.pop(chat_id, None)
             self._activity_last_text.pop(chat_id, None)
-            return
-        deleted = await self._try_delete_message(chat_id, msg_id)
-        self._activity_message_id.pop(chat_id, None)
-        self._activity_last_text.pop(chat_id, None)
         if not deleted:
             logger.warning(
                 "activity_message_orphaned", chat_id=chat_id, message_id=msg_id

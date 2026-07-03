@@ -28,7 +28,7 @@ allowed-tools:
   ```
   A fake `HOME` does **not** reliably help — claude 2.1.x auth is macOS-keychain-based, so the pane ends up logged out (`Please run /login`). Real `HOME` is still tmux-isolated via `tmux_socket_dir`.
 - **`APPROVED_DIR` must be a directory `claude` already trusts.** A fresh `/tmp` dir triggers claude's first-run "trust this folder?" prompt and the pane hangs. Use a real repo you've already opened in `claude`.
-- **`drive.py` has hardcoded `APP_LOG` / `AUDIT` paths** near the top (line ~21). Its `log` command reads those exact files — point them at your run's `{APPROVED_DIR}/.leashd/logs/app.log` and the audit pinned to `approved_directories[0]`, or it reads stale/wrong logs.
+- **`drive.py` reads `APPROVED_DIR` / `APP_LOG` / `AUDIT` / `TG_PORT` from the env** — export the same `APPROVED_DIR` you launched the harness with (default `/tmp/leashd_tmux_harness/repo`), or its `log`/`watch` commands read the wrong files.
 - Storage is in-memory; runtime is `tmux`; you need `claude` + `tmux` installed and `claude` authenticated (see the **`tmux-runtime`** skill). Restart the harness to pick up code edits (the engine loads modules at startup).
 
 ## Run it
@@ -50,9 +50,16 @@ uv run python scripts/_harness/drive.py cmd "task add a health check endpoint"
 uv run python scripts/_harness/drive.py tap <message_id> <callback_data>   # press an inline button
 uv run python scripts/_harness/drive.py calls [since]    # streaming timeline of outbound calls
 uv run python scripts/_harness/drive.py buttons <message_id>   # inline buttons on a message
-uv run python scripts/_harness/drive.py state            # quick counts
+uv run python scripts/_harness/drive.py state            # quick counts (incl. api_errors)
+uv run python scripts/_harness/drive.py errors           # Bot API errors the engine caused
 uv run python scripts/_harness/drive.py log <start_iso>  # filtered app.log events since an ISO timestamp
 ```
+
+The fake Bot API enforces real-Telegram semantics: at-least-once `getUpdates`
+(updates redeliver until confirmed by a higher offset), 4096-char text limits,
+`message is not modified` / `message to edit|delete not found` errors, and the
+64-byte `callback_data` limit — rejections surface in `errors`/`state` instead
+of being silently accepted.
 
 ## Reading the timeline
 

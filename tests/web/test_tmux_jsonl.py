@@ -308,6 +308,69 @@ async def test_fallback_discovery_skips_stale_jsonl(tmp_path, monkeypatch):
     assert sess.claude_uuid is None
 
 
+async def test_fallback_discovery_never_adopts_preexisting_session_file(
+    tmp_path, monkeypatch
+):
+    """A session file that already existed when the pane spawned belongs to
+    ANOTHER claude session (e.g. the user's own interactive `claude` in the
+    same repo, still appending). Discovery latching onto it streamed that
+    foreign conversation into the chat and adopted its uuid as this
+    session's resume token — regardless of how fresh its mtime is."""
+    from leashd.agents.runtimes.tmux_session import encode_project_dir
+
+    events: list[dict] = []
+
+    async def on_event(_sess, obj):
+        events.append(obj)
+
+    root = tmp_path / "projects"
+    proj = root / encode_project_dir("/work")
+    proj.mkdir(parents=True)
+    foreign = proj / "uuid-foreign.jsonl"
+    foreign.write_text("{}\n")
+
+    sess = _fake_session("/work", uuid=None)
+    tailer = JSONLTailer(projects_root=root, on_event=on_event, session=sess)
+    monkeypatch.setattr("leashd.web.tmux_jsonl._DISCOVER_AFTER", 0.0)
+    import os
+    import time
+
+    os.utime(foreign, (time.time(), time.time()))
+
+    assert tailer._resolve_path() is None
+    assert sess.claude_uuid is None
+
+    own = proj / "uuid-own.jsonl"
+    own.write_text("{}\n")
+    assert tailer._resolve_path() == own
+    assert sess.claude_uuid == "uuid-own"
+
+
+async def test_discovered_path_repoints_once_hook_uuid_known(tmp_path, monkeypatch):
+    sess = _fake_session("/work", uuid=None)
+    tailer, _events, root = _tailer(tmp_path, sess)
+    from leashd.agents.runtimes.tmux_session import encode_project_dir
+
+    monkeypatch.setattr("leashd.web.tmux_jsonl._DISCOVER_AFTER", 0.0)
+    tailer._started = 0.0
+    tailer._started_wall = 0.0
+
+    proj = root / encode_project_dir("/work")
+    proj.mkdir(parents=True)
+    wrong = proj / "uuid-wrong.jsonl"
+    wrong.write_text("{}\n")
+    assert tailer._resolve_path() == wrong
+    tailer._offset = 99
+
+    real = proj / "uuid-real.jsonl"
+    real.write_text("{}\n")
+    sess.claude_uuid = "uuid-real"
+
+    assert tailer._resolve_path() == real
+    assert tailer._offset == 0
+    assert tailer._discovered_path is False
+
+
 async def test_drain_tolerates_truncated_json_line(tmp_path):
     # A partial line written by `claude` between fsyncs starts with `{`
     # (the dedup guard let it through) but won't parse. Must be skipped
@@ -558,8 +621,6 @@ async def test_resolve_path_fallback_preserves_existing_uuid(tmp_path):
     proj_root.mkdir()
     proj = proj_root / encode_project_dir(cwd)
     proj.mkdir(parents=True)
-    other_jsonl = proj / "different-name.jsonl"
-    other_jsonl.write_text('{"uuid": "x"}\n')
 
     events: list[dict] = []
 
@@ -569,6 +630,9 @@ async def test_resolve_path_fallback_preserves_existing_uuid(tmp_path):
     sess = _fake_session(cwd, uuid="existing-uuid")
     tailer = JSONLTailer(projects_root=proj_root, on_event=on_event, session=sess)
     tailer._started -= 5.0
+
+    other_jsonl = proj / "different-name.jsonl"
+    other_jsonl.write_text('{"uuid": "x"}\n')
 
     path = tailer._resolve_path()
     assert path == other_jsonl

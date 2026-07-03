@@ -152,8 +152,46 @@ class TestMessageQueuing:
         messages = await store.get_messages("u1", "c1")
         user_msgs = [m for m in messages if m["role"] == "user"]
         user_texts = [m["content"] for m in user_msgs]
-        assert "queued-A" in user_texts
-        assert "queued-B" in user_texts
+        assert user_texts.count("queued-A") == 1
+        assert user_texts.count("queued-B") == 1
+        assert "queued-A\n\nqueued-B" not in user_texts
+
+        await store.teardown()
+
+    async def test_single_queued_message_stored_once(
+        self, config, audit_logger, mock_connector, tmp_path
+    ):
+        """A follow-up queued mid-turn must be stored exactly once — the drain
+        logs it, and the drained _execute_turn must not log it again (the
+        2.5ms-apart duplicate user rows seen in messages.db)."""
+        from leashd.storage.sqlite import SqliteSessionStore
+
+        store = SqliteSessionStore(tmp_path / "test.db")
+        await store.setup()
+
+        gate = asyncio.Event()
+        agent = self._make_slow_agent(gate)
+
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            audit=audit_logger,
+            store=store,
+        )
+
+        task = asyncio.create_task(eng.handle_message("u1", "first", "c1"))
+        await asyncio.sleep(0)
+
+        await eng.handle_message("u1", "follow-up", "c1")
+
+        gate.set()
+        await task
+
+        messages = await store.get_messages("u1", "c1")
+        user_texts = [m["content"] for m in messages if m["role"] == "user"]
+        assert user_texts.count("follow-up") == 1
 
         await store.teardown()
 

@@ -97,6 +97,7 @@ class FakeCS:
         self._goal_indicator_seen = False
         self._idle_at_composer = False
         self._stream_text_on_submit = False
+        self.last_model = None
 
     @property
     def goal_indicator_seen(self):
@@ -134,7 +135,7 @@ class FakeCS:
     def capture(self):
         return ""
 
-    async def submit(self, text):
+    async def submit(self, text, *, max_enter_presses=5, plain_keys=False):
         self.sent.append((text, True))
         if self._stream_text_on_submit and self.turn is not None:
             self.turn.text_parts.append(self._text)
@@ -973,3 +974,159 @@ async def test_cancel_chat_terminates_every_pane_for_the_chat(tmp_path):
     agent._tsm = Tsm()
     await agent.cancel_chat("web:1")
     assert sorted(terminated) == ["g1", "g2"]
+
+
+async def test_run_native_command_spawns_types_and_snapshots(tmp_path, monkeypatch):
+    monkeypatch.setattr("leashd.agents.runtimes.tmux.NATIVE_COMMAND_RENDER_POLL", 0.0)
+    cs = FakeCS()
+    cs._idle_at_composer = True
+    cs._complete_on_enter = False
+    cs.capture = lambda: "\n Select model \n ❯ 1. Default\n   2. Opus\n\n"
+    tsm = FakeTSM(cs)
+    agent = _agent(_cfg(tmp_path), tsm)
+
+    out = await agent.run_native_command(_session(tmp_path), "/model")
+
+    assert tsm.spawned is True
+    assert ("/model", True) in cs.sent
+    assert out.startswith("🖥 claude ▸ /model")
+    assert "Select model" in out
+
+
+async def test_run_native_command_refuses_mid_turn(tmp_path):
+    cs = FakeCS()
+    tsm = FakeTSM(cs)
+    tsm.spawned = True
+    cs.begin_turn(on_text_chunk=None, on_tool_activity=None)
+    agent = _agent(_cfg(tmp_path), tsm)
+
+    out = await agent.run_native_command(_session(tmp_path), "/model")
+
+    assert "mid-turn" in out
+    assert ("/model", True) not in cs.sent
+
+
+async def test_run_native_command_refuses_when_dialog_owns_screen(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr("leashd.agents.runtimes.tmux.NATIVE_COMMAND_IDLE_TIMEOUT", 0.0)
+    cs = FakeCS()
+    tsm = FakeTSM(cs)
+    tsm.spawned = True
+    agent = _agent(_cfg(tmp_path), tsm)
+
+    out = await agent.run_native_command(_session(tmp_path), "/model")
+
+    assert "not at the prompt" in out
+    assert ("/model", True) not in cs.sent
+
+
+async def test_run_native_command_requires_bound_pipeline(tmp_path):
+    agent = _agent(_cfg(tmp_path), FakeTSM(FakeCS(), bound=False))
+    with pytest.raises(AgentError, match="not bound"):
+        await agent.run_native_command(_session(tmp_path), "/model")
+
+
+async def test_capture_screen_none_without_pane(tmp_path):
+    agent = _agent(_cfg(tmp_path), FakeTSM(None))
+    assert await agent.capture_screen(_session(tmp_path)) is None
+
+
+async def test_capture_screen_returns_trimmed_snapshot(tmp_path):
+    cs = FakeCS()
+    tsm = FakeTSM(cs)
+    tsm.spawned = True
+    cs.capture = lambda: "   \nline1  \nline2\n\n   "
+    agent = _agent(_cfg(tmp_path), tsm)
+
+    assert await agent.capture_screen(_session(tmp_path)) == "line1\nline2"
+
+
+def test_crop_to_command_view_dialog_border_anchor():
+    from leashd.agents.runtimes.tmux import _crop_to_command_view
+
+    snapshot = (
+        " ▎ promo banner\n"
+        "❯ hey, who are you?\n"
+        "⏺ I'm Claude, an AI assistant.\n"
+        "✻ Brewed for 3s\n"
+        "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n"
+        "   Select model\n"
+        "     1. Default (recommended)\n"
+        "   Enter to set as default · s to use this session only"
+    )
+    out = _crop_to_command_view(snapshot, "/model")
+    assert out.startswith("▔▔▔")
+    assert "Select model" in out
+    assert "who are you" not in out
+    assert "promo banner" not in out
+
+
+def test_crop_to_command_view_echo_anchor_wins():
+    from leashd.agents.runtimes.tmux import _crop_to_command_view
+
+    snapshot = "⏺ old reply\n❯ /context\n  ⎿  Context Usage\n     41k/1m tokens (4%)"
+    out = _crop_to_command_view(snapshot, "/context")
+    assert out.splitlines()[0] == "❯ /context"
+    assert "old reply" not in out
+
+
+def test_crop_to_command_view_without_anchor_returns_unchanged():
+    from leashd.agents.runtimes.tmux import _crop_to_command_view
+
+    snapshot = "line one\nline two"
+    assert _crop_to_command_view(snapshot, "/help") == snapshot
+
+
+def test_format_pane_snapshot_collapses_blank_runs():
+    from leashd.agents.runtimes.tmux import _format_pane_snapshot
+
+    out = _format_pane_snapshot("a\n\n\n\n\nb\n\n\nc")
+    assert out == "a\n\nb\n\nc"
+
+
+async def test_run_native_command_model_includes_pin_note(tmp_path, monkeypatch):
+    monkeypatch.setattr("leashd.agents.runtimes.tmux.NATIVE_COMMAND_RENDER_POLL", 0.0)
+    cs = FakeCS()
+    cs._idle_at_composer = True
+    cs._complete_on_enter = False
+    cs.capture = lambda: "Select model\n 1. Default"
+    tsm = FakeTSM(cs)
+    agent = _agent(_cfg(tmp_path, claude_model="claude-opus-4-7"), tsm)
+
+    out = await agent.run_native_command(_session(tmp_path), "/model")
+
+    assert "claude_model = claude-opus-4-7" in out
+    assert "leashd model set" in out
+
+
+async def test_run_native_command_non_model_has_no_pin_note(tmp_path, monkeypatch):
+    monkeypatch.setattr("leashd.agents.runtimes.tmux.NATIVE_COMMAND_RENDER_POLL", 0.0)
+    cs = FakeCS()
+    cs._idle_at_composer = True
+    cs._complete_on_enter = False
+    cs.capture = lambda: "Context Usage\n 41k/1m tokens"
+    tsm = FakeTSM(cs)
+    agent = _agent(_cfg(tmp_path), tsm)
+
+    out = await agent.run_native_command(_session(tmp_path), "/context")
+
+    assert "leashd model set" not in out
+
+
+async def test_run_native_command_model_note_reports_ground_truth(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr("leashd.agents.runtimes.tmux.NATIVE_COMMAND_RENDER_POLL", 0.0)
+    cs = FakeCS()
+    cs._idle_at_composer = True
+    cs._complete_on_enter = False
+    cs.last_model = "claude-sonnet-5"
+    cs.capture = lambda: "Select model\n 1. Default"
+    tsm = FakeTSM(cs)
+    agent = _agent(_cfg(tmp_path), tsm)
+
+    out = await agent.run_native_command(_session(tmp_path), "/model")
+
+    assert "ground truth" in out
+    assert "claude-sonnet-5" in out

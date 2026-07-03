@@ -247,7 +247,7 @@ class _FakeCS:
     def pane_is_dead(self):
         return self._dead
 
-    async def submit(self, text):
+    async def submit(self, text, *, max_enter_presses=5, plain_keys=False):
         self.submitted.append(text)
 
 

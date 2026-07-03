@@ -63,6 +63,7 @@ class JSONLTailer:
         self._on_event = on_event
         self._session = session
         self._path: Path | None = None
+        self._discovered_path = False
         self._offset = 0
         self._inode: int | None = None
         self._seen: set[str] = set()
@@ -71,35 +72,74 @@ class JSONLTailer:
         self._skip_history_on_resume_pending = resume
         self._resume_drop_pending = resume
         self._resume_saw_synthetic = False
+        self._preexisting = self._snapshot_existing_jsonl()
+
+    def _project_dir(self) -> Path:
+        from leashd.agents.runtimes.tmux_session import encode_project_dir
+
+        return self._projects_root / encode_project_dir(self._session.working_directory)
+
+    def _snapshot_existing_jsonl(self) -> set[Path]:
+        """Session files already on disk when this pane spawned. The newest-
+        file discovery fallback must never adopt one of these: any OTHER
+        claude session in the same project (the user's own interactive
+        ``claude``, a concurrent chat) keeps appending to its file, so an
+        mtime heuristic alone latches onto a foreign transcript and streams
+        someone else's conversation into this chat."""
+        proj_dir = self._project_dir()
+        if not proj_dir.is_dir():
+            return set()
+        try:
+            return set(proj_dir.glob("*.jsonl"))
+        except OSError:
+            return set()
 
     def _resolve_path(self) -> Path | None:
-        if self._path is not None and self._path.is_file():
-            return self._path
         uuid = self._session.claude_uuid
         cwd = self._session.working_directory
+        if (
+            self._discovered_path
+            and self._path is not None
+            and uuid
+            and self._path.stem != uuid
+        ):
+            found = find_session_jsonl(self._projects_root, uuid, cwd)
+            if found is not None:
+                logger.info(
+                    "tmux_jsonl_repointed_to_hook_uuid",
+                    session_id=self._session.session_id,
+                    discovered=self._path.name,
+                    actual=found.name,
+                )
+                self._path = found
+                self._discovered_path = False
+                self._offset = 0
+                self._inode = None
+                return found
+        if self._path is not None and self._path.is_file():
+            return self._path
         if uuid:
             found = find_session_jsonl(self._projects_root, uuid, cwd)
             if found is not None:
                 self._path = found
+                self._discovered_path = False
                 return found
-        # Fallback: hooks may be slow/down — discover the newest jsonl
-        # written under the encoded project dir after we spawned.
         if time.monotonic() - self._started < _DISCOVER_AFTER:
             return None
-        from leashd.agents.runtimes.tmux_session import encode_project_dir
-
-        proj_dir = self._projects_root / encode_project_dir(cwd)
+        proj_dir = self._project_dir()
         if not proj_dir.is_dir():
             return None
         candidates = [
             p
             for p in proj_dir.glob("*.jsonl")
-            if p.stat().st_mtime >= self._started_wall - 5.0
+            if p not in self._preexisting
+            and p.stat().st_mtime >= self._started_wall - 5.0
         ]
         if not candidates:
             return None
         newest = max(candidates, key=lambda p: p.stat().st_mtime)
         self._path = newest
+        self._discovered_path = True
         if self._session.claude_uuid is None:
             self._session.claude_uuid = newest.stem
         return newest

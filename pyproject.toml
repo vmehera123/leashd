@@ -1,6 +1,6 @@
 [project]
 name = "leashd"
-version = "1.0.2"
+version = "1.1.0"
 description = "Safety-first agentic coding framework with pluggable runtimes. Run Claude Code or Codex as a governed daemon — sandbox, YAML policies, human-in-the-loop approval"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -162,11 +162,12 @@ ignore = ["E501"]  # line too long, handled by formatter
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S105", "S106", "S108", "S603", "S607", "ARG", "RUF001", "RUF003"]  # assert, test tokens, /tmp paths, subprocess, unused args all fine in tests; RUF001/3: fixtures embed the literal terminal glyphs (❯) Claude Code renders
-"scripts/_harness/**" = ["S108", "S310", "ARG"]  # throwaway tmux/Telegram verification harness: /tmp socket dir, localhost urllib, unused FastAPI route args
+"scripts/_harness/**" = ["S108", "S310", "S311", "S112", "S603", "S607", "SIM115", "ARG"]  # throwaway tmux/Telegram verification harness + soak driver: /tmp socket dir, localhost urllib, non-crypto random picks, lenient parsing, tmux subprocess calls
 # tmux runtime matches Claude Code's native in-pane permission selector, which
 # renders the literal U+276F (❯) glyph — the markers MUST byte-match captured
 # pane output, so the "ambiguous character" rules do not apply here.
-"leashd/agents/runtimes/tmux_session.py" = ["RUF001", "RUF003"]
+"leashd/agents/runtimes/tmux_session.py" = ["RUF001", "RUF002", "RUF003"]
+"leashd/agents/runtimes/tmux.py" = ["RUF001", "RUF002", "RUF003"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["leashd"]

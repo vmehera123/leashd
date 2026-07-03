@@ -1,25 +1,33 @@
 """Driver/observer for the tmux harness. Inject + watch the streaming timeline.
 
+Point APPROVED_DIR (or APP_LOG/AUDIT directly) at the same directory the
+harness runs with so the `log`/`watch` commands read that run's files.
+
 Usage:
   python drive.py msg "<text>"          inject a plain message
   python drive.py cmd "<command> args"  inject a slash command (e.g. "task ...")
   python drive.py tap <message_id> <callback_data>
-  python drive.py watch <seconds>       just watch calls/log for N seconds
+  python drive.py watch <seconds> <start_iso>   poll until the turn completes
   python drive.py calls [since]         dump recorded calls
   python drive.py buttons <message_id>
+  python drive.py errors                dump Bot API errors the engine caused
+  python drive.py log <start_iso>       filtered app.log events since timestamp
+  python drive.py state                 quick counts
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 import urllib.request
 from pathlib import Path
 
-TG = "http://127.0.0.1:8091"
-APP_LOG = Path("/Users/vmehera/projects/neomi/chat/.leashd/logs/app.log")
-AUDIT = Path("/Users/vmehera/projects/neomi/chat/.leashd/audit.jsonl")
+TG = f"http://127.0.0.1:{os.environ.get('TG_PORT', '8091')}"
+_APPROVED = os.environ.get("APPROVED_DIR", "/tmp/leashd_tmux_harness/repo")
+APP_LOG = Path(os.environ.get("APP_LOG", f"{_APPROVED}/.leashd/logs/app.log"))
+AUDIT = Path(os.environ.get("AUDIT", f"{_APPROVED}/.leashd/audit.jsonl"))
 
 
 def _post(path: str, payload: dict) -> dict:
@@ -66,19 +74,6 @@ WATCH_EVENTS = (
     "task_escalated",
     "error",
 )
-
-
-def _tail_jsonl(path: Path, since_ts: float) -> list[dict]:
-    out = []
-    if not path.exists():
-        return out
-    for ln in path.read_text(errors="replace").splitlines():
-        try:
-            o = json.loads(ln)
-        except json.JSONDecodeError:
-            continue
-        out.append(o)
-    return out
 
 
 def log_events_since(start_iso: str) -> None:
@@ -189,7 +184,27 @@ if __name__ == "__main__":
         print(json.dumps(_get(f"/control/buttons?message_id={sys.argv[2]}"), indent=2))
     elif cmd == "log":
         log_events_since(sys.argv[2])
+    elif cmd == "watch":
+        finished = watch(
+            float(sys.argv[2]),
+            sys.argv[3] if len(sys.argv) > 3 else "",
+            0,
+        )
+        print("turn_completed" if finished else "still_running")
+    elif cmd == "errors":
+        d = _get("/control/state")
+        for e in d.get("api_errors", []):
+            print(f"  {e['method']:20} {e['error_code']} {e['description']}")
+        if not d.get("api_errors"):
+            print("  (no Bot API errors)")
     elif cmd == "state":
         d = _get("/control/state")
-        print("calls:", d["total_calls"], "pending:", d["pending_updates"])
+        print(
+            "calls:",
+            d["total_calls"],
+            "pending:",
+            d["pending_updates"],
+            "api_errors:",
+            len(d.get("api_errors", [])),
+        )
         print("messages:", list(d["messages"].keys()))

@@ -298,6 +298,37 @@ _NATIVE_DIALOG_SKIP_SETS: tuple[tuple[str, ...], ...] = (
 # Numbered-option row: optional ``❯`` highlight, then ``N.`` then label.
 _NATIVE_DIALOG_OPTION_RE = re.compile(r"^\s*(❯)?\s*(\d+)\.\s+(.+?)\s*$")
 
+_SESSION_SCOPED_CONFIRM_MARKER = "s to use this session only"
+_MODEL_SWITCH_CONFIRM_MARKER = "No, go back"
+_MODEL_SWITCH_YES_PREFIX = "Yes,"
+
+_DIALOG_DRIVE_CONFIRM_RETRIES = 3
+_DIALOG_DRIVE_CONFIRM_POLL_S = 0.8
+_STRAY_DIALOG_WAIT_S = 4.0
+_DIALOG_NAV_MAX_STEPS = 14
+_DIALOG_NAV_STEP_DELAY_S = 0.3
+_DIALOG_REBRIDGE_COOLDOWN_S = 60.0
+
+
+def _composer_region(screen: str) -> str:
+    """The screen from the final ``❯`` line down, whitespace-normalized.
+
+    ``submit``'s still-queued check must look only here: transcript ``❯``
+    echoes of already-submitted prompts sit above the composer, and a
+    whole-screen match mistook such an echo for still-queued composer text
+    and pressed Enter again — which instantly confirmed whatever dialog the
+    command had just opened (the repeat-/model double-Enter that wrote the
+    global model default). No ``❯`` on screen falls back to the whole
+    screen: fail toward retrying, never toward losing a stuck prompt."""
+    lines = screen.splitlines()
+    idx: int | None = None
+    for i, ln in enumerate(lines):
+        if ln.lstrip().startswith("❯"):
+            idx = i
+    if idx is None:
+        return " ".join(screen.split())
+    return " ".join("\n".join(lines[idx:]).split())
+
 
 class NativeDialogMatch:
     """A detected actionable native claude TUI dialog.
@@ -421,6 +452,7 @@ def _detect_native_dialog(screen: str) -> NativeDialogMatch | None:
         "Enter to confirm" in screen
         or "Esc to cancel" in screen
         or "Enter to choose" in screen
+        or _SESSION_SCOPED_CONFIRM_MARKER in screen
     )
     rows = _parse_numbered_options(screen)
     if has_confirm_hint and rows:
@@ -495,6 +527,8 @@ class TmuxTurn:
         self.duration_ms: int = 0
         self.on_text_chunk = on_text_chunk
         self.on_tool_activity = on_tool_activity
+        self._activity_claims_hook: dict[str, int] = {}
+        self._activity_claims_jsonl: dict[str, int] = {}
         # Returns True while a Claude Code ``/goal`` is active in the pane. When
         # set, a completion signal defers (the goal keeps Claude working across
         # turns and leashd streams the whole run as one task). The dialog
@@ -534,6 +568,28 @@ class TmuxTurn:
         turn that is genuinely advancing (parity intent with claude-cli, whose
         NDJSON stream keeps its turn alive)."""
         self.last_activity = time.monotonic()
+
+    def claim_hook_activity(self, key: str) -> bool:
+        """One ToolActivity per physical tool call across the two redundant
+        sources (PreToolUse hook + JSONL tailer): each side claims a call by
+        identity key and yields when the other side already emitted it, in
+        either arrival order. Keeps the hook's instant indicator and the
+        tailer's coverage of hook-skipped tools without double-counting the
+        engine's tool summary against ``tools_used``."""
+        pending = self._activity_claims_jsonl.get(key, 0)
+        if pending > 0:
+            self._activity_claims_jsonl[key] = pending - 1
+            return False
+        self._activity_claims_hook[key] = self._activity_claims_hook.get(key, 0) + 1
+        return True
+
+    def claim_jsonl_activity(self, key: str) -> bool:
+        pending = self._activity_claims_hook.get(key, 0)
+        if pending > 0:
+            self._activity_claims_hook[key] = pending - 1
+            return False
+        self._activity_claims_jsonl[key] = self._activity_claims_jsonl.get(key, 0) + 1
+        return True
 
     def complete(self, *, is_error: bool = False) -> None:
         if self.stop_event.is_set():
@@ -675,6 +731,8 @@ class TmuxClaudeSession:
         # InteractionCoordinator. Owned by ``TmuxSessionManager.spawn``,
         # cancelled here in :meth:`teardown`.
         self.dialog_watcher_task: asyncio.Task[None] | None = None
+        self.failed_dialog_fingerprints: dict[str, float] = {}
+        self.last_model: str | None = None
 
     # -- pane control --------------------------------------------------------
 
@@ -683,13 +741,22 @@ class TmuxClaudeSession:
         self._pane = pane
 
     def pane_is_dead(self) -> bool:
+        """True when this pane can no longer serve the session.
+
+        Empty ``list-panes`` output is DEAD, not alive: when the tmux server
+        itself has exited (its last session was killed — daemon restart,
+        ``/clear`` of the only chat), libtmux returns empty stdout without
+        raising, and treating that as a healthy pane wedged the runtime —
+        every capture came back blank, ``await_ready`` timed out on every
+        turn, and nothing ever respawned until a full daemon restart.
+        """
         if self._pane is None:
             return True
         try:
             out = self._pane.cmd("list-panes", "-F", "#{pane_dead}").stdout
         except Exception:
             return True
-        return bool(out) and out[0].strip() == "1"
+        return not out or out[0].strip() == "1"
 
     def send_keys(self, keys: str, *, literal: bool = True) -> None:
         if self._pane is None:
@@ -881,22 +948,108 @@ class TmuxClaudeSession:
         logger.warning("tmux_pane_ready_timeout", tmux_name=self.tmux_name)
         return False
 
-    async def submit(self, text: str) -> None:
+    def _composer_accepts_input(self, screen: str) -> bool:
+        """The two states where typing text is safe and meaningful: the idle
+        composer, or the live-turn composer (mid-turn follow-ups queue
+        natively). Everything else — dialogs, pickers, menus, screens damaged
+        by a stray control sequence — must not receive prompt text. This is
+        a POSITIVE check on composer state rather than a dialog-shape
+        detector: the /model picker with its footer overwritten by a leaked
+        ``[201~`` paste terminator defeated every shape-based detector while
+        remaining obviously not-a-composer."""
+        return "esc to interrupt" in screen or self.is_idle_at_composer(screen)
+
+    async def _dismiss_stray_dialog(self) -> None:
+        """Never type a prompt into anything that is not the composer.
+
+        Typed characters are dialog keystrokes there — an open /model picker
+        interpreted the 's' inside a normal sentence as its session-scoped
+        confirm, ate the rest of the text, and the turn hung forever on a
+        prompt claude never received. Give the screen a short grace to
+        return to the composer (a bridged answer may be mid-drive), then
+        Escape whatever owns it. Dedicated selectors (AskUserQuestion /
+        permission / plan) are never escaped — they belong to a pending
+        human flow the engine gates messages behind; a stuck one is only
+        logged, matching the previous behaviour.
+        """
+        deadline = time.monotonic() + _STRAY_DIALOG_WAIT_S
+        while time.monotonic() < deadline:
+            screen = self.capture()
+            if self._composer_accepts_input(screen):
+                return
+            await asyncio.sleep(0.4)
+        for _ in range(2):
+            screen = self.capture()
+            if self._composer_accepts_input(screen):
+                return
+            if self.dedicated_selector_present(screen):
+                logger.warning(
+                    "tmux_submit_with_selector_on_screen", tmux_name=self.tmux_name
+                )
+                return
+            logger.warning("tmux_stray_dialog_dismissed", tmux_name=self.tmux_name)
+            with contextlib.suppress(Exception):
+                self.send_keys("Escape", literal=False)
+            await asyncio.sleep(0.5)
+
+    async def submit(
+        self, text: str, *, max_enter_presses: int = 5, plain_keys: bool = False
+    ) -> None:
+        await self._dismiss_stray_dialog()
         self._maybe_update_goal_state(text)
-        await self._deliver_prompt(text)
+        if plain_keys:
+            self.send_keys(text, literal=True)
+        else:
+            await self._deliver_prompt(text)
         await asyncio.sleep(0.5)
+        outcome = await self._drive_submission(text, max_enter_presses)
+        if outcome is not False:
+            if outcome is None:
+                logger.warning(
+                    "tmux_prompt_submit_unconfirmed", tmux_name=self.tmux_name
+                )
+            return
+        logger.warning(
+            "tmux_prompt_delivery_lost_retyping",
+            tmux_name=self.tmux_name,
+            chars=len(text),
+        )
+        with contextlib.suppress(Exception):
+            self.send_keys("Escape", literal=False)
+        await asyncio.sleep(0.4)
+        self.send_keys(text, literal=True)
+        await asyncio.sleep(0.5)
+        if await self._drive_submission(text, max_enter_presses) is not True:
+            logger.warning("tmux_prompt_submit_unconfirmed", tmux_name=self.tmux_name)
+
+    async def _drive_submission(self, text: str, max_enter_presses: int) -> bool | None:
+        """Press Enter and verify the prompt actually went somewhere.
+
+        Returns True when the turn is visibly running / a dialog opened /
+        the prompt is echoed in the transcript; None when the text is still
+        sitting in the composer after every press (legacy give-up — do NOT
+        retype on top of it); False when the text is nowhere on screen —
+        the delivery was lost and a retype is safe.
+        """
         tail = " ".join(text.split())[-48:]
-        for _ in range(5):
+        screen = ""
+        for _ in range(max_enter_presses):
             self.send_keys("Enter", literal=False)
             await asyncio.sleep(0.8)
             screen = self.capture()
-            started = "esc to interrupt" in screen or (
-                self.turn is not None and bool(self.turn.tools_used)
+            started = (
+                "esc to interrupt" in screen
+                or (self.turn is not None and bool(self.turn.tools_used))
+                or self.dedicated_selector_present(screen)
+                or _detect_native_dialog(screen) is not None
             )
-            still_queued = bool(tail) and tail in " ".join(screen.split())
-            if started or not still_queued:
-                return
-        logger.warning("tmux_prompt_submit_unconfirmed", tmux_name=self.tmux_name)
+            if started:
+                return True
+            if not tail:
+                return True
+            if tail not in _composer_region(screen):
+                return tail in " ".join(screen.split())
+        return None
 
     # Native interactive permission selector. Claude Code 2.1.144 renders this
     # IN THE PANE whenever its own classifier routes a tool through the
@@ -1909,6 +2062,8 @@ class TmuxSessionManager:
             await self.terminate(cs.session_id)
 
     def _ensure_server(self) -> Any:
+        if self._server is not None and not self._socket_path.exists():
+            self._server = None
         if self._server is None:
             import libtmux  # lazy: keeps the package importable without tmux
 
@@ -2344,7 +2499,9 @@ class TmuxSessionManager:
         cs = self._bind_uuid(cwd, claude_uuid)
         if cs is not None and cs.turn is not None:
             cs.turn.mark_activity()
-            if cs.turn.on_tool_activity is not None:
+            if cs.turn.on_tool_activity is not None and cs.turn.claim_hook_activity(
+                _tool_identity_key("", tool_name, tool_input)
+            ):
                 await safe_callback(
                     cs.turn.on_tool_activity,
                     ToolActivity(
@@ -2730,6 +2887,22 @@ class TmuxSessionManager:
                     continue
                 match = _detect_native_dialog(screen)
                 if match is None:
+                    if seen_fingerprints and not self.has_pending_human(cs.chat_id):
+                        seen_fingerprints.clear()
+                    continue
+                failed_at = cs.failed_dialog_fingerprints.get(match.fingerprint)
+                if (
+                    failed_at is not None
+                    and time.monotonic() - failed_at < _DIALOG_REBRIDGE_COOLDOWN_S
+                ):
+                    logger.warning(
+                        "tmux_native_dialog_suppressed_after_failed_drive",
+                        session_id=cs.session_id,
+                        tmux_name=cs.tmux_name,
+                        fingerprint=match.fingerprint[:80],
+                    )
+                    with contextlib.suppress(Exception):
+                        cs.send_keys("Escape", literal=False)
                     continue
                 if match.fingerprint in seen_fingerprints:
                     # Same dialog still rendered (keystroke drive hasn't
@@ -2852,15 +3025,60 @@ class TmuxSessionManager:
                 cs.send_keys("Escape", literal=False)
             return
 
-        # claude TUI numbered-option dialogs accept the row digit (1-based)
-        # as a one-keystroke pick, then Enter to confirm. Send both — the
-        # row digit also moves the highlight if Enter alone wouldn't pick
-        # the right row.
         row_digit = str(chosen_idx + 1)
         try:
-            cs.send_keys(row_digit, literal=True)
-            await asyncio.sleep(0.2)
-            cs.send_keys("Enter", literal=False)
+            session_scoped = _SESSION_SCOPED_CONFIRM_MARKER in cs.capture()
+            on_target = True
+            if session_scoped:
+                on_target = await self._navigate_dialog_highlight(cs, chosen_idx)
+                if on_target:
+                    await asyncio.sleep(_DIALOG_NAV_STEP_DELAY_S)
+                    cs.send_keys("s", literal=True)
+            else:
+                cs.send_keys(row_digit, literal=True)
+                await asyncio.sleep(0.2)
+                cs.send_keys("Enter", literal=False)
+            confirmed = False
+            for _ in range(_DIALOG_DRIVE_CONFIRM_RETRIES):
+                await asyncio.sleep(_DIALOG_DRIVE_CONFIRM_POLL_S)
+                screen = cs.capture()
+                if cs._composer_accepts_input(screen):
+                    confirmed = True
+                    break
+                if _MODEL_SWITCH_CONFIRM_MARKER in screen:
+                    self._accept_model_switch_confirm(cs, screen)
+                    continue
+                if session_scoped and on_target:
+                    on_target = await self._navigate_dialog_highlight(cs, chosen_idx)
+                    if on_target:
+                        cs.send_keys("s", literal=True)
+                elif not session_scoped:
+                    cs.send_keys("Enter", literal=False)
+            if not confirmed:
+                await asyncio.sleep(_DIALOG_DRIVE_CONFIRM_POLL_S)
+                confirmed = cs._composer_accepts_input(cs.capture())
+            if not confirmed:
+                screen = cs.capture()
+                rows = _parse_numbered_options(screen)
+                logger.warning(
+                    "tmux_native_dialog_drive_unconfirmed",
+                    session_id=cs.session_id,
+                    tmux_name=cs.tmux_name,
+                    name=match.name,
+                    nav_on_target=on_target,
+                    chosen_idx=chosen_idx,
+                    rows_found=len(rows),
+                    highlight_idx=next(
+                        (i for i, (_, hl, _) in enumerate(rows) if hl), None
+                    ),
+                    screen_tail=" ".join(screen.split())[-220:],
+                )
+                cs.failed_dialog_fingerprints[match.fingerprint] = time.monotonic()
+                for _ in range(2):
+                    cs.send_keys("Escape", literal=False)
+                    await asyncio.sleep(_DIALOG_DRIVE_CONFIRM_POLL_S)
+                    if cs._composer_accepts_input(cs.capture()):
+                        break
         except Exception:
             logger.exception(
                 "tmux_native_dialog_drive_error",
@@ -2875,7 +3093,61 @@ class TmuxSessionManager:
             tmux_name=cs.tmux_name,
             name=match.name,
             chosen_row=chosen_idx + 1,
+            session_scoped=session_scoped,
+            confirmed=confirmed,
         )
+
+    @staticmethod
+    def _accept_model_switch_confirm(cs: TmuxClaudeSession, screen: str) -> None:
+        """Answer claude's cache-invalidation follow-up ("This conversation is
+        cached for the current model… 1. Yes, switch to X / 2. No, go back")
+        that appears after a session-scoped pick whenever the pane has
+        history. The drive used to treat it as an unconfirmed pick and
+        fail-close with Escape, which selects "No, go back" — every pick on
+        a lived-in pane silently reverted. The Yes row's digit commits it
+        regardless of where the highlight sits."""
+        rows = _parse_numbered_options(screen)
+        yes_number = next(
+            (
+                number
+                for number, _, label in rows
+                if label.startswith(_MODEL_SWITCH_YES_PREFIX)
+            ),
+            1,
+        )
+        logger.info(
+            "tmux_model_switch_confirm_accepted",
+            session_id=cs.session_id,
+            tmux_name=cs.tmux_name,
+        )
+        cs.send_keys(str(yes_number), literal=True)
+
+    @staticmethod
+    async def _navigate_dialog_highlight(
+        cs: TmuxClaudeSession, chosen_idx: int
+    ) -> bool:
+        """Move the dialog highlight onto ``chosen_idx``, one verified arrow
+        at a time. Returns True once a fresh capture shows the ❯ on the
+        chosen row; False when the rows disappear or the budget runs out
+        (the caller fails closed instead of confirming a wrong row)."""
+        for _ in range(_DIALOG_NAV_MAX_STEPS):
+            rows = _parse_numbered_options(cs.capture())
+            if not rows:
+                return False
+            current = next((i for i, (_, hl, _) in enumerate(rows) if hl), None)
+            if current is None:
+                return False
+            if current == chosen_idx:
+                return True
+            cs.send_keys("Down" if chosen_idx > current else "Up", literal=False)
+            await asyncio.sleep(_DIALOG_NAV_STEP_DELAY_S)
+        logger.warning(
+            "tmux_native_dialog_nav_exhausted",
+            session_id=cs.session_id,
+            tmux_name=cs.tmux_name,
+            chosen_idx=chosen_idx,
+        )
+        return False
 
     async def _dispatch_jsonl_event(
         self, cs: TmuxClaudeSession, obj: dict[str, Any]
@@ -2892,7 +3164,11 @@ class TmuxSessionManager:
             turn.mark_activity()
 
         if obj_type == "assistant":
-            content = obj.get("message", {}).get("content", [])
+            message = obj.get("message", {})
+            model = message.get("model")
+            if isinstance(model, str) and model:
+                cs.last_model = model
+            content = message.get("content", [])
             if isinstance(content, list):
                 await self._process_blocks(turn, content)
             return
@@ -2945,14 +3221,17 @@ class TmuxSessionManager:
             elif btype == "tool_use":
                 name = str(block.get("name", ""))
                 turn.tools_used.append(name)
-                desc = describe_tool(name, block.get("input", {}) or {})
+                tool_input = block.get("input", {}) or {}
+                desc = describe_tool(name, tool_input)
                 # Record the call in the transcript so the persisted message
                 # reflects what the agent did — the engine's tool summary is
                 # not applied to the tmux AgentResponse.content.
                 turn.text_parts.append(
                     f"\U0001f527 {name}: {desc}" if desc else f"\U0001f527 {name}"
                 )
-                if turn.on_tool_activity:
+                if turn.on_tool_activity and turn.claim_jsonl_activity(
+                    _tool_identity_key("", name, tool_input)
+                ):
                     await safe_callback(
                         turn.on_tool_activity,
                         ToolActivity(tool_name=name, description=desc),

@@ -2102,6 +2102,74 @@ async def test_on_pre_tool_streams_tool_activity(cfg):
     assert any(a is not None and a.tool_name == "Bash" for a in activities)
 
 
+async def test_tool_activity_emitted_once_across_hook_and_jsonl(cfg):
+    """One physical tool call must produce exactly one ToolActivity even though
+    both redundant sources observe it (PreToolUse hook + JSONL tailer). The
+    double emission doubled the engine's 🧰 summary against the tmux footer
+    (``Bash x4, TaskUpdate x2`` for a 3-tool turn) and raced two activity
+    sends on the first tool of a session."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm, mode="auto")
+    tsm._by_uuid["u1"] = cs.session_id
+    activities: list = []
+
+    async def on_act(a):
+        activities.append(a)
+
+    turn = cs.begin_turn(on_text_chunk=None, on_tool_activity=on_act)
+    gk = _StubFloorGatekeeper(check_result=PermissionAllow(updated_input={}))
+    _bind(tsm, gk)
+
+    body = {
+        "session_id": "u1",
+        "cwd": "/work",
+        "tool_name": "Bash",
+        "tool_input": {"command": "make check"},
+        "permission_mode": "default",
+    }
+    block = {"type": "tool_use", "name": "Bash", "input": {"command": "make check"}}
+
+    await tsm.on_pre_tool(body)
+    await TmuxSessionManager._process_blocks(turn, [dict(block)])
+    assert len([a for a in activities if a is not None]) == 1
+    assert turn.tools_used == ["Bash"]
+
+    await tsm.on_pre_tool(body)
+    await TmuxSessionManager._process_blocks(turn, [dict(block)])
+    assert len([a for a in activities if a is not None]) == 2
+    assert turn.tools_used == ["Bash", "Bash"]
+
+
+async def test_tool_activity_jsonl_first_then_hook_not_duplicated(cfg):
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm, mode="auto")
+    tsm._by_uuid["u1"] = cs.session_id
+    activities: list = []
+
+    async def on_act(a):
+        activities.append(a)
+
+    turn = cs.begin_turn(on_text_chunk=None, on_tool_activity=on_act)
+    gk = _StubFloorGatekeeper(check_result=PermissionAllow(updated_input={}))
+    _bind(tsm, gk)
+
+    await TmuxSessionManager._process_blocks(
+        turn,
+        [{"type": "tool_use", "name": "Read", "input": {"file_path": "/a.py"}}],
+    )
+    await tsm.on_pre_tool(
+        {
+            "session_id": "u1",
+            "cwd": "/work",
+            "tool_name": "Read",
+            "tool_input": {"file_path": "/a.py"},
+            "permission_mode": "default",
+        }
+    )
+    assert len([a for a in activities if a is not None]) == 1
+    assert turn.tools_used == ["Read"]
+
+
 async def test_on_pre_tool_auto_payload_mismatch_full_pipeline(cfg):
     tsm = TmuxSessionManager(cfg)
     cs = _session(tsm, mode="auto")
@@ -3761,3 +3829,592 @@ async def test_reap_leftover_chat_panes_ignores_pane_less_cli_sessions(
     await tsm._reap_leftover_chat_panes("web:1", keep="new")
 
     assert "cli-sess" in tsm._sessions
+
+
+_MODEL_PICKER_SCREEN = """\
+⏺ prior reply text
+
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+   Select model
+   Switch between Claude models. Your pick becomes the default for new sessions.
+
+     1. Default (recommended)  Opus 4.8 with 1M context
+     2. Opus                   Opus 4.8 with 1M context
+   ❯ 3. Opus 4.7 ✔             Newer version available
+
+   Enter to set as default · s to use this session only · Esc to cancel
+"""
+
+
+def _picker_screen(hl: int) -> str:
+    rows = ["Default (recommended)", "Opus", "Opus 4.7 \u2714"]
+    marks = ["\u276f" if i == hl else " " for i in range(len(rows))]
+    body = "\n".join(f"   {marks[i]} {i + 1}. {label}" for i, label in enumerate(rows))
+    return (
+        "\u2594" * 16
+        + "\n   Select model\n"
+        + body
+        + "\n   Enter to set as default \u00b7 s to use this session only"
+        + " \u00b7 Esc to cancel\n"
+    )
+
+
+_STUB_MODEL_MATCH_OPTIONS = [
+    {"label": "Default (recommended)"},
+    {"label": "Opus"},
+    {"label": "Opus 4.7 \u2714"},
+]
+
+
+async def test_bridge_native_dialog_session_scoped_confirm_navigates_and_uses_s(
+    cfg, no_real_sleep
+):
+    """Session-scoped dialogs are driven closed-loop: one verified arrow per
+    fresh capture until the \u276f highlight sits on the chosen row, then the
+    session key. Blind arrow bursts silently missed on the /model picker
+    (three taps in a row never landed) and a digit press would instantly
+    commit the GLOBAL default."""
+    from leashd.agents.runtimes.tmux_session import (
+        NativeDialogMatch,
+        TmuxSessionManager,
+    )
+    from leashd.agents.types import PermissionAllow
+
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    idle = "\u276f\n  \u23f5\u23f5 auto mode on (shift+tab to cycle)\n"
+    cs.attach(
+        object(),
+        _FakePane(
+            [
+                _picker_screen(2),
+                _picker_screen(2),
+                _picker_screen(1),
+                idle,
+                idle,
+            ]
+        ),
+    )
+
+    class _StubInteractions:
+        async def handle_question(self, chat_id, tool_input, *, user_id, session_id):
+            return PermissionAllow(
+                updated_input={
+                    **tool_input,
+                    "answers": {tool_input["questions"][0]["question"]: "Opus"},
+                }
+            )
+
+    tsm._interactions = _StubInteractions()  # type: ignore[assignment]
+
+    match = NativeDialogMatch(
+        name="generic_native_dialog",
+        question="Select model",
+        header="Claude",
+        options=list(_STUB_MODEL_MATCH_OPTIONS),
+        fingerprint="model-picker",
+        selected_row_index=2,
+    )
+    await tsm._bridge_native_dialog(cs, match)
+    assert cs._pane.sent.count(("Up", False)) == 1
+    assert cs._pane.sent.count(("s", True)) == 1
+    assert ("2", True) not in cs._pane.sent
+    assert ("Enter", False) not in cs._pane.sent
+
+
+async def test_submit_single_enter_when_command_opens_dialog(
+    cfg, no_real_sleep, monkeypatch
+):
+    """Repeat-/model regression: the transcript already echoes the same
+    command from a prior run and the fresh submit opened the picker (the
+    composer is gone). The queued-text heuristic matches the old echo and
+    would press Enter again — instantly committing the picker's highlighted
+    row as the GLOBAL model default. An open dialog proves the submit
+    landed: exactly one Enter."""
+    monkeypatch.setattr(
+        "leashd.agents.runtimes.tmux_session._STRAY_DIALOG_WAIT_S", 0.01
+    )
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    screen = (
+        "❯ /model\n"
+        "  ⎿  Set model to Sonnet 5 for this session only\n"
+        "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n"
+        "   Select model\n"
+        "     1. Default (recommended)  Opus 4.8\n"
+        "     2. Opus                   Opus 4.8\n"
+        "   Enter to set as default · s to use this session only · Esc to cancel\n"
+    )
+    pane = _FakePane([screen])
+    cs.attach(object(), pane)
+
+    async def _no_typing(text):
+        pass
+
+    monkeypatch.setattr(cs, "_deliver_prompt", _no_typing)
+
+    await cs.submit("/model", max_enter_presses=5)
+
+    assert pane.sent.count(("Enter", False)) == 1
+
+
+async def test_submit_retries_while_composer_still_holds_text(
+    cfg, no_real_sleep, monkeypatch
+):
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    stuck = (
+        "────────────────\n"
+        "❯ /model\n"
+        "────────────────\n"
+        "  ⏵⏵ auto mode on (shift+tab to cycle)\n"
+    )
+    running = "⏺ working…\nesc to interrupt\n"
+    pane = _FakePane([stuck, stuck, running])
+    cs.attach(object(), pane)
+
+    async def _no_typing(text):
+        pass
+
+    monkeypatch.setattr(cs, "_deliver_prompt", _no_typing)
+
+    await cs.submit("/model", max_enter_presses=5)
+
+    assert pane.sent.count(("Enter", False)) == 2
+
+
+async def test_dialog_watcher_rebridges_same_dialog_after_it_clears(cfg, monkeypatch):
+    """Fingerprint dedup must reset once the dialog is gone and no bridge is
+    pending — a second /model reopens an IDENTICAL picker, and keeping the
+    fingerprint forever meant it never bridged again (buttons appeared only
+    once per pane)."""
+    import asyncio as _asyncio
+
+    from leashd.agents.runtimes.tmux_session import TmuxSessionManager
+
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+
+    idle = "❯\n  ⏵⏵ auto mode on (shift+tab to cycle)\n"
+    screens = [_WEBFETCH_SCREEN, _WEBFETCH_SCREEN, idle, _WEBFETCH_SCREEN]
+
+    class _SeqPane:
+        def __init__(self):
+            self.captures = 0
+            self.sent: list[tuple[str, bool]] = []
+
+        def cmd(self, *args):
+            from types import SimpleNamespace
+
+            if args[0] == "list-panes":
+                return SimpleNamespace(
+                    stdout=["0" if self.captures < len(screens) else "1"]
+                )
+            i = min(self.captures, len(screens) - 1)
+            self.captures += 1
+            return SimpleNamespace(stdout=screens[i].split("\n"))
+
+        def send_keys(self, *_a, **_k):
+            pass
+
+    cs.attach(object(), _SeqPane())
+
+    bridge_calls: list[str] = []
+
+    async def _stub_bridge(_cs, match):
+        bridge_calls.append(match.fingerprint)
+
+    tsm._bridge_native_dialog = _stub_bridge  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        "leashd.agents.runtimes.tmux_session._NATIVE_DIALOG_POLL_INTERVAL_S",
+        0.001,
+    )
+
+    task = _asyncio.create_task(tsm._dialog_watcher_loop(cs))
+    await _asyncio.wait_for(task, timeout=2.0)
+
+    assert bridge_calls == [
+        "webfetch:woodallscm.com",
+        "webfetch:woodallscm.com",
+    ]
+
+
+def test_pane_is_dead_when_tmux_server_gone(cfg):
+    """Empty ``list-panes`` output means the tmux SERVER exited (libtmux
+    returns no lines without raising). Treating it as a healthy pane wedged
+    the runtime: blank captures, await_ready timeouts on every turn, no
+    respawn until a daemon restart."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+
+    class _DeadServerPane:
+        def cmd(self, *args):
+            from types import SimpleNamespace
+
+            return SimpleNamespace(stdout=[])
+
+        def send_keys(self, *_a, **_k):
+            pass
+
+    cs.attach(object(), _DeadServerPane())
+
+    assert cs.pane_is_dead() is True
+
+
+def test_ensure_server_rebuilds_when_socket_gone(cfg, tmp_path):
+    tsm = TmuxSessionManager(cfg)
+    stale = object()
+    tsm._server = stale
+    assert not tsm._socket_path.exists()
+
+    tsm._socket_path.parent.mkdir(parents=True, exist_ok=True)
+    tsm._socket_path.touch()
+    tsm._server = stale
+    assert tsm._ensure_server() is stale
+
+    tsm._socket_path.unlink()
+    rebuilt = tsm._ensure_server()
+    assert rebuilt is not stale
+
+
+async def test_submit_escapes_stray_native_dialog_before_typing(
+    cfg, no_real_sleep, monkeypatch
+):
+    """A prompt must never be typed into a dialog that owns the screen —
+    the open /model picker consumed a normal sentence as dialog keystrokes
+    (its 's' committed a model, the rest vanished) and the turn hung forever
+    on a prompt claude never received."""
+    monkeypatch.setattr(
+        "leashd.agents.runtimes.tmux_session._STRAY_DIALOG_WAIT_S", 0.01
+    )
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    pane = _FakePane([_MODEL_PICKER_SCREEN])
+    cs.attach(object(), pane)
+
+    typed: list[str] = []
+
+    async def _record_typing(text):
+        typed.append(text)
+
+    monkeypatch.setattr(cs, "_deliver_prompt", _record_typing)
+
+    await cs.submit("which model do you use?", max_enter_presses=1)
+
+    assert ("Escape", False) in pane.sent
+    assert typed == ["which model do you use?"]
+    assert pane.sent.index(("Escape", False)) < pane.sent.index(("Enter", False))
+
+
+async def test_submit_never_escapes_dedicated_selector(cfg, no_real_sleep, monkeypatch):
+    monkeypatch.setattr(
+        "leashd.agents.runtimes.tmux_session._STRAY_DIALOG_WAIT_S", 0.01
+    )
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    perm = (
+        "Do you want to proceed?\n"
+        " ❯ 1. Yes\n"
+        "   2. No, and tell Claude what to do differently\n"
+    )
+    pane = _FakePane([perm])
+    cs.attach(object(), pane)
+
+    async def _no_typing(text):
+        pass
+
+    monkeypatch.setattr(cs, "_deliver_prompt", _no_typing)
+
+    await cs.submit("hello", max_enter_presses=1)
+
+    assert ("Escape", False) not in pane.sent
+
+
+async def test_bridge_native_dialog_represses_confirm_until_closed(cfg, no_real_sleep):
+    """The drive must verify the screen returned to a composer \u2014 a swallowed
+    confirm keystroke left the picker open and the next prompt was typed
+    into it. One re-press after the verify poll closes it."""
+    from leashd.agents.runtimes.tmux_session import (
+        NativeDialogMatch,
+        TmuxSessionManager,
+    )
+    from leashd.agents.types import PermissionAllow
+
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    idle = "\u276f\n  \u23f5\u23f5 auto mode on (shift+tab to cycle)\n"
+    cs.attach(
+        object(),
+        _FakePane(
+            [
+                _picker_screen(2),
+                _picker_screen(2),
+                _picker_screen(1),
+                _picker_screen(1),
+                _picker_screen(1),
+                idle,
+                idle,
+            ]
+        ),
+    )
+
+    class _StubInteractions:
+        async def handle_question(self, chat_id, tool_input, *, user_id, session_id):
+            return PermissionAllow(
+                updated_input={
+                    **tool_input,
+                    "answers": {tool_input["questions"][0]["question"]: "Opus"},
+                }
+            )
+
+    tsm._interactions = _StubInteractions()  # type: ignore[assignment]
+
+    match = NativeDialogMatch(
+        name="generic_native_dialog",
+        question="Select model",
+        header="Claude",
+        options=list(_STUB_MODEL_MATCH_OPTIONS),
+        fingerprint="model-picker",
+        selected_row_index=2,
+    )
+    await tsm._bridge_native_dialog(cs, match)
+
+    assert cs._pane.sent.count(("s", True)) == 2
+    assert ("Escape", False) not in cs._pane.sent
+
+
+async def test_bridge_native_dialog_escapes_when_confirm_never_lands(
+    cfg, no_real_sleep
+):
+    """Navigation that cannot reach the chosen row must NOT confirm a wrong
+    row \u2014 it fails closed: no session key, escalating Escape, and the
+    fingerprint recorded so the watcher will not re-bridge the same dialog
+    into an ask-fail-ask loop."""
+    from leashd.agents.runtimes.tmux_session import (
+        NativeDialogMatch,
+        TmuxSessionManager,
+    )
+    from leashd.agents.types import PermissionAllow
+
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    cs.attach(object(), _FakePane([_picker_screen(2)]))
+
+    class _StubInteractions:
+        async def handle_question(self, chat_id, tool_input, *, user_id, session_id):
+            return PermissionAllow(
+                updated_input={
+                    **tool_input,
+                    "answers": {tool_input["questions"][0]["question"]: "Opus"},
+                }
+            )
+
+    tsm._interactions = _StubInteractions()  # type: ignore[assignment]
+
+    match = NativeDialogMatch(
+        name="generic_native_dialog",
+        question="Select model",
+        header="Claude",
+        options=list(_STUB_MODEL_MATCH_OPTIONS),
+        fingerprint="model-picker",
+        selected_row_index=2,
+    )
+    await tsm._bridge_native_dialog(cs, match)
+
+    assert ("s", True) not in cs._pane.sent
+    assert ("Escape", False) in cs._pane.sent
+    assert "model-picker" in cs.failed_dialog_fingerprints
+
+
+async def test_submit_plain_keys_bypasses_typing_and_paste(
+    cfg, no_real_sleep, monkeypatch
+):
+    """Native slash commands must be delivered as one literal send-keys —
+    the human-typing profile's paste path leaked a bracketed-paste
+    terminator (``[201~``) into the freshly opened picker, overwriting the
+    footer every dialog detector keyed on."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    idle = "❯\n  ⏵⏵ auto mode on (shift+tab to cycle)\n"
+    pane = _FakePane([idle, _MODEL_PICKER_SCREEN, _MODEL_PICKER_SCREEN])
+    cs.attach(object(), pane)
+
+    delivered: list[str] = []
+
+    async def _fail_if_used(text):
+        delivered.append(text)
+
+    monkeypatch.setattr(cs, "_deliver_prompt", _fail_if_used)
+
+    await cs.submit("/model", max_enter_presses=1, plain_keys=True)
+
+    assert delivered == []
+    assert ("/model", True) in pane.sent
+    assert pane.sent.count(("Enter", False)) == 1
+
+
+async def test_submit_retypes_when_delivery_vanishes(cfg, no_real_sleep, monkeypatch):
+    """Observed live: a prompt delivered into a verified-ready composer
+    vanished (bracketed-paste desync) — no echo, no turn, empty composer —
+    and submit declared success, hanging the engine forever. A vanished
+    delivery is now retyped once via plain keystrokes."""
+    monkeypatch.setattr(
+        "leashd.agents.runtimes.tmux_session._STRAY_DIALOG_WAIT_S", 0.01
+    )
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    idle = "❯\n  ⏵⏵ auto mode on (shift+tab to cycle)\n"
+    running = "⏺ working…\nesc to interrupt\n"
+    pane = _FakePane([idle, idle, idle, running])
+    cs.attach(object(), pane)
+
+    async def _vanishing_delivery(text):
+        pass
+
+    monkeypatch.setattr(cs, "_deliver_prompt", _vanishing_delivery)
+
+    await cs.submit("which model do you use now?", max_enter_presses=1)
+
+    assert ("which model do you use now?", True) in pane.sent
+    assert pane.sent.count(("Enter", False)) == 2
+
+
+async def test_submit_does_not_retype_over_stuck_composer(
+    cfg, no_real_sleep, monkeypatch
+):
+    monkeypatch.setattr(
+        "leashd.agents.runtimes.tmux_session._STRAY_DIALOG_WAIT_S", 0.01
+    )
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    stuck = (
+        "────────────────\n"
+        "❯ hello there\n"
+        "────────────────\n"
+        "  ⏵⏵ auto mode on (shift+tab to cycle)\n"
+    )
+    pane = _FakePane([stuck])
+    cs.attach(object(), pane)
+
+    async def _no_typing(text):
+        pass
+
+    monkeypatch.setattr(cs, "_deliver_prompt", _no_typing)
+
+    await cs.submit("hello there", max_enter_presses=2)
+
+    assert ("hello there", True) not in pane.sent
+    assert pane.sent.count(("Enter", False)) == 2
+
+
+async def test_dialog_watcher_suppresses_recently_failed_dialog(cfg, monkeypatch):
+    """A dialog whose drive just failed must not be re-bridged (the observed
+    ask-fail-ask loop: three identical /model questions in 30s) \u2014 the
+    watcher escapes it instead until the cooldown passes."""
+    import asyncio as _asyncio
+    import time as _time
+
+    from leashd.agents.runtimes.tmux_session import TmuxSessionManager
+
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    cs.failed_dialog_fingerprints["webfetch:woodallscm.com"] = _time.monotonic()
+
+    class _SeqPane:
+        def __init__(self):
+            self.captures = 0
+            self.sent: list[tuple[str, bool]] = []
+
+        def cmd(self, *args):
+            from types import SimpleNamespace
+
+            if args[0] == "list-panes":
+                return SimpleNamespace(stdout=["0" if self.captures < 3 else "1"])
+            self.captures += 1
+            return SimpleNamespace(stdout=_WEBFETCH_SCREEN.split("\n"))
+
+        def send_keys(self, keys, enter=False, literal=True):
+            self.sent.append((keys, literal))
+
+    pane = _SeqPane()
+    cs.attach(object(), pane)
+
+    bridge_calls: list[str] = []
+
+    async def _stub_bridge(_cs, match):
+        bridge_calls.append(match.fingerprint)
+
+    tsm._bridge_native_dialog = _stub_bridge  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        "leashd.agents.runtimes.tmux_session._NATIVE_DIALOG_POLL_INTERVAL_S",
+        0.001,
+    )
+
+    task = _asyncio.create_task(tsm._dialog_watcher_loop(cs))
+    await _asyncio.wait_for(task, timeout=2.0)
+
+    assert bridge_calls == []
+    assert ("Escape", False) in pane.sent
+
+
+_CACHE_CONFIRM_SCREEN = (
+    "This conversation is cached for the current model. Switching to Sonnet 5\n"
+    "means the full history gets re-read on your next message.\n"
+    "   1. Yes, switch to Sonnet 5\n"
+    " ❯ 2. No, go back\n"
+)
+
+
+async def test_bridge_native_dialog_accepts_cache_switch_confirm(cfg, no_real_sleep):
+    """claude opens a second cache-invalidation dialog after a session-scoped
+    pick whenever the pane has history. Escaping it selects 'No, go back' —
+    every pick on a lived-in pane silently reverted (the daemon-only /model
+    failure). The drive must answer it with the Yes row's digit."""
+    from leashd.agents.runtimes.tmux_session import (
+        NativeDialogMatch,
+        TmuxSessionManager,
+    )
+    from leashd.agents.types import PermissionAllow
+
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    idle = "❯\n  ⏵⏵ auto mode on (shift+tab to cycle)\n"
+    cs.attach(
+        object(),
+        _FakePane(
+            [
+                _picker_screen(2),
+                _picker_screen(2),
+                _picker_screen(1),
+                _CACHE_CONFIRM_SCREEN,
+                idle,
+                idle,
+            ]
+        ),
+    )
+
+    class _StubInteractions:
+        async def handle_question(self, chat_id, tool_input, *, user_id, session_id):
+            return PermissionAllow(
+                updated_input={
+                    **tool_input,
+                    "answers": {tool_input["questions"][0]["question"]: "Opus"},
+                }
+            )
+
+    tsm._interactions = _StubInteractions()  # type: ignore[assignment]
+
+    match = NativeDialogMatch(
+        name="generic_native_dialog",
+        question="Select model",
+        header="Claude",
+        options=list(_STUB_MODEL_MATCH_OPTIONS),
+        fingerprint="model-picker",
+        selected_row_index=2,
+    )
+    await tsm._bridge_native_dialog(cs, match)
+
+    assert cs._pane.sent.count(("s", True)) == 1
+    assert ("1", True) in cs._pane.sent
+    assert ("Escape", False) not in cs._pane.sent
+    assert "model-picker" not in cs.failed_dialog_fingerprints

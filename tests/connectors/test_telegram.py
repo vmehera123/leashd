@@ -127,7 +127,7 @@ class TestStart:
 
         mock_builder.token.assert_called_once_with("fake:token")
         mock_builder.concurrent_updates.assert_called_once_with(True)
-        assert mock_app.add_handler.call_count == 5
+        assert mock_app.add_handler.call_count == 6
         mock_app.add_error_handler.assert_called_once()
         mock_app.initialize.assert_awaited_once()
         mock_app.start.assert_awaited_once()
@@ -155,6 +155,34 @@ class TestStart:
             if isinstance(handler, CommandHandler):
                 registered |= set(handler.commands)
         assert {"plan", "edit", "auto", "default"} <= registered
+
+    async def test_start_registers_catch_all_command_passthrough(self, connector):
+        """Unlisted slash commands (/model, /compact, …) must still reach
+        _on_command so the engine can relay them to the claude TUI — PTB
+        silently dropped them when only the explicit CommandHandler existed."""
+        from telegram.ext import MessageHandler, filters
+
+        mock_app = _make_mock_app()
+        mock_app.add_error_handler = MagicMock()
+        mock_builder = MagicMock()
+        mock_builder.token.return_value = mock_builder
+        mock_builder.concurrent_updates.return_value = mock_builder
+        mock_builder.build.return_value = mock_app
+
+        with patch(
+            "leashd.connectors.telegram.Application.builder",
+            return_value=mock_builder,
+        ):
+            await connector.start()
+
+        catch_alls = [
+            call.args[0]
+            for call in mock_app.add_handler.call_args_list
+            if isinstance(call.args[0], MessageHandler)
+            and str(call.args[0].filters) == str(filters.COMMAND)
+        ]
+        assert len(catch_alls) == 1
+        assert catch_alls[0].callback == connector._on_command
 
 
 class TestStop:
@@ -1798,6 +1826,52 @@ class TestSendActivityRecovery:
         assert msg_id == "99"
         assert connector._activity_message_id["123"] == "99"
         mock_app.bot.send_message.assert_awaited_once()
+
+    async def test_send_activity_deletes_survivor_before_replacing(self, connector):
+        """A failed edit does not prove the old activity message is gone (a
+        transient network error leaves it in the chat). Replacing without a
+        best-effort delete orphaned stale `🔧 …` bubbles below the final
+        reply."""
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        connector._activity_message_id["123"] = "50"
+        connector._activity_last_text["123"] = "🔍 Searching: Old task"
+
+        mock_app.bot.edit_message_text = AsyncMock(
+            side_effect=BadRequest("message not found")
+        )
+        mock_app.bot.delete_message = AsyncMock()
+        mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=99))
+
+        await connector.send_activity("123", "Read", "New task")
+
+        mock_app.bot.delete_message.assert_awaited_once()
+        assert mock_app.bot.delete_message.await_args.kwargs["message_id"] == 50
+
+    async def test_concurrent_send_activity_creates_single_message(self, connector):
+        """Two near-simultaneous activities for a chat with no activity
+        message yet must not both send one (the orphaned duplicate `🔧`
+        bubble at session start) — the per-chat lock serializes them."""
+        import asyncio as _asyncio
+
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        ids = iter([71, 72])
+
+        async def _slow_send(**_kw):
+            await _asyncio.sleep(0.05)
+            return MagicMock(message_id=next(ids))
+
+        mock_app.bot.send_message = AsyncMock(side_effect=_slow_send)
+        mock_app.bot.edit_message_text = AsyncMock()
+
+        first, second = await _asyncio.gather(
+            connector.send_activity("123", "Read", "file.py"),
+            connector.send_activity("123", "Bash", "pytest tests/"),
+        )
+
+        assert mock_app.bot.send_message.await_count == 1
+        assert first == second == "71"
 
 
 # --- B3: Question messages ---
