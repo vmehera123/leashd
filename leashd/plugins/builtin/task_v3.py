@@ -190,14 +190,12 @@ _V3_PHASE_TO_MODE: dict[TaskPhase, str] = {
 # System-prompt instruction prepended to plan and implement phase sessions.
 # These phases would otherwise inherit no mode instruction (PLAN_MODE_INSTRUCTION
 # is skipped when task_run_id is set, and AUTO_MODE_INSTRUCTION fires for
-# implement but says nothing about discovery). Without this, Claude defaults
-# to Bash for/grep/sed loops when a target repo's CLAUDE.md has no guidance.
+# implement but says nothing about discovery).
 _V3_DISCOVERY_INSTRUCTION: str = (
-    "For reading, searching, or listing files in this task phase, use the "
-    "Read, Grep, and Glob tools — NEVER Bash grep/sed/find/awk/ls/cat/for-loops. "
-    "For broad multi-file exploration, use the Agent tool (subagents). Bash "
-    "is reserved for running the project's own commands — tests, linters, "
-    "build steps, git — not for discovery or file I/O."
+    "For reading, searching, or listing files in this task phase, prefer the "
+    "Read, Grep, and Glob tools where the session provides them, and the "
+    "Agent tool (subagents) for broad multi-file exploration. Where they are "
+    "unavailable, Bash `grep`/`find` is a fine substitute."
 )
 
 # Verify defaults to ``None`` here — the verify_prompt body is self-contained

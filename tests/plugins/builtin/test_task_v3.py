@@ -335,20 +335,27 @@ class TestPrompts:
         with pytest.raises(TypeError):
             plan_prompt("abc", revision_feedback="should not be accepted")  # type: ignore[call-arg]
 
-    def test_plan_prompt_steers_away_from_bash_discovery(self):
+    def test_plan_prompt_prefers_structured_discovery_without_forbidding_bash(self):
+        """Stated as a preference, not a prohibition — a target repo's own
+        .claude/settings.json can disable Grep, and an audited run hit exactly
+        that while the prompt forbade the only remaining option."""
         p = " ".join(plan_prompt("abc").split())
         assert "Read, Grep, and Glob" in p
-        assert "never Bash grep/sed/find/for-loops for discovery" in p
+        assert "prefer" in p.lower()
+        assert "never Bash" not in p
 
     def test_implement_prompt_with_review_feedback(self):
         p = implement_prompt("abc", review_feedback="Fix the XSS issue")
         assert "REVIEW FEEDBACK" in p
         assert "Fix the XSS issue" in p
 
-    def test_implement_prompt_steers_away_from_bash_discovery(self):
+    def test_implement_prompt_prefers_structured_discovery_without_forbidding_bash(
+        self,
+    ):
         p = " ".join(implement_prompt("abc").split())
         assert "Read, Grep, and Glob" in p
-        assert "never Bash grep/sed/find/for-loops for discovery" in p
+        assert "prefer" in p.lower()
+        assert "never Bash" not in p
 
     def test_verify_prompt_with_prior_failure(self):
         p = verify_prompt("abc", prior_failure_tail="pytest failed: test_foo")
@@ -1471,12 +1478,12 @@ class TestPhaseExecution:
         assert call.kwargs["phase"] == "plan"
         assert call.kwargs["mode"] == "plan"
         assert call.kwargs["task_run_id"] == task.run_id
-        # Discovery guidance must reach the system prompt for plan+implement
-        # so Claude does not fall back to Bash for/grep/sed loops.
+        # Discovery guidance must reach the system prompt for plan+implement.
         mode_instruction = call.kwargs["mode_instruction"]
         assert mode_instruction is not None
         assert "Read, Grep, and Glob" in mode_instruction
-        assert "NEVER Bash" in mode_instruction
+        assert "prefer" in mode_instruction.lower()
+        assert "NEVER" not in mode_instruction
 
     async def test_execute_phase_clears_pending_before_dispatch(
         self, orchestrator, mock_engine, tmp_path

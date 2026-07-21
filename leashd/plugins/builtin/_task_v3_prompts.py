@@ -67,8 +67,8 @@ def plan_prompt(
         f"Read .leashd/tasks/{run_id}.md for the task description.\n"
         "This repo has a CLAUDE.md — follow it. Use subagents (Agent tool)\n"
         "to explore the codebase; do not read every file yourself.\n"
-        "For file-level inspection use Read, Grep, and Glob — never Bash\n"
-        "grep/sed/find/for-loops for discovery.\n"
+        "For file-level inspection prefer Read, Grep, and Glob where this\n"
+        "session provides them; Bash `grep`/`find` is fine where it does not.\n"
         "\n"
         'When your plan is ready, write it to the "## Plan" section of\n'
         f".leashd/tasks/{run_id}.md. The section MUST include concrete\n"
@@ -103,8 +103,8 @@ def implement_prompt(
         "\n"
         f'Read .leashd/tasks/{run_id}.md. Execute the "## Plan" section.\n'
         "Follow CLAUDE.md for lint/type/test commands.\n"
-        "For file-level inspection use Read, Grep, and Glob — never Bash\n"
-        "grep/sed/find/for-loops for discovery.\n"
+        "For file-level inspection prefer Read, Grep, and Glob where this\n"
+        "session provides them; Bash `grep`/`find` is fine where it does not.\n"
         "\n"
         "When finished, write a concise summary of changed files and key\n"
         'decisions to "## Implementation Summary" in the task file, then\n'

@@ -244,7 +244,8 @@ class TestImplementPromptV4:
         p = implement_prompt("abc", task_description="Add a /hello endpoint to FastAPI")
         assert "/hello endpoint" in p
         assert "v4 / phase: implement" in p
-        assert "Read, Grep, Glob" in p
+        assert "Read, Grep, and Glob" in p
+        assert "NEVER Bash" not in p  # preference, not a prohibition
         assert "EnterPlanMode" in p  # mentions to forbid
 
     def test_targets_implementation_summary_section(self):

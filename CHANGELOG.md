@@ -1,5 +1,8 @@
 # Changelog
 
+## [1.1.1] - 2026-07-21
+- **changed**: `/task` discovery guidance (v3 + v4 prompts, and the v3 plan/implement mode instruction) now states Read/Grep/Glob as a preference instead of a hard "never Bash" prohibition; Bash `grep`/`find` is an accepted fallback when a target repo's settings disable the structured tools.
+
 ## [1.1.0] - 2026-07-03
 - **added**: claude-native slash commands (`/model`, `/compact`, `/context`, `/cost`, `/help`, …) now pass through from Telegram/WebUI to the claude TUI on the tmux runtime; dialogs they open (model picker, consent prompts) are bridged to inline buttons.
 - **added**: `/screen` command — on-demand snapshot of the live claude terminal (tmux runtime).
