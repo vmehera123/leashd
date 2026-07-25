@@ -44,7 +44,7 @@ from leashd.core.safety.gatekeeper import FILE_EDIT_TOOLS, normalize_tool_name
 from leashd.exceptions import AgentError
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine
+    from collections.abc import Callable, Coroutine, Iterable
 
     from leashd.core.config import LeashdConfig
     from leashd.core.events import EventBus
@@ -175,6 +175,67 @@ def _credential_deny_rules() -> list[str]:
         for tool in _CREDENTIAL_DENY_TOOLS
         for glob in _CREDENTIAL_DENY_GLOBS
     ]
+
+
+_BASH_AUTO_APPROVE_PREFIX = "Bash::"
+
+
+def native_allow_rules(
+    policy_rules: Iterable[Any], auto_approved_tools: Iterable[str]
+) -> list[str]:
+    """Native claude ``permissions.allow`` rules mirroring what leashd has
+    ALREADY cleared — the counterpart to :func:`_credential_deny_rules`.
+
+    In ``auto`` mode claude runs its own classifier, and that classifier is a
+    second, independent gate leashd cannot influence per-call: a PreToolUse
+    ``allow`` does not stop it denying (observed live on 2.1.220 — leashd
+    auto-approved ``agent-browser click`` and the classifier answered
+    "Blocked by classifier", stranding a ``/web`` run). A static
+    ``permissions.allow`` entry IS resolved by claude's permission system, so
+    it settles those calls before the classifier is consulted.
+
+    This does NOT weaken the pipeline: ``permissions.allow`` does not suppress
+    hooks (verified — a PreToolUse ``deny`` still blocked an allow-listed
+    command), so the sandbox, hard-deny floor and audit trail all still run,
+    and ``permissions.deny`` still wins over any entry emitted here.
+
+    Two sources, both already-decided:
+
+    - policy rules whose action is ``allow`` — unconditionally safe by policy;
+    - tools the human blanket-approved for this chat ("always allow"), which
+      the gatekeeper would auto-approve anyway.
+
+    Only UNCONDITIONAL allow rules are mirrored. A rule carrying
+    ``command_patterns`` or ``path_patterns`` allows its tools only for inputs
+    matching those regexes, and claude's syntax is prefix/path globs — any
+    mapping would be lossy in the over-permissive direction. Dropping the
+    condition would be worse than skipping the rule: ``plan-file-writes``
+    allows ``Write``/``Edit`` *only* under ``.plan``/``.claude/plans/``, so
+    emitting a bare ``Write`` would natively clear edits to every path.
+    Bare ``Bash`` is never emitted.
+    """
+    allow: list[str] = []
+    for rule in policy_rules:
+        action = getattr(rule, "action", None)
+        if getattr(action, "value", action) != "allow":
+            continue
+        if getattr(rule, "command_patterns", None) or getattr(
+            rule, "path_patterns", None
+        ):
+            continue
+        for tool in getattr(rule, "tools", None) or []:
+            if isinstance(tool, str) and tool and tool != "Bash":
+                allow.append(tool)
+    for key in auto_approved_tools:
+        if not isinstance(key, str) or not key:
+            continue
+        if key.startswith(_BASH_AUTO_APPROVE_PREFIX):
+            command = key[len(_BASH_AUTO_APPROVE_PREFIX) :].strip()
+            if command:
+                allow.append(f"Bash({command}:*)")
+        elif key != "Bash":
+            allow.append(key)
+    return sorted(dict.fromkeys(allow))
 
 
 TYPING_MODE_TYPE = "type"
@@ -2089,8 +2150,34 @@ class TmuxSessionManager:
             ],
         }
 
-    def write_managed_settings(self, session_id: str) -> Path:
-        """Write a leashd-managed Claude Code settings file (hooks only).
+    def native_allow_for_chat(self, chat_id: str | None) -> list[str]:
+        """``permissions.allow`` entries for a chat, or empty when safety is
+        unbound (tests / sandbox spawns) or a blanket auto-approve is in force.
+
+        A blanket "approve everything" deliberately emits NOTHING: it is a
+        session-scoped, revocable stance, and baking it into a settings file
+        claude reads once at spawn would outlive ``/stop`` or a mode switch."""
+        if self._gatekeeper is None:
+            return []
+        policy = getattr(self._gatekeeper, "_policy_engine", None)
+        rules = getattr(policy, "rules", []) or []
+        per_tool: set[str] = set()
+        if chat_id:
+            blanket, per_tool = self._gatekeeper.get_auto_approve_status(chat_id)
+            if blanket:
+                per_tool = set()
+        return native_allow_rules(rules, per_tool)
+
+    def write_managed_settings(
+        self,
+        session_id: str,
+        *,
+        chat_id: str | None = None,
+        perm_mode: str | None = None,
+    ) -> Path:
+        """Write a leashd-managed Claude Code settings file — hooks, the
+        credential deny floor, and (in ``auto`` only) the native allow table
+        from :meth:`native_allow_for_chat`.
 
         Passed via ``claude --settings`` so the user's ``~/.claude/settings.json``
         and project ``.claude/settings.json`` are never touched. ``PreToolUse``
@@ -2125,10 +2212,17 @@ class TmuxSessionManager:
                 }
             ]
         path = self._socket_dir / f"{session_id}.settings.json"
-        payload: dict[str, Any] = {
-            "hooks": hooks,
-            "permissions": {"deny": _credential_deny_rules()},
-        }
+        permissions: dict[str, Any] = {"deny": _credential_deny_rules()}
+        if perm_mode == "auto":
+            allow = self.native_allow_for_chat(chat_id)
+            if allow:
+                permissions["allow"] = allow
+                logger.info(
+                    "tmux_native_allow_written",
+                    session_id=session_id,
+                    count=len(allow),
+                )
+        payload: dict[str, Any] = {"hooks": hooks, "permissions": permissions}
         enabled = self._security_enabled_plugins()
         if enabled:
             payload["enabledPlugins"] = enabled
@@ -2459,7 +2553,9 @@ class TmuxSessionManager:
         await self._reap_leftover_chat_panes(chat_id, keep=session_id)
 
         tmux_name = f"leashd_{session_id}"
-        settings_path = self.write_managed_settings(session_id)
+        settings_path = self.write_managed_settings(
+            session_id, chat_id=chat_id, perm_mode=perm_mode
+        )
         command, sysprompt_path = self._build_claude_command(
             session_id=session_id,
             session=session,

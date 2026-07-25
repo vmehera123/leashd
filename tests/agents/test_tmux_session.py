@@ -167,6 +167,148 @@ def test_write_managed_settings(cfg):
     assert stop["headers"]["X-Leashd-Token"] == "s3cr3t-token"
 
 
+class _FakeRule:
+    def __init__(self, action, tools=None, command_patterns=None):
+        self.action = action
+        self.tools = tools or []
+        self.command_patterns = command_patterns or []
+
+
+def test_native_allow_rules_translate_policy_and_always_allow():
+    """The counterpart to the credential deny floor: mirror what leashd has
+    ALREADY cleared into claude's own permission table, so its auto-mode
+    classifier settles those calls instead of denying them independently."""
+    from leashd.agents.runtimes.tmux_session import native_allow_rules
+
+    rules = [
+        _FakeRule("allow", tools=["Read", "Glob", "Skill"]),
+        _FakeRule("require_approval", tools=["WebFetch"]),
+        _FakeRule("deny", tools=["Write"]),
+        _FakeRule(
+            "allow",
+            command_patterns=[__import__("re").compile(r"^agent-browser\s+snapshot")],
+        ),
+    ]
+    out = native_allow_rules(rules, {"Bash::agent-browser click", "Edit"})
+
+    assert "Read" in out
+    assert "Glob" in out
+    assert "Skill" in out
+    # A blanket-approved bash command becomes a prefix rule claude understands.
+    assert "Bash(agent-browser click:*)" in out
+    assert "Edit" in out
+    # Only `allow` rules are mirrored — approval-gated / denied tools are not.
+    assert "WebFetch" not in out
+    assert "Write" not in out
+    # Regex command_patterns are NOT translated: claude's syntax is prefix
+    # globs, so any mapping would be lossy in the over-permissive direction.
+    assert not any("snapshot" in r for r in out)
+    # Never a bare Bash escape hatch, and stable + deduped for a settings file.
+    assert "Bash" not in out
+    assert out == sorted(set(out))
+
+
+def test_native_allow_rules_skip_conditional_rules():
+    """A rule scoped by path/command regexes allows its tools only for matching
+    inputs. Claude's syntax cannot express those conditions, and dropping them
+    silently widens the grant — `plan-file-writes` allows Write/Edit ONLY under
+    `.plan`/`.claude/plans/`, so a bare `Write` would clear every path."""
+    import re as _re
+
+    from leashd.agents.runtimes.tmux_session import native_allow_rules
+
+    path_scoped = _FakeRule("allow", tools=["Write", "Edit"])
+    path_scoped.path_patterns = [_re.compile(r"\.plan$")]
+    cmd_scoped = _FakeRule("allow", tools=["Bash"])
+    cmd_scoped.command_patterns = [_re.compile(r"^ls\b")]
+
+    out = native_allow_rules([path_scoped, cmd_scoped], set())
+    assert out == []
+
+
+def test_native_allow_rules_against_real_default_policy():
+    """Guards the same hole at the real policy: whatever `default.yaml` grows,
+    nothing conditional may leak into claude's native allow table."""
+    from leashd.agents.runtimes.tmux_session import native_allow_rules
+    from leashd.core.safety.policy import PolicyEngine
+
+    engine = PolicyEngine(["leashd/policies/default.yaml"])
+    out = native_allow_rules(engine.rules, set())
+
+    assert "Read" in out, "unconditional read-only tools should still be mirrored"
+    # plan-file-writes is path-scoped — it must NOT become a blanket grant.
+    assert "Write" not in out
+    assert "Edit" not in out
+    assert "Bash" not in out
+    for rule in engine.rules:
+        if rule.action == "allow" and (rule.command_patterns or rule.path_patterns):
+            for tool in rule.tools or []:
+                assert tool not in out, f"conditional rule {rule.name} leaked {tool}"
+
+
+def test_native_allow_rules_never_emit_bare_bash():
+    from leashd.agents.runtimes.tmux_session import native_allow_rules
+
+    out = native_allow_rules([_FakeRule("allow", tools=["Bash", "Read"])], {"Bash"})
+    assert out == ["Read"]
+
+
+def test_managed_settings_allow_list_is_auto_mode_only(cfg):
+    """Claude's classifier only arbitrates in `auto`. In default/edit/plan the
+    native prompt is the gate and leashd drives it, so pre-clearing there would
+    change which calls surface a prompt — keep the blast radius at auto."""
+    tsm = TmuxSessionManager(cfg)
+    tsm._gatekeeper = _AllowStubGatekeeper({"Bash::agent-browser click"})
+
+    auto = json.loads(
+        tsm.write_managed_settings("s-auto", chat_id="c1", perm_mode="auto").read_text()
+    )["permissions"]
+    assert "Bash(agent-browser click:*)" in auto["allow"]
+    assert auto["deny"], "the credential floor must survive alongside the allow list"
+
+    for mode in ("default", "acceptEdits", "plan", None):
+        perms = json.loads(
+            tsm.write_managed_settings(
+                f"s-{mode}", chat_id="c1", perm_mode=mode
+            ).read_text()
+        )["permissions"]
+        assert "allow" not in perms
+
+
+def test_managed_settings_blanket_auto_approve_emits_nothing(cfg):
+    """A blanket "approve everything" is session-scoped and revocable; baking
+    it into a file claude reads once at spawn would outlive /stop."""
+    tsm = TmuxSessionManager(cfg)
+    tsm._gatekeeper = _AllowStubGatekeeper({"Bash::rm -rf"}, blanket=True)
+    perms = json.loads(
+        tsm.write_managed_settings("s1", chat_id="c1", perm_mode="auto").read_text()
+    )["permissions"]
+    assert not any("rm -rf" in r for r in perms.get("allow", []))
+
+
+def test_managed_settings_allow_list_omitted_without_safety(cfg):
+    """Sandbox spawns and tests never call bind_safety — no gatekeeper means no
+    policy to mirror, and the file must still be written."""
+    tsm = TmuxSessionManager(cfg)
+    perms = json.loads(
+        tsm.write_managed_settings("s1", chat_id="c1", perm_mode="auto").read_text()
+    )["permissions"]
+    assert "allow" not in perms
+    assert perms["deny"]
+
+
+class _AllowStubGatekeeper:
+    def __init__(self, per_tool, *, blanket=False, policy_rules=None):
+        self._per_tool = per_tool
+        self._blanket = blanket
+        self._policy_engine = type(
+            "_P", (), {"rules": policy_rules or [_FakeRule("allow", tools=["Read"])]}
+        )()
+
+    def get_auto_approve_status(self, chat_id):
+        return self._blanket, set(self._per_tool)
+
+
 def test_credential_deny_rules_mirror_analyzer_floor():
     """T-8: the native deny globs must cover the same credential files the
     analyzer flags (_CREDENTIAL_PATTERNS) and must NOT over-block ordinary
@@ -1592,7 +1734,9 @@ def _prep_spawn(tsm, server, monkeypatch):
     monkeypatch.setattr(tsm, "_preflight", lambda: None)
     monkeypatch.setattr(tsm, "_ensure_server", lambda: server)
     monkeypatch.setattr(
-        tsm, "write_managed_settings", lambda sid: tsm._socket_dir / f"{sid}.json"
+        tsm,
+        "write_managed_settings",
+        lambda sid, **_: tsm._socket_dir / f"{sid}.json",
     )
     monkeypatch.setattr(
         tsm, "_build_claude_command", lambda **k: ("claude --foo", None)
