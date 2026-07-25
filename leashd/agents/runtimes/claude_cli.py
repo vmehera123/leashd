@@ -28,6 +28,7 @@ from leashd.agents.runtimes._helpers import (
     SIGTERM_GRACE_SECONDS,
     StderrBuffer,
     backoff_delay,
+    build_agent_browser_env,
     build_agent_cli_args,
     build_append_system_prompt,
     build_content_blocks,
@@ -484,18 +485,11 @@ class ClaudeCliAgent(BaseAgent):
         # Read/Grep/Glob/Edit tools on discovery-heavy tasks — verified by
         # comparing tool_use streams with different entrypoints against the
         # same prompt.
-        env = {**os.environ, "CLAUDE_CODE_ENTRYPOINT": "cli"}
-        if self._config.browser_backend == "agent-browser":
-            if not self._config.browser_headless:
-                env["AGENT_BROWSER_HEADED"] = "1"
-            if (
-                session.mode == "web"
-                and not session.browser_fresh
-                and self._config.browser_user_data_dir
-            ):
-                env["AGENT_BROWSER_PROFILE"] = str(
-                    Path(self._config.browser_user_data_dir).expanduser()
-                )
+        env = {
+            **os.environ,
+            "CLAUDE_CODE_ENTRYPOINT": "cli",
+            **build_agent_browser_env(self._config, session),
+        }
 
         start = time.monotonic()
         process = await asyncio.create_subprocess_exec(

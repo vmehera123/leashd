@@ -899,25 +899,99 @@ class TestAgentBrowserPolicyRules:
         assert engine.evaluate(c) == PolicyDecision.REQUIRE_APPROVAL
         assert c.category == "agent-browser-mutations"
 
-    def test_default_requires_approval_for_evaluate(self):
+    def test_default_requires_approval_for_eval(self):
+        engine = PolicyEngine([self.POLICIES_DIR / "default.yaml"])
+        c = engine.classify("Bash", {"command": "agent-browser eval 'document.title'"})
+        assert engine.evaluate(c) == PolicyDecision.REQUIRE_APPROVAL
+        assert c.category == "agent-browser-mutations"
+
+    def test_default_requires_approval_for_press(self):
+        engine = PolicyEngine([self.POLICIES_DIR / "default.yaml"])
+        c = engine.classify("Bash", {"command": "agent-browser press Enter"})
+        assert engine.evaluate(c) == PolicyDecision.REQUIRE_APPROVAL
+        assert c.category == "agent-browser-mutations"
+
+    def test_default_requires_approval_for_mouse(self):
+        engine = PolicyEngine([self.POLICIES_DIR / "default.yaml"])
+        c = engine.classify("Bash", {"command": "agent-browser mouse wheel 500"})
+        assert engine.evaluate(c) == PolicyDecision.REQUIRE_APPROVAL
+        assert c.category == "agent-browser-mutations"
+
+    def test_default_requires_approval_for_find(self):
+        """`find` defaults to the click action."""
         engine = PolicyEngine([self.POLICIES_DIR / "default.yaml"])
         c = engine.classify(
-            "Bash", {"command": "agent-browser evaluate 'document.title'"}
+            "Bash", {"command": "agent-browser find text 'Delete account' click"}
         )
         assert engine.evaluate(c) == PolicyDecision.REQUIRE_APPROVAL
         assert c.category == "agent-browser-mutations"
 
-    def test_default_requires_approval_for_key(self):
+    def test_default_requires_approval_for_tab_switch(self):
         engine = PolicyEngine([self.POLICIES_DIR / "default.yaml"])
-        c = engine.classify("Bash", {"command": "agent-browser key Enter"})
+        c = engine.classify("Bash", {"command": "agent-browser tab t2"})
         assert engine.evaluate(c) == PolicyDecision.REQUIRE_APPROVAL
         assert c.category == "agent-browser-mutations"
 
-    def test_default_requires_approval_for_mouse_wheel(self):
+    def test_default_allows_bare_tab_and_tab_list(self):
         engine = PolicyEngine([self.POLICIES_DIR / "default.yaml"])
-        c = engine.classify("Bash", {"command": "agent-browser mouse-wheel 0 500"})
-        assert engine.evaluate(c) == PolicyDecision.REQUIRE_APPROVAL
-        assert c.category == "agent-browser-mutations"
+        for cmd in ("agent-browser tab", "agent-browser tab list"):
+            c = engine.classify("Bash", {"command": cmd})
+            assert engine.evaluate(c) == PolicyDecision.ALLOW
+
+    def test_default_allows_new_readonly_audits(self):
+        engine = PolicyEngine([self.POLICIES_DIR / "default.yaml"])
+        for cmd in (
+            "agent-browser a11y --json",
+            "agent-browser vitals",
+            "agent-browser read",
+            "agent-browser is visible @e1",
+            "agent-browser errors",
+            "agent-browser react tree",
+        ):
+            c = engine.classify("Bash", {"command": cmd})
+            assert engine.evaluate(c) == PolicyDecision.ALLOW, cmd
+            assert c.category == "agent-browser-readonly"
+
+    def test_default_requires_approval_when_audit_navigates(self):
+        """The URL form navigates, so it must gate like `open`."""
+        engine = PolicyEngine([self.POLICIES_DIR / "default.yaml"])
+        for cmd in (
+            "agent-browser a11y https://example.com",
+            "agent-browser vitals http://localhost:3000",
+            "agent-browser read https://docs.example.com",
+        ):
+            c = engine.classify("Bash", {"command": cmd})
+            assert engine.evaluate(c) == PolicyDecision.REQUIRE_APPROVAL, cmd
+
+    def test_default_requires_approval_for_credential_commands(self):
+        engine = PolicyEngine([self.POLICIES_DIR / "default.yaml"])
+        for cmd in (
+            "agent-browser cookies clear",
+            "agent-browser storage local clear",
+            "agent-browser clipboard read",
+            "agent-browser auth login my-app",
+            "agent-browser state save auth.json",
+        ):
+            c = engine.classify("Bash", {"command": cmd})
+            assert engine.evaluate(c) == PolicyDecision.REQUIRE_APPROVAL, cmd
+
+    def test_privileged_commands_gated_in_every_policy(self):
+        """Installs code, binds listeners, attaches to the user's real Chrome,
+        or hides nested commands — never auto-allowed, even under permissive."""
+        for policy in ("default", "autonomous", "permissive"):
+            engine = PolicyEngine([self.POLICIES_DIR / f"{policy}.yaml"])
+            for cmd in (
+                "agent-browser plugin add some-pkg",
+                "agent-browser chat 'summarize'",
+                "agent-browser connect 9222",
+                "agent-browser mcp",
+                "agent-browser dashboard start",
+                "agent-browser confirm abc123",
+                "agent-browser batch 'click @e1'",
+                "agent-browser doctor --fix",
+            ):
+                c = engine.classify("Bash", {"command": cmd})
+                assert engine.evaluate(c) != PolicyDecision.ALLOW, f"{policy}: {cmd}"
 
     def test_autonomous_requires_approval_for_scrollintoview(self):
         engine = PolicyEngine([self.POLICIES_DIR / "autonomous.yaml"])

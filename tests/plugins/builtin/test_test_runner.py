@@ -378,9 +378,10 @@ class TestTestRunnerPlugin:
         self, plugin, config, event_bus, session
     ):
         # Regression: the latest /test session escalated to human on
-        # ``agent-browser viewport ...`` and ``agent-browser snapshot | head``.
-        # Use the real ToolGatekeeper so the integration of pre-approval +
-        # _approval_key truncation + _matches_auto_approved is exercised.
+        # ``agent-browser set viewport ...`` and ``agent-browser snapshot |
+        # head``. Use the real ToolGatekeeper so the integration of
+        # pre-approval + _approval_key truncation + _matches_auto_approved is
+        # exercised.
         from leashd.core.safety.audit import AuditLogger
         from leashd.core.safety.gatekeeper import ToolGatekeeper, _approval_key
 
@@ -408,10 +409,16 @@ class TestTestRunnerPlugin:
         await event_bus.emit(event)
 
         for cmd in (
-            "agent-browser viewport 375",
-            "agent-browser device iPhone-13",
+            "agent-browser set viewport 375 812",
+            "agent-browser set device iPhone-13",
             "agent-browser snapshot | head",
             "agent-browser snapshot -i | grep button",
+            "agent-browser a11y --json",
+            "agent-browser errors",
+            "agent-browser network requests --status 400-599",
+            "agent-browser screenshot --annotate .leashd/x.png",
+            "agent-browser find role button click --name Submit",
+            "agent-browser tab t2",
         ):
             key = _approval_key("Bash", {"command": cmd})
             assert real_gate._matches_auto_approved("chat1", key), (

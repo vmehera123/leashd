@@ -136,6 +136,12 @@ def verify_prompt(
     pass against the affected route(s). Tests alone are insufficient and
     will be rejected.
 
+    The browser step names the specific read-only agent-browser commands
+    that produce machine-checkable evidence (``console``, ``errors``,
+    ``network requests``, ``a11y``, ``vitals``, ``screenshot --annotate``)
+    rather than asking the agent to "check the console" and trusting it to
+    invent a way. All of them are auto-approved in this phase.
+
     When ``project_config`` is supplied (loaded from ``.leashd/test.yaml``)
     the agent gets a PROJECT TEST CONFIG block listing the project's
     server command, URL, framework, credentials, preconditions, focus
@@ -181,12 +187,30 @@ def verify_prompt(
         "exercise the route(s) the endpoint serves or the upstream UI "
         "that calls into it. Honour `focus areas` from PROJECT TEST "
         "CONFIG when present.\n"
-        "   - Run `agent-browser snapshot -i` and capture a screenshot "
-        "into .leashd/. Verify the accessibility tree matches the "
-        "intended behavior.\n"
+        "   - Run `agent-browser snapshot -i` and verify the "
+        "accessibility tree matches the intended behavior. Capture "
+        "evidence with `agent-browser screenshot --annotate "
+        ".leashd/verify-<route>.png` — the numbered labels map to the "
+        "`@eN` refs, so the image and the snapshot line up.\n"
         "   - Click / type / navigate the specific flow the change "
-        "touched. Check the browser console for errors and the network "
-        "tab for failed requests (4xx/5xx).\n"
+        "touched. After each page-changing action wait deliberately "
+        "(`agent-browser wait --url`, `--text`, or `--load networkidle`) "
+        "rather than a bare `wait <ms>`, and re-snapshot: refs go stale "
+        "the moment the page changes.\n"
+        "   - Audit the run with the dedicated read-only commands, not "
+        "by eyeballing: `agent-browser console` and `agent-browser "
+        "errors` for JS failures, and `agent-browser network requests "
+        "--status 400-599` for failed requests (then `agent-browser "
+        "network request <id>` for the body of anything that failed). "
+        "Any uncaught page error or unexpected 4xx/5xx is a FAIL.\n"
+        "   - Run `agent-browser a11y --json` on each route you "
+        "exercised. Treat NEW serious/critical violations introduced by "
+        "this change as a FAIL and fix them; pre-existing ones go in the "
+        "report but do not block.\n"
+        "   - If the change touches a user-visible route's rendering or "
+        "payload size, also run `agent-browser vitals --json` and note "
+        "LCP/CLS/INP. Flag an obvious regression; do not block on "
+        "absolute numbers.\n"
         "   - If the app genuinely cannot be started in this environment "
         "(no dev server possible, sandbox), do NOT loop: write "
         "`Status: FAIL` with `Blocked: cannot-start-app` and stop. The "
@@ -202,6 +226,10 @@ def verify_prompt(
         "   - A `Visual check:` line naming the route/URL, what you "
         "observed, and the saved screenshot path. PASS without visual "
         "evidence is rejected by the orchestrator.\n"
+        "   - A `Console/network:` line with the page-error count and "
+        "any failed request (method, path, status), or `clean`.\n"
+        "   - An `Accessibility:` line with the a11y violation counts "
+        "per route, marking which are new in this change, or `clean`.\n"
         "   - For any fix you made, list the changed file path."
     )
     prompt = _append(

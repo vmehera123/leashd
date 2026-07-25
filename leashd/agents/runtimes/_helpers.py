@@ -353,6 +353,46 @@ def build_agent_cli_args(
     return args
 
 
+def build_agent_browser_env(config: LeashdConfig, session: Session) -> dict[str, str]:
+    """Env vars that carry ``leashd browser`` settings into agent-browser.
+
+    Returned as a standalone mapping so every runtime configures the CLI
+    identically — the tmux runtime spawns ``claude`` through libtmux rather
+    than :func:`asyncio.create_subprocess_exec`, so it has no ``env=`` of its
+    own to fold these into and previously ignored them outright.
+
+    ``AGENT_BROWSER_PROFILE`` is only set for ``/web`` on a non-fresh session,
+    matching the subprocess runtimes: a persistent Chrome profile carries the
+    user's real logins, so it stays out of ``/task`` and ``/test`` runs.
+
+    Screenshots are pinned to the session's ``.leashd`` directory.
+    agent-browser otherwise drops a path-less ``screenshot`` in the system temp
+    dir, so ``/task`` visual evidence is cleaned up out from under the
+    ``Visual check:`` line that references it. agent-browser creates the
+    directory on first write.
+    """
+    if config.browser_backend != "agent-browser":
+        return {}
+    from leashd.plugins.builtin.browser_tools import SCREENSHOT_SAVE_DIR
+
+    env: dict[str, str] = {
+        "AGENT_BROWSER_SCREENSHOT_DIR": str(
+            Path(session.working_directory) / SCREENSHOT_SAVE_DIR
+        )
+    }
+    if not config.browser_headless:
+        env["AGENT_BROWSER_HEADED"] = "1"
+    if (
+        session.mode == "web"
+        and not session.browser_fresh
+        and config.browser_user_data_dir
+    ):
+        env["AGENT_BROWSER_PROFILE"] = str(
+            Path(config.browser_user_data_dir).expanduser()
+        )
+    return env
+
+
 def build_content_blocks(
     prompt: str,
     attachments: list[Attachment],

@@ -63,6 +63,14 @@ rules:
     action: allow
     description: "Browser tools (permissive mode)"
 
+  - name: agent-browser-privileged
+    tool: Bash
+    command_patterns:
+      - "^agent-browser\\s+(batch|chat|confirm|connect|dashboard|deny|install|mcp|plugin|stream|upgrade)\\b"
+      - "^agent-browser\\s+doctor\\b.*--fix"
+    action: require_approval
+    description: "Privileged agent-browser operation (code install, listener, real-Chrome attach, third-party send)"
+
   - name: agent-browser-all
     tool: Bash
     command_patterns: ["^agent-browser\\b"]

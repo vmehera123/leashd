@@ -3092,6 +3092,206 @@ async def test_answer_question_selector_no_match_no_freetext_logs_warning(
     assert "tmux_question_selector_no_match" in events
 
 
+# The AskUserQuestion pages claude 2.1.220 actually renders, captured live. A
+# ``multiSelect`` question draws CHECKBOX rows whose Enter only toggles the box
+# — it neither commits the answer nor advances the way a single-select row
+# does — and carries a trailing unnumbered "Next" ("Submit" on the last
+# question) that is the only way forward. Driving such a page as a single-select
+# is the wedge this whole block guards: the toggle marks the tab answered, the
+# NEXT question's answer is then replayed onto the same still-rendered page, and
+# the submission-review screen never appears, so the turn hangs silently.
+_AUQ_MULTI_PAGE = (
+    "←  ☐ Targets  ☐ Tone  ✔ Submit  →\n"
+    "\n"
+    "Which posts should I draft comments for?\n"
+    "\n"
+    "❯ 1. [ ] Shiva Varma\n"
+    "  2d, 21 reactions\n"
+    "  2. [ ] Aditya Singh\n"
+    "  5d, 6 reactions\n"
+    "  3. [ ] Type something\n"
+    "     Next\n"
+    "────────\n"
+    "  4. Chat about this\n"
+    "\n"
+    "Enter to select · Tab/Arrow keys to navigate · Esc to cancel"
+)
+_AUQ_MULTI_PAGE_CHECKED = _AUQ_MULTI_PAGE.replace("1. [ ]", "1. [✔]").replace(
+    "☐ Targets", "☒ Targets"
+)
+_AUQ_MULTI_PAGE_FREETEXT_UNCHECKED = _AUQ_MULTI_PAGE.replace(
+    "3. [ ] Type something", "3. [ ] decide it yourself"
+)
+_AUQ_MULTI_PAGE_FREETEXT_CHECKED = _AUQ_MULTI_PAGE.replace(
+    "3. [ ] Type something", "3. [✔] decide it yourself"
+).replace("☐ Targets", "☒ Targets")
+_AUQ_SINGLE_PAGE = (
+    "←  ☒ Targets  ☐ Tone  ✔ Submit  →\n"
+    "\n"
+    "How provocative should these be?\n"
+    "\n"
+    "❯ 1. Sharp pushback\n"
+    "     Contrarian.\n"
+    "  2. Neutral\n"
+    "     Flat.\n"
+    "  3. Type something.\n"
+    "────────\n"
+    "  4. Chat about this\n"
+    "\n"
+    "Enter to select · Tab/Arrow keys to navigate · Esc to cancel"
+)
+_AUQ_MULTI_QUESTION = {
+    "question": "Which posts should I draft comments for?",
+    "options": [{"label": "Shiva Varma"}, {"label": "Aditya Singh"}],
+}
+_AUQ_SINGLE_QUESTION = {
+    "question": "How provocative should these be?",
+    "options": [{"label": "Sharp pushback"}, {"label": "Neutral"}],
+}
+
+
+def test_multi_select_question_detected_by_checkbox_rows(cfg):
+    """The checkbox rows are what distinguish a page whose Enter toggles from
+    one whose Enter commits — the classification the whole drive branches on."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    assert cs.multi_select_question_present(_AUQ_MULTI_PAGE) is True
+    assert cs.multi_select_question_present(_AUQ_SINGLE_PAGE) is False
+    assert cs.multi_select_question_present(_AUQ_SELECTOR) is False
+
+
+def test_advance_row_position_ignores_transcript_numbering(cfg):
+    """The affordance sits one past the option count (it has no number of its
+    own) and must be located from the DIALOG only: assistant text above the
+    dialog routinely carries its own numbered lines, and counting those would
+    aim the cursor into the transcript."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    assert cs._advance_row_position(_AUQ_MULTI_PAGE) == 4
+    noisy = "  3. Rajeev G. · CPO, Cowbell\n  4. Rodrigo Soares\n" + _AUQ_MULTI_PAGE
+    assert cs._advance_row_position(noisy) == 4
+    # A single-select page has no such row — nothing to advance through.
+    assert cs._advance_row_position(_AUQ_SINGLE_PAGE) is None
+
+
+def test_question_page_signature_ignores_checkbox_state(cfg):
+    """Ticking a box redraws the page; that must not read as "advanced", or the
+    drive would believe it moved on while still sitting on the same question."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    assert cs._question_page_signature(_AUQ_MULTI_PAGE) == cs._question_page_signature(
+        _AUQ_MULTI_PAGE_CHECKED
+    )
+    assert cs._question_page_signature(_AUQ_MULTI_PAGE) != cs._question_page_signature(
+        _AUQ_SINGLE_PAGE
+    )
+
+
+async def test_answer_question_selector_advances_multi_select_page(cfg, no_real_sleep):
+    """The 2.1.220 regression, end to end: tick the chosen box, then walk down
+    to the trailing "Next" row and press it, so question 2 lands on question 2's
+    page and the run reaches the submission-review screen instead of hanging."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    pane = _FakePane(
+        [
+            _AUQ_MULTI_PAGE,
+            _AUQ_MULTI_PAGE_CHECKED,
+            _AUQ_MULTI_PAGE_CHECKED,
+            _AUQ_SINGLE_PAGE,
+            _AUQ_SINGLE_PAGE,
+            _SUBMIT_REVIEW_SCREEN,
+        ]
+    )
+    cs.attach(object(), pane)
+    ok = await cs.answer_question_selector(
+        questions=[_AUQ_MULTI_QUESTION, _AUQ_SINGLE_QUESTION],
+        answers={
+            "Which posts should I draft comments for?": "Shiva Varma",
+            "How provocative should these be?": "Sharp pushback",
+        },
+        timeout=5.0,
+    )
+    assert ok is True
+    assert pane.sent == [
+        # Q1 is multi-select: cursor is already on row 1, so Enter only ticks it.
+        ("Enter", False),
+        # Row 1 → the unnumbered "Next" at position 4, then commit the page.
+        ("Down", False),
+        ("Down", False),
+        ("Down", False),
+        ("Enter", False),
+        # Q2 is single-select: Enter commits and auto-advances on its own.
+        ("Enter", False),
+        # The submission-review page.
+        ("Enter", False),
+    ]
+
+
+async def test_answer_question_selector_rechecks_multi_select_freetext(
+    cfg, no_real_sleep
+):
+    """Free text on a multi-select page: the Enter that commits the typed answer
+    also toggles that row's box back OFF, leaving the question answered-looking
+    but unselected. That is exactly how the reported session wedged, so the
+    drive must tick it back on before advancing."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    pane = _FakePane(
+        [
+            _AUQ_MULTI_PAGE,
+            _AUQ_MULTI_PAGE_FREETEXT_UNCHECKED,
+            _AUQ_MULTI_PAGE_FREETEXT_CHECKED,
+            _AUQ_MULTI_PAGE_FREETEXT_CHECKED,
+            _SUBMIT_REVIEW_SCREEN,
+        ]
+    )
+    cs.attach(object(), pane)
+    ok = await cs.answer_question_selector(
+        questions=[_AUQ_MULTI_QUESTION],
+        answers={
+            "Which posts should I draft comments for?": "decide it yourself",
+        },
+        timeout=5.0,
+    )
+    assert ok is True
+    # Row 1 → the "Type something" row 3, Enter, the text, Enter (which unticks),
+    # then the corrective Enter that leaves the answer actually selected.
+    assert pane.sent[:6] == [
+        ("Down", False),
+        ("Down", False),
+        ("Enter", False),
+        ("decide it yourself", True),
+        ("Enter", False),
+        ("Enter", False),
+    ]
+
+
+async def test_answer_question_selector_survives_missing_advance_row(
+    cfg, no_real_sleep
+):
+    """If claude changes the layout again and the affordance disappears, the
+    drive logs and gives up rather than looping Enter on a page it cannot
+    leave — a wedged dialog is recoverable, a keystroke storm is not."""
+    import structlog.testing
+
+    page = _AUQ_MULTI_PAGE.replace("     Next\n", "")
+    ticked = _AUQ_MULTI_PAGE_CHECKED.replace("     Next\n", "")
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    pane = _FakePane([page, ticked])
+    cs.attach(object(), pane)
+    with structlog.testing.capture_logs() as captured:
+        ok = await cs.answer_question_selector(
+            questions=[_AUQ_MULTI_QUESTION],
+            answers={"Which posts should I draft comments for?": "Shiva Varma"},
+            timeout=5.0,
+        )
+    assert ok is True
+    assert pane_enters(pane) == 1
+    assert "tmux_question_advance_row_missing" in [e["event"] for e in captured]
+
+
 # ---------------------------------------------------------------------------
 # Stage 2 — native-dialog watcher (belt-and-suspenders gate)
 # ---------------------------------------------------------------------------
@@ -4418,3 +4618,103 @@ async def test_bridge_native_dialog_accepts_cache_switch_confirm(cfg, no_real_sl
     assert ("1", True) in cs._pane.sent
     assert ("Escape", False) not in cs._pane.sent
     assert "model-picker" not in cs.failed_dialog_fingerprints
+
+
+async def test_spawn_passes_agent_browser_env_to_pane(
+    tmp_path, monkeypatch, no_real_sleep
+):
+    """Regression: `leashd browser headless/set-profile` were no-ops on the
+    default runtime — tmux spawns claude via libtmux, which inherits the tmux
+    server's environment rather than any per-call `env=`."""
+    import leashd.agents.runtimes.tmux_session as ts
+    from leashd.core.config import LeashdConfig
+    from leashd.core.session import Session
+
+    profile = tmp_path / "browser-profile"
+    cfg = LeashdConfig(
+        approved_directories=[tmp_path],
+        agent_runtime="tmux",
+        tmux_socket_dir=tmp_path / "tmux",
+        tmux_hook_secret="s3cr3t-token",
+        audit_log_path=tmp_path / "audit.jsonl",
+        browser_backend="agent-browser",
+        browser_headless=False,
+        browser_user_data_dir=str(profile),
+    )
+    tsm = TmuxSessionManager(cfg)
+    events: list[tuple] = []
+    server = _FakeSpawnServer(events=events)
+    _prep_spawn(tsm, server, monkeypatch)
+    monkeypatch.setattr(
+        ts.subprocess, "run", _ScriptedRun({"has-session": _FakeCompleted(1)}, events)
+    )
+
+    session = Session(
+        session_id="sess1",
+        chat_id="web:c1",
+        user_id="u1",
+        working_directory=str(tmp_path),
+        mode="web",
+    )
+    cs = await _spawn(tsm, session=session)
+    cs.jsonl_task.cancel()
+
+    env = server.new_session_calls[0]["environment"]
+    assert env["AGENT_BROWSER_HEADED"] == "1"
+    assert env["AGENT_BROWSER_PROFILE"] == str(profile)
+
+
+async def test_spawn_omits_env_kwarg_for_playwright_backend(
+    tmp_path, monkeypatch, no_real_sleep
+):
+    import leashd.agents.runtimes.tmux_session as ts
+    from leashd.core.config import LeashdConfig
+
+    pw_cfg = LeashdConfig(
+        approved_directories=[tmp_path],
+        agent_runtime="tmux",
+        tmux_socket_dir=tmp_path / "tmux",
+        tmux_hook_secret="s3cr3t-token",
+        audit_log_path=tmp_path / "audit.jsonl",
+        browser_backend="playwright",
+    )
+    tsm = TmuxSessionManager(pw_cfg)
+    events: list[tuple] = []
+    server = _FakeSpawnServer(events=events)
+    _prep_spawn(tsm, server, monkeypatch)
+    monkeypatch.setattr(
+        ts.subprocess, "run", _ScriptedRun({"has-session": _FakeCompleted(1)}, events)
+    )
+
+    cs = await _spawn(tsm)
+    cs.jsonl_task.cancel()
+
+    assert "environment" not in server.new_session_calls[0]
+
+
+async def test_spawn_pins_browser_artifacts_to_leashd_dir(
+    cfg, monkeypatch, no_real_sleep, tmp_path
+):
+    import leashd.agents.runtimes.tmux_session as ts
+    from leashd.core.session import Session
+
+    tsm = TmuxSessionManager(cfg)
+    events: list[tuple] = []
+    server = _FakeSpawnServer(events=events)
+    _prep_spawn(tsm, server, monkeypatch)
+    monkeypatch.setattr(
+        ts.subprocess, "run", _ScriptedRun({"has-session": _FakeCompleted(1)}, events)
+    )
+
+    workdir = tmp_path / "repo"
+    session = Session(
+        session_id="sess1",
+        chat_id="web:c1",
+        user_id="u1",
+        working_directory=str(workdir),
+    )
+    cs = await _spawn(tsm, session=session)
+    cs.jsonl_task.cancel()
+
+    env = server.new_session_calls[0]["environment"]
+    assert env["AGENT_BROWSER_SCREENSHOT_DIR"] == str(workdir / ".leashd")

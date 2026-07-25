@@ -3,12 +3,14 @@
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import structlog
 import yaml
 from pydantic import BaseModel, ConfigDict
 
@@ -17,6 +19,8 @@ from leashd.config_store import (
     remove_skill_metadata,
     save_skill_metadata,
 )
+
+logger = structlog.get_logger()
 
 _SKILLS_DIR = Path.home() / ".claude" / "skills"
 
@@ -220,25 +224,140 @@ def has_installed_skills() -> bool:
 
 _BUILTIN_SKILL_DATA = Path(__file__).resolve().parent / "data" / "skills"
 
+_AGENT_BROWSER_SKILL_TIMEOUT = 10
+
+_ARTIFACT_DIR = ".leashd"
+
+
+def _agent_browser_cli_output(*args: str) -> str | None:
+    """Run ``agent-browser <args>`` and return stripped stdout, or None."""
+    exe = shutil.which("agent-browser")
+    if exe is None:
+        return None
+    try:
+        proc = subprocess.run(  # noqa: S603
+            [exe, *args],
+            capture_output=True,
+            text=True,
+            timeout=_AGENT_BROWSER_SKILL_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip() or None
+
+
+def _agent_browser_skill_source() -> tuple[Path, str]:
+    """Resolve the agent-browser skill to install and the version it came from.
+
+    Prefers the installed CLI's own ``core`` skill, which ships version-matched
+    with the binary — the vendored copy under ``data/skills`` is a snapshot and
+    drifts as agent-browser adds commands. Falls back to the vendored copy when
+    the CLI is absent or its layout is unrecognized.
+    """
+    path_out = _agent_browser_cli_output("skills", "path", "core")
+    if path_out:
+        candidate = Path(path_out.splitlines()[0].strip())
+        if (candidate / "SKILL.md").is_file():
+            version = _agent_browser_cli_output("--version") or "unknown"
+            return candidate, version.replace("agent-browser", "").strip() or "unknown"
+    return _BUILTIN_SKILL_DATA / "agent-browser", "builtin"
+
+
+def _normalize_skill_name(skill_md: Path, name: str) -> None:
+    """Rewrite the frontmatter ``name:`` so it matches the install directory.
+
+    The CLI's copy is named ``core`` (it is one of several skills it ships);
+    installed under ``~/.claude/skills/agent-browser`` that leaves the
+    frontmatter disagreeing with the directory and the recorded metadata key.
+    """
+    try:
+        text = skill_md.read_text(encoding="utf-8")
+    except OSError:
+        return
+    lines = text.split("\n")
+    if not lines or lines[0].strip() != "---":
+        return
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            return
+        if lines[i].startswith("name:"):
+            lines[i] = f"name: {name}"
+            skill_md.write_text("\n".join(lines), encoding="utf-8")
+            return
+
+
+_ARTIFACT_PATH_REWRITES: tuple[tuple[str, str], ...] = (
+    ("/tmp/", f"{_ARTIFACT_DIR}/"),  # noqa: S108
+    ('OUTPUT_DIR="${2:-.}"', f'OUTPUT_DIR="${{2:-{_ARTIFACT_DIR}}}"'),
+)
+
+_ARTIFACT_REWRITE_SUFFIXES: frozenset[str] = frozenset({".md", ".sh"})
+
+
+def _normalize_artifact_paths(root: Path) -> int:
+    """Point the skill's example output paths at ``.leashd``.
+
+    Upstream's examples write screenshots, HAR traces, and saved state to
+    ``/tmp``. An agent that follows them puts its evidence somewhere temp
+    cleanup reclaims — and outside the sandboxed project directory. Applied on
+    every install so the redirect survives a CLI upgrade rather than living as
+    a hand-patch in the vendored copy, which the next sync would overwrite.
+
+    Returns the number of files rewritten.
+    """
+    rewritten = 0
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.suffix not in _ARTIFACT_REWRITE_SUFFIXES:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        updated = text
+        for old, new in _ARTIFACT_PATH_REWRITES:
+            updated = updated.replace(old, new)
+        if updated != text:
+            path.write_text(updated, encoding="utf-8")
+            rewritten += 1
+    return rewritten
+
 
 def ensure_agent_browser_skill() -> None:
-    """Install the builtin agent-browser skill from package data."""
-    source = _BUILTIN_SKILL_DATA / "agent-browser"
+    """Install (or refresh) the agent-browser skill.
+
+    Re-copies whenever the resolved source version differs from what is
+    recorded in skill metadata, so a ``brew upgrade agent-browser`` propagates
+    the matching guide instead of leaving agents on a stale command surface.
+    """
+    source, version = _agent_browser_skill_source()
     target = _SKILLS_DIR / "agent-browser"
-    skill_md = target / "SKILL.md"
-    if skill_md.exists():
+    installed = get_skill("agent-browser")
+    expected_source = f"agent-browser@{version}"
+    if (
+        (target / "SKILL.md").is_file()
+        and installed is not None
+        and installed.source == expected_source
+    ):
+        return
+    if not (source / "SKILL.md").is_file():
+        logger.warning("agent_browser_skill_source_missing", source=str(source))
         return
     if target.exists():
         shutil.rmtree(target)
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(source, target)
+    _normalize_skill_name(target / "SKILL.md", "agent-browser")
+    _normalize_artifact_paths(target)
     save_skill_metadata(
         name="agent-browser",
         description="Browser automation CLI for AI agents",
-        source="builtin",
+        source=expected_source,
         installed_at=datetime.now(timezone.utc).isoformat(),
         tags=["browser"],
     )
+    logger.info("agent_browser_skill_installed", version=version, source=str(source))
 
 
 def remove_agent_browser_skill() -> None:

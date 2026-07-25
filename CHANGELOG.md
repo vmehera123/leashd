@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.2.0] - 2026-07-25
+- **fixed**: a `multiSelect` AskUserQuestion silently wedged the tmux runtime on Claude Code 2.1.220 — those questions now render checkbox rows whose Enter only *toggles* the box instead of committing and auto-advancing, so leashd ticked a box, replayed the next question's answer onto the same still-open page, and waited forever on a submit screen that never came. The drive now classifies each rendered page, ticks and verifies the chosen box, and advances through the page's trailing `Next`/`Submit` row.
+- **fixed**: free text answered into a `multiSelect` question was typed but left unselected (the Enter that commits the text also unticks the row), so the question stayed unanswered; the box is now ticked back on and read back to confirm.
+- **fixed**: agent-browser command tables refreshed to CLI 0.33 (enumerated against the real dispatch table, and pinned by a test) — `find` and `tab <id|label>` were auto-allowed as read-only despite mutating (`find text "Delete account"` defaults to click), ~30 subcommands (`read`, `is`, `a11y`, `vitals`, `react`, `dblclick`, `keydown`/`keyup`, `swipe`/`tap`, `cookies`, `batch`, …) matched no rule and stalled `/task` on a human approval, and 4 phantom entries were retired (`key`, `mouse-wheel`, `evaluate`, `viewport`).
+- **added**: `credential` and `privileged` tiers — `auth`/`state`/`cookies`/`storage`/`clipboard` are policy-gated but no longer auto-approved; `plugin`/`chat`/`mcp`/`dashboard`/`stream`/`connect`/`confirm`/`deny`/`install`/`upgrade`/`batch`/`doctor --fix` are human-gated in every policy including `permissive`.
+- **added**: v4 verify now runs `a11y --json`, `vitals --json`, `console`, `errors`, `network requests --status 400-599` and `screenshot --annotate`, reporting `Console/network:` and `Accessibility:` lines alongside `Visual check:`.
+- **fixed**: `leashd browser headless` / `set-profile` were silent no-ops on the default `tmux` runtime; all runtimes now share `build_agent_browser_env`.
+- **fixed**: a path-less `agent-browser screenshot` landed in the system temp dir, so `/task` visual evidence was cleaned up out from under the `Visual check:` line referencing it; screenshots are now pinned to the session's `.leashd/` directory.
+- **changed**: the agent-browser skill installs from the CLI's own version-matched copy and refreshes on upgrade, falling back to the vendored snapshot (itself refreshed to 0.33.0). Upstream's `/tmp` example paths are rewritten to `.leashd/` on every install, so the redirect survives a CLI upgrade instead of being a hand-patch the next sync overwrites.
+
 ## [1.1.1] - 2026-07-21
 - **changed**: `/task` discovery guidance (v3 + v4 prompts, and the v3 plan/implement mode instruction) now states Read/Grep/Glob as a preference instead of a hard "never Bash" prohibition; Bash `grep`/`find` is an accepted fallback when a target repo's settings disable the structured tools.
 

@@ -45,6 +45,7 @@ from leashd.agents.runtimes._helpers import (
     SESSION_TO_PERMISSION_MODE,
     StderrBuffer,
     backoff_delay,
+    build_agent_browser_env,
     build_content_blocks,
     build_workspace_context,
     describe_tool,
@@ -287,19 +288,13 @@ class ClaudeCodeAgent(BaseAgent):
             opts.disallowed_tools = list(
                 set(opts.disallowed_tools or []) | set(pw_tools)
             )
-            if not self._config.browser_headless:
-                opts.env["AGENT_BROWSER_HEADED"] = "1"
-            if (
-                session.mode == "web"
-                and not session.browser_fresh
-                and self._config.browser_user_data_dir
-            ):
-                resolved = str(Path(self._config.browser_user_data_dir).expanduser())
-                opts.env["AGENT_BROWSER_PROFILE"] = resolved
+            browser_env = build_agent_browser_env(self._config, session)
+            opts.env.update(browser_env)
+            if "AGENT_BROWSER_PROFILE" in browser_env:
                 logger.info(
                     "agent_browser_profile_injected",
                     session_id=session.session_id,
-                    profile=resolved,
+                    profile=browser_env["AGENT_BROWSER_PROFILE"],
                 )
         # See ``build_agent_cli_args``: in ``/web`` mode we forbid the
         # built-in ``WebFetch``/``WebSearch`` so all browser activity flows

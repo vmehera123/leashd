@@ -35,7 +35,11 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 import structlog
 
 from leashd.agents.base import ToolActivity
-from leashd.agents.runtimes._helpers import describe_tool, safe_callback
+from leashd.agents.runtimes._helpers import (
+    build_agent_browser_env,
+    describe_tool,
+    safe_callback,
+)
 from leashd.core.safety.gatekeeper import FILE_EDIT_TOOLS, normalize_tool_name
 from leashd.exceptions import AgentError
 
@@ -1133,6 +1137,9 @@ class TmuxClaudeSession:
     _QUESTION_SELECTOR_MARKERS = ("Enter to select", "to navigate")
     _QUESTION_FREETEXT_MARKER = "type something"
     _QUESTION_ROW_RE = re.compile(r"^\s*(❯)?\s*(\d+)\.\s")
+    _QUESTION_CHECKBOX_RE = re.compile(r"^\s*(?:❯)?\s*(\d+)\.\s*\[([^\]]?)\]")
+    _QUESTION_ADVANCE_RE = re.compile(r"^\s*(❯)?\s+(?:Next|Submit)\s*$")
+    _QUESTION_TAB_BAR_RE = re.compile(r"^\s*←.*→\s*$")
     # claude 2.1.150 wraps a multi-question AskUserQuestion with a final
     # "Review your answers" page: every individual selector lands the answer
     # for that one question and auto-advances to the next tab, then the
@@ -1164,6 +1171,99 @@ class TmuxClaudeSession:
         that follows the last per-question selector)."""
         s = self.capture() if screen is None else screen
         return all(m in s for m in self._SUBMIT_REVIEW_MARKERS)
+
+    @classmethod
+    def _dialog_block(cls, screen: str) -> list[str]:
+        """The rendered question page's own lines, excluding the transcript
+        above it. Anchored to the tab bar (``←  ☒ Q1  ☐ Q2  ✔ Submit  →``) when
+        one is present, else to the first checkbox row, and always cut at the
+        ``Enter to select`` footer. Assistant text routinely contains numbered
+        lines ("3. Rajeev G. …"), so an unscoped scan mis-counts option rows.
+
+        Falls back to the whole screen when there is no such footer — the
+        ExitPlanMode dialog has none and shares the row-navigation helpers."""
+        lines = screen.splitlines()
+        footer = None
+        for i, line in enumerate(lines):
+            if "Enter to select" in line:
+                footer = i
+        if footer is None:
+            return lines
+        start = None
+        for i in range(footer):
+            if cls._QUESTION_TAB_BAR_RE.match(lines[i]):
+                start = i + 1
+        if start is None:
+            for i in range(footer):
+                if cls._QUESTION_CHECKBOX_RE.match(lines[i]):
+                    start = i
+                    break
+        return lines[start or 0 : footer]
+
+    @classmethod
+    def multi_select_question_present(cls, screen: str) -> bool:
+        """True iff the rendered question page is a ``multiSelect`` one.
+
+        claude 2.1.220 draws those rows as ``1. [ ] Label`` / ``1. [✔] Label``
+        checkboxes whose Enter TOGGLES the box instead of committing the answer
+        and auto-advancing (which is what a single-select row still does). Such
+        a page can only be left through its trailing affordance row, so the
+        distinction decides whether the driver must advance by hand."""
+        return any(
+            cls._QUESTION_CHECKBOX_RE.match(ln) for ln in cls._dialog_block(screen)
+        )
+
+    @classmethod
+    def _row_checkbox_state(cls, screen: str, row: int) -> bool | None:
+        """Checked-state of a multi-select row, or None when that row carries no
+        checkbox. Lets the driver confirm a toggle landed the way it intended
+        rather than assuming Enter flipped it on."""
+        for line in cls._dialog_block(screen):
+            m = cls._QUESTION_CHECKBOX_RE.match(line)
+            if m and int(m.group(1)) == row:
+                return m.group(2).strip() != ""
+        return None
+
+    @classmethod
+    def _advance_row_position(cls, screen: str) -> int | None:
+        """Cursor position of the page's trailing ``Next``/``Submit`` row — the
+        unnumbered affordance that commits a multi-select question and moves to
+        the next one (or to the submission-review page when it is the last).
+
+        It sits directly below the final numbered option and ABOVE the
+        ``Chat about this`` escape hatch, so its position is one past the option
+        count rather than its printed number (there isn't one)."""
+        count = 0
+        for line in cls._dialog_block(screen):
+            if cls._QUESTION_ROW_RE.match(line):
+                count += 1
+            elif cls._QUESTION_ADVANCE_RE.match(line):
+                return count + 1
+        return None
+
+    @classmethod
+    def _cursor_position(cls, screen: str) -> int | None:
+        """Where the ``❯`` cursor sits, in the same coordinates
+        :meth:`_advance_row_position` returns — so navigation can start from the
+        affordance row, not just from a numbered option."""
+        for line in cls._dialog_block(screen):
+            m = cls._QUESTION_ROW_RE.match(line)
+            if m and m.group(1):
+                return int(m.group(2))
+            a = cls._QUESTION_ADVANCE_RE.match(line)
+            if a and a.group(1):
+                return cls._advance_row_position(screen)
+        return None
+
+    @classmethod
+    def _question_page_signature(cls, screen: str) -> str:
+        """Identity of the rendered question page, insensitive to checkbox
+        state — used to tell "the page advanced" from "the toggle redrew it"."""
+        rows = []
+        for line in cls._dialog_block(screen):
+            m = cls._QUESTION_CHECKBOX_RE.match(line)
+            rows.append(line.replace("❯", "").strip() if m is None else m.group(1))
+        return "\n".join(rows)
 
     # Native ExitPlanMode plan-approval dialog — a third in-pane selector kind,
     # distinct from both the binary permission prompt and the AskUserQuestion
@@ -1299,14 +1399,23 @@ class TmuxClaudeSession:
             self._plan_drive_active = False
 
     async def answer_question_selector(
-        self, *, questions: list[Any], answers: dict[str, Any], timeout: float = 20.0
+        self, *, questions: list[Any], answers: dict[str, Any], timeout: float = 45.0
     ) -> bool:
         """Select the human's chosen option(s) in claude's AskUserQuestion
-        selector. claude renders one selector per question (sequentially); for
-        each, navigate from the highlighted row to the chosen option's row and
-        press Enter. Guarded so the PreToolUse + PermissionRequest double-fire
-        drives the pane only once. Screen-gated + idempotent like
-        ``answer_perm_selector`` — a no-op if the selector never renders."""
+        selector, one rendered question page at a time.
+
+        A single-select page commits and auto-advances on Enter. A
+        ``multiSelect`` page does NOT (see
+        :meth:`multi_select_question_present`) — Enter only toggles a checkbox,
+        so the page has to be advanced explicitly through its trailing
+        ``Next``/``Submit`` row. Each question is therefore classified from the
+        page actually on screen at that moment, never from a fixed assumption
+        about claude's layout: getting this wrong replays question N+1's answer
+        onto question N's page and wedges the dialog forever.
+
+        Guarded so the PreToolUse + PermissionRequest double-fire drives the
+        pane only once. Screen-gated + idempotent like ``answer_perm_selector``
+        — a no-op if the selector never renders."""
         if self._question_drive_active:
             return False
         self._question_drive_active = True
@@ -1321,32 +1430,129 @@ class TmuxClaudeSession:
                     if isinstance(o, dict)
                 ]
                 chosen = answers.get(q.get("question", ""))
-                # Multi-select arrays / non-string answers are not a single-
-                # row pick — leave them (connectors return one label).
                 if not isinstance(chosen, str):
                     continue
-                idx = self._match_option_row(chosen, options)
-                if idx is None:
-                    if await self._answer_via_type_something(chosen, deadline):
-                        continue
-                    logger.warning(
-                        "tmux_question_selector_no_match",
-                        tmux_name=self.tmux_name,
-                        chosen=chosen,
-                        options=options,
-                    )
-                    continue
-                if not await self._select_option_row(idx, deadline):
+                if not await self._answer_one_question(chosen, options, deadline):
                     return False
-            # claude 2.1.150+ adds a final ``Submit answers``/``Cancel``
-            # confirmation when AskUserQuestion carried >1 question — without
-            # the extra Enter the answered tabs never propagate to the model
-            # and the turn hangs (see :attr:`_SUBMIT_REVIEW_MARKERS`).
-            if len(questions) > 1:
-                await self._confirm_submit_review_if_present(deadline)
+            await self._confirm_submit_review_if_present(deadline)
             return True
         finally:
             self._question_drive_active = False
+
+    async def _answer_one_question(
+        self, chosen: str, options: list[Any], deadline: float
+    ) -> bool:
+        """Apply one human answer to whichever question page is on screen, then
+        leave that page ready for the next answer.
+
+        Returns False only when the selector never rendered, so the caller can
+        abandon the drive; an unmatched answer is reported and skipped (the page
+        is still advanced so a later question is not replayed onto this one).
+
+        The page is read ONCE here and that same capture is handed to the row
+        drive, so classifying the page costs no extra pane read."""
+        screen = await self._await_question_page(deadline)
+        if screen is None:
+            return False
+        multi = self.multi_select_question_present(screen)
+        idx = self._match_option_row(chosen, options)
+        if idx is None:
+            if not await self._answer_via_type_something(
+                chosen, deadline, multi=multi, screen=screen
+            ):
+                logger.warning(
+                    "tmux_question_selector_no_match",
+                    tmux_name=self.tmux_name,
+                    chosen=chosen,
+                    options=options,
+                )
+        else:
+            if not await self._select_option_row(idx, deadline, screen=screen):
+                return False
+            if multi:
+                await self._ensure_row_checked(idx + 1, deadline)
+        if multi:
+            await self._advance_question_page(
+                deadline, self._question_page_signature(screen)
+            )
+        return True
+
+    async def _await_question_page(self, deadline: float) -> str | None:
+        """Block until a question page is rendered, returning that capture (or
+        None if the selector never appears — a drive that presses nothing)."""
+        while time.monotonic() < deadline:
+            screen = self.capture()
+            if self.question_selector_present(screen):
+                return screen
+            await asyncio.sleep(0.3)
+        return None
+
+    async def _ensure_row_checked(self, row: int, deadline: float) -> bool:
+        """Leave a multi-select row ticked. Enter toggles, so a row that was
+        already ticked would be turned OFF by the drive's own keystroke — read
+        the box back and correct instead of trusting the press.
+
+        Exactly ONE corrective press: since Enter toggles, retrying against a
+        stale frame would flip the box back off and oscillate. If the box still
+        does not read as ticked, say so and leave it for the watchdog rather
+        than drumming Enter into the pane."""
+        if time.monotonic() >= deadline:
+            return False
+        state = self._row_checkbox_state(self.capture(), row)
+        if state is None or state:
+            return bool(state)
+        self.send_keys("Enter", literal=False)
+        await asyncio.sleep(0.5)
+        if self._row_checkbox_state(self.capture(), row):
+            return True
+        logger.warning(
+            "tmux_question_row_uncheckable",
+            tmux_name=self.tmux_name,
+            row=row,
+        )
+        return False
+
+    async def _advance_question_page(self, deadline: float, before: str) -> bool:
+        """Leave a multi-select question page via its ``Next``/``Submit`` row.
+
+        ``before`` is the signature of the page being left; it is checkbox-state
+        insensitive, so the caller's pre-toggle capture identifies the same page
+        after the toggle. Advance is confirmed by that identity changing (or the
+        submission-review screen appearing) rather than by assuming the
+        keystroke worked, and is attempted at most twice so a layout claude
+        changes again degrades into a logged no-op instead of an Enter loop."""
+        for _ in range(2):
+            if time.monotonic() >= deadline:
+                return False
+            screen = self.capture()
+            if self.submit_review_present(screen):
+                return True
+            if self._question_page_signature(screen) != before:
+                return True
+            target = self._advance_row_position(screen)
+            if target is None:
+                logger.warning(
+                    "tmux_question_advance_row_missing",
+                    tmux_name=self.tmux_name,
+                )
+                return False
+            current = self._cursor_position(screen) or 1
+            key = "Down" if target > current else "Up"
+            for _ in range(abs(target - current)):
+                self.send_keys(key, literal=False)
+                await asyncio.sleep(0.12)
+            self.send_keys("Enter", literal=False)
+            logger.info(
+                "tmux_question_page_advanced",
+                tmux_name=self.tmux_name,
+                row=target,
+            )
+            await asyncio.sleep(0.8)
+        screen = self.capture()
+        return (
+            self.submit_review_present(screen)
+            or self._question_page_signature(screen) != before
+        )
 
     async def _confirm_submit_review_if_present(self, deadline: float) -> bool:
         """Press Enter on claude's ``Ready to submit your answers?`` screen
@@ -1394,27 +1600,24 @@ class TmuxClaudeSession:
         deadline: float,
         present: Callable[[str], bool] | None = None,
         log_event: str = "tmux_question_selector_answered",
+        screen: str | None = None,
     ) -> bool:
         """Navigate the rendered selector to the agent option at ``target_idx``
         (0-based; row 1 = first option) and press Enter. ``present`` gates the
         drive on the right selector kind (AskUserQuestion by default; the plan
         dialog passes its own detector). Cursor-aware so a re-poll never
-        overshoots the target row."""
+        overshoots the target row. ``screen`` reuses a capture the caller has
+        already taken, so classifying a page does not cost a second pane read."""
         present = present or self.question_selector_present
         target = target_idx + 1
         while time.monotonic() < deadline:
-            screen = self.capture()
+            if screen is None:
+                screen = self.capture()
             if not present(screen):
+                screen = None
                 await asyncio.sleep(0.3)
                 continue
-            current = None
-            for line in screen.splitlines():
-                m = self._QUESTION_ROW_RE.match(line)
-                if m and m.group(1):  # the highlighted row carries ❯
-                    current = int(m.group(2))
-                    break
-            if current is None:
-                current = 1  # a freshly rendered selector highlights row 1
+            current = self._cursor_position(screen) or 1
             key = "Down" if target > current else "Up"
             for _ in range(abs(target - current)):
                 self.send_keys(key, literal=False)
@@ -1438,16 +1641,32 @@ class TmuxClaudeSession:
                 return int(m.group(2))
         return None
 
-    async def _answer_via_type_something(self, text: str, deadline: float) -> bool:
+    async def _answer_via_type_something(
+        self,
+        text: str,
+        deadline: float,
+        *,
+        multi: bool = False,
+        screen: str | None = None,
+    ) -> bool:
         """Route a free-text answer (one that matched no discrete option) into
         the dialog's own "Type something" entry: select that row, enter the
         text, submit. Returns False when the dialog has no such row, so the
-        caller falls back to logging the unmatched answer."""
-        row = self._find_freetext_row(self.capture())
+        caller falls back to logging the unmatched answer.
+
+        On a ``multiSelect`` page the Enter that commits the typed text also
+        toggles that row's checkbox back OFF, leaving the answer typed but
+        unselected and the question still unanswered — the exact shape of the
+        wedged pane this path was found in. Tick it back on and verify."""
+        page = self.capture() if screen is None else screen
+        row = self._find_freetext_row(page)
         if row is None:
             return False
         if not await self._select_option_row(
-            row - 1, deadline, log_event="tmux_question_freetext_row_selected"
+            row - 1,
+            deadline,
+            log_event="tmux_question_freetext_row_selected",
+            screen=page,
         ):
             return False
         await asyncio.sleep(0.3)
@@ -1460,6 +1679,8 @@ class TmuxClaudeSession:
             chars=len(text),
         )
         await asyncio.sleep(0.6)
+        if multi:
+            await self._ensure_row_checked(row, deadline)
         return True
 
     def begin_turn(
@@ -2260,7 +2481,7 @@ class TmuxSessionManager:
 
         from libtmux.exc import TmuxSessionExists  # lazy: optional dep (preflighted)
 
-        new_session_kwargs = {
+        new_session_kwargs: dict[str, Any] = {
             "session_name": tmux_name,
             "start_directory": working_directory,
             "window_command": command,
@@ -2268,6 +2489,9 @@ class TmuxSessionManager:
             "x": self._config.tmux_terminal_cols,
             "y": self._config.tmux_terminal_rows,
         }
+        browser_env = build_agent_browser_env(self._config, session)
+        if browser_env:
+            new_session_kwargs["environment"] = browser_env
         try:
             tmux_session = server.new_session(**new_session_kwargs)
         except TmuxSessionExists:

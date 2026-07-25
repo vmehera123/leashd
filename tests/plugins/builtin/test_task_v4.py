@@ -284,6 +284,49 @@ class TestVerifyPromptV4:
         assert "pytest broke on test_x" in p
         assert "PREVIOUS VERIFY FAILURE" in p
 
+    def test_names_machine_checkable_audit_commands(self):
+        p = verify_prompt("abc")
+        for fragment in (
+            "agent-browser console",
+            "agent-browser errors",
+            "agent-browser network requests",
+            "agent-browser a11y",
+            "agent-browser vitals",
+            "--annotate",
+        ):
+            assert fragment in p, fragment
+
+    def test_reports_console_network_and_accessibility(self):
+        p = verify_prompt("abc")
+        assert "Console/network:" in p
+        assert "Accessibility:" in p
+
+    def test_every_named_command_is_auto_approved_in_verify(self):
+        """The prompt must not instruct the agent into a human approval.
+
+        Regression: the command tables were pinned to a ~0.12-era
+        agent-browser surface, so newer subcommands matched no policy rule
+        and stalled an autonomous /task waiting on a tap that never came.
+        """
+        import re
+
+        from leashd.core.safety.gatekeeper import _approval_key
+        from leashd.plugins.builtin.browser_tools import AGENT_BROWSER_AUTO_APPROVE
+
+        prompt = verify_prompt("abc")
+        commands = set(re.findall(r"`(agent-browser [^`]+)`", prompt))
+        assert commands
+
+        blocked = []
+        for command in sorted(commands):
+            key = _approval_key("Bash", {"command": command})
+            covered = key in AGENT_BROWSER_AUTO_APPROVE or any(
+                key.startswith(stored + " ") for stored in AGENT_BROWSER_AUTO_APPROVE
+            )
+            if not covered:
+                blocked.append((command, key))
+        assert blocked == []
+
     def test_verify_prompt_renders_test_yaml_fields(self):
         from leashd.plugins.builtin.test_config_loader import ProjectTestConfig
 

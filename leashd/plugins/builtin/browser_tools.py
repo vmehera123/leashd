@@ -1,9 +1,33 @@
-"""Browser tools plugin — observability for Playwright MCP and agent-browser."""
+"""Browser tools plugin — observability for Playwright MCP and agent-browser.
+
+The ``agent-browser`` command tables below track the CLI's subcommand surface
+(verified against 0.33.0) and sort it into four tiers:
+
+``readonly``
+    Observation only — auto-allowed by the shipped policies.
+``mutation``
+    Drives the page or the browser session — policy-gated, and auto-approved
+    inside ``/test`` and the ``/task`` verify phase.
+``credential``
+    Reaches auth material (cookies, storage, saved logins, clipboard, state
+    files). Gated like a mutation but never auto-approved on a caller's
+    behalf, so a phase that auto-approves browsing cannot also lift secrets.
+``privileged``
+    Outside the browser-automation trust envelope: installs code
+    (``plugin``), binds a network listener (``mcp``, ``dashboard``,
+    ``stream``), attaches to the user's real Chrome (``connect``), ships page
+    content to a third party (``chat``), carries opaque nested commands past
+    per-segment evaluation (``batch``), or resolves agent-browser's own
+    confirmation gate (``confirm``/``deny``). Always human-gated.
+
+Unrecognized subcommands classify as ``None`` and fall through to the policy
+default (``require_approval``), so a future CLI release fails closed.
+"""
 
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import structlog
 from pydantic import BaseModel, ConfigDict
@@ -100,21 +124,30 @@ def is_browser_tool(tool_name: str) -> bool:
     return normalize_tool_name(tool_name) in ALL_BROWSER_TOOLS
 
 
+AgentBrowserTier = Literal["readonly", "mutation", "credential", "privileged"]
+
 AGENT_BROWSER_READONLY_COMMANDS: frozenset[str] = frozenset(
     {
         "snapshot",
         "screenshot",
         "console",
+        "errors",
         "get",
-        "find",
+        "is",
         "wait",
         "diff",
-        "errors",
         "highlight",
-        "viewport",
-        "device",
+        "react",
+        "skills",
+        "profiles",
     }
 )
+
+AGENT_BROWSER_NAVIGATING_READ_COMMANDS: frozenset[str] = frozenset(
+    {"read", "a11y", "vitals"}
+)
+
+AGENT_BROWSER_DIAGNOSTIC_COMMANDS: frozenset[str] = frozenset({"doctor"})
 
 AGENT_BROWSER_MUTATION_COMMANDS: frozenset[str] = frozenset(
     {
@@ -124,39 +157,80 @@ AGENT_BROWSER_MUTATION_COMMANDS: frozenset[str] = frozenset(
         "reload",
         "close",
         "click",
+        "dblclick",
         "fill",
         "type",
         "check",
+        "uncheck",
         "select",
         "press",
         "keyboard",
-        "key",
-        "scroll",
-        "scrollintoview",
+        "keydown",
+        "keyup",
+        "focus",
         "hover",
         "drag",
+        "find",
+        "scroll",
+        "scrollintoview",
+        "mouse",
+        "swipe",
+        "tap",
+        "device",
         "upload",
+        "download",
         "dialog",
         "eval",
-        "evaluate",
         "set",
-        "download",
         "pdf",
-        "state",
+        "frame",
+        "pushstate",
+        "window",
+        "network",
         "record",
         "profiler",
-        "network",
+        "trace",
+        "inspect",
+        "removeinitscript",
+    }
+)
+
+AGENT_BROWSER_CREDENTIAL_COMMANDS: frozenset[str] = frozenset(
+    {
         "auth",
-        "mouse-wheel",
+        "state",
+        "cookies",
+        "storage",
+        "clipboard",
+    }
+)
+
+AGENT_BROWSER_PRIVILEGED_COMMANDS: frozenset[str] = frozenset(
+    {
+        "plugin",
+        "chat",
+        "mcp",
+        "dashboard",
+        "stream",
+        "connect",
+        "confirm",
+        "deny",
+        "install",
+        "upgrade",
+        "batch",
     }
 )
 
 _AGENT_BROWSER_TAB_READONLY: frozenset[str] = frozenset({"list"})
-_AGENT_BROWSER_TAB_MUTATION: frozenset[str] = frozenset({"new", "switch", "close"})
+_AGENT_BROWSER_TAB_MUTATION: frozenset[str] = frozenset({"new", "close"})
 
 AGENT_BROWSER_AUTO_APPROVE: frozenset[str] = frozenset(
     {
         *(f"Bash::agent-browser {cmd}" for cmd in AGENT_BROWSER_READONLY_COMMANDS),
+        *(
+            f"Bash::agent-browser {cmd}"
+            for cmd in AGENT_BROWSER_NAVIGATING_READ_COMMANDS
+        ),
         *(f"Bash::agent-browser {cmd}" for cmd in AGENT_BROWSER_MUTATION_COMMANDS),
         "Bash::agent-browser tab",
         "Bash::agent-browser session",
@@ -165,11 +239,17 @@ AGENT_BROWSER_AUTO_APPROVE: frozenset[str] = frozenset(
 
 _AGENT_BROWSER_CMD_RE = re.compile(r"^agent-browser\s+(\S+)(?:\s+(\S+))?")
 
+_URL_ARG_RE = re.compile(r"(?:https?://|\bwww\.)", re.IGNORECASE)
+
 # Known subcommands used by strip_agent_browser_flags to disambiguate
 # ``--flag <value>`` from ``--bool-flag <subcommand>``.
 _AGENT_BROWSER_KNOWN_SUBS: frozenset[str] = (
     AGENT_BROWSER_READONLY_COMMANDS
+    | AGENT_BROWSER_NAVIGATING_READ_COMMANDS
+    | AGENT_BROWSER_DIAGNOSTIC_COMMANDS
     | AGENT_BROWSER_MUTATION_COMMANDS
+    | AGENT_BROWSER_CREDENTIAL_COMMANDS
+    | AGENT_BROWSER_PRIVILEGED_COMMANDS
     | frozenset({"tab", "session"})
 )
 
@@ -212,31 +292,69 @@ def strip_agent_browser_flags(command: str) -> str:
     return "agent-browser " + " ".join(rest) if rest else "agent-browser"
 
 
-def parse_agent_browser_command(command: str) -> tuple[str, bool] | None:
-    """Parse Bash command → (subcommand, is_mutation) or None."""
+def classify_agent_browser_command(
+    command: str,
+) -> tuple[str, AgentBrowserTier] | None:
+    """Parse a Bash command → ``(subcommand, tier)``, or None if unrecognized.
+
+    ``tab`` switches by id or label (``tab t2``, ``tab docs``) rather than a
+    named verb, so any argument that isn't ``list``/``new``/``close`` is a
+    switch and classifies as a mutation.
+
+    ``find`` defaults to the ``click`` action when none is given, so the whole
+    subcommand is a mutation — ``find text "Delete account"`` deletes.
+
+    ``read``/``a11y``/``vitals`` navigate when handed a URL and merely observe
+    when bare; the URL form is a mutation.
+
+    ``doctor`` is read-only diagnosis until ``--fix``, which reinstalls Chrome
+    and purges saved state.
+    """
     command = strip_agent_browser_flags(command)
     m = _AGENT_BROWSER_CMD_RE.match(command)
     if not m:
         return None
     sub = m.group(1)
     arg2 = m.group(2)
+    named_arg = arg2 if arg2 and not arg2.startswith("-") else None
 
     if sub == "tab":
-        if arg2 in _AGENT_BROWSER_TAB_MUTATION:
-            return f"tab {arg2}", True
-        if arg2 in _AGENT_BROWSER_TAB_READONLY:
-            return f"tab {arg2}", False
-        return f"tab {arg2 or ''}", False
+        if named_arg is None:
+            return "tab", "readonly"
+        if named_arg in _AGENT_BROWSER_TAB_READONLY:
+            return f"tab {named_arg}", "readonly"
+        if named_arg in _AGENT_BROWSER_TAB_MUTATION:
+            return f"tab {named_arg}", "mutation"
+        return "tab switch", "mutation"
     if sub == "session":
-        if arg2 in _AGENT_BROWSER_TAB_READONLY:
-            return f"session {arg2}", False
-        return f"session {arg2 or ''}", False
+        return (f"session {named_arg}" if named_arg else "session"), "readonly"
+    if sub in AGENT_BROWSER_DIAGNOSTIC_COMMANDS:
+        return sub, "privileged" if "--fix" in command.split() else "readonly"
+    if sub in AGENT_BROWSER_NAVIGATING_READ_COMMANDS:
+        return sub, "mutation" if _URL_ARG_RE.search(command) else "readonly"
 
     if sub in AGENT_BROWSER_READONLY_COMMANDS:
-        return sub, False
+        return sub, "readonly"
     if sub in AGENT_BROWSER_MUTATION_COMMANDS:
-        return sub, True
+        return sub, "mutation"
+    if sub in AGENT_BROWSER_CREDENTIAL_COMMANDS:
+        return sub, "credential"
+    if sub in AGENT_BROWSER_PRIVILEGED_COMMANDS:
+        return sub, "privileged"
     return None
+
+
+def parse_agent_browser_command(command: str) -> tuple[str, bool] | None:
+    """Parse Bash command → (subcommand, is_mutation) or None.
+
+    Everything above the ``readonly`` tier reports as a mutation; callers that
+    need the finer distinction use :func:`classify_agent_browser_command`.
+    """
+    classified = classify_agent_browser_command(command)
+    if classified is None:
+        return None
+    sub, tier = classified
+    return sub, tier != "readonly"
 
 
 def is_agent_browser_command(tool_name: str, tool_input: dict[str, object]) -> bool:
@@ -250,7 +368,7 @@ def is_agent_browser_command(tool_name: str, tool_input: dict[str, object]) -> b
 class BrowserToolsPlugin(LeashdPlugin):
     meta = PluginMeta(
         name="browser_tools",
-        version="0.2.0",
+        version="0.3.0",
         description="Observability for Playwright MCP and agent-browser tools",
     )
 
@@ -270,21 +388,30 @@ class BrowserToolsPlugin(LeashdPlugin):
     async def stop(self) -> None:
         pass
 
-    def _detect_browser_event(self, event: Event) -> tuple[str, bool, str] | None:
-        """Detect a browser tool event. Returns (tool_name, is_mutation, backend) or None."""
+    def _detect_browser_event(
+        self, event: Event
+    ) -> tuple[str, bool, str, AgentBrowserTier] | None:
+        """Detect a browser tool event → (tool_name, is_mutation, backend, tier)."""
         tool_name = event.data.get("tool_name", "")
 
         if is_browser_tool(tool_name):
             normalized = normalize_tool_name(tool_name)
-            return tool_name, normalized in BROWSER_MUTATION_TOOLS, "playwright"
+            is_mutation = normalized in BROWSER_MUTATION_TOOLS
+            tier: AgentBrowserTier = "mutation" if is_mutation else "readonly"
+            return tool_name, is_mutation, "playwright", tier
 
         if tool_name == "Bash":
             tool_input = event.data.get("tool_input", {})
             command = str(tool_input.get("command", "")) if tool_input else ""
-            parsed = parse_agent_browser_command(command)
-            if parsed:
-                sub, is_mutation = parsed
-                return f"agent-browser {sub}", is_mutation, "agent-browser"
+            classified = classify_agent_browser_command(command)
+            if classified:
+                sub, tier = classified
+                return (
+                    f"agent-browser {sub}",
+                    tier != "readonly",
+                    "agent-browser",
+                    tier,
+                )
 
         return None
 
@@ -292,11 +419,12 @@ class BrowserToolsPlugin(LeashdPlugin):
         detected = self._detect_browser_event(event)
         if not detected:
             return
-        tool_name, is_mutation, backend = detected
+        tool_name, is_mutation, backend, tier = detected
         logger.info(
             "browser_tool_gated",
             tool_name=tool_name,
             is_mutation=is_mutation,
+            tier=tier,
             backend=backend,
             session_id=event.data.get("session_id", "unknown"),
         )
@@ -305,10 +433,11 @@ class BrowserToolsPlugin(LeashdPlugin):
         detected = self._detect_browser_event(event)
         if not detected:
             return
-        tool_name, _is_mutation, backend = detected
+        tool_name, _is_mutation, backend, tier = detected
         logger.info(
             "browser_tool_allowed",
             tool_name=tool_name,
+            tier=tier,
             backend=backend,
             session_id=event.data.get("session_id", "unknown"),
         )
@@ -317,10 +446,11 @@ class BrowserToolsPlugin(LeashdPlugin):
         detected = self._detect_browser_event(event)
         if not detected:
             return
-        tool_name, _is_mutation, backend = detected
+        tool_name, _is_mutation, backend, tier = detected
         logger.warning(
             "browser_tool_denied",
             tool_name=tool_name,
+            tier=tier,
             backend=backend,
             reason=event.data.get("reason", ""),
             session_id=event.data.get("session_id", "unknown"),

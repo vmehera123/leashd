@@ -220,8 +220,9 @@ class TaskV4Orchestrator(TaskV3Orchestrator):
                     "perform the mandatory agent-browser visual check. Tests "
                     "alone are not acceptable in v4. You MUST start the app, "
                     "drive the affected route(s) with the agent-browser "
-                    "skill, capture a screenshot, and add a `Visual check:` "
-                    "line to ## Verification this time."
+                    "skill, capture evidence with `agent-browser screenshot "
+                    "--annotate`, and add a `Visual check:` line to "
+                    "## Verification this time."
                 )
                 prior_failure = (
                     f"{banner}\n\n{prior_failure}" if prior_failure else banner

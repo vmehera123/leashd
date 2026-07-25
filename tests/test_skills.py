@@ -308,30 +308,118 @@ class TestPathTraversal:
             get_skill("../../etc")
 
 
+@pytest.fixture
+def no_agent_browser_cli(monkeypatch):
+    """Force the vendored-copy fallback regardless of the host machine."""
+    monkeypatch.setattr("leashd.skills._agent_browser_cli_output", lambda *args: None)
+
+
+@pytest.fixture
+def fake_agent_browser_cli(monkeypatch, tmp_path):
+    """Stand in for an installed agent-browser shipping its own core skill."""
+    source = tmp_path / "skill-data" / "core"
+    source.mkdir(parents=True)
+    (source / "SKILL.md").write_text("---\nname: agent-browser\n---\n# from CLI\n")
+
+    state = {"version": "0.33.0"}
+
+    def fake_output(*args: str) -> str | None:
+        if args[:2] == ("skills", "path"):
+            return str(source)
+        if args == ("--version",):
+            return f"agent-browser {state['version']}"
+        return None
+
+    monkeypatch.setattr("leashd.skills._agent_browser_cli_output", fake_output)
+    return state
+
+
 class TestBuiltinAgentBrowserSkill:
-    def test_ensure_installs_skill(self, fake_config_dir, fake_skills_dir):
+    def test_ensure_installs_skill(
+        self, fake_config_dir, fake_skills_dir, no_agent_browser_cli
+    ):
         from leashd.skills import ensure_agent_browser_skill
 
         ensure_agent_browser_skill()
         skill_md = fake_skills_dir / "agent-browser" / "SKILL.md"
         assert skill_md.is_file()
 
-    def test_ensure_idempotent(self, fake_config_dir, fake_skills_dir):
+    def test_ensure_idempotent(
+        self, fake_config_dir, fake_skills_dir, no_agent_browser_cli
+    ):
         from leashd.skills import ensure_agent_browser_skill
 
         ensure_agent_browser_skill()
         ensure_agent_browser_skill()
         assert (fake_skills_dir / "agent-browser" / "SKILL.md").is_file()
 
-    def test_ensure_saves_metadata(self, fake_config_dir, fake_skills_dir):
+    def test_ensure_saves_metadata(
+        self, fake_config_dir, fake_skills_dir, no_agent_browser_cli
+    ):
         from leashd.skills import ensure_agent_browser_skill
 
         ensure_agent_browser_skill()
         info = get_skill("agent-browser")
         assert info is not None
-        assert info.source == "builtin"
+        assert info.source == "agent-browser@builtin"
 
-    def test_remove_deletes_skill(self, fake_config_dir, fake_skills_dir):
+    def test_prefers_installed_cli_skill_over_vendored_copy(
+        self, fake_config_dir, fake_skills_dir, fake_agent_browser_cli
+    ):
+        from leashd.skills import ensure_agent_browser_skill
+
+        ensure_agent_browser_skill()
+
+        skill_md = fake_skills_dir / "agent-browser" / "SKILL.md"
+        assert "# from CLI" in skill_md.read_text()
+        info = get_skill("agent-browser")
+        assert info is not None
+        assert info.source == "agent-browser@0.33.0"
+
+    def test_refreshes_when_cli_version_changes(
+        self, fake_config_dir, fake_skills_dir, fake_agent_browser_cli
+    ):
+        from leashd.skills import ensure_agent_browser_skill
+
+        ensure_agent_browser_skill()
+        assert get_skill("agent-browser").source == "agent-browser@0.33.0"
+
+        fake_agent_browser_cli["version"] = "0.34.0"
+        ensure_agent_browser_skill()
+
+        assert get_skill("agent-browser").source == "agent-browser@0.34.0"
+
+    def test_no_recopy_when_version_unchanged(
+        self, fake_config_dir, fake_skills_dir, fake_agent_browser_cli
+    ):
+        from leashd.skills import ensure_agent_browser_skill
+
+        ensure_agent_browser_skill()
+        marker = fake_skills_dir / "agent-browser" / "local-edit.txt"
+        marker.write_text("kept")
+
+        ensure_agent_browser_skill()
+
+        assert marker.is_file()
+
+    def test_falls_back_when_cli_path_is_unusable(
+        self, fake_config_dir, fake_skills_dir, monkeypatch
+    ):
+        from leashd.skills import ensure_agent_browser_skill
+
+        monkeypatch.setattr(
+            "leashd.skills._agent_browser_cli_output",
+            lambda *args: "/nonexistent/skill/dir",
+        )
+
+        ensure_agent_browser_skill()
+
+        assert (fake_skills_dir / "agent-browser" / "SKILL.md").is_file()
+        assert get_skill("agent-browser").source == "agent-browser@builtin"
+
+    def test_remove_deletes_skill(
+        self, fake_config_dir, fake_skills_dir, no_agent_browser_cli
+    ):
         from leashd.skills import ensure_agent_browser_skill, remove_agent_browser_skill
 
         ensure_agent_browser_skill()
@@ -344,7 +432,9 @@ class TestBuiltinAgentBrowserSkill:
 
         remove_agent_browser_skill()  # should not raise
 
-    def test_ensure_replaces_partial_install(self, fake_config_dir, fake_skills_dir):
+    def test_ensure_replaces_partial_install(
+        self, fake_config_dir, fake_skills_dir, no_agent_browser_cli
+    ):
         """A target dir without SKILL.md (interrupted install) is wiped and
         re-copied rather than left half-populated."""
         from leashd.skills import ensure_agent_browser_skill
@@ -357,3 +447,144 @@ class TestBuiltinAgentBrowserSkill:
 
         assert (stale / "SKILL.md").is_file()
         assert not (stale / "leftover.txt").exists()
+
+
+class TestAgentBrowserSkillNameNormalization:
+    def test_cli_skill_installs_under_agent_browser_name(
+        self, fake_config_dir, fake_skills_dir, fake_agent_browser_cli
+    ):
+        # The CLI names its copy `core`; installed under
+        # ~/.claude/skills/agent-browser that would leave the frontmatter
+        # disagreeing with the directory and the metadata key.
+        from leashd.skills import _parse_frontmatter, ensure_agent_browser_skill
+
+        ensure_agent_browser_skill()
+
+        skill_md = fake_skills_dir / "agent-browser" / "SKILL.md"
+        assert _parse_frontmatter(skill_md.read_text())["name"] == "agent-browser"
+
+    def test_description_and_body_preserved(
+        self, fake_config_dir, fake_skills_dir, monkeypatch, tmp_path
+    ):
+        from leashd.skills import _parse_frontmatter, ensure_agent_browser_skill
+
+        source = tmp_path / "core"
+        source.mkdir()
+        (source / "SKILL.md").write_text(
+            "---\nname: core\ndescription: Core guide\n"
+            "allowed-tools: Bash(agent-browser:*)\n---\n\n# Body kept\n"
+        )
+        monkeypatch.setattr(
+            "leashd.skills._agent_browser_cli_output",
+            lambda *args: (
+                str(source)
+                if args[:2] == ("skills", "path")
+                else "agent-browser 0.33.0"
+            ),
+        )
+
+        ensure_agent_browser_skill()
+
+        text = (fake_skills_dir / "agent-browser" / "SKILL.md").read_text()
+        fm = _parse_frontmatter(text)
+        assert fm["name"] == "agent-browser"
+        assert fm["description"] == "Core guide"
+        assert fm["allowed-tools"] == "Bash(agent-browser:*)"
+        assert "# Body kept" in text
+
+
+class TestAgentBrowserArtifactPaths:
+    """Upstream examples write to /tmp; leashd keeps artifacts in .leashd.
+
+    Regression: syncing the vendored skill from the CLI overwrote leashd's
+    `.leashd` customisation, so the shipped templates told agents to save
+    screenshots into a directory temp cleanup reclaims. Applied on install so
+    it survives the next CLI upgrade instead of being a hand-patch.
+    """
+
+    def test_rewrites_tmp_paths(self, tmp_path):
+        from leashd.skills import _normalize_artifact_paths
+
+        (tmp_path / "SKILL.md").write_text(
+            "agent-browser screenshot /tmp/page.png\n"
+            "agent-browser network har stop /tmp/trace.har\n"
+        )
+        assert _normalize_artifact_paths(tmp_path) == 1
+        text = (tmp_path / "SKILL.md").read_text()
+        assert "/tmp/" not in text
+        assert "screenshot .leashd/page.png" in text
+        assert "har stop .leashd/trace.har" in text
+
+    def test_rewrites_shell_output_dir_default(self, tmp_path):
+        from leashd.skills import _normalize_artifact_paths
+
+        script = tmp_path / "capture.sh"
+        script.write_text('OUTPUT_DIR="${2:-.}"\n')
+        _normalize_artifact_paths(tmp_path)
+        assert script.read_text() == 'OUTPUT_DIR="${2:-.leashd}"\n'
+
+    def test_recurses_into_subdirectories(self, tmp_path):
+        from leashd.skills import _normalize_artifact_paths
+
+        nested = tmp_path / "references"
+        nested.mkdir()
+        (nested / "session.md").write_text("agent-browser screenshot /tmp/a.png\n")
+        assert _normalize_artifact_paths(tmp_path) == 1
+        assert "/tmp/" not in (nested / "session.md").read_text()
+
+    def test_leaves_unrelated_files_alone(self, tmp_path):
+        from leashd.skills import _normalize_artifact_paths
+
+        binary = tmp_path / "logo.png"
+        binary.write_bytes(b"\x89PNG\r\n\x1a\n/tmp/keepme")
+        (tmp_path / "notes.txt").write_text("/tmp/keepme\n")
+        assert _normalize_artifact_paths(tmp_path) == 0
+        assert b"/tmp/keepme" in binary.read_bytes()
+        assert "/tmp/keepme" in (tmp_path / "notes.txt").read_text()
+
+    def test_idempotent(self, tmp_path):
+        from leashd.skills import _normalize_artifact_paths
+
+        (tmp_path / "SKILL.md").write_text("screenshot /tmp/a.png\n")
+        assert _normalize_artifact_paths(tmp_path) == 1
+        assert _normalize_artifact_paths(tmp_path) == 0
+
+    def test_applied_on_install_from_cli_source(
+        self, fake_config_dir, fake_skills_dir, monkeypatch, tmp_path
+    ):
+        from leashd.skills import ensure_agent_browser_skill
+
+        source = tmp_path / "core"
+        (source / "templates").mkdir(parents=True)
+        (source / "SKILL.md").write_text(
+            "---\nname: core\ndescription: d\n---\n\nscreenshot /tmp/x.png\n"
+        )
+        (source / "templates" / "form.sh").write_text(
+            "agent-browser screenshot /tmp/form-result.png\n"
+        )
+        monkeypatch.setattr(
+            "leashd.skills._agent_browser_cli_output",
+            lambda *args: (
+                str(source)
+                if args[:2] == ("skills", "path")
+                else "agent-browser 0.33.0"
+            ),
+        )
+
+        ensure_agent_browser_skill()
+
+        installed = fake_skills_dir / "agent-browser"
+        assert "/tmp/" not in (installed / "SKILL.md").read_text()
+        assert "/tmp/" not in (installed / "templates" / "form.sh").read_text()
+
+    def test_vendored_skill_ships_no_tmp_paths(self):
+        from leashd.skills import _BUILTIN_SKILL_DATA
+
+        offenders = [
+            p
+            for p in (_BUILTIN_SKILL_DATA / "agent-browser").rglob("*")
+            if p.is_file()
+            and p.suffix in {".md", ".sh"}
+            and "/tmp/" in p.read_text(encoding="utf-8", errors="ignore")
+        ]
+        assert offenders == []
