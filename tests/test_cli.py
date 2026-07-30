@@ -732,6 +732,60 @@ class TestClean:
         assert "Cleaned 3 artifact(s)" in captured.out
 
 
+class TestCleanClosesBrowser:
+    """`leashd clean` runs in its own process, out of reach of engine teardown.
+
+    Without this a headed Chrome outlived the clean and Chrome replayed its
+    tabs on the next launch.
+    """
+
+    def _config(self, profile, **kw):
+        from leashd.core.config import LeashdConfig
+
+        return LeashdConfig(
+            approved_directories=[profile.parent],
+            browser_backend=kw.pop("backend", "agent-browser"),
+            browser_user_data_dir=str(profile),
+            **kw,
+        )
+
+    def test_closes_browser_and_prunes_restore_state(self, tmp_path):
+        from leashd.cli import _close_browser
+
+        profile = tmp_path / "browser-profile"
+        sessions = profile / "Default" / "Sessions"
+        sessions.mkdir(parents=True)
+        (sessions / "Session_13429888176925079").write_bytes(b"window-state")
+        (sessions / "Tabs_13429888177775418").write_bytes(b"tab-state")
+
+        with patch("leashd.cli.subprocess.run") as mock_run:
+            removed = _close_browser(self._config(profile))
+
+        assert mock_run.call_args.args[0] == ["agent-browser", "close", "--all"]
+        assert removed == 2
+        assert list(sessions.iterdir()) == []
+
+    def test_skips_other_backends(self, tmp_path):
+        from leashd.cli import _close_browser
+
+        profile = tmp_path / "browser-profile"
+        profile.mkdir()
+
+        with patch("leashd.cli.subprocess.run") as mock_run:
+            assert _close_browser(self._config(profile, backend="playwright")) == 0
+
+        mock_run.assert_not_called()
+
+    def test_survives_missing_agent_browser(self, tmp_path):
+        from leashd.cli import _close_browser
+
+        profile = tmp_path / "browser-profile"
+        profile.mkdir()
+
+        with patch("leashd.cli.subprocess.run", side_effect=FileNotFoundError):
+            assert _close_browser(self._config(profile)) == 0
+
+
 class TestVersion:
     def test_version_subcommand(self, capsys):
         from leashd import __version__

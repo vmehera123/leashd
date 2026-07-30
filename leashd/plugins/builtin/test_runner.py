@@ -664,6 +664,7 @@ class TestRunnerPlugin(LeashdPlugin):
         )
 
         session.mode = "test"
+        session.web_active = False
         session.mode_instruction = build_test_instruction(
             config,
             project_config=project_config,

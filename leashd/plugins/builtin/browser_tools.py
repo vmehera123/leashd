@@ -93,6 +93,7 @@ class BrowserToolSet(BaseModel):
     type_tool: str
     navigate_tool: str
     press_key_tool: str
+    new_tab_tool: str
 
 
 BROWSER_TOOL_SETS: dict[str, BrowserToolSet] = {
@@ -104,6 +105,7 @@ BROWSER_TOOL_SETS: dict[str, BrowserToolSet] = {
         type_tool="browser_type",
         navigate_tool="browser_navigate",
         press_key_tool="browser_press_key",
+        new_tab_tool="browser_tab_new",
     ),
     "agent-browser": BrowserToolSet(
         snap_tool="agent-browser snapshot -i",
@@ -113,6 +115,7 @@ BROWSER_TOOL_SETS: dict[str, BrowserToolSet] = {
         type_tool="agent-browser type",
         navigate_tool="agent-browser open",
         press_key_tool="agent-browser press",
+        new_tab_tool="agent-browser tab new",
     ),
 }
 

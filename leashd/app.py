@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from leashd.agents.registry import get_agent
+from leashd.browser_profile import merged_launch_args, prune_restore_state
 from leashd.core.config import LeashdConfig, ensure_leashd_dir
 from leashd.core.engine import Engine, PathConfig
 from leashd.core.events import EventBus
@@ -211,6 +212,9 @@ def build_engine(
         from leashd.skills import ensure_agent_browser_skill
 
         ensure_agent_browser_skill()
+        os.environ["AGENT_BROWSER_ARGS"] = merged_launch_args(
+            os.environ.get("AGENT_BROWSER_ARGS")
+        )
         if not config.browser_headless:
             os.environ.setdefault("AGENT_BROWSER_HEADED", "1")
         else:
@@ -218,6 +222,7 @@ def build_engine(
         if config.browser_user_data_dir:
             resolved = str(Path(config.browser_user_data_dir).expanduser())
             os.environ.setdefault("AGENT_BROWSER_PROFILE", resolved)
+            prune_restore_state(Path(resolved))
         logger.info("browser_backend_configured", backend="agent-browser")
 
     if config.workspace_config_root is None:

@@ -1006,11 +1006,10 @@ wheels = [
 
 [[package]]
 name = "leashd"
-version = "1.2.1"
+version = "1.2.2"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
-    { name = "claude-agent-sdk" },
     { name = "codex-sdk-python" },
     { name = "fastapi" },
     { name = "libtmux" },
@@ -1025,10 +1024,16 @@ dependencies = [
     { name = "watchdog" },
 ]
 
+[package.optional-dependencies]
+claude-agent-sdk = [
+    { name = "claude-agent-sdk" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "httpx" },
     { name = "httpx-ws" },
+    { name = "leashd", extra = ["claude-agent-sdk"] },
     { name = "mypy" },
     { name = "playwright" },
     { name = "pytest" },
@@ -1041,7 +1046,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.20.0" },
-    { name = "claude-agent-sdk", specifier = ">=0.1.39" },
+    { name = "claude-agent-sdk", marker = "extra == 'claude-agent-sdk'", specifier = ">=0.1.39" },
     { name = "codex-sdk-python", specifier = ">=0.114.0" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "libtmux", specifier = ">=0.55,<0.56" },
@@ -1055,11 +1060,13 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34.0" },
     { name = "watchdog", specifier = ">=4.0" },
 ]
+provides-extras = ["claude-agent-sdk"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "httpx", specifier = ">=0.28.0" },
     { name = "httpx-ws", specifier = ">=0.7.0" },
+    { name = "leashd", extras = ["claude-agent-sdk"] },
     { name = "mypy", specifier = ">=1.15" },
     { name = "playwright", specifier = ">=1.40.0" },
     { name = "pytest", specifier = ">=9.0.2" },

@@ -17,6 +17,11 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
+_EXECUTED_BEFORE_VERDICT = (
+    "This tool call already ran — the runtime did not wait for leashd's "
+    "approval, so the decision arrived too late to gate it."
+)
+
 
 class ApprovalResult(BaseModel):
     model_config = ConfigDict(frozen=True)
@@ -37,6 +42,19 @@ class PendingApproval(BaseModel):
     rejection_reason: str | None = None
     message_id: str | None = None
     description: str = ""
+
+
+def _is_same_call(
+    pending: PendingApproval, tool_name: str, tool_input: dict[str, Any]
+) -> bool:
+    """Whether a gate was opened for this exact tool call.
+
+    A gate carries the policy key, which refines the raw tool name the runtime
+    reports (``Bash::curl`` for a ``Bash``).
+    """
+    return pending.tool_input == tool_input and (
+        pending.tool_name == tool_name or pending.tool_name.startswith(f"{tool_name}::")
+    )
 
 
 class ApprovalCoordinator:
@@ -148,22 +166,67 @@ class ApprovalCoordinator:
     def has_pending(self, chat_id: str) -> bool:
         return any(p.chat_id == chat_id for p in self.pending.values())
 
+    async def _settle_rejected(
+        self, pending: PendingApproval, reason: str | None = None
+    ) -> None:
+        pending.decision = False
+        pending.rejection_reason = reason
+        pending.event.set()
+        if pending.message_id:
+            await self.connector.delete_message(pending.chat_id, pending.message_id)
+
     async def reject_with_reason(self, chat_id: str, reason: str) -> bool:
-        for pending in self.pending.values():
-            if pending.chat_id == chat_id:
-                pending.decision = False
-                pending.rejection_reason = reason
-                pending.event.set()
-                if pending.message_id:
-                    await self.connector.delete_message(chat_id, pending.message_id)
-                logger.info(
-                    "approval_rejected_with_reason",
-                    approval_id=pending.approval_id,
-                    chat_id=chat_id,
-                    reason=reason,
-                )
-                return True
-        return False
+        """Reject every live gate for this chat with the human's own words.
+
+        Newest first, and all of them: a parallel tool batch opens several gates
+        at once, so resolving one would leave the turn parked on siblings the
+        human has already answered in substance.
+        """
+        matched = [
+            pending
+            for pending in reversed(list(self.pending.values()))
+            if pending.chat_id == chat_id
+        ]
+        for pending in matched:
+            await self._settle_rejected(pending, reason)
+            logger.info(
+                "approval_rejected_with_reason",
+                approval_id=pending.approval_id,
+                chat_id=chat_id,
+                tool=pending.tool_name,
+                reason=reason,
+            )
+        return bool(matched)
+
+    async def expire_executed(
+        self, chat_id: str, tool_name: str, tool_input: dict[str, Any]
+    ) -> str | None:
+        """Retire the gate for a call the runtime ran without waiting for it.
+
+        Such a gate never resolves, so its card stays tappable and
+        :meth:`has_pending` keeps diverting the human's messages into
+        :meth:`reject_with_reason` instead of to the agent. Callers pass their
+        runtime's tool-completion signal; a gate that actually blocked is
+        already gone by then, making this a no-op.
+        """
+        pending = next(
+            (
+                p
+                for p in self.pending.values()
+                if p.chat_id == chat_id and _is_same_call(p, tool_name, tool_input)
+            ),
+            None,
+        )
+        if pending is None:
+            return None
+        await self._settle_rejected(pending, _EXECUTED_BEFORE_VERDICT)
+        logger.warning(
+            "approval_expired_after_execution",
+            approval_id=pending.approval_id,
+            chat_id=chat_id,
+            tool=pending.tool_name,
+        )
+        return pending.approval_id
 
     def _format_description(
         self,
@@ -197,17 +260,15 @@ class ApprovalCoordinator:
     async def cancel_pending(self, chat_id: str) -> list[str]:
         cancelled: list[str] = []
         for approval_id, pending in list(self.pending.items()):
-            if pending.chat_id == chat_id:
-                pending.decision = False
-                pending.event.set()
-                if pending.message_id:
-                    await self.connector.delete_message(chat_id, pending.message_id)
-                cancelled.append(approval_id)
-                logger.info(
-                    "approval_cancelled",
-                    approval_id=approval_id,
-                    chat_id=chat_id,
-                )
+            if pending.chat_id != chat_id:
+                continue
+            await self._settle_rejected(pending)
+            cancelled.append(approval_id)
+            logger.info(
+                "approval_cancelled",
+                approval_id=approval_id,
+                chat_id=chat_id,
+            )
         return cancelled
 
     @property

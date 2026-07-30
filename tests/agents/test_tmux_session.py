@@ -823,6 +823,60 @@ async def test_on_lifecycle_stop_completes_turn_subagent_does_not(cfg):
     assert turn.stop_event.is_set()
 
 
+async def test_on_lifecycle_post_tool_use_expires_the_escaped_gate(cfg):
+    """A gate left live by an escaped call swallows the human's next message."""
+    from unittest.mock import AsyncMock
+
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm, chat_id="chat1")
+    tsm._by_uuid["u1"] = cs.session_id
+    approvals = AsyncMock()
+    tsm._approvals = approvals
+
+    tool_input = {"command": "curl https://example.com"}
+    await tsm.on_lifecycle(
+        "PostToolUse",
+        {
+            "session_id": "u1",
+            "cwd": "/work",
+            "tool_name": "Bash",
+            "tool_input": tool_input,
+        },
+    )
+    approvals.expire_executed.assert_awaited_once_with("chat1", "Bash", tool_input)
+
+
+async def test_on_lifecycle_post_tool_use_tolerates_a_malformed_body(cfg):
+    from unittest.mock import AsyncMock
+
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm, chat_id="chat1")
+    tsm._by_uuid["u1"] = cs.session_id
+    approvals = AsyncMock()
+    tsm._approvals = approvals
+
+    for body in (
+        {"session_id": "u1", "cwd": "/work"},
+        {"session_id": "u1", "cwd": "/work", "tool_name": "Bash", "tool_input": "nope"},
+    ):
+        await tsm.on_lifecycle("PostToolUse", body)
+    approvals.expire_executed.assert_not_awaited()
+
+
+async def test_on_lifecycle_post_tool_use_does_not_end_the_turn(cfg):
+    """Only Stop/SessionEnd complete a turn — a tool finishing does not."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    tsm._by_uuid["u1"] = cs.session_id
+    turn = cs.begin_turn(on_text_chunk=None, on_tool_activity=None)
+
+    await tsm.on_lifecycle(
+        "PostToolUse",
+        {"session_id": "u1", "cwd": "/work", "tool_name": "Bash", "tool_input": {}},
+    )
+    assert not turn.stop_event.is_set()
+
+
 def test_bind_uuid_terminal_event_skips_pending_cwd_fallback(cfg):
     """A terminal hook (Stop/SessionEnd) with an unseen UUID must NOT adopt the
     in-flight spawn via the cwd fallback — that stale hook from a reaped prior
@@ -982,6 +1036,7 @@ def _parity_session(tmp_path):
 
     return SimpleNamespace(
         mode="test",
+        web_active=False,
         task_run_id=None,
         workspace_directories=[],
         working_directory=str(tmp_path),
@@ -1051,13 +1106,17 @@ def test_build_agent_cli_args_web_mode_disallows_webfetch(cfg, tmp_path):
     browser/fetch activity routes through ``Bash agent-browser …`` (which
     leashd gates and bridges to Telegram). Without this, claude TUI 2.1.150
     picks ``WebFetch`` for research and hits its own per-domain consent
-    prompt inside the pane — a prompt leashd can't bridge."""
+    prompt inside the pane — a prompt leashd can't bridge.
+
+    Keyed on ``web_active``: ``/web`` runs the session under ``auto``, so a
+    ``mode == "web"`` check never fires in production."""
     from types import SimpleNamespace
 
     from leashd.agents.runtimes._helpers import build_agent_cli_args
 
     web_session = SimpleNamespace(
-        mode="web",
+        mode="auto",
+        web_active=True,
         task_run_id=None,
         workspace_directories=[],
         working_directory=str(tmp_path),
@@ -1083,6 +1142,7 @@ def test_build_agent_cli_args_web_mode_disallows_webfetch(cfg, tmp_path):
     # Non-web sessions are unaffected — those built-ins remain available.
     non_web_session = SimpleNamespace(
         mode="default",
+        web_active=False,
         task_run_id=None,
         workspace_directories=[],
         working_directory=str(tmp_path),
@@ -1675,7 +1735,8 @@ class _ScriptedRun:
     ``script`` maps subcommand → a single ``_FakeCompleted`` or a list
     consumed in order (the last entry repeats). Records ``(subcommand,
     target_name)`` into the shared ``events`` list so ordering against the
-    fake ``new_session`` can be asserted.
+    fake ``new_session`` can be asserted. Unscripted subcommands succeed, so a
+    test only spells out the calls whose result it cares about.
     """
 
     def __init__(self, script, events):
@@ -1691,7 +1752,9 @@ class _ScriptedRun:
         sub = argv[3]
         name = argv[5][1:] if len(argv) > 5 and argv[4] == "-t" else None
         self.events.append((sub, name))
-        seq = self._script[sub]
+        seq = self._script.get(sub)
+        if seq is None:
+            return _FakeCompleted(0)
         return seq.pop(0) if len(seq) > 1 else seq[0]
 
     def sub_calls(self, sub):
@@ -4798,7 +4861,8 @@ async def test_spawn_passes_agent_browser_env_to_pane(
         chat_id="web:c1",
         user_id="u1",
         working_directory=str(tmp_path),
-        mode="web",
+        mode="auto",
+        web_active=True,
     )
     cs = await _spawn(tsm, session=session)
     cs.jsonl_task.cancel()
@@ -4862,3 +4926,335 @@ async def test_spawn_pins_browser_artifacts_to_leashd_dir(
 
     env = server.new_session_calls[0]["environment"]
     assert env["AGENT_BROWSER_SCREENSHOT_DIR"] == str(workdir / ".leashd")
+
+
+# --- pane post-mortem -------------------------------------------------------
+
+
+class _StatusPane:
+    """Pane stand-in answering ``list-panes`` and ``capture-pane`` separately."""
+
+    def __init__(
+        self,
+        *,
+        dead_flag="0",
+        screen="claude > _",
+        raises=False,
+        exit_status="",
+        exit_signal="",
+    ):
+        self.dead_flag = dead_flag
+        self.screen = screen
+        self.raises = raises
+        self.exit_status = exit_status
+        self.exit_signal = exit_signal
+
+    def cmd(self, *args):
+        from types import SimpleNamespace
+
+        if self.raises:
+            raise RuntimeError("tmux went away")
+        if args[0] == "list-panes":
+            if self.dead_flag is None:
+                return SimpleNamespace(stdout=[])
+            fmt = args[-1]
+            if "pane_dead_status" in fmt:
+                return SimpleNamespace(
+                    stdout=[f"{self.exit_status}|{self.exit_signal}"]
+                )
+            return SimpleNamespace(stdout=[self.dead_flag])
+        return SimpleNamespace(stdout=self.screen.split("\n"))
+
+
+def test_pane_status_separates_dead_gone_detached_and_error(cfg):
+    tsm = TmuxSessionManager(cfg)
+
+    cs = _session(tsm)
+    assert cs.pane_status() == "detached"
+    assert cs.pane_is_dead() is True
+
+    cs.attach(object(), _StatusPane(dead_flag="0"))
+    assert cs.pane_status() == "alive"
+    assert cs.pane_is_dead() is False
+
+    cs.attach(object(), _StatusPane(dead_flag="1"))
+    assert cs.pane_status() == "dead"
+
+    cs.attach(object(), _StatusPane(dead_flag=None))
+    assert cs.pane_status() == "gone"
+
+    cs.attach(object(), _StatusPane(raises=True))
+    assert cs.pane_status() == "error"
+    assert cs.pane_is_dead() is True
+
+
+def test_capture_memoises_the_last_non_empty_screen(cfg):
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    pane = _StatusPane(screen="real content")
+    cs.attach(object(), pane)
+
+    cs.capture()
+    assert cs.last_screen == "real content"
+    assert cs.last_screen_at > 0
+
+    pane.screen = "   \n  "
+    cs.capture()
+    assert cs.last_screen == "real content"
+
+
+def test_death_report_falls_back_to_the_last_screen_when_the_pane_is_gone(cfg):
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    cs.attach(object(), _StatusPane(screen="working on it\n> agent-browser open"))
+    cs.capture()
+
+    cs.attach(object(), _StatusPane(dead_flag=None, screen=""))
+    report = cs.death_report()
+
+    assert report["pane_status"] == "gone"
+    assert report["pane_tail_live"] is False
+    assert "agent-browser open" in report["pane_tail"]
+    assert "pane_tail_age_s" in report
+
+
+def test_death_report_prefers_a_live_capture_of_a_retained_dead_pane(cfg):
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    cs.attach(object(), _StatusPane(screen="stale frame"))
+    cs.capture()
+    cs.attach(
+        object(),
+        _StatusPane(dead_flag="1", screen="Error: out of memory", exit_status="1"),
+    )
+
+    report = cs.death_report()
+
+    assert report["pane_status"] == "dead"
+    assert report["pane_tail_live"] is True
+    assert "out of memory" in report["pane_tail"]
+    assert report["pane_exit_status"] == "1"
+    assert report["pane_exit_signal"] is None
+
+
+def test_death_report_separates_a_clean_exit_from_a_signal(cfg):
+    """The first question of any mid-turn death: did claude quit, or was it
+    killed? tmux fills exactly one of the two fields."""
+    tsm = TmuxSessionManager(cfg)
+
+    cs = _session(tsm, session_id="quit")
+    cs.attach(object(), _StatusPane(dead_flag="1", exit_status="0"))
+    quit_report = cs.death_report()
+
+    cs = _session(tsm, session_id="killed")
+    cs.attach(object(), _StatusPane(dead_flag="1", exit_signal="kill"))
+    killed_report = cs.death_report()
+
+    assert (quit_report["pane_exit_status"], quit_report["pane_exit_signal"]) == (
+        "0",
+        None,
+    )
+    assert (killed_report["pane_exit_status"], killed_report["pane_exit_signal"]) == (
+        None,
+        "kill",
+    )
+
+
+def test_death_report_keeps_the_exit_cause_after_the_session_vanishes(cfg):
+    """The cause used to be read at abort time and only while the pane was
+    still DEAD. A real turn died 2.2s after its SessionEnd hook, by which point
+    the session was GONE, so the post-mortem carried no status and no signal —
+    the one field separating "claude quit" from "something killed it"."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    cs.attach(object(), _StatusPane(dead_flag="1", exit_signal="kill"))
+
+    assert cs.pane_is_dead() is True
+
+    cs.attach(object(), _StatusPane(dead_flag=None, screen=""))
+    report = cs.death_report()
+
+    assert report["pane_status"] == "gone"
+    assert report["pane_exit_status"] is None
+    assert report["pane_exit_signal"] == "kill"
+    assert report["pane_exit_cause_latched"] is True
+
+
+def test_death_report_marks_a_live_read_as_not_latched(cfg):
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    cs.attach(object(), _StatusPane(dead_flag="1", exit_status="0"))
+
+    report = cs.death_report()
+
+    assert report["pane_exit_status"] == "0"
+    assert report["pane_exit_cause_latched"] is False
+
+
+def test_latch_death_cause_keeps_the_first_reading(cfg):
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    cs.attach(object(), _StatusPane(dead_flag="1", exit_signal="term"))
+    cs.latch_death_cause()
+
+    cs.attach(object(), _StatusPane(dead_flag="1", exit_status="0"))
+    cs.latch_death_cause()
+
+    assert cs.last_death_cause == (None, "term")
+
+
+def test_latch_death_cause_ignores_a_pane_that_has_not_died(cfg):
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    cs.attach(object(), _StatusPane(screen="still working"))
+
+    cs.latch_death_cause()
+
+    assert cs.last_death_cause is None
+    assert "pane_exit_status" not in cs.death_report()
+
+
+def test_no_exit_fields_when_the_pane_vanished_unobserved(cfg):
+    """Nothing ever saw the pane dead, so there is genuinely nothing to report
+    — the fields must stay absent rather than claim a clean exit."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    cs.attach(object(), _StatusPane(dead_flag=None, screen=""))
+
+    report = cs.death_report()
+
+    assert report["pane_status"] == "gone"
+    assert "pane_exit_status" not in report
+    assert "pane_exit_signal" not in report
+
+
+def test_death_report_reads_the_scrollback_not_just_the_visible_screen(cfg):
+    """tmux blanks a signalled pane's visible screen and leaves only its own
+    banner, so a visible-only capture of a dead pane recovers nothing."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    blanked = "what claude printed last\n" + "\n" * 30 + "Pane is dead (signal kill)"
+    pane = _StatusPane(dead_flag="1", screen=blanked, exit_signal="kill")
+    cs.attach(object(), pane)
+
+    tail = cs.death_report()["pane_tail"]
+
+    assert "what claude printed last" in tail
+    assert "Pane is dead (signal kill)" in tail
+
+
+def test_death_report_trims_the_tail_to_the_last_lines(cfg):
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    body = "\n".join(f"line{i}" for i in range(200))
+    cs.attach(object(), _StatusPane(dead_flag="1", screen=body + "\n\n\n"))
+
+    tail = cs.death_report()["pane_tail"]
+
+    assert tail.endswith("line199")
+    assert "line0\n" not in tail
+    assert len(tail.splitlines()) <= 40
+
+
+async def test_on_lifecycle_session_end_records_the_reason(cfg):
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    tsm._by_uuid["u1"] = cs.session_id
+    cs.begin_turn(on_text_chunk=None, on_tool_activity=None)
+
+    await tsm.on_lifecycle(
+        "SessionEnd", {"session_id": "u1", "cwd": "/work", "reason": "other"}
+    )
+
+    assert cs.session_end_reason == "other"
+    assert cs.session_end_at > 0
+    assert cs.turn.stop_event.is_set()
+    assert cs.death_report()["session_end_reason"] == "other"
+
+
+async def test_on_lifecycle_session_end_latches_the_exit_cause(cfg):
+    """SessionEnd is the earliest leashd hears the CLI is going; the pane is
+    still on the socket then, and the watcher's next poll may not be."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    tsm._by_uuid["u1"] = cs.session_id
+    cs.begin_turn(on_text_chunk=None, on_tool_activity=None)
+    cs.attach(object(), _StatusPane(dead_flag="1", exit_status="1"))
+
+    await tsm.on_lifecycle(
+        "SessionEnd", {"session_id": "u1", "cwd": "/work", "reason": "other"}
+    )
+
+    assert cs.last_death_cause == ("1", None)
+
+    cs.attach(object(), _StatusPane(dead_flag=None, screen=""))
+    report = cs.death_report()
+    assert report["pane_status"] == "gone"
+    assert report["pane_exit_status"] == "1"
+    assert report["session_end_reason"] == "other"
+
+
+async def test_on_lifecycle_session_end_without_a_reason_is_still_recorded(cfg):
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    tsm._by_uuid["u1"] = cs.session_id
+
+    await tsm.on_lifecycle("SessionEnd", {"session_id": "u1", "cwd": "/work"})
+
+    assert cs.session_end_reason == "unspecified"
+
+
+async def test_spawn_retains_the_pane_after_claude_exits(
+    cfg, monkeypatch, no_real_sleep
+):
+    """Without remain-on-exit a claude that quits mid-turn takes its pane — and
+    its final output and exit status — with it, leaving the abort nothing to
+    read. The option is a window option, so the target is the window."""
+    import leashd.agents.runtimes.tmux_session as ts
+
+    tsm = TmuxSessionManager(cfg)
+    events: list[tuple] = []
+    server = _FakeSpawnServer(events=events)
+    _prep_spawn(tsm, server, monkeypatch)
+    scripted = _ScriptedRun({"has-session": _FakeCompleted(1)}, events)
+    monkeypatch.setattr(ts.subprocess, "run", scripted)
+
+    cs = await _spawn(tsm)
+    cs.jsonl_task.cancel()
+
+    opts = scripted.sub_calls("set-option")
+    assert opts
+    assert opts[0][3:] == [
+        "set-option",
+        "-w",
+        "-t",
+        "leashd_sess1:",
+        "remain-on-exit",
+        "on",
+    ]
+
+
+async def test_spawn_survives_a_failing_remain_on_exit(cfg, monkeypatch, no_real_sleep):
+    """A tmux that rejects the option costs forensics, never the session."""
+    import leashd.agents.runtimes.tmux_session as ts
+
+    tsm = TmuxSessionManager(cfg)
+    events: list[tuple] = []
+    server = _FakeSpawnServer(events=events)
+    _prep_spawn(tsm, server, monkeypatch)
+    monkeypatch.setattr(
+        ts.subprocess,
+        "run",
+        _ScriptedRun(
+            {
+                "has-session": _FakeCompleted(1),
+                "set-option": _FakeCompleted(1, stderr="no such window"),
+            },
+            events,
+        ),
+    )
+
+    cs = await _spawn(tsm)
+    cs.jsonl_task.cancel()
+
+    assert cs.tmux_name == "leashd_sess1"

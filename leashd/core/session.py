@@ -40,6 +40,7 @@ class Session(BaseModel):
     task_settings_override: dict[str, Any] | None = None
     browser_fresh: bool = False
     browser_backend: str | None = None
+    web_active: bool = False
     # Task v4: orchestrator opts a phase into Claude's native ``auto``
     # permission policy. Honored by the claude-cli and tmux runtimes
     # (PreToolUse hook bridge required); ignored by claude-code SDK and
@@ -147,6 +148,7 @@ class SessionManager:
         session.mode = self._default_mode
         session.mode_instruction = None
         session.plan_origin = None
+        session.web_active = False
 
     async def reset(self, user_id: str, chat_id: str) -> None:
         """Clear conversation state but preserve working_directory."""
@@ -166,6 +168,7 @@ class SessionManager:
         session.native_auto_allowed = False
         session.browser_fresh = False
         session.browser_backend = None
+        session.web_active = False
         session.created_at = datetime.now(timezone.utc)
         session.last_used = datetime.now(timezone.utc)
         session.is_active = True

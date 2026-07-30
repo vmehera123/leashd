@@ -295,6 +295,179 @@ _ARTIFACT_PATH_REWRITES: tuple[tuple[str, str], ...] = (
 
 _ARTIFACT_REWRITE_SUFFIXES: frozenset[str] = frozenset({".md", ".sh"})
 
+MAX_BROWSER_TABS = 15
+
+_TAB_DISCIPLINE_MARKER = "## One browser, many tabs"
+
+_TAB_DISCIPLINE_SECTION = f"""
+{_TAB_DISCIPLINE_MARKER}
+
+leashd runs agent-browser against a shared persistent profile, and when
+`browser.headless` is false every browser launch is a real window on the user's
+screen. Treat the browser as one long-lived session:
+
+- Use `agent-browser open <url>` for the first page only.
+- For every page after that use `agent-browser tab new <url>`, switch with
+  `agent-browser tab <id|label>`, and drop one with `agent-browser tab close <id|label>`.
+- Keep at most {MAX_BROWSER_TABS} tabs open at once. Close a tab before opening
+  the next one beyond that.
+- Never call `agent-browser close` between pages. Each relaunch leaves its
+  windows behind in the profile's session state, and the next launch restores
+  every one of them — this is how a single run ends up with hundreds of windows.
+- Reserve `--session <name>` for genuinely separate identities, such as a
+  two-user auth test. Each session is a whole extra browser, so never use
+  sessions to fan out over a URL list.
+
+To visit many URLs, reuse the one browser and cycle tabs:
+
+```bash
+n=0
+while IFS= read -r url; do
+  agent-browser tab new --label "p$n" "$url" >/dev/null
+  agent-browser get text body
+  agent-browser tab close "p$n" >/dev/null
+  n=$((n+1))
+done < urls.txt
+```
+
+To overlap page loads, open up to {MAX_BROWSER_TABS} with `tab new` first, then
+read and close them — never more than {MAX_BROWSER_TABS} open at a time.
+"""
+
+
+_SEARCH_ENGINE_MARKER = "## Default search engine"
+
+_SEARCH_ENGINE_SECTION = f"""
+{_SEARCH_ENGINE_MARKER}
+
+Search with Google unless it is unavailable. Upstream's worked example above
+opens `duckduckgo.com`, which is why agents reach for it first, but Google
+carries the operators research tasks depend on:
+
+```bash
+agent-browser tab new --label q "https://www.google.com/search?q=<query>&num=20"
+```
+
+- `&num=20` returns more results per page, so fewer round trips.
+- `site:`, `OR`, `-exclude`, and quoted phrases behave as documented; DuckDuckGo
+  degrades several of them silently.
+- Fall back to `duckduckgo.com/?q=` or `bing.com/search?q=` only when Google is
+  blocked, rate-limited, or returns no parseable results — say which engine
+  produced a result when it was not Google.
+
+Search pages count against the {MAX_BROWSER_TABS}-tab budget like any other
+page: reuse one labelled search tab rather than opening a fresh one per query.
+"""
+
+
+SEARCH_SCRIPT_NAME = "search-batch.sh"
+
+_SEARCH_SCRIPT_RELPATH = f"templates/{SEARCH_SCRIPT_NAME}"
+
+_SEARCH_SCRIPT_SOURCE = _BUILTIN_SKILL_DATA / SEARCH_SCRIPT_NAME
+
+_BATCHED_SEARCH_MARKER = "## Batched searches"
+
+_BATCHED_SEARCH_SECTION = f"""
+{_BATCHED_SEARCH_MARKER}
+
+Google answers a burst of result-page requests with its `/sorry/index`
+interstitial. Measured against leashd's persistent profile: 15 tabs opened
+back-to-back lost 2 pages, the same 15 queries run one tab at a time lost none,
+and a throwaway browser with no profile was refused on its very first request.
+So the profile is what makes searching work at all, and the arrival rate is what
+gets a run cut off part-way.
+
+Run multi-query research through the shipped helper rather than a hand-rolled
+`for` loop over `tab new`:
+
+```bash
+~/.claude/skills/agent-browser/{_SEARCH_SCRIPT_RELPATH} \\
+  -n 4 -j 2:5 -c 10 "first query" "second query" "third query"
+~/.claude/skills/agent-browser/{_SEARCH_SCRIPT_RELPATH} -f queries.txt
+```
+
+It holds `-n` tabs in flight, waits a random `-j min:max` seconds between opens,
+prints `title<TAB>url` per query, and closes each tab as soon as it is read. On a
+`/sorry` page it backs off and retries once, then falls back to DuckDuckGo and
+Bing, unwrapping both engines' redirect URLs. It never calls
+`agent-browser close`.
+"""
+
+
+def _upsert_section(root: Path, marker: str, section: str) -> bool:
+    """Insert or refresh one of leashd's appended SKILL.md sections.
+
+    Replaces an existing section in place — from its ``##`` marker up to the
+    next same-level heading — so edits to the wording reach skills that are
+    already installed. A plain "append when the marker is absent" check would
+    leave every existing install pinned to whatever text shipped first.
+
+    Returns True when the file changed.
+    """
+    skill_md = root / "SKILL.md"
+    try:
+        text = skill_md.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    start = text.find(marker)
+    if start == -1:
+        updated = f"{text.rstrip()}\n{section}"
+    else:
+        end = text.find("\n## ", start + len(marker))
+        updated = f"{text[:start].rstrip()}\n{section}"
+        if end != -1:
+            updated = f"{updated}\n{text[end + 1 :]}"
+    if updated == text:
+        return False
+    skill_md.write_text(updated, encoding="utf-8")
+    return True
+
+
+def _install_search_script(root: Path) -> bool:
+    """Copy leashd's batched-search helper into the skill's templates directory.
+
+    Shipped as a script rather than a documented loop because the loop agents
+    write themselves opens every tab at once, which is what Google throttles.
+    Returns True when the file was written or its contents changed.
+    """
+    if not _SEARCH_SCRIPT_SOURCE.is_file():
+        return False
+    target = root / _SEARCH_SCRIPT_RELPATH
+    try:
+        source_text = _SEARCH_SCRIPT_SOURCE.read_text(encoding="utf-8")
+        if target.is_file() and target.read_text(encoding="utf-8") == source_text:
+            return False
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(source_text, encoding="utf-8")
+        target.chmod(0o755)
+    except OSError:
+        return False
+    return True
+
+
+def _apply_customisations(root: Path) -> tuple[tuple[str, bool], ...]:
+    """Apply every leashd customisation to an installed agent-browser skill.
+
+    Ordered so the appended sections land in reading order. Each entry reports
+    whether it changed anything, so callers can log only real edits.
+    """
+    return (
+        (
+            "tab_discipline",
+            _upsert_section(root, _TAB_DISCIPLINE_MARKER, _TAB_DISCIPLINE_SECTION),
+        ),
+        (
+            "search_engine",
+            _upsert_section(root, _SEARCH_ENGINE_MARKER, _SEARCH_ENGINE_SECTION),
+        ),
+        (
+            "batched_search",
+            _upsert_section(root, _BATCHED_SEARCH_MARKER, _BATCHED_SEARCH_SECTION),
+        ),
+        ("search_script", _install_search_script(root)),
+    )
+
 
 def _normalize_artifact_paths(root: Path) -> int:
     """Point the skill's example output paths at ``.leashd``.
@@ -340,6 +513,13 @@ def ensure_agent_browser_skill() -> None:
         and installed is not None
         and installed.source == expected_source
     ):
+        backfilled = [
+            name for name, applied in _apply_customisations(target) if applied
+        ]
+        if backfilled:
+            logger.info(
+                "agent_browser_skill_customisations_backfilled", added=backfilled
+            )
         return
     if not (source / "SKILL.md").is_file():
         logger.warning("agent_browser_skill_source_missing", source=str(source))
@@ -350,6 +530,7 @@ def ensure_agent_browser_skill() -> None:
     shutil.copytree(source, target)
     _normalize_skill_name(target / "SKILL.md", "agent-browser")
     _normalize_artifact_paths(target)
+    _apply_customisations(target)
     save_skill_metadata(
         name="agent-browser",
         description="Browser automation CLI for AI agents",

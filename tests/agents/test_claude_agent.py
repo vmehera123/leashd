@@ -1036,7 +1036,8 @@ class TestClaudeCodeAgent:
             user_id="u1",
             chat_id="c1",
             working_directory=str(tmp_path),
-            mode="web",
+            mode="auto",
+            web_active=True,
         )
         opts = agent._build_options(session, can_use_tool=None)
         assert opts.env.get("AGENT_BROWSER_PROFILE") == profile_dir

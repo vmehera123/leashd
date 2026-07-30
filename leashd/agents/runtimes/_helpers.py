@@ -8,11 +8,14 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
+
+from leashd.browser_profile import merged_launch_args
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -325,7 +328,7 @@ def build_agent_cli_args(
     # turn looking stuck. Forbidding them in web mode forces all browser /
     # fetch activity through ``Bash agent-browser …`` so every domain
     # passes through leashd's policy + approval pipeline.
-    if session.mode == "web":
+    if session.web_active:
         for t in ("WebFetch", "WebSearch"):
             if t not in disallowed:
                 disallowed.append(t)
@@ -365,6 +368,9 @@ def build_agent_browser_env(config: LeashdConfig, session: Session) -> dict[str,
     matching the subprocess runtimes: a persistent Chrome profile carries the
     user's real logins, so it stays out of ``/task`` and ``/test`` runs.
 
+    ``AGENT_BROWSER_ARGS`` carries the launch args that keep Chrome from opening
+    its own untracked startup tab; see :func:`merged_launch_args`.
+
     Screenshots are pinned to the session's ``.leashd`` directory.
     agent-browser otherwise drops a path-less ``screenshot`` in the system temp
     dir, so ``/task`` visual evidence is cleaned up out from under the
@@ -378,12 +384,13 @@ def build_agent_browser_env(config: LeashdConfig, session: Session) -> dict[str,
     env: dict[str, str] = {
         "AGENT_BROWSER_SCREENSHOT_DIR": str(
             Path(session.working_directory) / SCREENSHOT_SAVE_DIR
-        )
+        ),
+        "AGENT_BROWSER_ARGS": merged_launch_args(os.environ.get("AGENT_BROWSER_ARGS")),
     }
     if not config.browser_headless:
         env["AGENT_BROWSER_HEADED"] = "1"
     if (
-        session.mode == "web"
+        session.web_active
         and not session.browser_fresh
         and config.browser_user_data_dir
     ):

@@ -60,7 +60,7 @@ Reported to the engine during execution so streaming can display which tool the 
 
 ## `ClaudeCodeAgent`
 
-`ClaudeCodeAgent` (`agents/claude_code.py`) is the built-in implementation wrapping the `claude-agent-sdk`.
+`ClaudeCodeAgent` (`agents/claude_code.py`) is the built-in implementation wrapping the `claude-agent-sdk`, which ships as the optional `leashd[claude-agent-sdk]` extra. The registry registers this runtime lazily and raises a `ConfigError` with install instructions when the package is absent, so every other runtime works without it.
 
 ### Execute Flow
 

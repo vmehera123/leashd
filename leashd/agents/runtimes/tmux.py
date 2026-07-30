@@ -39,7 +39,10 @@ from leashd.agents.runtimes._helpers import (
     model_supports_native_auto,
     safe_callback,
 )
-from leashd.agents.runtimes.tmux_session import get_or_create_tmux_session_manager
+from leashd.agents.runtimes.tmux_session import (
+    PANE_GONE,
+    get_or_create_tmux_session_manager,
+)
 from leashd.exceptions import AgentError
 
 if TYPE_CHECKING:
@@ -187,6 +190,48 @@ def _resume_note(kind: str | None, approved: bool | None) -> str:
     if kind == "question":
         return "✅ Got your answer — continuing."
     return "▶️ Continuing."
+
+
+def _death_report(cs: TmuxClaudeSession) -> dict[str, Any]:
+    """Post-mortem fields for an abort, never raising.
+
+    This runs on the path that is the user's last signal before a silent hang,
+    so a tmux hiccup while gathering evidence must not replace the abort with
+    an exception.
+    """
+    try:
+        return cs.death_report()
+    except Exception:
+        logger.debug("tmux_death_report_failed", exc_info=True)
+        return {"pane_status": "unknown"}
+
+
+def _pane_died_notice(report: dict[str, Any], *, resumable: bool) -> str:
+    """User-facing pane-death line, naming the cause when Claude reported one.
+
+    ``resumable`` reflects whether leashd holds the claude session id: with it,
+    a resend re-attaches to the same conversation, so the turn's context is not
+    lost and saying "retry" would undersell the recovery.
+    """
+    reason = report.get("session_end_reason")
+    signal = report.get("pane_exit_signal")
+    gone = report.get("pane_status") == PANE_GONE
+    if signal:
+        what = f"tmux pane exited — claude was killed ({signal})"
+    elif reason:
+        what = f"tmux pane exited — claude session ended ({reason})"
+    elif gone:
+        what = "tmux pane exited — the tmux session is gone"
+    else:
+        what = "tmux pane exited"
+    if gone and (signal or reason):
+        what += "; the tmux session is gone"
+    tail = (
+        "resend to resume — your conversation context is saved"
+        if resumable
+        else "resend to retry"
+    )
+    return f"{what}; turn aborted; {tail}"
 
 
 class TmuxAgent(BaseAgent):
@@ -620,9 +665,11 @@ class TmuxAgent(BaseAgent):
             #    pending, so an autonomous /test hung here for up to 60 min —
             #    the exact reported failure.)
             if cs.pane_is_dead():
+                report = _death_report(cs)
                 return await _abort(
                     "tmux_turn_pane_died",
-                    "tmux pane exited — turn aborted; resend to retry",
+                    _pane_died_notice(report, resumable=bool(cs.claude_uuid)),
+                    **report,
                 )
 
             # 2. JSONL tailer dead → the fallback turn-completion signal is
@@ -631,6 +678,7 @@ class TmuxAgent(BaseAgent):
                 return await _abort(
                     "tmux_turn_tailer_dead",
                     "tmux session telemetry stopped — turn aborted; resend to retry",
+                    **_death_report(cs),
                 )
 
             # 3. Human pending → never expire (parity with claude-cli pausing
@@ -755,12 +803,14 @@ class TmuxAgent(BaseAgent):
                     "tmux_turn_no_progress",
                     "agent produced no output — turn aborted; resend to retry",
                     idle_s=int(now - turn.last_activity),
+                    **_death_report(cs),
                 )
             if ceiling > 0 and now - started > ceiling:
                 logger.warning(
                     "tmux_turn_timeout",
                     session_id=session.session_id,
                     timeout=ceiling,
+                    **_death_report(cs),
                 )
                 # Soft error — the pane stays alive for the next turn.
                 return AgentResponse(

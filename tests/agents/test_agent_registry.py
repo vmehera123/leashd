@@ -7,6 +7,7 @@ from leashd.agents.registry import (
     get_agent,
     get_available_runtime_names,
     list_runtimes,
+    missing_runtime_dependency,
     register_agent,
 )
 from leashd.agents.runtimes.claude_code import ClaudeCodeAgent
@@ -55,6 +56,31 @@ class TestGetAvailableRuntimeNames:
 
     def test_returns_list(self):
         assert isinstance(get_available_runtime_names(), list)
+
+
+class TestMissingRuntimeDependency:
+    def test_none_when_sdk_installed(self):
+        assert missing_runtime_dependency("claude-code") is None
+
+    def test_none_for_runtime_without_optional_import(self):
+        assert missing_runtime_dependency("tmux") is None
+
+    def test_hint_when_sdk_absent(self, monkeypatch):
+        monkeypatch.setattr(
+            "importlib.util.find_spec",
+            lambda name, *a, **kw: None if name == "claude_agent_sdk" else object(),
+        )
+        hint = missing_runtime_dependency("claude-code")
+        assert hint is not None
+        assert "leashd[claude-agent-sdk]" in hint
+
+    def test_get_agent_raises_config_error_when_sdk_absent(self, config, monkeypatch):
+        monkeypatch.setattr(
+            "importlib.util.find_spec",
+            lambda name, *a, **kw: None if name == "claude_agent_sdk" else object(),
+        )
+        with pytest.raises(ConfigError, match=r"leashd\[claude-agent-sdk\]"):
+            get_agent("claude-code", config)
 
 
 class TestListRuntimes:

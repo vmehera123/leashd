@@ -181,8 +181,17 @@ class TestHandleCommand:
         eng.agent = MagicMock()
         eng.agent.capabilities = SimpleNamespace(accepts_input_while_busy=True)
         # Don't run a real turn — capture the start + verify the side effects.
-        eng.handle_message = AsyncMock(return_value="")
-        eng._close_browser_processes = AsyncMock()
+        order: list[str] = []
+
+        async def _turn(*args, **kwargs):
+            order.append("turn")
+            return ""
+
+        async def _close(*args, **kwargs):
+            order.append("close")
+
+        eng.handle_message = AsyncMock(side_effect=_turn)
+        eng._close_browser_processes = AsyncMock(side_effect=_close)
 
         result = await eng.handle_command("user1", "goal", "all tests pass", "chat1")
 
@@ -193,8 +202,9 @@ class TestHandleCommand:
         # The goal was started as a turn with the literal /goal prompt...
         eng.handle_message.assert_awaited_once()
         assert eng.handle_message.await_args.args[1] == "/goal all tests pass"
-        # ...and the browser is closed after the goal turn returns.
-        eng._close_browser_processes.assert_awaited_once()
+        # ...between a mode-switch teardown of whatever browser the old mode
+        # left and the post-goal close of the one the goal itself drove.
+        assert order == ["close", "turn", "close"]
 
     async def test_goal_command_without_interactive_runtime_is_rejected(
         self, config, audit_logger, policy_engine, mock_connector
@@ -2859,7 +2869,7 @@ class TestClearEmitsEvent:
         assert any(e.data["chat_id"] == "chat1" for e in captured_events)
 
 
-class TestBrowserShutdown:
+class TestWebSessionTeardown:
     def _make_engine(self, config, audit_logger, policy_engine, connector=None, **kw):
         return Engine(
             connector=connector,
@@ -2871,23 +2881,74 @@ class TestBrowserShutdown:
             **kw,
         )
 
-    async def _create_session(self, eng, config, *, mode="web"):
+    async def _create_session(self, eng, config, *, mode="auto", web_active=True):
         await eng.handle_message("user1", "hello", "chat1")
         session = eng.session_manager.get("user1", "chat1")
         session.mode = mode
+        session.web_active = web_active
         return session
 
-    async def test_shutdown_browser_noop_for_non_web_mode(
-        self, config, audit_logger, policy_engine
+    async def test_end_web_session_closes_browser_outside_web_mode(
+        self, tmp_path, audit_logger, policy_engine
     ):
-        eng = self._make_engine(config, audit_logger, policy_engine)
-        session = await self._create_session(eng, config, mode="default")
+        """Teardown used to be gated on `web_active`.
 
-        with patch("asyncio.create_subprocess_exec") as mock_exec:
-            await eng._shutdown_browser(session)
-            mock_exec.assert_not_called()
+        Agents reach for agent-browser outside `/web` too — a `/task` verify
+        phase, or a plain message — and that browser stayed up for the rest of
+        the daemon's life, costing a headed Chrome and every tab it held.
+        """
+        ab_config = LeashdConfig(
+            approved_directories=[tmp_path],
+            max_turns=5,
+            audit_log_path=tmp_path / "audit.jsonl",
+            browser_backend="agent-browser",
+        )
+        eng = self._make_engine(ab_config, audit_logger, policy_engine)
+        session = await self._create_session(
+            eng, ab_config, mode="default", web_active=False
+        )
+        session.browser_backend = "agent-browser"
 
-    async def test_shutdown_browser_agent_browser_backend(
+        mock_proc = AsyncMock()
+        mock_proc.wait = AsyncMock(return_value=0)
+
+        with patch(
+            "asyncio.create_subprocess_exec", return_value=mock_proc
+        ) as mock_exec:
+            await eng._end_web_session(session)
+            mock_exec.assert_called_once_with(
+                "agent-browser",
+                "close",
+                "--all",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+
+    async def test_shutdown_closes_browser(self, tmp_path, audit_logger, policy_engine):
+        """`leashd stop` / `restart` must not leave a headed Chrome behind."""
+        ab_config = LeashdConfig(
+            approved_directories=[tmp_path],
+            max_turns=5,
+            audit_log_path=tmp_path / "audit.jsonl",
+            browser_backend="agent-browser",
+        )
+        eng = self._make_engine(ab_config, audit_logger, policy_engine)
+
+        mock_proc = AsyncMock()
+        mock_proc.wait = AsyncMock(return_value=0)
+
+        with patch(
+            "asyncio.create_subprocess_exec", return_value=mock_proc
+        ) as mock_exec:
+            await eng.shutdown()
+
+        assert mock_exec.call_args_list[0].args == (
+            "agent-browser",
+            "close",
+            "--all",
+        )
+
+    async def test_end_web_session_agent_browser_backend(
         self, tmp_path, audit_logger, policy_engine
     ):
         ab_config = LeashdConfig(
@@ -2906,15 +2967,156 @@ class TestBrowserShutdown:
         with patch(
             "asyncio.create_subprocess_exec", return_value=mock_proc
         ) as mock_exec:
-            await eng._shutdown_browser(session)
+            await eng._end_web_session(session)
             mock_exec.assert_called_once_with(
                 "agent-browser",
                 "close",
+                "--all",
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
 
-    async def test_shutdown_browser_playwright_backend(
+    async def test_end_web_session_prunes_chrome_restore_state(
+        self, tmp_path, audit_logger, policy_engine
+    ):
+        """Closing the browser is not enough on its own.
+
+        Regression: Chrome writes every open tab into the profile's session
+        store on the way out and replays the lot on the next launch, so a
+        `/clear` that shut the browser down still handed the next session the
+        previous run's tabs.
+        """
+        profile = tmp_path / "browser-profile"
+        sessions = profile / "Default" / "Sessions"
+        sessions.mkdir(parents=True)
+        (sessions / "Session_13429888176925079").write_bytes(b"window-state")
+        (sessions / "Tabs_13429888177775418").write_bytes(b"tab-state")
+
+        ab_config = LeashdConfig(
+            approved_directories=[tmp_path],
+            max_turns=5,
+            audit_log_path=tmp_path / "audit.jsonl",
+            browser_backend="agent-browser",
+            browser_user_data_dir=str(profile),
+        )
+        eng = self._make_engine(ab_config, audit_logger, policy_engine)
+        session = await self._create_session(eng, ab_config)
+        session.browser_backend = "agent-browser"
+
+        mock_proc = AsyncMock()
+        mock_proc.wait = AsyncMock(return_value=0)
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+            await eng._end_web_session(session)
+
+        assert list(sessions.iterdir()) == []
+
+    async def test_end_web_session_without_profile_skips_prune(
+        self, tmp_path, audit_logger, policy_engine
+    ):
+        """A fresh-profile run has no saved tab set to drop, and the prune walks
+        the filesystem — teardown must not pay for it."""
+        ab_config = LeashdConfig(
+            approved_directories=[tmp_path],
+            max_turns=5,
+            audit_log_path=tmp_path / "audit.jsonl",
+            browser_backend="agent-browser",
+        )
+        eng = self._make_engine(ab_config, audit_logger, policy_engine)
+        session = await self._create_session(eng, ab_config)
+        session.browser_backend = "agent-browser"
+
+        mock_proc = AsyncMock()
+        mock_proc.wait = AsyncMock(return_value=0)
+
+        with (
+            patch("asyncio.create_subprocess_exec", return_value=mock_proc),
+            patch("leashd.core.engine.prune_restore_state") as mock_prune,
+            patch("leashd.core.engine.profile_in_use") as mock_in_use,
+        ):
+            await eng._end_web_session(session)
+
+        mock_prune.assert_not_called()
+        mock_in_use.assert_not_called()
+
+    async def test_end_web_session_waits_for_chrome_to_release_the_profile(
+        self, tmp_path, audit_logger, policy_engine
+    ):
+        """`agent-browser close` returns before Chrome has finished writing its
+        session store, and the prune is a no-op while the profile is held — so
+        teardown polls until the profile is released."""
+        profile = tmp_path / "browser-profile"
+        sessions = profile / "Default" / "Sessions"
+        sessions.mkdir(parents=True)
+        (sessions / "Session_13429888176925079").write_bytes(b"window-state")
+
+        ab_config = LeashdConfig(
+            approved_directories=[tmp_path],
+            max_turns=5,
+            audit_log_path=tmp_path / "audit.jsonl",
+            browser_backend="agent-browser",
+            browser_user_data_dir=str(profile),
+        )
+        eng = self._make_engine(ab_config, audit_logger, policy_engine)
+        session = await self._create_session(eng, ab_config)
+        session.browser_backend = "agent-browser"
+        lock = profile / "SingletonLock"
+        lock.write_text("host-1234")
+
+        mock_proc = AsyncMock()
+        mock_proc.wait = AsyncMock(return_value=0)
+        waits = 0
+
+        async def _chrome_lets_go(_delay):
+            nonlocal waits
+            waits += 1
+            if waits == 2:
+                lock.unlink()
+
+        with (
+            patch("asyncio.create_subprocess_exec", return_value=mock_proc),
+            patch("asyncio.sleep", side_effect=_chrome_lets_go),
+        ):
+            await eng._end_web_session(session)
+
+        assert waits == 2
+        assert list(sessions.iterdir()) == []
+
+    async def test_end_web_session_gives_up_on_a_profile_that_stays_held(
+        self, tmp_path, audit_logger, policy_engine
+    ):
+        """A profile a *different* Chrome owns must not stall teardown forever,
+        and its tab set is not ours to delete."""
+        profile = tmp_path / "browser-profile"
+        sessions = profile / "Default" / "Sessions"
+        sessions.mkdir(parents=True)
+        (sessions / "Session_13429888176925079").write_bytes(b"window-state")
+
+        ab_config = LeashdConfig(
+            approved_directories=[tmp_path],
+            max_turns=5,
+            audit_log_path=tmp_path / "audit.jsonl",
+            browser_backend="agent-browser",
+            browser_user_data_dir=str(profile),
+        )
+        eng = self._make_engine(ab_config, audit_logger, policy_engine)
+        session = await self._create_session(eng, ab_config)
+        session.browser_backend = "agent-browser"
+        (profile / "SingletonLock").write_text("host-1234")
+
+        mock_proc = AsyncMock()
+        mock_proc.wait = AsyncMock(return_value=0)
+
+        with (
+            patch("asyncio.create_subprocess_exec", return_value=mock_proc),
+            patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+        ):
+            await eng._end_web_session(session)
+
+        assert mock_sleep.await_count == 10
+        assert [p.name for p in sessions.iterdir()] == ["Session_13429888176925079"]
+
+    async def test_end_web_session_playwright_backend(
         self, config, audit_logger, policy_engine
     ):
         eng = self._make_engine(config, audit_logger, policy_engine)
@@ -2924,10 +3126,10 @@ class TestBrowserShutdown:
         with patch.object(
             eng, "_kill_playwright_mcp", new_callable=AsyncMock
         ) as mock_kill:
-            await eng._shutdown_browser(session)
+            await eng._end_web_session(session)
             mock_kill.assert_awaited_once()
 
-    async def test_shutdown_browser_uses_session_backend_over_config(
+    async def test_end_web_session_uses_session_backend_over_config(
         self, config, audit_logger, policy_engine
     ):
         """Session was started with agent-browser but config changed to playwright."""
@@ -2941,15 +3143,16 @@ class TestBrowserShutdown:
         with patch(
             "asyncio.create_subprocess_exec", return_value=mock_proc
         ) as mock_exec:
-            await eng._shutdown_browser(session)
+            await eng._end_web_session(session)
             mock_exec.assert_called_once_with(
                 "agent-browser",
                 "close",
+                "--all",
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
 
-    async def test_shutdown_browser_handles_exceptions(
+    async def test_end_web_session_handles_exceptions(
         self, config, audit_logger, policy_engine
     ):
         eng = self._make_engine(config, audit_logger, policy_engine)
@@ -2962,7 +3165,7 @@ class TestBrowserShutdown:
             new_callable=AsyncMock,
             side_effect=OSError("boom"),
         ):
-            await eng._shutdown_browser(session)
+            await eng._end_web_session(session)
 
     async def test_stop_calls_browser_shutdown_for_web_session(
         self, config, audit_logger, policy_engine, mock_connector
@@ -2973,12 +3176,12 @@ class TestBrowserShutdown:
         session = await self._create_session(eng, config)
 
         with patch.object(
-            eng, "_shutdown_browser", new_callable=AsyncMock
+            eng, "_end_web_session", new_callable=AsyncMock
         ) as mock_shutdown:
             await eng.handle_command("user1", "stop", "", "chat1")
             mock_shutdown.assert_awaited_once_with(session)
 
-    async def test_clear_calls_browser_shutdown_before_reset(
+    async def test_clear_ends_the_web_session_before_reset(
         self, config, audit_logger, policy_engine, mock_connector
     ):
         sm = SessionManager()
@@ -3002,16 +3205,16 @@ class TestBrowserShutdown:
             call_order.append("reset")
             return await original_reset(user_id, chat_id)
 
-        async def tracking_shutdown(s):
-            call_order.append("browser_shutdown")
+        async def tracking_teardown(s):
+            call_order.append("end_web_session")
 
         with (
-            patch.object(eng, "_shutdown_browser", side_effect=tracking_shutdown),
+            patch.object(eng, "_end_web_session", side_effect=tracking_teardown),
             patch.object(sm, "reset", side_effect=tracking_reset),
         ):
             await eng.handle_command("user1", "clear", "", "chat1")
 
-        assert call_order == ["browser_shutdown", "reset"]
+        assert call_order == ["end_web_session", "reset"]
 
     async def test_default_closes_browser_when_leaving_web_mode(
         self, config, audit_logger, policy_engine, mock_connector
@@ -3022,25 +3225,65 @@ class TestBrowserShutdown:
         session = await self._create_session(eng, config)
 
         with patch.object(
-            eng, "_shutdown_browser", new_callable=AsyncMock
+            eng, "_end_web_session", new_callable=AsyncMock
         ) as mock_shutdown:
             result = await eng.handle_command("user1", "default", "", "chat1")
             mock_shutdown.assert_awaited_once_with(session)
         assert "Default mode" in result
 
-    async def test_default_skips_browser_shutdown_for_non_web_mode(
+    async def test_mode_switch_closes_a_non_web_session_browser(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        """A browser opened outside ``/web`` is still a browser to retire.
+
+        ``/task`` verify phases and plain messages drive agent-browser without
+        ever setting ``web_active``, so keying teardown on that flag left those
+        browsers alive until the daemon stopped.
+        """
+        eng = self._make_engine(
+            config, audit_logger, policy_engine, connector=mock_connector
+        )
+        await self._create_session(eng, config, mode="edit", web_active=False)
+
+        with patch.object(
+            eng, "_close_browser_processes", new_callable=AsyncMock
+        ) as mock_close:
+            await eng.handle_command("user1", "default", "", "chat1")
+            mock_close.assert_awaited_once()
+
+    async def test_mode_switch_shuts_down_a_web_session_browser(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        """Leaving ``/web`` by any route must close the browser it opened."""
+        for command in ("default", "plan", "edit", "auto"):
+            eng = self._make_engine(
+                config, audit_logger, policy_engine, connector=mock_connector
+            )
+            session = await self._create_session(eng, config)
+
+            with patch.object(
+                eng, "_close_browser_processes", new_callable=AsyncMock
+            ) as mock_close:
+                await eng.handle_command("user1", command, "", "chat1")
+                mock_close.assert_awaited_once()
+            assert session.web_active is False, command
+
+    async def test_plan_exit_shuts_down_a_web_session_browser(
         self, config, audit_logger, policy_engine, mock_connector
     ):
         eng = self._make_engine(
             config, audit_logger, policy_engine, connector=mock_connector
         )
-        await self._create_session(eng, config, mode="edit")
+        session = await self._create_session(eng, config)
 
         with patch.object(
-            eng, "_shutdown_browser", new_callable=AsyncMock
-        ) as mock_shutdown:
-            await eng.handle_command("user1", "default", "", "chat1")
-            mock_shutdown.assert_not_awaited()
+            eng, "_close_browser_processes", new_callable=AsyncMock
+        ) as mock_close:
+            await eng._exit_plan_mode(
+                session, "chat1", "user1", "the plan", trigger="test"
+            )
+            mock_close.assert_awaited_once()
+        assert session.web_active is False
 
     async def test_kill_playwright_mcp_no_processes(
         self, config, audit_logger, policy_engine
@@ -3207,7 +3450,7 @@ class TestCleanupSession:
         session.mode = "web"
 
         with patch.object(
-            eng, "_shutdown_browser", new_callable=AsyncMock
+            eng, "_end_web_session", new_callable=AsyncMock
         ) as mock_browser:
             await eng._cleanup_session(session, "chat1")
             mock_browser.assert_awaited_once_with(session)
@@ -3444,7 +3687,7 @@ class TestStopFullCleanup:
         eng._gatekeeper.enable_auto_approve("chat1")
         eng._pending_messages["chat1"] = ["queued"]
 
-        with patch.object(eng, "_shutdown_browser", new_callable=AsyncMock) as mock_br:
+        with patch.object(eng, "_end_web_session", new_callable=AsyncMock) as mock_br:
             await eng.handle_command("user1", "stop", "", "chat1")
 
         assert pending_approval.decision is False
@@ -3484,7 +3727,7 @@ class TestDirSwitchFullCleanup:
         session.mode = "web"
 
         with patch.object(
-            eng, "_shutdown_browser", new_callable=AsyncMock
+            eng, "_end_web_session", new_callable=AsyncMock
         ) as mock_browser:
             await eng.handle_command("user1", "dir", "api", "chat1")
             mock_browser.assert_awaited_once()
@@ -3613,7 +3856,7 @@ class TestDirSwitchFullCleanup:
         eng._gatekeeper.enable_auto_approve("chat1")
         eng._pending_messages["chat1"] = ["queued"]
 
-        with patch.object(eng, "_shutdown_browser", new_callable=AsyncMock) as mock_br:
+        with patch.object(eng, "_end_web_session", new_callable=AsyncMock) as mock_br:
             await eng.handle_command("user1", "dir", "api", "chat1")
 
         assert pending_approval.decision is False
@@ -3735,7 +3978,7 @@ class TestWorkspaceFullCleanup:
         session.mode = "web"
 
         with patch.object(
-            eng, "_shutdown_browser", new_callable=AsyncMock
+            eng, "_end_web_session", new_callable=AsyncMock
         ) as mock_browser:
             await eng.handle_command("user1", "workspace", "myws", "chat1")
             mock_browser.assert_awaited_once()
@@ -3786,7 +4029,7 @@ class TestWorkspaceFullCleanup:
         eng._gatekeeper.enable_auto_approve("chat1")
         eng._pending_messages["chat1"] = ["queued"]
 
-        with patch.object(eng, "_shutdown_browser", new_callable=AsyncMock) as mock_br:
+        with patch.object(eng, "_end_web_session", new_callable=AsyncMock) as mock_br:
             await eng.handle_command("user1", "workspace", "myws", "chat1")
 
         assert pending_approval.decision is False
@@ -3878,7 +4121,7 @@ class TestWorkspaceFullCleanup:
         session.mode = "web"
 
         with patch.object(
-            eng, "_shutdown_browser", new_callable=AsyncMock
+            eng, "_end_web_session", new_callable=AsyncMock
         ) as mock_browser:
             await eng.handle_command("user1", "ws", "exit", "chat1")
             mock_browser.assert_awaited_once()
@@ -3943,7 +4186,7 @@ class TestWorkspaceFullCleanup:
         eng._gatekeeper.enable_auto_approve("chat1")
         eng._pending_messages["chat1"] = ["queued"]
 
-        with patch.object(eng, "_shutdown_browser", new_callable=AsyncMock) as mock_br:
+        with patch.object(eng, "_end_web_session", new_callable=AsyncMock) as mock_br:
             await eng.handle_command("user1", "ws", "exit", "chat1")
 
         assert pending_approval.decision is False
@@ -4022,7 +4265,7 @@ class TestClearFullCleanup:
         eng._gatekeeper.enable_auto_approve("chat1")
         eng._pending_messages["chat1"] = ["queued"]
 
-        with patch.object(eng, "_shutdown_browser", new_callable=AsyncMock) as mock_br:
+        with patch.object(eng, "_end_web_session", new_callable=AsyncMock) as mock_br:
             result = await eng.handle_command("user1", "clear", "", "chat1")
 
         assert "cleared" in result.lower()

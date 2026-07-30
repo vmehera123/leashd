@@ -132,6 +132,7 @@ class MergeResolverPlugin(LeashdPlugin):
         )
 
         session.mode = "merge"
+        session.web_active = False
         session.mode_instruction = build_merge_instruction(config)
 
         gatekeeper.enable_tool_auto_approve(chat_id, "Edit")

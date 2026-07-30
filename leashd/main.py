@@ -20,6 +20,46 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
+# Window a SIGHUP burst is collapsed over. Every CLI subcommand that touches
+# config, and every WebUI settings write, signals the daemon independently, so
+# one user action can deliver dozens of SIGHUPs — each of which otherwise ran a
+# full re-read, sandbox rebuild, workspace reload and CONFIG_RELOADED fan-out.
+# Coalescing keeps the last signal authoritative while doing the work once.
+_RELOAD_DEBOUNCE_SECONDS = 0.25
+
+
+def _install_reload_handler(loop: asyncio.AbstractEventLoop, engine: Any) -> None:
+    """Wire SIGHUP to a debounced ``engine.reload_config()``.
+
+    A signal arriving while a reload is scheduled or running re-arms the run
+    instead of queuing another, so a burst settles into exactly one reload plus
+    at most one follow-up covering whatever changed during it.
+    """
+    if not hasattr(signal, "SIGHUP"):
+        return
+
+    state: dict[str, Any] = {"task": None, "pending": False}
+
+    async def _reload_loop() -> None:
+        try:
+            while True:
+                await asyncio.sleep(_RELOAD_DEBOUNCE_SECONDS)
+                state["pending"] = False
+                await engine.reload_config()
+                if not state["pending"]:
+                    return
+        finally:
+            state["task"] = None
+
+    def _schedule_reload() -> None:
+        task = state["task"]
+        if task is not None and not task.done():
+            state["pending"] = True
+            return
+        state["task"] = asyncio.ensure_future(_reload_loop())
+
+    loop.add_signal_handler(signal.SIGHUP, _schedule_reload)
+
 
 async def _create_message_store(config: LeashdConfig) -> MessageStore | None:
     """Create and initialize a shared message store for the WebUI REST router."""
@@ -141,15 +181,7 @@ async def _run_telegram(config: LeashdConfig) -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop_event.set)
 
-    if hasattr(signal, "SIGHUP"):
-        _reload_tasks: set[asyncio.Task[None]] = set()
-
-        def _schedule_reload() -> None:
-            task = asyncio.ensure_future(engine.reload_config())
-            _reload_tasks.add(task)
-            task.add_done_callback(_reload_tasks.discard)
-
-        loop.add_signal_handler(signal.SIGHUP, _schedule_reload)
+    _install_reload_handler(loop, engine)
 
     try:
         await stop_event.wait()
@@ -242,15 +274,7 @@ async def _run_web(config: LeashdConfig) -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop_event.set)
 
-    if hasattr(signal, "SIGHUP"):
-        _reload_tasks: set[asyncio.Task[None]] = set()
-
-        def _schedule_reload() -> None:
-            task = asyncio.ensure_future(engine.reload_config())
-            _reload_tasks.add(task)
-            task.add_done_callback(_reload_tasks.discard)
-
-        loop.add_signal_handler(signal.SIGHUP, _schedule_reload)
+    _install_reload_handler(loop, engine)
 
     try:
         await stop_event.wait()
@@ -336,15 +360,7 @@ async def _run_multi(config: LeashdConfig) -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop_event.set)
 
-    if hasattr(signal, "SIGHUP"):
-        _reload_tasks: set[asyncio.Task[None]] = set()
-
-        def _schedule_reload() -> None:
-            task = asyncio.ensure_future(engine.reload_config())
-            _reload_tasks.add(task)
-            task.add_done_callback(_reload_tasks.discard)
-
-        loop.add_signal_handler(signal.SIGHUP, _schedule_reload)
+    _install_reload_handler(loop, engine)
 
     try:
         await stop_event.wait()

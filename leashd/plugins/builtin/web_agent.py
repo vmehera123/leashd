@@ -26,7 +26,7 @@ from leashd.plugins.builtin.workflow import (
     load_playbook,
     playbook_requires_topic,
 )
-from leashd.skills import get_skills_by_tag
+from leashd.skills import MAX_BROWSER_TABS, get_skills_by_tag
 
 if TYPE_CHECKING:
     from leashd.plugins.base import PluginContext
@@ -242,6 +242,34 @@ def build_web_instruction(
                 "`agent-browser close` to ensure any stale browser session is "
                 "cleaned up. Then proceed with `agent-browser open <url>`."
             )
+        browser_desc += (
+            "\n\nONE BROWSER, MANY TABS: the browser is a single long-lived "
+            "session and every launch is a real window on the user's screen. "
+            "Use `agent-browser open <url>` for the first page only; for every "
+            "page after that use `agent-browser tab new <url>`, switch with "
+            "`agent-browser tab <id|label>`, and drop one with "
+            f"`agent-browser tab close <id|label>`. Keep at most "
+            f"{MAX_BROWSER_TABS} tabs open at once. Never call "
+            "`agent-browser close` between pages and never loop it over a URL "
+            "list — each relaunch leaves its windows behind in the profile and "
+            "the next launch restores all of them, which is how a run ends up "
+            "with hundreds of open windows. Reserve `--session <name>` for "
+            "genuinely separate identities such as a two-user auth test; each "
+            "session is a whole extra browser, so never use sessions to fan "
+            "out over URLs."
+        )
+        browser_desc += (
+            "\n\nSEARCH WITH GOOGLE BY DEFAULT: use "
+            "`https://www.google.com/search?q=<query>&num=20` for web searches. "
+            "`&num=20` returns more results per page, and `site:`, `OR`, "
+            "`-exclude` and quoted phrases work as documented — DuckDuckGo "
+            "degrades several of those silently. Fall back to "
+            "`duckduckgo.com/?q=` or `bing.com/search?q=` only when Google is "
+            "blocked, rate-limited, or returns nothing parseable, and say which "
+            "engine produced a result when it was not Google. Reuse one "
+            "labelled search tab across queries rather than opening a new tab "
+            "per search."
+        )
     else:
         browser_desc = (
             "You have browser MCP tools available via Playwright MCP "
@@ -362,6 +390,18 @@ def build_web_instruction(
 
     rules_lines = [
         "RULES:",
+        f"- `{tools.navigate_tool}` is the ONLY way you may load a page. Never "
+        "read page content with WebFetch, curl, wget, or an HTTP library — a "
+        "fetched response is not what the page renders, it skips the browser "
+        "profile you are signed in to, and it bypasses leashd's gating. This "
+        "holds for research too: a task that only reads pages is still a "
+        "browser task",
+        "- Discovering candidate URLs from your own knowledge or from links on "
+        "pages you have opened is fine; every URL you act on must then be "
+        f"opened with `{tools.navigate_tool}`",
+        f"- Read batches in parallel across tabs — `{tools.new_tab_tool} <url>` "
+        f"up to {MAX_BROWSER_TABS} at a time, collect from each, then close "
+        "them before opening the next batch",
         f"- Use {tools.snap_tool} only when the playbook specifies verify: true "
         "or when you need to discover page state for the first time. Do NOT "
         "snapshot between sequential actions (e.g. click → type → click)",
@@ -508,6 +548,7 @@ class WebAgentPlugin(LeashdPlugin):
 
         session = event.data["session"]
         session.mode = "auto"
+        session.web_active = True
         session.browser_backend = self._browser_backend
         session.browser_fresh = config.fresh
         if not config.resume:

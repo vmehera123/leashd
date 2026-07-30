@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import contextlib
 import shutil
+import subprocess
 import sys
+import time
 import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -13,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from leashd.core.config import LeashdConfig
 
+from leashd.browser_profile import profile_in_use, prune_restore_state
 from leashd.config_store import (
     add_approved_directory,
     clear_directory_setting,
@@ -1091,7 +1094,10 @@ def _handle_runtime_show() -> None:
 
 def _handle_runtime_set(name: str) -> None:
     """Set the agent runtime."""
-    from leashd.agents.registry import get_available_runtime_names
+    from leashd.agents.registry import (
+        get_available_runtime_names,
+        missing_runtime_dependency,
+    )
 
     available = get_available_runtime_names()
     if name not in available:
@@ -1100,6 +1106,10 @@ def _handle_runtime_set(name: str) -> None:
             file=sys.stderr,
         )
         sys.exit(1)
+
+    hint = missing_runtime_dependency(name)
+    if hint:
+        print(f"Warning: {hint}", file=sys.stderr)
 
     data = load_global_config()
     data["agent_runtime"] = name
@@ -1112,7 +1122,7 @@ def _handle_runtime_set(name: str) -> None:
 
 def _handle_runtime_list() -> None:
     """List available agent runtimes."""
-    from leashd.agents.registry import list_runtimes
+    from leashd.agents.registry import list_runtimes, missing_runtime_dependency
 
     runtimes = list_runtimes()
     data = load_global_config()
@@ -1121,7 +1131,43 @@ def _handle_runtime_list() -> None:
     for rt in runtimes:
         marker = " (active)" if rt["name"] == current else ""
         stability = f" [{rt['stability']}]" if rt.get("stability") else ""
-        print(f"  {rt['name']}{stability}{marker}")
+        missing = (
+            " (dependency not installed)"
+            if missing_runtime_dependency(rt["name"])
+            else ""
+        )
+        print(f"  {rt['name']}{stability}{marker}{missing}")
+
+
+_BROWSER_SHUTDOWN_POLLS = 10
+
+_BROWSER_SHUTDOWN_POLL_SECONDS = 0.3
+
+
+def _close_browser(config: LeashdConfig) -> int:
+    """Shut the agent-browser browser down and drop Chrome's saved tab set.
+
+    ``leashd clean`` runs in its own process, so it cannot reach the engine's
+    teardown — without this a headed Chrome outlives the clean and its tabs come
+    back on the next launch. Returns the number of restore-state files removed.
+    """
+    if config.browser_backend != "agent-browser":
+        return 0
+    with contextlib.suppress(Exception):
+        subprocess.run(
+            ["agent-browser", "close", "--all"],  # noqa: S607
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+    if not config.browser_user_data_dir:
+        return 0
+    profile = Path(config.browser_user_data_dir).expanduser()
+    for _ in range(_BROWSER_SHUTDOWN_POLLS):
+        if not profile_in_use(profile):
+            break
+        time.sleep(_BROWSER_SHUTDOWN_POLL_SECONDS)
+    return prune_restore_state(profile)
 
 
 def _handle_clean() -> None:
@@ -1173,6 +1219,7 @@ def _handle_clean() -> None:
             from leashd.agents.runtimes.tmux_session import TmuxSessionManager
 
             cleaned += TmuxSessionManager(config).kill_owned_sessions()
+        cleaned += _close_browser(config)
         socket_dir = Path(config.tmux_socket_dir).expanduser()
         if socket_dir.is_dir():
             for artifact in (

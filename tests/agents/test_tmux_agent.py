@@ -135,6 +135,9 @@ class FakeCS:
     def capture(self):
         return ""
 
+    def death_report(self):
+        return {"pane_status": "dead" if self.pane_is_dead() else "alive"}
+
     async def submit(self, text, *, max_enter_presses=5, plain_keys=False):
         self.sent.append((text, True))
         if self._stream_text_on_submit and self.turn is not None:
@@ -573,6 +576,119 @@ async def test_execute_aborts_when_pane_dies_no_human_pending(tmp_path):
     assert resp.is_error is True
     assert "pane exited" in resp.content
     assert cs.complete_calls == 1
+
+
+async def test_pane_death_abort_reports_the_cause_and_the_resume_path(tmp_path):
+    # The post-mortem the incident log was missing: the abort has to name what
+    # claude said on its way out and tell the user the context survives, since
+    # the claude session id is what a resend re-attaches to.
+    cs = FakeCS()
+    cs._complete_on_enter = False
+    cs.pane_is_dead = lambda: True
+    cs.claude_uuid = "claude-uuid-1"
+    cs.death_report = lambda: {
+        "pane_status": "dead",
+        "session_end_reason": "other",
+        "pane_tail": "Error: something went wrong",
+        "pane_tail_live": True,
+    }
+    tsm = FakeTSM(cs)
+    cfg = _cfg(tmp_path)
+    cfg.agent_timeout_seconds = 3600
+    agent = _agent(cfg, tsm)
+
+    resp = await agent.execute("explore the codebase", _session(tmp_path))
+
+    assert resp.is_error is True
+    assert "claude session ended (other)" in resp.content
+    assert "resend to resume" in resp.content
+
+
+async def test_pane_death_abort_says_retry_when_no_session_is_resumable(tmp_path):
+    # Without a bound claude session id a resend really does start over, so the
+    # message must not promise the conversation is preserved.
+    cs = FakeCS()
+    cs._complete_on_enter = False
+    cs.pane_is_dead = lambda: True
+    cs.claude_uuid = None
+    cs.death_report = lambda: {"pane_status": "gone"}
+    tsm = FakeTSM(cs)
+    cfg = _cfg(tmp_path)
+    cfg.agent_timeout_seconds = 3600
+    agent = _agent(cfg, tsm)
+
+    resp = await agent.execute("explore the codebase", _session(tmp_path))
+
+    assert "the tmux session is gone" in resp.content
+    assert "resend to retry" in resp.content
+
+
+async def test_pane_death_abort_reports_reason_and_gone_together(tmp_path):
+    # The real incident: SessionEnd gave a reason, then the session vanished
+    # before the watcher polled. The old notice dropped the reason on the floor
+    # because "gone" was checked first, so the message said nothing about why.
+    cs = FakeCS()
+    cs._complete_on_enter = False
+    cs.pane_is_dead = lambda: True
+    cs.claude_uuid = "claude-uuid-1"
+    cs.death_report = lambda: {
+        "pane_status": "gone",
+        "session_end_reason": "other",
+        "pane_exit_status": "1",
+        "pane_exit_cause_latched": True,
+    }
+    tsm = FakeTSM(cs)
+    cfg = _cfg(tmp_path)
+    cfg.agent_timeout_seconds = 3600
+    agent = _agent(cfg, tsm)
+
+    resp = await agent.execute("explore the codebase", _session(tmp_path))
+
+    assert "claude session ended (other)" in resp.content
+    assert "the tmux session is gone" in resp.content
+
+
+async def test_pane_death_abort_names_a_killing_signal(tmp_path):
+    # A signal outranks the reason: it answers "something killed it" directly.
+    cs = FakeCS()
+    cs._complete_on_enter = False
+    cs.pane_is_dead = lambda: True
+    cs.claude_uuid = "claude-uuid-1"
+    cs.death_report = lambda: {
+        "pane_status": "dead",
+        "session_end_reason": "other",
+        "pane_exit_signal": "kill",
+    }
+    tsm = FakeTSM(cs)
+    cfg = _cfg(tmp_path)
+    cfg.agent_timeout_seconds = 3600
+    agent = _agent(cfg, tsm)
+
+    resp = await agent.execute("explore the codebase", _session(tmp_path))
+
+    assert "claude was killed (kill)" in resp.content
+
+
+async def test_pane_death_abort_survives_a_failing_post_mortem(tmp_path):
+    # Gathering evidence must never replace the abort with an exception — a
+    # raised post-mortem would turn a clean error into a silent hang.
+    cs = FakeCS()
+    cs._complete_on_enter = False
+    cs.pane_is_dead = lambda: True
+
+    def _boom():
+        raise RuntimeError("tmux went away")
+
+    cs.death_report = _boom
+    tsm = FakeTSM(cs)
+    cfg = _cfg(tmp_path)
+    cfg.agent_timeout_seconds = 3600
+    agent = _agent(cfg, tsm)
+
+    resp = await agent.execute("explore the codebase", _session(tmp_path))
+
+    assert resp.is_error is True
+    assert "pane exited" in resp.content
 
 
 async def test_execute_aborts_when_jsonl_tailer_dead(tmp_path):

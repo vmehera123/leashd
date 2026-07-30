@@ -243,6 +243,38 @@ class TestBuildWebInstruction:
         assert "CONTENT REVIEW RULE (MANDATORY)" in instruction
         assert "MUST NEVER post" in instruction
 
+    def test_fetching_pages_is_prohibited_not_merely_deprioritised(self):
+        """A research task has no clicking, so "use agent-browser for browser
+        interactions" did not read as binding — the rule must name the
+        alternatives and forbid them."""
+        instruction = build_web_instruction(
+            WebConfig(description="research local companies"), None
+        )
+        for banned in ("WebFetch", "curl", "wget"):
+            assert banned in instruction, banned
+        assert "ONLY way you may load a page" in instruction
+        assert "still a browser task" in instruction
+
+    def test_batch_reads_are_parallelised_across_tabs(self):
+        """The `/web` prompt and the agent-browser skill quote one cap, so an
+        agent cannot be told 15 in one place and something else in the other."""
+        from leashd.skills import MAX_BROWSER_TABS
+
+        instruction = build_web_instruction(WebConfig(description="x"), None)
+        assert "agent-browser tab new <url>" in instruction
+        assert f"up to {MAX_BROWSER_TABS} at a time" in instruction
+        assert f"{MAX_BROWSER_TABS} tabs open at once" in instruction
+
+    def test_prohibition_names_the_active_backend(self):
+        for backend, navigate in (
+            ("agent-browser", "agent-browser open"),
+            ("playwright", "browser_navigate"),
+        ):
+            instruction = build_web_instruction(
+                WebConfig(description="x"), None, browser_backend=backend
+            )
+            assert f"`{navigate}` is the ONLY way you may load a page" in instruction
+
     def test_generic_auth_without_recipe(self):
         config = WebConfig()
         instruction = build_web_instruction(config, None)
@@ -430,6 +462,26 @@ class TestWebAgentPlugin:
         assert session.mode == "auto"
         assert "WEB MODE" in session.mode_instruction
         assert "CONTENT REVIEW RULE" in session.mode_instruction
+
+    async def test_plugin_flags_the_session_as_web_active(
+        self, initialized_plugin, event_bus, session, gatekeeper
+    ):
+        """``mode`` cannot carry this — ``/web`` runs under ``auto``, which is
+        why every ``mode == "web"`` branch was unreachable in production."""
+        assert session.web_active is False
+        await event_bus.emit(
+            Event(
+                name=COMMAND_WEB,
+                data={
+                    "session": session,
+                    "chat_id": "chat1",
+                    "args": "read the docs at example.com",
+                    "gatekeeper": gatekeeper,
+                    "prompt": "",
+                },
+            )
+        )
+        assert session.web_active is True
 
     async def test_plugin_auto_approves_all_browser_tools(
         self, initialized_plugin, event_bus, session, gatekeeper
@@ -1216,6 +1268,83 @@ class TestBuildWebInstructionBackend:
         instruction = build_web_instruction(config, None, browser_backend="playwright")
         assert "browser_snapshot" in instruction
         assert "browser_take_screenshot" in instruction
+
+
+class TestBrowserTabDiscipline:
+    """One browser with bounded tabs, never a browser per URL.
+
+    Regression: a `/web` run looped `agent-browser open`/`close` over a URL
+    list, and under the headed shared profile each relaunch left a window
+    behind until a launch restored ~200 of them onto the user's screen.
+    """
+
+    def test_agent_browser_caps_tabs(self):
+        config = WebConfig()
+        instruction = build_web_instruction(
+            config, None, browser_backend="agent-browser"
+        )
+        assert "ONE BROWSER, MANY TABS" in instruction
+        assert "at most 15 tabs" in instruction
+        assert "agent-browser tab new" in instruction
+
+    def test_agent_browser_forbids_relaunch_per_page(self):
+        config = WebConfig()
+        instruction = build_web_instruction(
+            config, None, browser_backend="agent-browser"
+        )
+        assert "never loop it over a URL list" in instruction
+        assert "never use sessions to fan out over URLs" in instruction
+
+    def test_applies_on_resume(self):
+        config = WebConfig()
+        instruction = build_web_instruction(
+            config, None, browser_backend="agent-browser", resume=True
+        )
+        assert "ONE BROWSER, MANY TABS" in instruction
+        assert "at most 15 tabs" in instruction
+
+    def test_playwright_unaffected(self):
+        config = WebConfig()
+        instruction = build_web_instruction(config, None, browser_backend="playwright")
+        assert "ONE BROWSER, MANY TABS" not in instruction
+
+
+class TestDefaultSearchEngine:
+    """Google is the default; the skill's own example steers agents to DDG.
+
+    A `/web` research run opened `duckduckgo.com` first because upstream's
+    worked search example does, then lost `site:` and `num=` partway through
+    and had to switch to Google mid-task.
+    """
+
+    def test_agent_browser_prefers_google(self):
+        config = WebConfig()
+        instruction = build_web_instruction(
+            config, None, browser_backend="agent-browser"
+        )
+        assert "SEARCH WITH GOOGLE BY DEFAULT" in instruction
+        assert "https://www.google.com/search?q=<query>&num=20" in instruction
+
+    def test_names_fallback_engines_as_secondary(self):
+        config = WebConfig()
+        instruction = build_web_instruction(
+            config, None, browser_backend="agent-browser"
+        )
+        google_at = instruction.index("google.com/search")
+        assert google_at < instruction.index("duckduckgo.com/?q=")
+        assert "only when Google is blocked" in instruction
+
+    def test_applies_on_resume(self):
+        config = WebConfig()
+        instruction = build_web_instruction(
+            config, None, browser_backend="agent-browser", resume=True
+        )
+        assert "SEARCH WITH GOOGLE BY DEFAULT" in instruction
+
+    def test_playwright_unaffected(self):
+        config = WebConfig()
+        instruction = build_web_instruction(config, None, browser_backend="playwright")
+        assert "SEARCH WITH GOOGLE BY DEFAULT" not in instruction
 
 
 class TestResumeFlag:

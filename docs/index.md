@@ -52,6 +52,8 @@ flowchart LR
 ```bash
 # Install
 pip install leashd        # or: uv tool install leashd
+# claude-code (SDK) runtime only:
+pip install 'leashd[claude-agent-sdk]'
 # or from source:
 git clone <repo-url> && cd leashd && uv sync
 

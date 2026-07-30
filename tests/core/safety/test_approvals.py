@@ -738,3 +738,191 @@ class TestApprovalCancellationExtended:
         await task
         assert r1.approved is False
         assert r2.approved is True
+
+
+class TestRejectWithReasonFanout:
+    """A typed course-correction must reach every gate the human can see.
+
+    Binding it to one gate chosen in insertion order sent the words to the
+    *oldest* card, which in the field was a call that had already escaped the
+    gate minutes earlier — so the agent never heard the correction and the
+    live siblings stayed parked.
+    """
+
+    async def test_reaches_every_pending_gate_for_the_chat(
+        self, approval_coordinator, mock_connector, classification
+    ):
+        async def reject_once():
+            while len(mock_connector.approval_requests) < 3:
+                await asyncio.sleep(0.01)
+            assert await approval_coordinator.reject_with_reason(
+                "chat1", "use agent-browser"
+            )
+
+        task = asyncio.create_task(reject_once())
+        results = await asyncio.gather(
+            *(
+                approval_coordinator.request_approval(
+                    chat_id="chat1",
+                    tool_name="Bash",
+                    tool_input={"command": f"curl https://example.com/{n}"},
+                    classification=classification,
+                    timeout=5,
+                )
+                for n in range(3)
+            )
+        )
+        await task
+
+        assert [r.approved for r in results] == [False, False, False]
+        assert {r.reason for r in results} == {"use agent-browser"}
+
+    async def test_leaves_other_chats_alone(
+        self, approval_coordinator, mock_connector, classification
+    ):
+        async def reject_chat1():
+            while len(mock_connector.approval_requests) < 2:
+                await asyncio.sleep(0.01)
+            await approval_coordinator.reject_with_reason("chat1", "no")
+            for req in mock_connector.approval_requests:
+                if req["chat_id"] == "chat2":
+                    await approval_coordinator.resolve_approval(
+                        req["approval_id"], True
+                    )
+
+        task = asyncio.create_task(reject_chat1())
+        mine, theirs = await asyncio.gather(
+            approval_coordinator.request_approval(
+                chat_id="chat1",
+                tool_name="Bash",
+                tool_input={"command": "curl a"},
+                classification=classification,
+                timeout=5,
+            ),
+            approval_coordinator.request_approval(
+                chat_id="chat2",
+                tool_name="Bash",
+                tool_input={"command": "curl b"},
+                classification=classification,
+                timeout=5,
+            ),
+        )
+        await task
+        assert mine.approved is False
+        assert theirs.approved is True
+
+
+class TestExpireExecuted:
+    """Retire a gate whose tool already ran.
+
+    Claude's native ``auto`` policy does not block on leashd's PreToolUse
+    verdict, so the call completes while the gate still waits. The orphan then
+    swallows every message the human types, because the engine routes text to
+    ``reject_with_reason`` whenever an approval is pending.
+    """
+
+    async def test_expires_the_matching_gate(
+        self, approval_coordinator, mock_connector, classification
+    ):
+        cmd = {"command": "curl https://example.com"}
+
+        async def tool_completes():
+            while not mock_connector.approval_requests:
+                await asyncio.sleep(0.01)
+            expired = await approval_coordinator.expire_executed("chat1", "Bash", cmd)
+            assert expired is not None
+
+        task = asyncio.create_task(tool_completes())
+        result = await approval_coordinator.request_approval(
+            chat_id="chat1",
+            tool_name="Bash::curl",
+            tool_input=cmd,
+            classification=classification,
+            timeout=5,
+        )
+        await task
+
+        assert result.approved is False
+        assert "already ran" in (result.reason or "")
+        assert approval_coordinator.has_pending("chat1") is False
+
+    async def test_frees_the_chat_so_typed_text_is_not_swallowed(
+        self, approval_coordinator, mock_connector, classification
+    ):
+        cmd = {"command": "curl https://example.com"}
+
+        async def tool_completes():
+            while not mock_connector.approval_requests:
+                await asyncio.sleep(0.01)
+            await approval_coordinator.expire_executed("chat1", "Bash", cmd)
+
+        task = asyncio.create_task(tool_completes())
+        await approval_coordinator.request_approval(
+            chat_id="chat1",
+            tool_name="Bash::curl",
+            tool_input=cmd,
+            classification=classification,
+            timeout=5,
+        )
+        await task
+
+        assert await approval_coordinator.reject_with_reason("chat1", "late") is False
+
+    async def test_withdraws_the_card(
+        self, approval_coordinator, mock_connector, classification
+    ):
+        cmd = {"command": "curl https://example.com"}
+
+        async def tool_completes():
+            while not mock_connector.approval_requests:
+                await asyncio.sleep(0.01)
+            await approval_coordinator.expire_executed("chat1", "Bash", cmd)
+
+        task = asyncio.create_task(tool_completes())
+        await approval_coordinator.request_approval(
+            chat_id="chat1",
+            tool_name="Bash::curl",
+            tool_input=cmd,
+            classification=classification,
+            timeout=5,
+        )
+        await task
+
+        msg_id = mock_connector.approval_requests[0]["message_id"]
+        assert {"chat_id": "chat1", "message_id": msg_id} in (
+            mock_connector.deleted_messages
+        )
+
+    async def test_leaves_a_different_call_pending(
+        self, approval_coordinator, mock_connector, classification
+    ):
+        async def other_tool_completes():
+            while not mock_connector.approval_requests:
+                await asyncio.sleep(0.01)
+            assert (
+                await approval_coordinator.expire_executed(
+                    "chat1", "Bash", {"command": "curl OTHER"}
+                )
+                is None
+            )
+            req = mock_connector.approval_requests[0]
+            await approval_coordinator.resolve_approval(req["approval_id"], True)
+
+        task = asyncio.create_task(other_tool_completes())
+        result = await approval_coordinator.request_approval(
+            chat_id="chat1",
+            tool_name="Bash::curl",
+            tool_input={"command": "curl MINE"},
+            classification=classification,
+            timeout=5,
+        )
+        await task
+        assert result.approved is True
+
+    async def test_noop_when_nothing_is_pending(self, approval_coordinator):
+        assert (
+            await approval_coordinator.expire_executed(
+                "chat1", "Bash", {"command": "x"}
+            )
+            is None
+        )

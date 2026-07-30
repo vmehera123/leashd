@@ -354,6 +354,26 @@ class TestTestRunnerPlugin:
         assert "TEST MODE" in session.mode_instruction
         assert "PHASE 1" in session.mode_instruction
 
+    async def test_plugin_clears_a_prior_web_session_flag(
+        self, initialized_plugin, event_bus, session, gatekeeper
+    ):
+        """A stale flag would keep ``WebFetch``/``WebSearch`` denied and the
+        persistent browser profile attached for the rest of the session."""
+        session.web_active = True
+        await event_bus.emit(
+            Event(
+                name=COMMAND_TEST,
+                data={
+                    "session": session,
+                    "chat_id": "chat1",
+                    "args": "verify login",
+                    "gatekeeper": gatekeeper,
+                    "prompt": "",
+                },
+            )
+        )
+        assert session.web_active is False
+
     async def test_plugin_auto_approves_browser_tools(
         self, initialized_plugin, event_bus, session, gatekeeper
     ):

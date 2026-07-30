@@ -6,8 +6,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from leashd.exceptions import ConnectorError
+from leashd.main import (
+    _install_reload_handler,
+    _maybe_start_tmux_hook_server,
+    _run_cli,
+    run,
+)
 from leashd.main import _main as main
-from leashd.main import _maybe_start_tmux_hook_server, _run_cli, run
 
 
 @pytest.fixture
@@ -367,3 +372,62 @@ class TestTmuxHookServer:
             await _run_cli(cfg)
         mock_engine.shutdown.assert_awaited_once()
         fake_server.stop.assert_awaited_once()
+
+
+class TestReloadHandler:
+    """SIGHUP coalescing — a burst of signals must reload config once."""
+
+    def _install(self, engine):
+        loop = MagicMock()
+        handlers = {}
+        loop.add_signal_handler = lambda sig, cb: handlers.__setitem__(sig, cb)
+        _install_reload_handler(loop, engine)
+        import signal as _signal
+
+        return handlers[_signal.SIGHUP]
+
+    async def test_a_burst_of_signals_reloads_once(self, monkeypatch):
+        monkeypatch.setattr("leashd.main._RELOAD_DEBOUNCE_SECONDS", 0.01)
+        engine = AsyncMock()
+        fire = self._install(engine)
+
+        for _ in range(29):
+            fire()
+        await asyncio.sleep(0.08)
+
+        assert engine.reload_config.await_count == 1
+
+    async def test_a_signal_during_a_reload_triggers_one_follow_up(self, monkeypatch):
+        monkeypatch.setattr("leashd.main._RELOAD_DEBOUNCE_SECONDS", 0.01)
+        started = asyncio.Event()
+        release = asyncio.Event()
+        calls = []
+
+        async def _slow_reload():
+            calls.append(1)
+            started.set()
+            await release.wait()
+
+        engine = MagicMock()
+        engine.reload_config = _slow_reload
+        fire = self._install(engine)
+
+        fire()
+        await started.wait()
+        fire()
+        release.set()
+        await asyncio.sleep(0.08)
+
+        assert len(calls) == 2
+
+    async def test_later_signals_reload_again(self, monkeypatch):
+        monkeypatch.setattr("leashd.main._RELOAD_DEBOUNCE_SECONDS", 0.01)
+        engine = AsyncMock()
+        fire = self._install(engine)
+
+        fire()
+        await asyncio.sleep(0.06)
+        fire()
+        await asyncio.sleep(0.06)
+
+        assert engine.reload_config.await_count == 2

@@ -331,6 +331,47 @@ def plan_human_typing(
 _NATIVE_DIALOG_POLL_INTERVAL_S = 1.5
 _NATIVE_DIALOG_TOOL_INPUT_KEY = "__leashd_native_dialog__"
 
+# Pane liveness states. ``pane_is_dead()`` collapses everything but ALIVE into
+# one bool for the callers that only branch on "can this pane still work?";
+# ``pane_status()`` keeps the distinction because the four causes need
+# different follow-up: DEAD means the pane's own process exited (claude quit /
+# crashed) with the pane retained, GONE means the tmux session or the whole
+# server is no longer there, DETACHED means leashd never held a pane, and
+# ERROR means the tmux CLI itself failed. A post-mortem that cannot say which
+# of these happened is the difference between "claude exited" and "leashd lost
+# the tmux server" — see :meth:`TmuxClaudeSession.death_report`.
+PANE_ALIVE = "alive"
+PANE_DEAD = "dead"
+PANE_GONE = "gone"
+PANE_DETACHED = "detached"
+PANE_ERROR = "error"
+
+# Trailing pane lines kept for the post-mortem. The claude TUI prints its exit
+# reason (error banner, /exit confirmation, OOM notice) in the last handful of
+# rows, so a short tail carries the signal without bloating the log.
+_POSTMORTEM_TAIL_LINES = 40
+_POSTMORTEM_TAIL_CHARS = 4000
+# Scrollback depth read on the death path. tmux blanks the *visible* screen of
+# a pane whose process was signalled and leaves only its own "Pane is dead
+# (signal kill, …)" banner there — everything the process printed is pushed
+# into the scrollback, so a visible-only capture of a dead pane recovers
+# nothing. Deep enough that a screenful of blanking cannot push the real
+# output out of the tail.
+_POSTMORTEM_SCROLLBACK_LINES = 200
+
+
+def _screen_tail(screen: str) -> str:
+    """Last informative lines of a pane capture, for the post-mortem.
+
+    Blank lines are dropped rather than kept in place: a dead pane's capture is
+    mostly the blank rows tmux left behind, and preserving them would push the
+    lines that explain the death out of the tail.
+    """
+    lines = [stripped for line in screen.splitlines() if (stripped := line.rstrip())]
+    tail = "\n".join(lines[-_POSTMORTEM_TAIL_LINES:])
+    return tail[-_POSTMORTEM_TAIL_CHARS:]
+
+
 # Status-bar indicator the claude TUI renders while a ``/goal`` is running
 # (``◎ /goal active 2m``). leashd seeds ``goal_active`` optimistically when it
 # injects a goal; the dialog watcher uses this marker only to detect the goal
@@ -798,6 +839,19 @@ class TmuxClaudeSession:
         self.dialog_watcher_task: asyncio.Task[None] | None = None
         self.failed_dialog_fingerprints: dict[str, float] = {}
         self.last_model: str | None = None
+        # Post-mortem state. When a pane dies mid-turn the pane — and with it
+        # everything the claude TUI printed on its way out — is already gone by
+        # the time leashd's liveness poll notices, so the abort has nothing to
+        # report but "it's dead". These keep the last thing leashd saw: every
+        # non-empty capture() is memoised (the dialog watcher already captures
+        # every 1.5s, so this costs nothing extra), and the SessionEnd hook's
+        # `reason` is recorded because that field is Claude Code's own answer to
+        # "why did this session end?".
+        self.last_screen: str = ""
+        self.last_screen_at: float = 0.0
+        self.session_end_reason: str | None = None
+        self.session_end_at: float = 0.0
+        self.last_death_cause: tuple[str | None, str | None] | None = None
 
     # -- pane control --------------------------------------------------------
 
@@ -805,23 +859,128 @@ class TmuxClaudeSession:
         self._tmux_session = tmux_session
         self._pane = pane
 
-    def pane_is_dead(self) -> bool:
-        """True when this pane can no longer serve the session.
+    def pane_status(self) -> str:
+        """Classify pane liveness — one of the ``PANE_*`` constants.
 
-        Empty ``list-panes`` output is DEAD, not alive: when the tmux server
-        itself has exited (its last session was killed — daemon restart,
+        Empty ``list-panes`` output is ``PANE_GONE``, not alive: when the tmux
+        server itself has exited (its last session was killed — daemon restart,
         ``/clear`` of the only chat), libtmux returns empty stdout without
         raising, and treating that as a healthy pane wedged the runtime —
         every capture came back blank, ``await_ready`` timed out on every
         turn, and nothing ever respawned until a full daemon restart.
+
+        ``PANE_DEAD`` (``#{pane_dead}`` = 1) and ``PANE_GONE`` are both fatal
+        for the turn but mean different things: DEAD is the pane's process
+        exiting under a retained pane, GONE is the session/server itself
+        vanishing. Only GONE implicates leashd's own tmux handling.
         """
         if self._pane is None:
-            return True
+            return PANE_DETACHED
         try:
             out = self._pane.cmd("list-panes", "-F", "#{pane_dead}").stdout
         except Exception:
-            return True
-        return not out or out[0].strip() == "1"
+            return PANE_ERROR
+        if not out:
+            return PANE_GONE
+        return PANE_DEAD if out[0].strip() == "1" else PANE_ALIVE
+
+    def pane_is_dead(self) -> bool:
+        """True when this pane can no longer serve the session.
+
+        Latches the exit cause on the way past: this is the most frequent
+        liveness check in the runtime, so it is the earliest place that
+        reliably sees a retained-dead pane before anything can reap it.
+        """
+        status = self.pane_status()
+        if status == PANE_DEAD:
+            self.latch_death_cause()
+        return status != PANE_ALIVE
+
+    def latch_death_cause(self) -> None:
+        """Memoise the pane's exit status/signal while the pane still exists.
+
+        ``death_report`` is built when the turn watcher notices the pane, which
+        can be seconds after ``claude`` exited — and a session that vanishes in
+        between takes the cause with it. A real turn died 2.2s after its
+        ``SessionEnd`` hook and reported ``pane_status=gone`` with no status and
+        no signal, which is exactly the field that separates "claude chose to
+        quit" from "something killed it". Whoever sees the pane dead first
+        records it here so the post-mortem outlives the session.
+
+        First non-empty read wins; later calls are no-ops.
+        """
+        if self.last_death_cause is not None:
+            return
+        status, signal = self._pane_death_cause()
+        if status is not None or signal is not None:
+            self.last_death_cause = (status, signal)
+
+    def _pane_death_cause(self) -> tuple[str | None, str | None]:
+        """``(exit_status, signal)`` of a retained dead pane, as tmux saw it.
+
+        Exactly one is populated: a process that ran to completion has a status
+        (0 clean, non-zero failure) and no signal; one that was killed has a
+        signal name (``kill``, ``term``) and no status. That split is the first
+        question to ask of any pane that died mid-turn — it separates "claude
+        chose to quit" from "something killed it".
+        """
+        if self._pane is None:
+            return None, None
+        try:
+            out = self._pane.cmd(
+                "list-panes", "-F", "#{pane_dead_status}|#{pane_dead_signal}"
+            ).stdout
+        except Exception:
+            return None, None
+        if not out:
+            return None, None
+        status, _, sig = out[0].strip().partition("|")
+        return status or None, sig or None
+
+    def capture_scrollback(self) -> str:
+        """Pane capture including scrollback — the post-mortem read."""
+        if self._pane is None:
+            return ""
+        try:
+            out = self._pane.cmd(
+                "capture-pane", "-p", "-S", f"-{_POSTMORTEM_SCROLLBACK_LINES}"
+            ).stdout
+        except Exception:
+            return ""
+        return "\n".join(out) if isinstance(out, list) else str(out)
+
+    def death_report(self) -> dict[str, Any]:
+        """Everything leashd knows about why this pane stopped serving.
+
+        Built at abort time so the app log carries the evidence instead of
+        forcing a post-hoc dig through OS logs. A live capture is preferred (a
+        retained-but-dead pane still renders the TUI's final frame); when the
+        session or server is gone the memoised last screen is the only record
+        that survives.
+        """
+        status = self.pane_status()
+        screen = self.capture_scrollback()
+        live = bool(_screen_tail(screen))
+        if not live:
+            screen = self.last_screen
+        report: dict[str, Any] = {
+            "pane_status": status,
+            "pane_tail": _screen_tail(screen),
+            "pane_tail_live": live,
+        }
+        if status == PANE_DEAD:
+            self.latch_death_cause()
+        if self.last_death_cause is not None:
+            exit_status, exit_signal = self.last_death_cause
+            report["pane_exit_status"] = exit_status
+            report["pane_exit_signal"] = exit_signal
+            report["pane_exit_cause_latched"] = status != PANE_DEAD
+        if not live and self.last_screen_at:
+            report["pane_tail_age_s"] = int(time.monotonic() - self.last_screen_at)
+        if self.session_end_reason is not None:
+            report["session_end_reason"] = self.session_end_reason
+            report["session_end_age_s"] = int(time.monotonic() - self.session_end_at)
+        return report
 
     def send_keys(self, keys: str, *, literal: bool = True) -> None:
         if self._pane is None:
@@ -910,14 +1069,22 @@ class TmuxClaudeSession:
                 await asyncio.sleep(step.delay)
 
     def capture(self) -> str:
-        """Current visible pane contents (for readiness / submit checks)."""
+        """Current visible pane contents (for readiness / submit checks).
+
+        Every non-empty read is memoised into ``last_screen`` so a pane that
+        later disappears still has a last-known frame for :meth:`death_report`.
+        """
         if self._pane is None:
             return ""
         try:
             out = self._pane.cmd("capture-pane", "-p").stdout
         except Exception:
             return ""
-        return "\n".join(out) if isinstance(out, list) else str(out)
+        screen = "\n".join(out) if isinstance(out, list) else str(out)
+        if screen.strip():
+            self.last_screen = screen
+            self.last_screen_at = time.monotonic()
+        return screen
 
     # Claude Code TUI is interactive once the composer hint line is drawn.
     # Includes the bypass-mode footer ``⏵⏵ bypass permissions on`` so a tmux
@@ -2430,6 +2597,44 @@ class TmuxSessionManager:
         )
         return None
 
+    def _set_remain_on_exit(self, name: str) -> None:
+        """Keep the pane after ``claude`` exits. Best-effort, never raises.
+
+        Without this a claude that quits mid-turn takes its pane — and with it
+        the last thing it printed and its exit status — down instantly, and the
+        tmux session and (if it was the last one) the whole server go with it;
+        leashd's liveness poll then finds nothing to read. Retained, the dead
+        pane still renders its final frame for :meth:`death_report` and exposes
+        ``pane_dead_status``, which distinguishes a clean exit from a signal.
+
+        Safe to leave lying around: pane reuse is gated on ``pane_is_dead()``,
+        and ``spawn`` reaps the deterministic session name before recreating.
+
+        ``remain-on-exit`` is a *window* option, so the target is the session's
+        window (``name:``) — the exact-match ``=name`` session syntax used by
+        the kill/has-session helpers is rejected here as a window target.
+        """
+        try:
+            proc = subprocess.run(  # noqa: S603
+                self._tmux_argv(
+                    "set-option", "-w", "-t", f"{name}:", "remain-on-exit", "on"
+                ),
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            logger.warning("tmux_remain_on_exit_failed", name=name, error=str(exc))
+            return
+        if proc.returncode != 0:
+            logger.warning(
+                "tmux_remain_on_exit_failed",
+                name=name,
+                rc=proc.returncode,
+                stderr=proc.stderr.strip(),
+            )
+
     def _kill_tmux_session(self, name: str) -> None:
         """Best-effort kill of a single tmux session by exact name. Never raises.
 
@@ -2611,6 +2816,7 @@ class TmuxSessionManager:
                     "wedged — try `leashd restart`."
                 ) from exc
         pane = tmux_session.active_window.active_pane
+        self._set_remain_on_exit(tmux_name)
 
         cs = TmuxClaudeSession(
             session_id=session_id,
@@ -3167,11 +3373,50 @@ class TmuxSessionManager:
 
         if event in ("SessionStart", "UserPromptSubmit"):
             return
-        if event == "Stop":
+        if event == "PostToolUse":
+            await self._expire_executed_gate(cs, body)
+        elif event == "Stop":
             # Authoritative turn-completion signal (NOT SubagentStop).
             cs.complete_turn()
         elif event == "SessionEnd":
+            # `reason` is Claude Code's own account of why the CLI stopped
+            # (`clear` / `logout` / `prompt_input_exit` / `other`). Recording it
+            # is the difference between a post-mortem that says "the pane died"
+            # and one that says why. The hook is registered async, so a fast
+            # exit can lose the delivery — hence it is stored on the session for
+            # a later abort to read rather than acted on only here.
+            cs.session_end_reason = str(body.get("reason") or "unspecified")
+            cs.session_end_at = time.monotonic()
+            # Earliest moment leashd knows the CLI is going: probe the pane now,
+            # while the session is still on the socket. The turn watcher's next
+            # poll is up to seconds later and has found the session already gone.
+            cs.latch_death_cause()
+            logger.info(
+                "tmux_session_end",
+                session_id=cs.session_id,
+                chat_id=cs.chat_id,
+                reason=cs.session_end_reason,
+                turn_active=cs.turn is not None and not cs.turn.stop_event.is_set(),
+            )
             cs.complete_turn()
+
+    async def _expire_executed_gate(
+        self, cs: TmuxClaudeSession, body: dict[str, Any]
+    ) -> None:
+        """Retire an approval whose tool escaped the gate and already ran.
+
+        Claude's native ``auto`` policy does not block on the ``PreToolUse``
+        verdict for calls its own classifier cleared, so the tool finishes while
+        leashd still waits on the human. ``PostToolUse`` is the authoritative
+        "this call is done" signal.
+        """
+        if self._approvals is None:
+            return
+        tool_name = str(body.get("tool_name", ""))
+        tool_input = body.get("tool_input") or {}
+        if not tool_name or not isinstance(tool_input, dict):
+            return
+        await self._approvals.expire_executed(cs.chat_id, tool_name, tool_input)
 
     # -- native dialog watcher (Stage 2 belt-and-suspenders gate) -----------
 

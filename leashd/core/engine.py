@@ -15,6 +15,7 @@ import structlog
 from pydantic import BaseModel, ConfigDict
 
 from leashd.agents.types import PermissionAllow, PermissionDeny
+from leashd.browser_profile import profile_in_use, prune_restore_state
 from leashd.connectors.base import Attachment, InlineButton
 from leashd.core import plan_gate
 from leashd.core.config import build_directory_names, ensure_leashd_dir
@@ -132,6 +133,8 @@ _MAX_STREAMING_DISPLAY = 4000
 # ``/goal <word>`` forms that CLEAR rather than set a goal (Claude Code aliases).
 _GOAL_CLEAR_WORDS = frozenset({"clear", "stop", "off", "reset", "none", "cancel"})
 _TRANSIENT_MESSAGE_DELAY = 5.0  # seconds before auto-deleting status messages (longer than connector's 4.0s approval cleanup)
+_BROWSER_SHUTDOWN_POLLS = 10
+_BROWSER_SHUTDOWN_POLL_SECONDS = 0.3
 
 
 class AgentDeadline:
@@ -622,6 +625,7 @@ class Engine:
 
     async def shutdown(self) -> None:
         await self.event_bus.emit(Event(name=ENGINE_STOPPED))
+        await self._shutdown_browser(self.config.browser_backend)
         if self.plugin_registry:
             await self.plugin_registry.stop_all()
         if self._message_store and not self._shared_store:
@@ -678,33 +682,65 @@ class Engine:
             mid = self._interrupt_message_ids.pop(chat_id, None)
             if mid and self.connector:
                 await self.connector.delete_message(chat_id, mid)
-        await self._shutdown_browser(session)
+        await self._end_web_session(session)
         self._gatekeeper.disable_auto_approve(chat_id)
         self._pending_messages.pop(chat_id, None)
 
-    async def _shutdown_browser(self, session: Session) -> None:
-        if session.mode != "web":
-            return
+    async def _end_web_session(self, session: Session) -> None:
+        """Retire the browser at a session boundary.
+
+        Not gated on ``web_active``: an agent reaches for agent-browser outside
+        ``/web`` too — a ``/task`` verify phase or a plain message — and leaving
+        that browser up cost a headed Chrome and its tabs for the rest of the
+        daemon's life. Every caller is a mode switch or teardown, never a point
+        mid-turn, so closing unconditionally cannot pull the browser out from
+        under a running agent.
+        """
+        session.web_active = False
         await self._close_browser_processes(session)
 
     async def _close_browser_processes(self, session: Session) -> None:
+        await self._shutdown_browser(
+            session.browser_backend or self.config.browser_backend
+        )
+
+    async def _shutdown_browser(self, backend: str | None) -> None:
         """Close any live browser the agent opened (agent-browser session or
-        Playwright MCP). Mode-independent — callers decide when it applies (web
-        mode teardown, or after a ``/goal`` that drove the browser)."""
-        backend = session.browser_backend or self.config.browser_backend
+        Playwright MCP) and drop the tab set Chrome would otherwise replay."""
         try:
             if backend == "agent-browser":
                 proc = await asyncio.create_subprocess_exec(
                     "agent-browser",
                     "close",
+                    "--all",
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.DEVNULL,
                 )
                 await asyncio.wait_for(proc.wait(), timeout=5)
+                await self._prune_browser_restore_state()
             else:
                 await self._kill_playwright_mcp()
         except Exception:
             logger.debug("browser_shutdown_failed", exc_info=True)
+
+    async def _prune_browser_restore_state(self) -> None:
+        """Drop Chrome's saved tab set once the browser is down.
+
+        Closing the browser is not enough on its own: Chrome writes every open
+        tab into the profile's session store on the way out and replays the lot
+        on the next launch, so a ``/clear`` that shut the browser down still
+        handed the next session the previous run's tabs. Waits for the profile
+        to be released first, because the prune is a no-op while it is held.
+        """
+        if not self.config.browser_user_data_dir:
+            return
+        profile = Path(self.config.browser_user_data_dir).expanduser()
+        for _ in range(_BROWSER_SHUTDOWN_POLLS):
+            if not await asyncio.to_thread(profile_in_use, profile):
+                break
+            await asyncio.sleep(_BROWSER_SHUTDOWN_POLL_SECONDS)
+        removed = await asyncio.to_thread(prune_restore_state, profile)
+        logger.debug("browser_restore_state_pruned", files=removed)
 
     async def _pgrep_and_kill(self, pattern: str, sig: int = signal.SIGTERM) -> bool:
         """Find processes matching *pattern* via pgrep and send *sig*."""
@@ -1607,6 +1643,7 @@ class Engine:
 
         if command == "plan":
             old_mode = session.mode
+            await self._end_web_session(session)
             session.mode = "plan"
             session.plan_origin = "user"
             self._gatekeeper.disable_auto_approve(chat_id)
@@ -1693,6 +1730,7 @@ class Engine:
                 await cancel_chat(chat_id)
             session.mode = "auto"
             session.task_run_id = None
+            await self._end_web_session(session)
             await self.session_manager.save(session)
             event_data: dict[str, Any] = {
                 "user_id": user_id,
@@ -1748,6 +1786,7 @@ class Engine:
 
         if command == "edit":
             old_mode = session.mode
+            await self._end_web_session(session)
             session.mode = "edit"
             session.plan_origin = "edit"
             logger.info(
@@ -1772,8 +1811,7 @@ class Engine:
 
         if command == "auto":
             old_mode = session.mode
-            if old_mode == "web":
-                await self._shutdown_browser(session)
+            await self._end_web_session(session)
             session.mode = "auto"
             session.mode_instruction = None
             session.plan_origin = None
@@ -1805,8 +1843,7 @@ class Engine:
 
         if command == "default":
             old_mode = session.mode
-            if old_mode == "web":
-                await self._shutdown_browser(session)
+            await self._end_web_session(session)
             session.mode = "default"
             session.mode_instruction = None
             session.plan_origin = None
@@ -1956,8 +1993,7 @@ class Engine:
         # policy rule (agent-browser, file writes, …). Mirrors /auto.
         if session.mode != "auto":
             old_mode = session.mode
-            if old_mode == "web":
-                await self._shutdown_browser(session)
+            await self._end_web_session(session)
             session.mode = "auto"
             session.mode_instruction = None
             session.plan_origin = None
@@ -2438,6 +2474,7 @@ class Engine:
             session.agent_resume_token = None
         session.mode = "edit" if target_mode == "edit" else "default"
         session.plan_origin = None
+        await self._end_web_session(session)
         await self.session_manager.save(session)
         if target_mode == "edit":
             self._gatekeeper.enable_tool_auto_approve(chat_id, "Write")

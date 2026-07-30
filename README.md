@@ -69,7 +69,7 @@ Sessions are **multi-turn**: the agent remembers the full conversation context, 
 
 - **Python 3.10+**
 - **At least one agent runtime:**
-  - **[Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)** — installed and authenticated. The `claude` command must work in your terminal. The default `tmux` runtime also needs **`tmux`** installed; the other Claude runtimes (`claude-cli`, `claude-code`) need only `claude`.
+  - **[Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)** — installed and authenticated. The `claude` command must work in your terminal. The default `tmux` runtime also needs **`tmux`** installed; `claude-cli` needs only `claude`; the SDK-based `claude-code` runtime additionally needs the optional `claude-agent-sdk` package (`pip install 'leashd[claude-agent-sdk]'`).
   - **[Codex CLI](https://developers.openai.com/codex/cli)** — installed and authenticated. The `codex` command must work in your terminal.
 
 ### 1. Install
@@ -82,6 +82,12 @@ Or with [uv](https://docs.astral.sh/uv/) (recommended):
 
 ```bash
 uv tool install leashd
+```
+
+The `claude-code` (SDK) runtime needs one extra package — install it only if you plan to use that runtime:
+
+```bash
+pip install 'leashd[claude-agent-sdk]'      # or: uv tool install 'leashd[claude-agent-sdk]'
 ```
 
 ### 2. Run the setup wizard
@@ -177,7 +183,7 @@ leashd runtime set claude-cli    # switch to Claude CLI (default)
 |---|---|---|---|---|---|
 | **tmux** *(default)* | Interactive `claude` TUI in a tmux pane | Session tokens | Full (PreToolUse hook bridge) | `claude` CLI + `tmux` | beta |
 | **claude-cli** | Claude CLI (native subprocess) | NDJSON session IDs | Full (task orchestrator) | `claude` CLI authenticated | beta |
-| **claude-code** | Claude Code CLI (SDK) | SDK sessions | Full (task orchestrator) | `claude` CLI + `claude-agent-sdk` | stable |
+| **claude-code** | Claude Code CLI (SDK) | SDK sessions | Full (task orchestrator) | `claude` CLI + `pip install 'leashd[claude-agent-sdk]'` | stable |
 | **codex** | Codex CLI | Thread IDs | Full (streaming + approval bridge) | `codex` CLI authenticated | beta |
 
 All runtimes support interactive approval, streaming responses, and the full autonomous pipeline. Each runtime declares its capabilities via an agent capabilities model — leashd adapts features like session resume and approval routing automatically.

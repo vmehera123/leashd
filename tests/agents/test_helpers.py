@@ -110,20 +110,23 @@ class TestBuildAgentBrowserEnv:
     def test_profile_injected_for_web_mode(self, tmp_path):
         env = build_agent_browser_env(
             self._config(browser_user_data_dir=str(tmp_path)),
-            self._session(mode="web"),
+            self._session(mode="auto", web_active=True),
         )
         assert env["AGENT_BROWSER_PROFILE"] == str(tmp_path)
 
     def test_profile_expands_user(self):
         env = build_agent_browser_env(
             self._config(browser_user_data_dir="~/.leashd/browser-profile"),
-            self._session(mode="web"),
+            self._session(mode="auto", web_active=True),
         )
         assert "~" not in env["AGENT_BROWSER_PROFILE"]
 
     def test_profile_withheld_outside_web_mode(self, tmp_path):
-        """A persistent profile carries the user's real logins."""
-        for mode in ("default", "task", "test"):
+        """A persistent profile carries the user's real logins.
+
+        ``auto`` is listed deliberately — ``/web`` runs under it too, so only
+        ``web_active`` may unlock the profile."""
+        for mode in ("default", "auto", "task", "test"):
             env = build_agent_browser_env(
                 self._config(browser_user_data_dir=str(tmp_path)),
                 self._session(mode=mode),
@@ -133,6 +136,6 @@ class TestBuildAgentBrowserEnv:
     def test_profile_withheld_when_browser_fresh(self, tmp_path):
         env = build_agent_browser_env(
             self._config(browser_user_data_dir=str(tmp_path)),
-            self._session(mode="web", browser_fresh=True),
+            self._session(mode="auto", web_active=True, browser_fresh=True),
         )
         assert "AGENT_BROWSER_PROFILE" not in env

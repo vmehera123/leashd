@@ -1373,6 +1373,7 @@ class TaskV3Orchestrator(LeashdPlugin):
                 session.task_run_id = None
                 session.plan_origin = None
                 session.native_auto_allowed = False
+                session.web_active = False
                 await self._engine.session_manager.save(session)
             self._engine.disable_auto_approve(task.chat_id)
 

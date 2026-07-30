@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.2] - 2026-07-28
+- **fixed**: browser sessions no longer leak or replay tabs. Stale `SingletonSocket` files made a dead browser look live, `/clear` handed the next session the previous run's restore state, and a `/web` run over a URL list relaunched the browser per URL (~200 windows); liveness now checks the DevTools port, teardown prunes restore state, Chrome launches with `--no-startup-window`, and a one-browser/15-tab rule is installed into the agent-browser skill and the `/web` prompt.
+- **fixed**: `/web` never used the browser at all. The `WebFetch`/`WebSearch` denial, persistent profile, and teardown keyed on a `session.mode == "web"` that `/web` never sets, and now key on a `web_active` session flag.
+- **added**: web research defaults to Google (`&num=20`) with DuckDuckGo and Bing fallbacks, plus a throttled `search-batch.sh` helper that staggers tab opens so bursts of result pages stop hitting `/sorry/index`.
+- **fixed**: a tmux pane that dies mid-turn now reports its exit status or killing signal and Claude's `SessionEnd` reason instead of just "pane exited", because panes are retained on exit and the death cause is latched the first time it is seen.
+- **fixed**: approvals no longer strand a chat. A typed rejection reason resolves every live gate instead of the oldest one, and `PostToolUse` retires an approval left pending by a tool that ran without waiting for leashd's verdict.
+- **changed**: `claude-agent-sdk` moved to the optional `leashd[claude-agent-sdk]` extra and `claude-code` is registered lazily, so a default install skips the SDK tree and selecting that runtime without it fails with an install hint instead of an import error at startup.
+
 ## [1.2.1] - 2026-07-25
 - **fixed**: in `/auto` mode Claude's own classifier could deny a tool leashd had already cleared ("Blocked by classifier" on an `agent-browser click` leashd auto-approved, stranding a `/web` run) — a PreToolUse `allow` does not stop it. leashd's managed settings now also emit `permissions.allow`, mirroring policy `allow` rules and the chat's always-allow tools so those calls are resolved before the classifier runs. Verified that this does *not* weaken the pipeline: `permissions.allow` does not suppress hooks, and a credential read stayed blocked with a blanket `Read` allow entry active.
 
