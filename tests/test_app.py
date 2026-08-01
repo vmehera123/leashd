@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -387,3 +388,38 @@ class TestLoadDefaultMcpServers:
         ):
             _load_default_mcp_servers(config, tmp_path)
         assert "codebase-memory-mcp" not in config.mcp_servers
+
+
+class TestTmuxReapGating:
+    """`build_engine` must not kill live tmux panes unless asked.
+
+    The sweep runs `tmux kill-session` on the socket resolved from config.
+    An in-process build_engine() that left `tmux_socket_dir` at its default
+    would target the running daemon's socket and kill whatever pane the
+    caller is being served from — including its own.
+    """
+
+    def test_does_not_reap_by_default(self, tmp_path):
+        config = LeashdConfig(approved_directories=[tmp_path])
+        with patch(
+            "leashd.agents.runtimes.tmux_session.TmuxSessionManager.kill_owned_sessions"
+        ) as reap:
+            _patched_build_engine(config=config)
+        reap.assert_not_called()
+
+    def test_reaps_when_opted_in(self, tmp_path):
+        config = LeashdConfig(approved_directories=[tmp_path])
+        with patch(
+            "leashd.agents.runtimes.tmux_session.TmuxSessionManager.kill_owned_sessions"
+        ) as reap:
+            _patched_build_engine(config=config, reap_orphan_tmux=True)
+        reap.assert_called_once()
+
+    def test_socket_dir_never_defaults_to_real_home(self, tmp_path):
+        """conftest pins the socket dir so no test can reach the live daemon."""
+        config = LeashdConfig(approved_directories=[tmp_path])
+        assert config.tmux_socket_dir != Path("~/.leashd/tmux")
+        assert Path("~/.leashd/tmux").expanduser() not in (
+            config.tmux_socket_dir,
+            config.tmux_socket_dir.expanduser(),
+        )

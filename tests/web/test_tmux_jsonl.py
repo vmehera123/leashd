@@ -48,6 +48,67 @@ async def test_drain_dedups_and_tolerates_partial_lines(tmp_path):
     assert len(events) == 2
 
 
+async def test_drain_retries_a_line_caught_mid_write(tmp_path):
+    """A poll that lands while claude is still flushing a record must not
+    consume the truncated bytes: the record is delivered whole once the
+    newline arrives. The turn's final assistant text is the biggest line
+    written, so dropping it loses the entire answer."""
+    import json as _json
+
+    from leashd.agents.runtimes.tmux_session import encode_project_dir
+
+    sess = _fake_session("/work")
+    tailer, events, root = _tailer(tmp_path, sess)
+    proj = root / encode_project_dir("/work")
+    proj.mkdir(parents=True)
+    jsonl = proj / "uuid-1.jsonl"
+
+    answer = (
+        _json.dumps(
+            {
+                "uuid": "answer",
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "x" * 5000}]},
+            }
+        )
+        + "\n"
+    ).encode()
+    split = len(answer) // 2
+
+    jsonl.write_bytes(answer[:split])
+    path = tailer._resolve_path()
+    await tailer._drain(path)
+    assert events == []
+
+    with jsonl.open("ab") as fh:
+        fh.write(answer[split:])
+        fh.write(b'{"uuid": "after", "type": "assistant"}\n')
+    await tailer._drain(path)
+    assert [e["uuid"] for e in events] == ["answer", "after"]
+    assert len(events[0]["message"]["content"][0]["text"]) == 5000
+
+
+async def test_drain_holds_a_line_that_has_no_newline_yet(tmp_path):
+    from leashd.agents.runtimes.tmux_session import encode_project_dir
+
+    sess = _fake_session("/work")
+    tailer, events, root = _tailer(tmp_path, sess)
+    proj = root / encode_project_dir("/work")
+    proj.mkdir(parents=True)
+    jsonl = proj / "uuid-1.jsonl"
+    jsonl.write_bytes(b'{"uuid": "a", "type": "user"}')
+
+    path = tailer._resolve_path()
+    await tailer._drain(path)
+    assert events == []
+    assert tailer._offset == 0
+
+    with jsonl.open("ab") as fh:
+        fh.write(b"\n")
+    await tailer._drain(path)
+    assert [e["uuid"] for e in events] == ["a"]
+
+
 def _resume_tailer(tmp_path, session):
     events: list[dict] = []
 

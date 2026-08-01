@@ -683,3 +683,61 @@ class TestEngineStreamingOverflow:
             m for m in connector.sent_messages if m.get("message_id") is not None
         ]
         assert len(streaming_msgs) >= 2
+
+
+class TestStreamingHidesFileMarkers:
+    """A delivery marker is plumbing — it must never be rendered to the user."""
+
+    def _rendered(self, connector) -> list[str]:
+        return [m["text"] for m in connector.sent_messages] + [
+            m["text"] for m in connector.edited_messages
+        ]
+
+    async def test_marker_never_shown_while_streaming(self):
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0.0)
+
+        await responder.on_chunk("Coverage is 91%.\n\n")
+        await responder.on_chunk("[[leashd:file coverage.html]]")
+
+        assert all("leashd:file" not in t for t in self._rendered(connector))
+
+    async def test_partial_marker_never_shown(self):
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0.0)
+
+        await responder.on_chunk("Done.\n\n[[leashd:fi")
+
+        assert all("leashd:fi" not in t for t in self._rendered(connector))
+
+    async def test_marker_in_an_overflowed_window_is_not_left_behind(self):
+        from leashd.core.engine import _MAX_STREAMING_DISPLAY
+        from leashd.core.file_delivery import strip_file_markers
+
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0.0)
+
+        head = "A" * (_MAX_STREAMING_DISPLAY - 100)
+        chunks = [head, "[[leashd:file early.png]]", "B" * 300, "tail."]
+        for chunk in chunks:
+            await responder.on_chunk(chunk)
+        await responder.finalize(strip_file_markers("".join(chunks)))
+
+        assert all("leashd:file" not in t for t in self._rendered(connector))
+
+    async def test_marker_hidden_when_activity_pauses_the_cursor(self):
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0.0)
+
+        await responder.on_chunk("Report ready.\n[[leashd:file out.pdf]]")
+        await responder.on_activity(ToolActivity(tool_name="Bash", description="ls"))
+
+        assert all("leashd:file" not in t for t in self._rendered(connector))
+
+    async def test_plain_brackets_still_render(self):
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=0.0)
+
+        await responder.on_chunk("See [the docs] and array[0] for details.")
+
+        assert any("array[0]" in t for t in self._rendered(connector))

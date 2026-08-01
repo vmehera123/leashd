@@ -59,7 +59,11 @@ The fake Bot API enforces real-Telegram semantics: at-least-once `getUpdates`
 (updates redeliver until confirmed by a higher offset), 4096-char text limits,
 `message is not modified` / `message to edit|delete not found` errors, and the
 64-byte `callback_data` limit — rejections surface in `errors`/`state` instead
-of being silently accepted.
+of being silently accepted. It also parses `parse_mode=HTML` the way Telegram
+does: an unknown or unbalanced tag is a 400 (`can't parse entities`), and both
+the length ceiling and the stored message text are measured on the *stripped*
+text — so `calls` shows the HTML you sent while `state` shows what a user
+would see.
 
 ## Reading the timeline
 

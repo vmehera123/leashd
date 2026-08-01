@@ -54,8 +54,8 @@ class _PartialConnector(BaseConnector):
     async def request_approval(self, chat_id, approval_id, description, tool_name=""):
         return None
 
-    async def send_file(self, chat_id, file_path) -> None:
-        pass
+    async def send_file(self, chat_id, file_path, *, caption="") -> bool:
+        return True
 
 
 class TestBaseConnectorAbstract:
@@ -265,8 +265,10 @@ class TestMockConnectorFidelity:
 
     async def test_send_file_records_path(self):
         mc = MockConnector()
-        await mc.send_file("42", "/tmp/test.txt")
+        delivered = await mc.send_file("42", "/tmp/test.txt", caption="test.txt")
+        assert delivered is True
         assert mc.sent_messages[0]["file_path"] == "/tmp/test.txt"
+        assert mc.sent_files[0]["caption"] == "test.txt"
 
     async def test_simulate_approval_calls_resolver(self):
         mc = MockConnector()

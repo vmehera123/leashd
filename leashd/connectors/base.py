@@ -101,7 +101,10 @@ class BaseConnector(ABC):
     ) -> str | None: ...
 
     @abstractmethod
-    async def send_file(self, chat_id: str, file_path: str) -> None: ...
+    async def send_file(
+        self, chat_id: str, file_path: str, *, caption: str = ""
+    ) -> bool:
+        """Deliver a real file to the chat. Returns True when it landed."""
 
     async def send_message_with_id(
         self,

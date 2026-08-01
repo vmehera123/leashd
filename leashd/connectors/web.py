@@ -8,6 +8,7 @@ import uuid
 from collections.abc import Callable, Coroutine
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 
 import structlog
 
@@ -17,6 +18,7 @@ from leashd.connectors.base import (
     InlineButton,
     MessageHandler,
 )
+from leashd.core.file_delivery import format_bytes
 from leashd.web.app import create_app
 from leashd.web.models import ServerMessage
 from leashd.web.ws_handler import WebSocketHandler
@@ -199,14 +201,37 @@ class WebConnector(BaseConnector):
         )
         return approval_id
 
-    async def send_file(self, chat_id: str, file_path: str) -> None:
+    async def send_file(
+        self, chat_id: str, file_path: str, *, caption: str = ""
+    ) -> bool:
+        """Offer the file as an authenticated download link.
+
+        The browser cannot receive an upload the way Telegram does, so the
+        chat gets a link the WebUI fetches with its API key; the endpoint
+        re-runs the same sandbox and credential gate before serving bytes.
+
+        The label is a filename, and ``[draft] notes.md`` is a filename a
+        person writes — its brackets are escaped so the link survives
+        Markdown rendering.
+        """
+        path = Path(file_path)
+        try:
+            size = path.stat().st_size
+        except OSError:
+            logger.warning("web_send_file_unreadable", file_path=file_path)
+            return False
+        label = (caption or path.name).replace("[", "\\[").replace("]", "\\]")
+        url = "/api/files/download?path=" + quote(str(path), safe="")
         await self._ws_handler.send_to(
             chat_id,
             ServerMessage(
                 type="message",
-                payload={"text": f"📎 File: {file_path}"},
+                payload={
+                    "text": f"📎 [{label}]({url}) ({format_bytes(size)})",
+                },
             ),
         )
+        return True
 
     async def send_message_with_id(self, chat_id: str, text: str) -> str | None:
         message_id = str(uuid.uuid4())

@@ -101,6 +101,33 @@ class AuditLogger:
             entry["user_id"] = user_id
         self._write(entry)
 
+    def log_file_delivery(
+        self,
+        session_id: str,
+        *,
+        chat_id: str,
+        trigger: str,
+        delivered: bool,
+        path: str | None = None,
+        size: int | None = None,
+        reason: str | None = None,
+    ) -> None:
+        """Record a file leaving the machine, or the refusal that stopped it."""
+        entry: dict[str, Any] = {
+            "event": "file_delivery",
+            "session_id": session_id,
+            "chat_id": chat_id,
+            "trigger": trigger,
+            "delivered": delivered,
+        }
+        if path is not None:
+            entry["path"] = path
+        if size is not None:
+            entry["size"] = size
+        if reason is not None:
+            entry["reason"] = reason
+        self._write(entry)
+
     def get_recent_entries(
         self, session_id: str, limit: int = 20
     ) -> list[dict[str, Any]]:

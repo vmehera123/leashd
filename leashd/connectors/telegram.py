@@ -7,7 +7,7 @@ import re
 from collections.abc import Callable, Coroutine
 from datetime import timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, TypeVar, cast
+from typing import TYPE_CHECKING, TypeVar
 
 import structlog
 from telegram import (
@@ -17,7 +17,7 @@ from telegram import (
     Message,
     Update,
 )
-from telegram.constants import ChatAction
+from telegram.constants import ChatAction, ParseMode
 from telegram.error import BadRequest, NetworkError, RetryAfter
 from telegram.ext import (
     Application,
@@ -34,6 +34,14 @@ from leashd.connectors.base import (
     BaseConnector,
     InlineButton,
 )
+from leashd.connectors.telegram_markdown import (
+    Chunk,
+    code_span,
+    escape,
+    quote_block,
+    render_chunks,
+    render_one,
+)
 from leashd.exceptions import ConnectorError
 
 if TYPE_CHECKING:
@@ -42,6 +50,13 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 _MAX_MESSAGE_LENGTH = 4000  # Telegram limit is 4096; leave buffer
+_MAX_CAPTION_LENGTH = 1024  # Bot API caption ceiling
+_MAX_UPLOAD_BYTES = 50 * 1000 * 1000  # Bot API sendDocument ceiling
+_MAX_PHOTO_BYTES = 10 * 1000 * 1000  # Bot API sendPhoto ceiling
+_PHOTO_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".webp"})
+_MARKDOWN_SUFFIXES = frozenset({".md", ".markdown", ".mdx"})
+_PREVIEW_SUFFIXES = _MARKDOWN_SUFFIXES | {".txt", ".text"}
+_MAX_PREVIEW_BYTES = 32 * 1024
 _APPROVAL_PREFIX = "approval:"
 _INTERACTION_PREFIX = "interact:"
 _CALLBACK_DATA_MAX_BYTES = 64
@@ -116,6 +131,20 @@ def _activity_label(tool_name: str, description: str = "") -> tuple[str, str]:
     return ("⏳", "Running")
 
 
+def _activity_chunk(emoji: str, verb: str, description: str) -> Chunk:
+    """Build the activity line with the tool's argument as literal code.
+
+    A description is a command or path, not prose — rendering it as Markdown
+    would let a ``*`` glob or an ``_`` in a filename turn into emphasis, so it
+    is escaped into a code span instead of being parsed.
+    """
+    label = f"{emoji} {verb}: "
+    body = description[: _MAX_MESSAGE_LENGTH - len(label)]
+    if not body.strip():
+        return Chunk(label.rstrip(), escape(label.rstrip()))
+    return Chunk(f"{label}{body}", f"{escape(label)}{code_span(body)}")
+
+
 def _truncate_callback_data(data: str) -> str:
     """Truncate callback_data to fit Telegram's 64-byte limit (byte-safe)."""
     if len(data.encode()) <= _CALLBACK_DATA_MAX_BYTES:
@@ -177,6 +206,55 @@ async def _retry_on_network_error(
     raise ConnectorError(f"{operation} failed after {max_retries} retries: {last_exc}")
 
 
+_ENTITY_ERROR_MARKERS = ("parse entities", "unsupported start tag", "end tag", "entity")
+
+
+def _is_entity_error(exc: BadRequest) -> bool:
+    """Whether Telegram rejected the markup rather than the request itself.
+
+    Only a markup complaint justifies resending as plain text — retrying
+    ``message is not modified`` or a missing message would duplicate or
+    re-fail the send.
+    """
+    message = str(exc).lower()
+    return any(marker in message for marker in _ENTITY_ERROR_MARKERS)
+
+
+async def _send_rendered(
+    send: Callable[[str, str | None], Coroutine[object, object, _T]],
+    chunk: Chunk,
+    *,
+    operation: str,
+) -> _T:
+    """Send a rendered chunk, falling back to its Markdown source on a parse error.
+
+    The renderer aims to emit only markup Telegram accepts, but a rejected
+    message must never be a lost message, so anything it refuses to parse is
+    resent verbatim with no parse mode.
+    """
+    try:
+        return await _retry_on_network_error(
+            lambda: send(chunk.html, ParseMode.HTML),
+            max_retries=_SEND_MAX_RETRIES,
+            base_delay=_SEND_BASE_DELAY,
+            max_delay=_SEND_MAX_DELAY,
+            operation=operation,
+        )
+    except BadRequest as exc:
+        if not _is_entity_error(exc):
+            raise
+        logger.warning(
+            "telegram_html_parse_rejected", operation=operation, error=str(exc)
+        )
+        return await _retry_on_network_error(
+            lambda: send(chunk.source, None),
+            max_retries=_SEND_MAX_RETRIES,
+            base_delay=_SEND_BASE_DELAY,
+            max_delay=_SEND_MAX_DELAY,
+            operation=f"{operation}_plain",
+        )
+
+
 class TelegramConnector(BaseConnector):
     def __init__(self, bot_token: str, api_base_url: str | None = None) -> None:
         super().__init__()
@@ -218,6 +296,7 @@ class TelegramConnector(BaseConnector):
                     "stop",
                     "web",
                     "goal",
+                    "file",
                 ],
                 self._on_command,
             )
@@ -268,20 +347,21 @@ class TelegramConnector(BaseConnector):
     ) -> None:
         if self._app is None:
             return
-        chunks = _split_text(text)
+        chunks = render_chunks(text, _MAX_MESSAGE_LENGTH)
         markup = _to_telegram_markup(buttons) if buttons else None
         bot = self._app.bot
         try:
             for i, chunk in enumerate(chunks):
                 is_last = i == len(chunks) - 1
                 rm = markup if is_last else None
-                await _retry_on_network_error(
-                    lambda _c=chunk, _rm=rm: bot.send_message(  # type: ignore[misc]
-                        chat_id=int(chat_id), text=_c, reply_markup=_rm
+                await _send_rendered(
+                    lambda body, mode, _rm=rm: bot.send_message(  # type: ignore[misc]
+                        chat_id=int(chat_id),
+                        text=body,
+                        reply_markup=_rm,
+                        parse_mode=mode,
                     ),
-                    max_retries=_SEND_MAX_RETRIES,
-                    base_delay=_SEND_BASE_DELAY,
-                    max_delay=_SEND_MAX_DELAY,
+                    chunk,
                     operation="send_message",
                 )
             logger.info(
@@ -294,16 +374,20 @@ class TelegramConnector(BaseConnector):
             logger.exception("telegram_send_message_failed", chat_id=chat_id)
 
     async def send_message_with_id(self, chat_id: str, text: str) -> str | None:
+        return await self._send_chunk_with_id(
+            chat_id, render_one(text, _MAX_MESSAGE_LENGTH)
+        )
+
+    async def _send_chunk_with_id(self, chat_id: str, chunk: Chunk) -> str | None:
         if self._app is None:
             return None
         bot = self._app.bot
-        truncated = text[:_MAX_MESSAGE_LENGTH]
         try:
-            msg = await _retry_on_network_error(
-                lambda: bot.send_message(chat_id=int(chat_id), text=truncated),
-                max_retries=_SEND_MAX_RETRIES,
-                base_delay=_SEND_BASE_DELAY,
-                max_delay=_SEND_MAX_DELAY,
+            msg = await _send_rendered(
+                lambda body, mode: bot.send_message(
+                    chat_id=int(chat_id), text=body, parse_mode=mode
+                ),
+                chunk,
                 operation="send_message_with_id",
             )
             return str(msg.message_id)
@@ -315,17 +399,15 @@ class TelegramConnector(BaseConnector):
         if self._app is None:
             return
         bot = self._app.bot
-        truncated = text[:_MAX_MESSAGE_LENGTH]
         try:
-            await _retry_on_network_error(
-                lambda: bot.edit_message_text(
+            await _send_rendered(
+                lambda body, mode: bot.edit_message_text(
                     chat_id=int(chat_id),
                     message_id=int(message_id),
-                    text=truncated,
+                    text=body,
+                    parse_mode=mode,
                 ),
-                max_retries=_SEND_MAX_RETRIES,
-                base_delay=_SEND_BASE_DELAY,
-                max_delay=_SEND_MAX_DELAY,
+                render_one(text, _MAX_MESSAGE_LENGTH),
                 operation="edit_message",
             )
         except Exception:
@@ -348,21 +430,29 @@ class TelegramConnector(BaseConnector):
         text: str,
         buttons: list[list[InlineButton]],
     ) -> str | None:
+        return await self._send_chunk_with_buttons(
+            chat_id, render_one(text, _MAX_MESSAGE_LENGTH), buttons
+        )
+
+    async def _send_chunk_with_buttons(
+        self,
+        chat_id: str,
+        chunk: Chunk,
+        buttons: list[list[InlineButton]],
+    ) -> str | None:
         if self._app is None:
             return None
         bot = self._app.bot
         markup = _to_telegram_markup(buttons)
-        truncated = text[:_MAX_MESSAGE_LENGTH]
         try:
-            msg = await _retry_on_network_error(
-                lambda: bot.send_message(
+            msg = await _send_rendered(
+                lambda body, mode: bot.send_message(
                     chat_id=int(chat_id),
-                    text=truncated,
+                    text=body,
                     reply_markup=markup,
+                    parse_mode=mode,
                 ),
-                max_retries=_SEND_MAX_RETRIES,
-                base_delay=_SEND_BASE_DELAY,
-                max_delay=_SEND_MAX_DELAY,
+                chunk,
                 operation="send_message_with_buttons",
             )
             return str(msg.message_id)
@@ -390,20 +480,21 @@ class TelegramConnector(BaseConnector):
         if self._app is None:
             return None
         emoji, verb = _activity_label(tool_name, description)
-        text = f"{emoji} {verb}: {description}"
+        chunk = _activity_chunk(emoji, verb, description)
+        text = chunk.source
         async with self._activity_lock(chat_id):
             existing = self._activity_message_id.get(chat_id)
             if existing:
                 if self._activity_last_text.get(chat_id) == text:
                     return existing
-                edited = await self._try_edit_message(chat_id, existing, text)
+                edited = await self._try_edit_chunk(chat_id, existing, chunk)
                 if edited:
                     self._activity_last_text[chat_id] = text
                     return existing
                 await self._try_delete_message(chat_id, existing)
                 self._activity_message_id.pop(chat_id, None)
                 self._activity_last_text.pop(chat_id, None)
-            msg_id = await self.send_message_with_id(chat_id, text)
+            msg_id = await self._send_chunk_with_id(chat_id, chunk)
             if msg_id:
                 self._activity_message_id[chat_id] = msg_id
                 self._activity_last_text[chat_id] = text
@@ -435,20 +526,25 @@ class TelegramConnector(BaseConnector):
 
     async def _try_edit_message(self, chat_id: str, message_id: str, text: str) -> bool:
         """Edit a message with retry. Returns True on success."""
+        return await self._try_edit_chunk(
+            chat_id, message_id, render_one(text, _MAX_MESSAGE_LENGTH)
+        )
+
+    async def _try_edit_chunk(
+        self, chat_id: str, message_id: str, chunk: Chunk
+    ) -> bool:
         if self._app is None:
             return False
         app = self._app
-        truncated = text[:_MAX_MESSAGE_LENGTH]
         try:
-            await _retry_on_network_error(
-                lambda: app.bot.edit_message_text(
+            await _send_rendered(
+                lambda body, mode: app.bot.edit_message_text(
                     chat_id=int(chat_id),
                     message_id=int(message_id),
-                    text=truncated,
+                    text=body,
+                    parse_mode=mode,
                 ),
-                max_retries=_SEND_MAX_RETRIES,
-                base_delay=_SEND_BASE_DELAY,
-                max_delay=_SEND_MAX_DELAY,
+                chunk,
                 operation="edit_activity",
             )
             return True
@@ -482,9 +578,8 @@ class TelegramConnector(BaseConnector):
         if self._app is None:
             return []
         ids: list[str] = []
-        chunks = _split_text(plan_text)
-        for chunk in chunks:
-            msg_id = await self.send_message_with_id(chat_id, chunk)
+        for chunk in render_chunks(plan_text, _MAX_MESSAGE_LENGTH):
+            msg_id = await self._send_chunk_with_id(chat_id, chunk)
             if msg_id:
                 ids.append(msg_id)
         self._plan_message_ids[chat_id] = ids
@@ -520,8 +615,11 @@ class TelegramConnector(BaseConnector):
         preview = (
             message_preview[:200] if len(message_preview) > 200 else message_preview
         )
-        text = (
-            f'\U0001f4ac New message received:\n"{preview}"\n\nInterrupt current task?'
+        header = "\U0001f4ac New message received:"
+        footer = "Interrupt current task?"
+        chunk = Chunk(
+            f'{header}\n"{preview}"\n\n{footer}',
+            f"{escape(header)}\n{quote_block(preview)}\n\n{escape(footer)}",
         )
         buttons = [
             [
@@ -535,7 +633,7 @@ class TelegramConnector(BaseConnector):
                 ),
             ]
         ]
-        return await self._send_message_with_id_and_buttons(chat_id, text, buttons)
+        return await self._send_chunk_with_buttons(chat_id, chunk, buttons)
 
     async def _delayed_delete(
         self, chat_id: str, message_id: str, delay: float
@@ -611,39 +709,137 @@ class TelegramConnector(BaseConnector):
         )
         return msg_id
 
-    async def send_file(self, chat_id: str, file_path: str) -> None:
+    async def send_file(
+        self, chat_id: str, file_path: str, *, caption: str = ""
+    ) -> bool:
+        """Upload a real file to the chat.
+
+        Images within Telegram's photo ceiling go as a photo so they render
+        inline on mobile; everything else goes as a document, which preserves
+        the exact bytes and filename. A photo the API rejects (dimension /
+        ratio limits it applies only to photos) is retried as a document.
+        """
         if self._app is None:
-            return
-        bot = self._app.bot
+            return False
+        path = Path(file_path)
         try:
-            path = Path(file_path)
-            with path.open("rb") as f:
+            data = await asyncio.to_thread(path.read_bytes)
+        except OSError:
+            logger.warning(
+                "telegram_send_file_unreadable", chat_id=chat_id, file_path=file_path
+            )
+            return False
+        if not data or len(data) > _MAX_UPLOAD_BYTES:
+            logger.warning(
+                "telegram_send_file_rejected",
+                chat_id=chat_id,
+                file_path=file_path,
+                size=len(data),
+            )
+            return False
 
-                async def _send() -> Message:
-                    f.seek(0)
-                    return cast(
-                        Message,
-                        await bot.send_document(chat_id=int(chat_id), document=f),
-                    )
+        bot = self._app.bot
+        label = caption[:_MAX_CAPTION_LENGTH]
+        text = code_span(label) if label else None
+        mode = ParseMode.HTML if text else None
+        as_photo = (
+            path.suffix.lower() in _PHOTO_SUFFIXES and len(data) <= _MAX_PHOTO_BYTES
+        )
 
+        if as_photo:
+            try:
                 await _retry_on_network_error(
-                    _send,
+                    lambda: bot.send_photo(
+                        chat_id=int(chat_id),
+                        photo=data,
+                        filename=path.name,
+                        caption=text,
+                        parse_mode=mode,
+                    ),
                     max_retries=_SEND_MAX_RETRIES,
                     base_delay=_SEND_BASE_DELAY,
                     max_delay=_SEND_MAX_DELAY,
-                    operation="send_file",
+                    operation="send_photo",
                 )
-            logger.info(
-                "telegram_file_sent",
-                chat_id=chat_id,
-                file_path=file_path,
+            except BadRequest:
+                logger.info(
+                    "telegram_photo_fallback_document",
+                    chat_id=chat_id,
+                    file_path=file_path,
+                )
+            except Exception:
+                logger.exception(
+                    "telegram_send_file_failed", chat_id=chat_id, file_path=file_path
+                )
+                return False
+            else:
+                logger.info(
+                    "telegram_file_sent",
+                    chat_id=chat_id,
+                    file_path=file_path,
+                    size=len(data),
+                    kind="photo",
+                )
+                return True
+
+        try:
+            await _retry_on_network_error(
+                lambda: bot.send_document(
+                    chat_id=int(chat_id),
+                    document=data,
+                    filename=path.name,
+                    caption=text,
+                    parse_mode=mode,
+                ),
+                max_retries=_SEND_MAX_RETRIES,
+                base_delay=_SEND_BASE_DELAY,
+                max_delay=_SEND_MAX_DELAY,
+                operation="send_file",
             )
         except Exception:
             logger.exception(
-                "telegram_send_file_failed",
-                chat_id=chat_id,
-                file_path=file_path,
+                "telegram_send_file_failed", chat_id=chat_id, file_path=file_path
             )
+            return False
+        logger.info(
+            "telegram_file_sent",
+            chat_id=chat_id,
+            file_path=file_path,
+            size=len(data),
+            kind="document",
+        )
+        await self._send_file_preview(chat_id, path, data)
+        return True
+
+    async def _send_file_preview(self, chat_id: str, path: Path, data: bytes) -> None:
+        """Post a text file's contents beside the attachment, rendered.
+
+        Telegram shows a document as an opaque attachment — it will not render
+        a ``.md`` file's contents — so a short Markdown or text file is also
+        sent as a message, which is the only way to read it without
+        downloading it first.
+        """
+        suffix = path.suffix.lower()
+        if suffix not in _PREVIEW_SUFFIXES or len(data) > _MAX_PREVIEW_BYTES:
+            return
+        try:
+            source = data.decode()
+        except UnicodeDecodeError:
+            return
+        if not source.strip() or len(source) > _MAX_MESSAGE_LENGTH:
+            return
+        chunk = (
+            render_one(source, _MAX_MESSAGE_LENGTH)
+            if suffix in _MARKDOWN_SUFFIXES
+            else Chunk(source, f"<pre>{escape(source)}</pre>")
+        )
+        sent = await self._send_chunk_with_id(chat_id, chunk)
+        logger.info(
+            "telegram_file_preview_sent",
+            chat_id=chat_id,
+            file_path=str(path),
+            delivered=bool(sent),
+        )
 
     async def send_question(
         self,
@@ -988,6 +1184,26 @@ class TelegramConnector(BaseConnector):
         if data.startswith(_APPROVAL_PREFIX):
             await self._handle_approval_callback(query, data)
 
+    async def _append_status(self, query: CallbackQuery, status: str) -> None:
+        """Re-edit a resolved prompt to carry its outcome.
+
+        The rebuilt HTML comes from ``text_html``, not ``text`` — under a parse
+        mode Telegram returns the message stripped of its entities, so echoing
+        ``text`` back would flatten the prompt's formatting.
+        """
+        message = query.message
+        if not isinstance(message, Message):
+            return
+        chunk = Chunk(
+            f"{message.text or ''}\n\n{status}",
+            f"{message.text_html or ''}\n\n{escape(status)}",
+        )
+        await _send_rendered(
+            lambda body, mode: query.edit_message_text(text=body, parse_mode=mode),
+            chunk,
+            operation="edit_callback_message",
+        )
+
     async def _handle_approval_callback(self, query: CallbackQuery, data: str) -> None:
         suffix = data[len(_APPROVAL_PREFIX) :]
         if ":" not in suffix:
@@ -1050,8 +1266,7 @@ class TelegramConnector(BaseConnector):
             status = "Expired (approval no longer active)"
 
         try:
-            raw = f"{query.message.text}\n\n{status}"
-            await query.edit_message_text(raw)
+            await self._append_status(query, status)
             chat_id = str(query.message.chat_id)
             msg_id = str(query.message.message_id)
             self.schedule_message_cleanup(chat_id, msg_id)
@@ -1092,8 +1307,9 @@ class TelegramConnector(BaseConnector):
 
         if not resolved:
             try:
-                raw = f"{query.message.text}\n\nExpired (interaction no longer active)"
-                await query.edit_message_text(raw)
+                await self._append_status(
+                    query, "Expired (interaction no longer active)"
+                )
             except Exception:
                 logger.exception("telegram_edit_interaction_message_failed")
             return
@@ -1158,8 +1374,7 @@ class TelegramConnector(BaseConnector):
             return
 
         try:
-            raw = f"{query.message.text}\n\n{status}"
-            await query.edit_message_text(raw)
+            await self._append_status(query, status)
             if resolved:
                 chat_id = str(query.message.chat_id)
                 msg_id = str(query.message.message_id)
@@ -1247,32 +1462,6 @@ class TelegramConnector(BaseConnector):
             error=str(context.error),
             update=str(update),
         )
-
-
-def _split_text(text: str) -> list[str]:
-    if not text:
-        return [""]
-    if len(text) <= _MAX_MESSAGE_LENGTH:
-        return [text]
-
-    chunks: list[str] = []
-    while text:
-        if len(text) <= _MAX_MESSAGE_LENGTH:
-            chunks.append(text)
-            break
-
-        split_at = text.rfind("\n", 0, _MAX_MESSAGE_LENGTH)
-        if split_at <= 0:
-            split_at = text.rfind(" ", 0, _MAX_MESSAGE_LENGTH)
-        if split_at <= 0:
-            split_at = _MAX_MESSAGE_LENGTH
-
-        chunks.append(text[:split_at])
-        text = (
-            text[split_at + 1 :] if split_at < _MAX_MESSAGE_LENGTH else text[split_at:]
-        )
-
-    return chunks
 
 
 def _to_telegram_markup(

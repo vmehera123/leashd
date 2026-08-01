@@ -113,7 +113,7 @@ async def _maybe_start_tmux_hook_server(config: LeashdConfig) -> Any:
 
 
 async def _run_cli(config: LeashdConfig) -> None:
-    engine = build_engine(config)
+    engine = build_engine(config, reap_orphan_tmux=True)
     hook_server = await _maybe_start_tmux_hook_server(config)
     await engine.startup()
 
@@ -158,7 +158,7 @@ async def _run_telegram(config: LeashdConfig) -> None:
         config.telegram_bot_token,  # type: ignore[arg-type]
         api_base_url=config.telegram_api_base_url,
     )
-    engine = build_engine(config, connector=connector)
+    engine = build_engine(config, connector=connector, reap_orphan_tmux=True)
     hook_server = await _maybe_start_tmux_hook_server(config)
     await engine.startup()
     try:
@@ -251,7 +251,12 @@ async def _run_web(config: LeashdConfig) -> None:
     connector = WebConnector(
         config, message_store=message_store, tmux_session_manager=tmux_sm
     )
-    engine = build_engine(config, connector=connector, message_store=message_store)
+    engine = build_engine(
+        config,
+        connector=connector,
+        message_store=message_store,
+        reap_orphan_tmux=True,
+    )
     connector.ws_handler.set_on_reconnect_state(_make_reconnect_state_callback(engine))
     await engine.startup()
 
@@ -306,7 +311,12 @@ async def _run_multi(config: LeashdConfig) -> None:
     web_connector._on_connect = lambda cid: multi.register_route(cid, web_connector)
     web_connector._on_disconnect = lambda cid: multi.unregister_route(cid)
 
-    engine = build_engine(config, connector=multi, message_store=message_store)
+    engine = build_engine(
+        config,
+        connector=multi,
+        message_store=message_store,
+        reap_orphan_tmux=True,
+    )
     web_connector.ws_handler.set_on_reconnect_state(
         _make_reconnect_state_callback(engine)
     )

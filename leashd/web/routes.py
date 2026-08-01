@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 import aiosqlite
 import structlog
 from fastapi import APIRouter, Header
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from leashd.config_store import (
     clear_directory_setting,
@@ -23,6 +23,8 @@ from leashd.config_store import (
     update_config_sections,
 )
 from leashd.core.config import build_directory_names
+from leashd.core.file_delivery import resolve_outgoing_files
+from leashd.core.safety.sandbox import SandboxEnforcer
 from leashd.daemon import signal_reload
 from leashd.web.auth import AuthResult, verify_api_key
 from leashd.web.models import TabInfo, WorkspaceTabInfo
@@ -70,6 +72,37 @@ def create_rest_router(
                 "working_directory": str(config.approved_directories[0]),
                 "directories": [str(d) for d in config.approved_directories],
             }
+        )
+
+    @router.get("/files/download", response_model=None)
+    async def download_file(
+        path: str = "", x_api_key: str = Header("")
+    ) -> FileResponse | JSONResponse:
+        """Serve a delivered file — re-gated on every request, never trusted."""
+        if err := _check_auth(x_api_key, config):
+            return JSONResponse(
+                status_code=401, content={"status": "error", "error": err}
+            )
+        if not path:
+            return JSONResponse(
+                status_code=400, content={"status": "error", "error": "path required"}
+            )
+        files, errors = resolve_outgoing_files(
+            [path],
+            working_directory=str(config.approved_directories[0]),
+            sandbox=SandboxEnforcer(list(config.approved_directories)),
+        )
+        if not files:
+            logger.warning("webui_file_download_refused", path=path, reasons=errors)
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "status": "error",
+                    "error": errors[0] if errors else "refused",
+                },
+            )
+        return FileResponse(
+            files[0], filename=files[0].name, media_type="application/octet-stream"
         )
 
     @router.post("/auth")

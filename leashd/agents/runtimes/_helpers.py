@@ -86,6 +86,16 @@ UV_PROJECT_GUIDANCE = (
     "the project's locked dependencies."
 )
 
+FILE_DELIVERY_GUIDANCE = (
+    "To hand the user an actual file (report, screenshot, log, archive) "
+    "instead of a path they cannot open, end your reply with a marker on its "
+    "own line: [[leashd:file <path>]] — one marker per file, paths relative to "
+    "the working directory. leashd uploads the real file to the chat and "
+    "removes the marker from your message. Only do this when a file is the "
+    "deliverable; files outside the approved directories, credential-shaped "
+    "files, and files over 50 MB are refused."
+)
+
 AGENT_BROWSER_GUIDANCE = (
     "Browser automation uses agent-browser on this machine, so pages can show "
     "Cloudflare / JS anti-bot challenges. After `agent-browser open`, do not "
@@ -199,6 +209,7 @@ def build_runtime_guidance(config: LeashdConfig, session: Session) -> str | None
         blocks.append(UV_PROJECT_GUIDANCE)
     if config.browser_backend == "agent-browser":
         blocks.append(AGENT_BROWSER_GUIDANCE)
+    blocks.append(FILE_DELIVERY_GUIDANCE)
     return "\n\n".join(blocks) if blocks else None
 
 

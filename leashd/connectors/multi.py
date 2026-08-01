@@ -72,8 +72,12 @@ class MultiConnector(BaseConnector):
             chat_id, approval_id, description, tool_name
         )
 
-    async def send_file(self, chat_id: str, file_path: str) -> None:
-        await self._get_connector(chat_id).send_file(chat_id, file_path)
+    async def send_file(
+        self, chat_id: str, file_path: str, *, caption: str = ""
+    ) -> bool:
+        return await self._get_connector(chat_id).send_file(
+            chat_id, file_path, caption=caption
+        )
 
     async def send_message_with_id(self, chat_id: str, text: str) -> str | None:
         return await self._get_connector(chat_id).send_message_with_id(chat_id, text)

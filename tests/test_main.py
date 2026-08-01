@@ -431,3 +431,30 @@ class TestReloadHandler:
         await asyncio.sleep(0.06)
 
         assert engine.reload_config.await_count == 2
+
+
+class TestDaemonOptsIntoTmuxReap:
+    """Only the daemon entrypoints own the tmux pane lifecycle, so only they
+    may ask build_engine to sweep leashd-owned panes off the shared socket."""
+
+    async def test_run_cli_opts_in(self, mock_engine, mock_config):
+        with (
+            patch("leashd.main.build_engine", return_value=mock_engine) as build,
+            patch("leashd.main._maybe_start_tmux_hook_server", return_value=None),
+            patch("builtins.input", side_effect=EOFError),
+        ):
+            await _run_cli(mock_config)
+        assert build.call_args.kwargs["reap_orphan_tmux"] is True
+
+    async def test_every_entrypoint_opts_in(self):
+        """Guards against a new/edited entrypoint silently losing the sweep."""
+        import inspect
+        import re
+
+        import leashd.main as main_mod
+
+        source = inspect.getsource(main_mod)
+        calls = re.findall(r"build_engine\((?:[^()]|\([^()]*\))*\)", source)
+        assert calls, "no build_engine call sites found — regex drifted"
+        for call in calls:
+            assert "reap_orphan_tmux=True" in call, f"missing opt-in: {call}"

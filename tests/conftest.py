@@ -20,7 +20,7 @@ from leashd.storage.memory import MemorySessionStore
 
 
 @pytest.fixture(autouse=True)
-def _isolate_env(monkeypatch):
+def _isolate_env(monkeypatch, tmp_path):
     """Prevent .env file and shell env from leaking into tests.
 
     Root cause: LeashdConfig.model_config has env_file=".env" which loads
@@ -30,6 +30,12 @@ def _isolate_env(monkeypatch):
     for key in list(os.environ):
         if key.startswith("LEASHD_"):
             monkeypatch.delenv(key, raising=False)
+    # Never let a LeashdConfig built without an explicit tmux_socket_dir fall
+    # back to the default ~/.leashd/tmux — that is the *running daemon's*
+    # socket, and code reached from tests (kill_owned_sessions, the managed
+    # --settings writers) would operate on live panes and the real config dir.
+    # An env var rather than a field default so explicit kwargs still win.
+    monkeypatch.setenv("LEASHD_TMUX_SOCKET_DIR", str(tmp_path / "tmux-isolated"))
 
 
 class MockConnector(BaseConnector):
@@ -56,6 +62,8 @@ class MockConnector(BaseConnector):
         self.scheduled_cleanups: list[dict] = []
         self.closed_agent_groups: list[str] = []
         self.completed_streams: list[dict] = []
+        self.sent_files: list[dict] = []
+        self.send_file_result = True
         self._support_streaming = support_streaming
         self._next_message_id = 1
         self._activity_message_id: dict[str, str] = {}
@@ -117,13 +125,23 @@ class MockConnector(BaseConnector):
     async def delete_message(self, chat_id: str, message_id: str) -> None:
         self.deleted_messages.append({"chat_id": chat_id, "message_id": message_id})
 
-    async def send_file(self, chat_id: str, file_path: str) -> None:
+    async def send_file(
+        self, chat_id: str, file_path: str, *, caption: str = ""
+    ) -> bool:
+        self.sent_files.append(
+            {
+                "chat_id": chat_id,
+                "file_path": file_path,
+                "caption": caption,
+            }
+        )
         self.sent_messages.append(
             {
                 "chat_id": chat_id,
                 "file_path": file_path,
             }
         )
+        return self.send_file_result
 
     async def send_question(
         self,

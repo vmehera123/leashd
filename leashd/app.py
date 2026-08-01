@@ -168,6 +168,7 @@ def build_engine(
     plugins: list[LeashdPlugin] | None = None,
     message_store: MessageStore | None = None,
     agent: BaseAgent | None = None,
+    reap_orphan_tmux: bool = False,
 ) -> Engine:
     if config is None:
         config = LeashdConfig()  # type: ignore[call-arg]  # pydantic-settings loads from env
@@ -367,15 +368,19 @@ def build_engine(
     )
 
     tsm = get_or_create_tmux_session_manager(config)
-    # Always reap leashd-owned tmux panes left by a prior daemon, regardless
-    # of the current runtime. `leashd restart` = stop + start as separate
-    # processes; a clean stop tears its own panes down, but a SIGKILL'd one
-    # (the stop_daemon 10s timeout) or a runtime switched away from tmux
-    # would otherwise leave a stale interactive `claude` serving the user.
-    # Strictly scoped to leashd's private socket + `leashd_*` names, so a
-    # user's own tmux is never touched; idempotent and cheap when there is
-    # nothing to reap.
-    tsm.kill_owned_sessions()
+    # Reap leashd-owned tmux panes left by a prior daemon, regardless of the
+    # current runtime. `leashd restart` = stop + start as separate processes;
+    # a clean stop tears its own panes down, but a SIGKILL'd one (the
+    # stop_daemon 10s timeout) or a runtime switched away from tmux would
+    # otherwise leave a stale interactive `claude` serving the user.
+    #
+    # Opt-in because it kills processes on a socket shared by every daemon on
+    # the machine: the socket is resolved from config, and any in-process
+    # build_engine() whose config leaves tmux_socket_dir at its default would
+    # otherwise reap the *live* daemon's panes. Only the daemon entrypoints in
+    # main.py own that lifecycle, so only they pass True.
+    if reap_orphan_tmux:
+        tsm.kill_owned_sessions()
     # Install + register the opt-in security-guidance plugin once per daemon,
     # runtime-agnostic (no-op unless LEASHD_SECURITY_GUIDANCE_ENABLED). The
     # managed --settings written per session then activate it via enabledPlugins.

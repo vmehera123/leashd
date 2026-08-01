@@ -5,21 +5,31 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from telegram import Message
+from telegram.constants import ParseMode
 from telegram.error import BadRequest, InvalidToken, NetworkError, RetryAfter, TimedOut
 
 from leashd.connectors.base import InlineButton
 from leashd.connectors.telegram import (
     _CALLBACK_DATA_MAX_BYTES,
+    _MAX_CAPTION_LENGTH,
     _MAX_MESSAGE_LENGTH,
     TelegramConnector,
     _retry_on_network_error,
-    _split_text,
     _to_telegram_markup,
     _truncate_callback_data,
+)
+from leashd.connectors.telegram_markdown import (
+    TELEGRAM_TEXT_LIMIT,
+    split_source,
+    visible_length,
 )
 from leashd.exceptions import ConnectorError
 
 # --- Pure function tests ---
+
+
+def _split_text(text):
+    return split_source(text, _MAX_MESSAGE_LENGTH)
 
 
 class TestSplitText:
@@ -226,7 +236,7 @@ class TestSendMessage:
         mock_app.bot.send_message.assert_awaited_once()
         call_kwargs = mock_app.bot.send_message.await_args.kwargs
         assert call_kwargs["chat_id"] == 123
-        assert "parse_mode" not in call_kwargs
+        assert call_kwargs["parse_mode"] == ParseMode.HTML
         assert call_kwargs["reply_markup"] is None
 
     async def test_sends_long_message_in_chunks(self, connector):
@@ -312,52 +322,132 @@ class TestRequestApproval:
 
 
 class TestSendFile:
-    async def test_sends_document(self, connector, tmp_path):
+    async def test_sends_document_with_real_bytes(self, connector, tmp_path):
         mock_app = _make_mock_app()
         connector._app = mock_app
 
-        test_file = tmp_path / "test.txt"
+        test_file = tmp_path / "report.txt"
         test_file.write_text("content")
 
-        await connector.send_file("123", str(test_file))
+        delivered = await connector.send_file("123", str(test_file))
 
+        assert delivered is True
         mock_app.bot.send_document.assert_awaited_once()
         call_kwargs = mock_app.bot.send_document.await_args.kwargs
         assert call_kwargs["chat_id"] == 123
+        assert call_kwargs["document"] == b"content"
+        assert call_kwargs["filename"] == "report.txt"
+
+    async def test_caption_passed_and_truncated(self, connector, tmp_path):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+
+        test_file = tmp_path / "report.txt"
+        test_file.write_text("content")
+
+        await connector.send_file("123", str(test_file), caption="x" * 2000)
+
+        call_kwargs = mock_app.bot.send_document.await_args.kwargs
+        assert visible_length(call_kwargs["caption"]) == _MAX_CAPTION_LENGTH
+        assert call_kwargs["parse_mode"] == ParseMode.HTML
+
+    async def test_image_goes_as_photo(self, connector, tmp_path):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+
+        shot = tmp_path / "screenshot.png"
+        shot.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+
+        delivered = await connector.send_file("123", str(shot), caption="screenshot")
+
+        assert delivered is True
+        mock_app.bot.send_photo.assert_awaited_once()
+        mock_app.bot.send_document.assert_not_awaited()
+        call_kwargs = mock_app.bot.send_photo.await_args.kwargs
+        assert call_kwargs["photo"] == b"\x89PNG\r\n\x1a\nfake"
+        assert call_kwargs["filename"] == "screenshot.png"
+
+    async def test_photo_rejected_falls_back_to_document(self, connector, tmp_path):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        mock_app.bot.send_photo = AsyncMock(
+            side_effect=BadRequest("PHOTO_INVALID_DIMENSIONS")
+        )
+
+        shot = tmp_path / "huge.png"
+        shot.write_bytes(b"\x89PNG" * 10)
+
+        delivered = await connector.send_file("123", str(shot))
+
+        assert delivered is True
+        mock_app.bot.send_document.assert_awaited_once()
+
+    async def test_oversized_file_not_uploaded(self, connector, tmp_path, monkeypatch):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        monkeypatch.setattr("leashd.connectors.telegram._MAX_UPLOAD_BYTES", 4)
+
+        test_file = tmp_path / "big.bin"
+        test_file.write_bytes(b"12345")
+
+        delivered = await connector.send_file("123", str(test_file))
+
+        assert delivered is False
+        mock_app.bot.send_document.assert_not_awaited()
+
+    async def test_empty_file_not_uploaded(self, connector, tmp_path):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+
+        test_file = tmp_path / "empty.txt"
+        test_file.write_bytes(b"")
+
+        delivered = await connector.send_file("123", str(test_file))
+
+        assert delivered is False
+        mock_app.bot.send_document.assert_not_awaited()
 
     async def test_send_nonexistent_file_logged_not_raised(self, connector):
         mock_app = _make_mock_app()
         connector._app = mock_app
 
-        await connector.send_file("123", "/nonexistent/path.txt")  # should not raise
+        delivered = await connector.send_file("123", "/nonexistent/path.txt")
 
+        assert delivered is False
         mock_app.bot.send_document.assert_not_awaited()
 
-    async def test_retry_resets_file_position(self, connector, tmp_path):
-        """File position is reset to 0 before each retry attempt."""
+    async def test_retry_resends_identical_bytes(self, connector, tmp_path):
+        """A network retry re-uploads the whole file, not a partially read one."""
         mock_app = _make_mock_app()
         connector._app = mock_app
 
-        test_file = tmp_path / "test.txt"
+        test_file = tmp_path / "report.txt"
         test_file.write_text("full content here")
 
-        positions_on_call: list[int] = []
+        payloads: list[bytes] = []
 
-        async def _track_position(**kwargs):
-            doc = kwargs["document"]
-            positions_on_call.append(doc.tell())
-            if len(positions_on_call) == 1:
-                doc.read()  # advance position, simulating partial read
+        async def _track_payload(**kwargs):
+            payloads.append(kwargs["document"])
+            if len(payloads) == 1:
                 raise NetworkError("transient")
             return MagicMock()
 
-        mock_app.bot.send_document = AsyncMock(side_effect=_track_position)
+        mock_app.bot.send_document = AsyncMock(side_effect=_track_payload)
 
-        await connector.send_file("123", str(test_file))
+        delivered = await connector.send_file("123", str(test_file))
 
-        assert len(positions_on_call) == 2
-        assert positions_on_call[0] == 0, "first call should start at position 0"
-        assert positions_on_call[1] == 0, "retry should reset position to 0"
+        assert delivered is True
+        assert payloads == [b"full content here", b"full content here"]
+
+    async def test_upload_failure_reported(self, connector, tmp_path):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        mock_app.bot.send_document = AsyncMock(side_effect=BadRequest("chat not found"))
+
+        test_file = tmp_path / "report.txt"
+        test_file.write_text("content")
+
+        assert await connector.send_file("123", str(test_file)) is False
 
 
 # --- Handler tests ---
@@ -525,7 +615,7 @@ class TestOnCallbackQuery:
 
         update.callback_query.edit_message_text.assert_awaited_once()
         call_args = update.callback_query.edit_message_text.await_args
-        edited_text = call_args[0][0]
+        edited_text = call_args.kwargs["text"]
         assert "Approved \u2713" in edited_text
 
     async def test_no_query_is_noop(self, connector):
@@ -587,7 +677,7 @@ class TestOnCallbackQuery:
         await connector._on_callback_query(update, MagicMock())
 
         update.callback_query.edit_message_text.assert_awaited_once()
-        edited_text = update.callback_query.edit_message_text.await_args[0][0]
+        edited_text = update.callback_query.edit_message_text.await_args.kwargs["text"]
         assert "Expired" in edited_text
 
     async def test_no_resolver_set_still_edits_message(self, connector):
@@ -595,7 +685,7 @@ class TestOnCallbackQuery:
         await connector._on_callback_query(update, MagicMock())
 
         update.callback_query.edit_message_text.assert_awaited_once()
-        edited_text = update.callback_query.edit_message_text.await_args[0][0]
+        edited_text = update.callback_query.edit_message_text.await_args.kwargs["text"]
         assert "Expired" in edited_text
 
     async def test_query_answer_failure_does_not_abort_handler(self, connector):
@@ -618,7 +708,7 @@ class TestOnCallbackQuery:
         update = _make_callback_update("approval:yes:abc-123")
         await connector._on_callback_query(update, MagicMock())
 
-        edited_text = update.callback_query.edit_message_text.await_args[0][0]
+        edited_text = update.callback_query.edit_message_text.await_args.kwargs["text"]
         assert "Expired" in edited_text
         assert "Approved \u2713" not in edited_text
 
@@ -636,7 +726,7 @@ class TestSendMessageWithId:
         assert result == "42"
         call_kwargs = mock_app.bot.send_message.await_args.kwargs
         assert call_kwargs["chat_id"] == 123
-        assert "parse_mode" not in call_kwargs
+        assert call_kwargs["parse_mode"] == ParseMode.HTML
 
     async def test_returns_none_on_error(self, connector):
         mock_app = _make_mock_app()
@@ -675,7 +765,7 @@ class TestEditMessage:
         call_kwargs = mock_app.bot.edit_message_text.await_args.kwargs
         assert call_kwargs["chat_id"] == 123
         assert call_kwargs["message_id"] == 42
-        assert "parse_mode" not in call_kwargs
+        assert call_kwargs["parse_mode"] == ParseMode.HTML
 
     async def test_no_app_is_noop(self, connector):
         await connector.edit_message("123", "42", "text")  # should not raise
@@ -713,8 +803,8 @@ class TestTelegramConnectorEdgeCases:
         await connector.send_typing_indicator("123")  # should not raise
 
     async def test_send_file_no_app_noop(self, connector):
-        """send_file with no app does nothing."""
-        await connector.send_file("123", "/some/file.txt")  # should not raise
+        """send_file with no app reports no delivery."""
+        assert await connector.send_file("123", "/some/file.txt") is False
 
     async def test_callback_query_no_data_ignored(self, connector):
         """Callback query with None data is handled gracefully."""
@@ -968,7 +1058,7 @@ class TestApproveAllCallback:
         update = _make_callback_update("approval:all:abc-123")
         await connector._on_callback_query(update, MagicMock())
 
-        edited_text = update.callback_query.edit_message_text.await_args[0][0]
+        edited_text = update.callback_query.edit_message_text.await_args.kwargs["text"]
         assert "Bash" in edited_text
         assert "Approved \u2713" in edited_text
 
@@ -981,7 +1071,7 @@ class TestApproveAllCallback:
         update = _make_callback_update("approval:all:abc-123")
         await connector._on_callback_query(update, MagicMock())
 
-        edited_text = update.callback_query.edit_message_text.await_args[0][0]
+        edited_text = update.callback_query.edit_message_text.await_args.kwargs["text"]
         assert "Approved \u2713" in edited_text
         assert "'uv run' cmds auto-approved" in edited_text
 
@@ -1011,7 +1101,7 @@ class TestApproveAllCallback:
         await connector._on_callback_query(update, MagicMock())
 
         resolver.assert_awaited_once_with("abc-123", True)
-        edited_text = update.callback_query.edit_message_text.await_args[0][0]
+        edited_text = update.callback_query.edit_message_text.await_args.kwargs["text"]
         assert "Approved \u2713" in edited_text
 
     async def test_tool_name_cleaned_up_on_all_callback(self, connector):
@@ -1053,7 +1143,7 @@ class TestApproveAllCallback:
         update = _make_callback_update("approval:all:unknown-id")
         await connector._on_callback_query(update, MagicMock())
 
-        edited_text = update.callback_query.edit_message_text.await_args[0][0]
+        edited_text = update.callback_query.edit_message_text.await_args.kwargs["text"]
         assert "all future tools auto-approved" in edited_text
 
 
@@ -1568,7 +1658,7 @@ class TestInterruptPrompt:
 
         resolver.assert_awaited_once_with("int-xyz", True)
         update.callback_query.edit_message_text.assert_awaited_once()
-        edited = update.callback_query.edit_message_text.await_args[0][0]
+        edited = update.callback_query.edit_message_text.await_args.kwargs["text"]
         assert "Interrupting" in edited
 
     async def test_interrupt_callback_wait(self, connector):
@@ -1580,7 +1670,7 @@ class TestInterruptPrompt:
 
         resolver.assert_awaited_once_with("int-xyz", False)
         update.callback_query.edit_message_text.assert_awaited_once()
-        edited = update.callback_query.edit_message_text.await_args[0][0]
+        edited = update.callback_query.edit_message_text.await_args.kwargs["text"]
         assert "Queued" in edited
 
     async def test_interrupt_callback_expired(self, connector):
@@ -1592,7 +1682,7 @@ class TestInterruptPrompt:
 
         resolver.assert_awaited_once_with("int-old", True)
         update.callback_query.edit_message_text.assert_awaited_once()
-        edited = update.callback_query.edit_message_text.await_args[0][0]
+        edited = update.callback_query.edit_message_text.await_args.kwargs["text"]
         assert "Expired" in edited
 
     async def test_interrupt_callback_send_now_schedules_cleanup(self, connector):
@@ -1954,7 +2044,7 @@ class TestSendQuestion:
         )
         call_args = mock_app.bot.send_message.call_args
         text = call_args.kwargs.get("text", call_args[1].get("text", ""))
-        assert "**Auth**" in text
+        assert "<b>Auth</b>" in text
         assert "Choose method" in text
 
     async def test_multibyte_utf8_label_callback_data_within_64_bytes(self, connector):
@@ -2165,7 +2255,7 @@ class TestPlanReviewInteractionCallback:
         ) as mock_del:
             await connector._on_callback_query(update, MagicMock())
             mock_del.assert_not_awaited()
-            edited = update.callback_query.edit_message_text.call_args[0][0]
+            edited = update.callback_query.edit_message_text.call_args.kwargs["text"]
             assert "Expired" in edited
             assert connector._plan_message_ids["999"] == ["10", "11", "12"]
 
@@ -2308,12 +2398,12 @@ class TestCallbackEdgeCases:
 
         update1 = _make_callback_update("approval:yes:abc-1")
         await connector._on_callback_query(update1, MagicMock())
-        edited1 = update1.callback_query.edit_message_text.call_args[0][0]
+        edited1 = update1.callback_query.edit_message_text.call_args.kwargs["text"]
         assert "Approved" in edited1
 
         update2 = _make_callback_update("approval:yes:abc-1")
         await connector._on_callback_query(update2, MagicMock())
-        edited2 = update2.callback_query.edit_message_text.call_args[0][0]
+        edited2 = update2.callback_query.edit_message_text.call_args.kwargs["text"]
         assert "Expired" in edited2
 
     async def test_null_query_message_does_not_crash(self, connector):
@@ -2349,7 +2439,7 @@ class TestCallbackEdgeCases:
 
         update = _make_callback_update("interact:int-9:React")
         await connector._on_callback_query(update, MagicMock())
-        edited = update.callback_query.edit_message_text.call_args[0][0]
+        edited = update.callback_query.edit_message_text.call_args.kwargs["text"]
         assert "Expired" in edited
 
     async def test_interaction_callback_passes_index_sigil_to_resolver(self, connector):
@@ -2941,7 +3031,7 @@ class TestCallbackDataSecurity:
         update = _make_callback_update("approval:yes:unknown-id")
         await connector._on_callback_query(update, MagicMock())
 
-        edit_text = update.callback_query.edit_message_text.call_args.args[0]
+        edit_text = update.callback_query.edit_message_text.call_args.kwargs["text"]
         assert "Expired" in edit_text
 
     async def test_unknown_interaction_id_shows_expired(self, connector):
@@ -2953,7 +3043,7 @@ class TestCallbackDataSecurity:
         update = _make_callback_update("interact:unknown-id:option_a")
         await connector._on_callback_query(update, MagicMock())
 
-        edit_text = update.callback_query.edit_message_text.call_args.args[0]
+        edit_text = update.callback_query.edit_message_text.call_args.kwargs["text"]
         assert "Expired" in edit_text
 
     def test_truncated_callback_data_preserves_prefix(self):
@@ -3063,7 +3153,7 @@ class TestCallbackRoutingEdgeCases:
         update = _make_callback_update("interact:int-1:option_a")
         await connector._on_callback_query(update, MagicMock())
 
-        edit_text = update.callback_query.edit_message_text.call_args.args[0]
+        edit_text = update.callback_query.edit_message_text.call_args.kwargs["text"]
         assert "Expired" in edit_text
 
     async def test_interaction_non_message_query_early_return(self, connector):
@@ -3124,7 +3214,7 @@ class TestInterruptCallbackEdgeCases:
         )
 
         await connector._on_callback_query(update, MagicMock())
-        edit_text = update.callback_query.edit_message_text.call_args.args[0]
+        edit_text = update.callback_query.edit_message_text.call_args.kwargs["text"]
         assert "Expired" in edit_text
 
     async def test_non_message_query_does_not_crash(self, connector):
@@ -3192,7 +3282,7 @@ class TestApprovalLifecycle:
         await connector._on_callback_query(update, MagicMock())
 
         resolver.assert_awaited_once_with("ap-1", True)
-        edit_text = update.callback_query.edit_message_text.call_args.args[0]
+        edit_text = update.callback_query.edit_message_text.call_args.kwargs["text"]
         assert "Approved" in edit_text
         assert len(connector._cleanup_tasks) >= 0
 
@@ -3214,7 +3304,7 @@ class TestApprovalLifecycle:
         await connector._on_callback_query(update, MagicMock())
 
         resolver.assert_awaited_once_with("ap-1", False)
-        edit_text = update.callback_query.edit_message_text.call_args.args[0]
+        edit_text = update.callback_query.edit_message_text.call_args.kwargs["text"]
         assert "Rejected" in edit_text
 
     async def test_full_approve_all_flow(self, connector):
@@ -3239,7 +3329,7 @@ class TestApprovalLifecycle:
 
         resolver.assert_awaited_once_with("ap-1", True)
         auto_approve_handler.assert_called_once_with("100", "Write")
-        edit_text = update.callback_query.edit_message_text.call_args.args[0]
+        edit_text = update.callback_query.edit_message_text.call_args.kwargs["text"]
         assert "auto-approved" in edit_text
         assert "Write" in edit_text
 
@@ -3372,7 +3462,7 @@ class TestQuestionLifecycle:
         update = _make_callback_update("interact:int-1:A")
         await connector._on_callback_query(update, MagicMock())
 
-        edit_text = update.callback_query.edit_message_text.call_args.args[0]
+        edit_text = update.callback_query.edit_message_text.call_args.kwargs["text"]
         assert "Expired" in edit_text
 
 
@@ -3465,3 +3555,258 @@ class TestSendActivityStateTracking:
         result = await connector.send_activity("100", "Bash", "npm test")
         assert result == "99"
         assert connector._activity_message_id["100"] == "99"
+
+
+class TestMarkdownRendering:
+    async def test_bold_and_code_render_as_html(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+
+        await connector.send_message("123", "**bold** and `code`")
+
+        kwargs = mock_app.bot.send_message.await_args.kwargs
+        assert kwargs["text"] == "<b>bold</b> and <code>code</code>"
+        assert kwargs["parse_mode"] == ParseMode.HTML
+
+    async def test_wide_table_becomes_labelled_records(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+
+        await connector.send_message(
+            "123",
+            "| Opportunity | Call | Reason |\n|---|---|---|\n"
+            "| A. FCA financial promotions rollout | Do not build it now | "
+            "Six vendors already ship it and the obligation is shrinking |",
+        )
+
+        text = mock_app.bot.send_message.await_args.kwargs["text"]
+        assert "<b>Opportunity</b>: A. FCA financial promotions rollout" in text
+        assert "|" not in text
+
+    async def test_falls_back_to_plain_source_on_entity_error(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        mock_app.bot.send_message = AsyncMock(
+            side_effect=[
+                BadRequest("Bad Request: can't parse entities: unexpected end tag"),
+                MagicMock(message_id=7),
+            ]
+        )
+
+        await connector.send_message("123", "**bold**")
+
+        assert mock_app.bot.send_message.await_count == 2
+        first, second = mock_app.bot.send_message.await_args_list
+        assert first.kwargs["parse_mode"] == ParseMode.HTML
+        assert second.kwargs["text"] == "**bold**"
+        assert second.kwargs["parse_mode"] is None
+
+    async def test_unrelated_bad_request_is_not_resent(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        mock_app.bot.edit_message_text = AsyncMock(
+            side_effect=BadRequest("Bad Request: message is not modified")
+        )
+
+        await connector.edit_message("123", "42", "text")
+
+        assert mock_app.bot.edit_message_text.await_count == 1
+
+    async def test_activity_argument_is_literal_not_markdown(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=5))
+
+        await connector.send_activity("123", "Bash", "grep -rn '*.py' some_dir_name")
+
+        text = mock_app.bot.send_message.await_args.kwargs["text"]
+        assert "<code>grep -rn '*.py' some_dir_name</code>" in text
+        assert "<i>" not in text
+
+    async def test_question_header_renders_bold(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=5))
+
+        await connector.send_question(
+            "123", "i-1", "Which one?", "Auth", [{"label": "JWT"}]
+        )
+
+        text = mock_app.bot.send_message.await_args.kwargs["text"]
+        assert text.startswith("<b>Auth</b>")
+
+    async def test_streamed_partial_markdown_still_parses(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+
+        await connector.edit_message("123", "42", "Working on **the ta")
+
+        text = mock_app.bot.edit_message_text.await_args.kwargs["text"]
+        assert text == "Working on **the ta"
+
+
+class TestFilePreview:
+    async def test_markdown_file_is_previewed_rendered(self, connector, tmp_path):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        doc = tmp_path / "notes.md"
+        doc.write_text("# Title\n\n- one\n")
+
+        assert await connector.send_file("123", str(doc)) is True
+
+        mock_app.bot.send_document.assert_awaited_once()
+        text = mock_app.bot.send_message.await_args.kwargs["text"]
+        assert text == "<b>Title</b>\n\n• one"
+
+    async def test_text_file_is_previewed_preformatted(self, connector, tmp_path):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        doc = tmp_path / "out.txt"
+        doc.write_text("col a   col b\n1       2\n")
+
+        await connector.send_file("123", str(doc))
+
+        text = mock_app.bot.send_message.await_args.kwargs["text"]
+        assert text.startswith("<pre>")
+        assert text.endswith("</pre>")
+
+    async def test_source_file_is_not_previewed(self, connector, tmp_path):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        doc = tmp_path / "app.py"
+        doc.write_text("x = 1\n")
+
+        await connector.send_file("123", str(doc))
+
+        mock_app.bot.send_message.assert_not_awaited()
+
+    async def test_oversized_markdown_is_not_previewed(self, connector, tmp_path):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        doc = tmp_path / "big.md"
+        doc.write_text("a" * (_MAX_MESSAGE_LENGTH + 1))
+
+        await connector.send_file("123", str(doc))
+
+        mock_app.bot.send_document.assert_awaited_once()
+        mock_app.bot.send_message.assert_not_awaited()
+
+    async def test_undecodable_file_is_not_previewed(self, connector, tmp_path):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        doc = tmp_path / "weird.md"
+        doc.write_bytes(b"\xff\xfe\x00binary")
+
+        await connector.send_file("123", str(doc))
+
+        mock_app.bot.send_message.assert_not_awaited()
+
+    async def test_empty_preview_is_skipped(self, connector, tmp_path):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        doc = tmp_path / "blank.md"
+        doc.write_text("   \n\n")
+
+        await connector.send_file("123", str(doc))
+
+        mock_app.bot.send_message.assert_not_awaited()
+
+    async def test_image_gets_no_preview(self, connector, tmp_path):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        img = tmp_path / "shot.png"
+        img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 32)
+
+        await connector.send_file("123", str(img))
+
+        mock_app.bot.send_photo.assert_awaited_once()
+        mock_app.bot.send_message.assert_not_awaited()
+
+    async def test_photo_upload_error_is_not_retried_as_a_document(
+        self, connector, tmp_path
+    ):
+        """A BadRequest means the API refused the *photo* shape and a document
+        may still work; anything else already exhausted its retries."""
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        mock_app.bot.send_photo = AsyncMock(side_effect=RuntimeError("socket closed"))
+        img = tmp_path / "shot.png"
+        img.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+
+        assert await connector.send_file("123", str(img)) is False
+        mock_app.bot.send_document.assert_not_awaited()
+
+
+class TestActivityRendering:
+    async def test_argument_free_tool_renders_without_an_empty_code_span(
+        self, connector
+    ):
+        """``TodoWrite`` and friends surface with no argument at all."""
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=5))
+
+        await connector.send_activity("123", "TodoWrite", "")
+
+        text = mock_app.bot.send_message.await_args.kwargs["text"]
+        assert "<code>" not in text
+        assert text == "\U0001f9e0 Thinking:"
+
+    async def test_whitespace_only_argument_is_treated_as_absent(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=5))
+
+        await connector.send_activity("123", "Bash", "   \n ")
+
+        text = mock_app.bot.send_message.await_args.kwargs["text"]
+        assert "<code>" not in text
+        assert text.rstrip().endswith("Running:")
+
+    async def test_long_argument_is_truncated_and_escaped(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=5))
+
+        await connector.send_activity("123", "Bash", "grep " + "<x>" * 4000)
+
+        text = mock_app.bot.send_message.await_args.kwargs["text"]
+        assert visible_length(text) <= TELEGRAM_TEXT_LIMIT
+        assert "<x>" not in text
+        assert "&lt;x&gt;" in text
+
+
+class TestResolvedPromptKeepsItsFormatting:
+    """Under a parse mode Telegram hands back ``text`` stripped of entities, so
+    echoing it would flatten an approval prompt the moment it is resolved."""
+
+    def _resolved_update(self, data="approval:yes:abc-123"):
+        update = MagicMock()
+        update.callback_query.answer = AsyncMock()
+        update.callback_query.data = data
+        update.callback_query.edit_message_text = AsyncMock()
+        msg = MagicMock(spec=Message)
+        msg.text = "Run tests? uv run pytest"
+        msg.text_html = "Run tests? <code>uv run pytest</code>"
+        update.callback_query.message = msg
+        return update
+
+    async def test_approval_outcome_is_appended_to_the_rendered_prompt(self, connector):
+        connector.set_approval_resolver(AsyncMock(return_value=True))
+        update = self._resolved_update()
+
+        await connector._on_callback_query(update, MagicMock())
+
+        kwargs = update.callback_query.edit_message_text.await_args.kwargs
+        assert kwargs["text"] == ("Run tests? <code>uv run pytest</code>\n\nApproved ✓")
+        assert kwargs["parse_mode"] == ParseMode.HTML
+
+    async def test_status_is_escaped_before_it_is_appended(self, connector):
+        connector.set_approval_resolver(AsyncMock(return_value=True))
+        connector._approval_tool_names["abc-123"] = "Bash<&>"
+        update = self._resolved_update("approval:all:abc-123")
+
+        await connector._on_callback_query(update, MagicMock())
+
+        text = update.callback_query.edit_message_text.await_args.kwargs["text"]
+        assert "Bash&lt;&amp;&gt;" in text

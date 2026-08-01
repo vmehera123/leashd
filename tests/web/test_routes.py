@@ -988,3 +988,68 @@ class TestRuntimeSettingsListEndpoints:
     def test_list_directory_settings_requires_auth(self, client):
         resp = client.get("/api/config/directory-settings")
         assert resp.status_code == 401
+
+
+class TestFileDownload:
+    def test_serves_file_inside_sandbox(self, client, tmp_path):
+        report = tmp_path / "report.txt"
+        report.write_text("all good")
+
+        resp = client.get(
+            "/api/files/download",
+            params={"path": str(report)},
+            headers=_AUTH_HEADER,
+        )
+
+        assert resp.status_code == 200
+        assert resp.content == b"all good"
+        assert "report.txt" in resp.headers.get("content-disposition", "")
+
+    def test_requires_auth(self, client, tmp_path):
+        report = tmp_path / "report.txt"
+        report.write_text("all good")
+
+        resp = client.get("/api/files/download", params={"path": str(report)})
+
+        assert resp.status_code == 401
+
+    def test_path_outside_sandbox_refused(self, client, tmp_path):
+        outside = tmp_path.parent / "outside-download.txt"
+        outside.write_text("nope")
+
+        resp = client.get(
+            "/api/files/download",
+            params={"path": str(outside)},
+            headers=_AUTH_HEADER,
+        )
+
+        assert resp.status_code == 403
+        assert "outside the approved directories" in resp.json()["error"]
+
+    def test_traversal_refused(self, client, tmp_path):
+        (tmp_path.parent / "escape.txt").write_text("nope")
+
+        resp = client.get(
+            "/api/files/download",
+            params={"path": "../escape.txt"},
+            headers=_AUTH_HEADER,
+        )
+
+        assert resp.status_code == 403
+
+    def test_credential_file_refused(self, client, tmp_path):
+        (tmp_path / ".env").write_text("TOKEN=abc")
+
+        resp = client.get(
+            "/api/files/download",
+            params={"path": str(tmp_path / ".env")},
+            headers=_AUTH_HEADER,
+        )
+
+        assert resp.status_code == 403
+        assert "credential" in resp.json()["error"]
+
+    def test_missing_path_returns_400(self, client):
+        resp = client.get("/api/files/download", headers=_AUTH_HEADER)
+
+        assert resp.status_code == 400

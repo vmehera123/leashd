@@ -7,6 +7,7 @@ import pytest
 from leashd.agents.runtimes._helpers import (
     AGENT_BROWSER_GUIDANCE,
     AUTO_MODE_INSTRUCTION,
+    FILE_DELIVERY_GUIDANCE,
     MAX_BUFFER_SIZE,
     NATIVE_AUTO_INSTRUCTION,
     PLAN_MODE_INSTRUCTION,
@@ -154,7 +155,17 @@ class TestBuildRuntimeGuidance:
         cfg = LeashdConfig(
             approved_directories=[tmp_path], browser_backend="playwright"
         )
-        assert build_runtime_guidance(cfg, self._session(tmp_path)) is None
+        guidance = build_runtime_guidance(cfg, self._session(tmp_path))
+        assert guidance is not None
+        assert UV_PROJECT_GUIDANCE not in guidance
+
+    def test_file_delivery_guidance_always_included(self, tmp_path):
+        cfg = LeashdConfig(
+            approved_directories=[tmp_path], browser_backend="playwright"
+        )
+        guidance = build_runtime_guidance(cfg, self._session(tmp_path))
+        assert guidance is not None
+        assert FILE_DELIVERY_GUIDANCE in guidance
 
     def test_agent_browser_backend_emits_browser_guidance(self, tmp_path):
         cfg = LeashdConfig(

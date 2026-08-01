@@ -10,6 +10,7 @@ Usage:
   python drive.py watch <seconds> <start_iso>   poll until the turn completes
   python drive.py calls [since]         dump recorded calls
   python drive.py buttons <message_id>
+  python drive.py files [since]         dump real files the bot uploaded
   python drive.py errors                dump Bot API errors the engine caused
   python drive.py log <start_iso>       filtered app.log events since timestamp
   python drive.py state                 quick counts
@@ -135,8 +136,26 @@ def streaming_timeline(since: int = 0) -> None:
             )
         elif method == "sendChatAction":
             print(f"  +{dt:6.2f}s {method:16} {data.get('action', '')}")
+        elif method in ("sendDocument", "sendPhoto"):
+            payload = data.get("document") or data.get("photo") or ""
+            print(
+                f"  +{dt:6.2f}s {method:16} mid={c.get('message_id')} "
+                f"{payload} caption={data.get('caption', '')!r}"
+            )
         else:
             print(f"  +{dt:6.2f}s {method:16} {json.dumps(data)[:80]}")
+
+
+def uploaded_files(since: int = 0) -> None:
+    d = _get(f"/control/files?since={since}")
+    print(f"  uploaded files: {d['total']}")
+    for f in d["files"]:
+        print(
+            f"  {f['method']:14} mid={f['message_id']} {f['filename']!r} "
+            f"{f['size']}B sha={f['sha256'][:12]} caption={f['caption']!r}"
+        )
+    if not d["files"]:
+        print("  (no files uploaded)")
 
 
 def watch(seconds: float, start_iso: str, since_calls: int) -> bool:
@@ -182,6 +201,8 @@ if __name__ == "__main__":
         streaming_timeline(int(sys.argv[2]) if len(sys.argv) > 2 else 0)
     elif cmd == "buttons":
         print(json.dumps(_get(f"/control/buttons?message_id={sys.argv[2]}"), indent=2))
+    elif cmd == "files":
+        uploaded_files(int(sys.argv[2]) if len(sys.argv) > 2 else 0)
     elif cmd == "log":
         log_events_since(sys.argv[2])
     elif cmd == "watch":
@@ -206,5 +227,7 @@ if __name__ == "__main__":
             d["pending_updates"],
             "api_errors:",
             len(d.get("api_errors", [])),
+            "files:",
+            len(d.get("files", [])),
         )
         print("messages:", list(d["messages"].keys()))

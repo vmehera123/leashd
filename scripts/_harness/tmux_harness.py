@@ -14,9 +14,11 @@ approvals, plan/auto/task/goal/follow-up behaviour against the real pipeline.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import time
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +37,9 @@ USER_ID = os.environ.get("USER_ID", "284184690")
 
 MAX_TEXT_LEN = 4096
 MAX_CALLBACK_DATA_BYTES = 64
+MAX_CAPTION_LEN = 1024
+MAX_UPLOAD_BYTES = 50 * 1000 * 1000
+MAX_PHOTO_BYTES = 10 * 1000 * 1000
 
 calls: list[dict[str, Any]] = []
 pending: list[dict[str, Any]] = []
@@ -43,6 +48,7 @@ msg_text: dict[int, str] = {}
 msg_markup: dict[int, str | None] = {}
 deleted_mids: set[int] = set()
 api_errors: list[dict[str, Any]] = []
+uploads: list[dict[str, Any]] = []
 _uid = [1]
 _mid = [1000]
 
@@ -69,6 +75,88 @@ def err(method: str, description: str, code: int = 400) -> JSONResponse:
         status_code=code,
         content={"ok": False, "error_code": code, "description": description},
     )
+
+
+ALLOWED_TAGS = frozenset(
+    {
+        "b",
+        "strong",
+        "i",
+        "em",
+        "u",
+        "ins",
+        "s",
+        "strike",
+        "del",
+        "a",
+        "code",
+        "pre",
+        "blockquote",
+        "span",
+        "tg-spoiler",
+        "tg-emoji",
+    }
+)
+
+
+class _EntityParser(HTMLParser):
+    """Reject the markup real Telegram rejects and yield the text it counts.
+
+    Telegram parses parse_mode=HTML into entities over a plain-text body: an
+    unknown or unbalanced tag is a 400, and both the 4096-character ceiling
+    and the message text it echoes back are measured on the *stripped* text.
+    Accepting any string here would let the harness bless markup the real API
+    would refuse.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.stack: list[str] = []
+        self.error = ""
+        self.parts: list[str] = []
+
+    def _fail(self, message: str) -> None:
+        self.error = self.error or message
+
+    def handle_starttag(self, tag: str, attrs: Any) -> None:
+        if tag not in ALLOWED_TAGS:
+            self._fail(f'Unsupported start tag "{tag}"')
+            return
+        self.stack.append(tag)
+
+    def handle_startendtag(self, tag: str, attrs: Any) -> None:
+        self._fail(f'Unsupported start tag "{tag}"')
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag not in ALLOWED_TAGS:
+            self._fail(f'Unsupported start tag "{tag}"')
+            return
+        if not self.stack or self.stack[-1] != tag:
+            self._fail(f'Can\'t find end tag corresponding to start tag "{tag}"')
+            return
+        self.stack.pop()
+
+    def handle_data(self, data: str) -> None:
+        self.parts.append(data)
+
+
+def parse_entities(text: str, parse_mode: str | None) -> tuple[str, str]:
+    """Return (text Telegram would store, error description if it would 400)."""
+    if (parse_mode or "").upper() != "HTML":
+        return text, ""
+    parser = _EntityParser()
+    try:
+        parser.feed(text)
+        parser.close()
+    except Exception as exc:
+        return "", f"Bad Request: can't parse entities: {exc}"
+    if not parser.error and parser.stack:
+        parser.error = (
+            f'Can\'t find end tag corresponding to start tag "{parser.stack[-1]}"'
+        )
+    if parser.error:
+        return "", f"Bad Request: can't parse entities: {parser.error}"
+    return "".join(parser.parts), ""
 
 
 def _invalid_button_data(rm_raw: str | None) -> str | None:
@@ -113,7 +201,16 @@ def _store_buttons(message_id: int, rm_raw: str | None) -> None:
         buttons[message_id] = flat
 
 
-async def _handle(method: str, data: dict[str, Any]) -> dict[str, Any] | JSONResponse:
+def _upload_field(method: str) -> str:
+    return {"sendPhoto": "photo", "sendDocument": "document"}.get(method, "document")
+
+
+async def _handle(
+    method: str,
+    data: dict[str, Any],
+    files: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any] | JSONResponse:
+    files = files or {}
     if method == "getMe":
         return ok(
             {
@@ -144,7 +241,12 @@ async def _handle(method: str, data: dict[str, Any]) -> dict[str, Any] | JSONRes
             await asyncio.sleep(0.05)
         return ok(ready[:limit])
     if method == "sendMessage":
-        text = data.get("text", "")
+        raw = data.get("text", "")
+        if not raw:
+            return err(method, "Bad Request: message text is empty")
+        text, entity_error = parse_entities(raw, data.get("parse_mode"))
+        if entity_error:
+            return err(method, entity_error)
         if not text:
             return err(method, "Bad Request: message text is empty")
         if len(text) > MAX_TEXT_LEN:
@@ -176,7 +278,12 @@ async def _handle(method: str, data: dict[str, Any]) -> dict[str, Any] | JSONRes
         if bad is not None:
             return err(method, "Bad Request: BUTTON_DATA_INVALID")
         if method == "editMessageText":
-            text = data.get("text", "")
+            raw = data.get("text", "")
+            if not raw:
+                return err(method, "Bad Request: message text is empty")
+            text, entity_error = parse_entities(raw, data.get("parse_mode"))
+            if entity_error:
+                return err(method, entity_error)
             if not text:
                 return err(method, "Bad Request: message text is empty")
             if len(text) > MAX_TEXT_LEN:
@@ -223,8 +330,35 @@ async def _handle(method: str, data: dict[str, Any]) -> dict[str, Any] | JSONRes
         )
         return ok(True)
     if method in ("sendDocument", "sendPhoto"):
+        field = _upload_field(method)
+        upload = files.get(field)
+        if upload is None:
+            return err(method, f"Bad Request: there is no {field} in the request")
+        if upload["size"] == 0:
+            return err(method, "Bad Request: file must be non-empty")
+        limit = MAX_PHOTO_BYTES if method == "sendPhoto" else MAX_UPLOAD_BYTES
+        if upload["size"] > limit:
+            return err(method, "Request Entity Too Large", 413)
+        caption, entity_error = parse_entities(
+            data.get("caption", "") or "", data.get("parse_mode")
+        )
+        if entity_error:
+            return err(method, entity_error)
+        if len(caption) > MAX_CAPTION_LEN:
+            return err(method, "Bad Request: message caption is too long")
         mid = _mid[0]
         _mid[0] += 1
+        msg_text[mid] = caption
+        uploads.append(
+            {
+                "seq": len(calls),
+                "ts": time.time(),
+                "method": method,
+                "message_id": mid,
+                "caption": caption,
+                **upload,
+            }
+        )
         calls.append(
             {
                 "seq": len(calls),
@@ -234,9 +368,7 @@ async def _handle(method: str, data: dict[str, Any]) -> dict[str, Any] | JSONRes
                 "message_id": mid,
             }
         )
-        return ok(
-            _msg_obj(mid, data.get("caption", ""), int(data.get("chat_id", CHAT_ID)))
-        )
+        return ok(_msg_obj(mid, caption, int(data.get("chat_id", CHAT_ID))))
     calls.append({"seq": len(calls), "ts": time.time(), "method": method, "data": data})
     return ok(True)
 
@@ -244,12 +376,26 @@ async def _handle(method: str, data: dict[str, Any]) -> dict[str, Any] | JSONRes
 @app.post("/bot{token}/{method}")
 async def bot_api(token: str, method: str, request: Request) -> dict[str, Any]:
     ctype = request.headers.get("content-type", "")
+    files: dict[str, dict[str, Any]] = {}
     if ctype.startswith("application/json"):
         data = await request.json()
     else:
         form = await request.form()
-        data = {k: (v if isinstance(v, str) else "<file>") for k, v in form.items()}
-    return await _handle(method, data)
+        data = {}
+        for key, value in form.multi_items():
+            if isinstance(value, str):
+                data[key] = value
+                continue
+            content = await value.read()
+            files[key] = {
+                "filename": value.filename or "",
+                "content_type": value.content_type or "",
+                "size": len(content),
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "head": content[:64].hex(),
+            }
+            data[key] = f"<file:{value.filename}:{len(content)}B>"
+    return await _handle(method, data, files)
 
 
 @app.post("/file/bot{token}/{path:path}")
@@ -350,6 +496,12 @@ async def get_buttons(message_id: int) -> dict[str, Any]:
     return {"message_id": message_id, "buttons": buttons.get(message_id, [])}
 
 
+@app.get("/control/files")
+async def get_files(since: int = 0) -> dict[str, Any]:
+    """Every real file the bot uploaded — filename, byte size, sha256, caption."""
+    return {"files": uploads[since:], "total": len(uploads)}
+
+
 @app.get("/control/state")
 async def get_state() -> dict[str, Any]:
     return {
@@ -359,6 +511,7 @@ async def get_state() -> dict[str, Any]:
         "buttons": {str(k): v for k, v in buttons.items()},
         "deleted": sorted(deleted_mids),
         "api_errors": api_errors,
+        "files": uploads,
     }
 
 
@@ -368,6 +521,7 @@ async def reset() -> dict[str, Any]:
     pending.clear()
     api_errors.clear()
     deleted_mids.clear()
+    uploads.clear()
     return {"ok": True}
 
 

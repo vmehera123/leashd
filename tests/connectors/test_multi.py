@@ -133,8 +133,10 @@ class TestDelegation:
         assert len(mock_telegram.approval_requests) == 1
 
     async def test_send_file(self, multi, mock_telegram):
-        await multi.send_file("12345", "/tmp/test.txt")
+        delivered = await multi.send_file("12345", "/tmp/test.txt", caption="test.txt")
+        assert delivered is True
         assert len(mock_telegram.sent_messages) == 1
+        assert mock_telegram.sent_files[0]["caption"] == "test.txt"
 
     async def test_send_message_with_id(self, multi, mock_telegram):
         result = await multi.send_message_with_id("12345", "streaming")

@@ -139,6 +139,7 @@ const SLASH_COMMANDS = [
   { command: "/test", description: "Activate test workflow" },
   { command: "/web", description: "Web automation" },
   { command: "/task", description: "Submit autonomous task" },
+  { command: "/file", description: "Send a file from the working directory" },
   { command: "/dir", description: "Switch working directory" },
   { command: "/workspace", description: "Activate workspace" },
   { command: "/ws", description: "Workspace (alias)" },
@@ -2565,6 +2566,35 @@ modalOverlay.addEventListener("click", (e) => {
 // ============================================================
 // Copy buttons for code blocks
 // ============================================================
+/**
+ * Delivered-file links need the API key, which a plain navigation cannot send,
+ * so fetch the bytes with authFetch and hand the browser a blob instead.
+ */
+messagesEl.addEventListener("click", async (e) => {
+  const link = e.target.closest('a[href*="/api/files/download"]');
+  if (!link) return;
+  e.preventDefault();
+  try {
+    const res = await authFetch(link.getAttribute("href"));
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      showToast(body.error || `Download failed (${res.status})`, "error");
+      return;
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = link.textContent.trim().split("/").pop() || "download";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch {
+    showToast("Download failed", "error");
+  }
+});
+
 function addCopyButtons(container) {
   if (!container) return;
   const pres = container.querySelectorAll("pre");

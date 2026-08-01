@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.3.0] - 2026-08-01
+- **added**: `/file <path>` uploads real files to the chat, and an agent hands one over with `[[leashd:file <path>]]`. Sandbox and credential gates run per delivery (symlinks are resolved before the check), every upload or refusal lands in `audit.jsonl`, and a malformed path or an escaping glob comes back as a capped refusal list rather than an exception or a thousand-line message.
+- **added**: Telegram renders agent Markdown properly — headings, bold, lists, code fences and tables format instead of arriving as raw source. Emphasis that would cross a tag boundary (`**a *b***`, `**COUNT(*):**`) stays literal rather than emitting markup Telegram rejects, and the 4096 ceiling is counted in UTF-16 units so emoji-heavy replies still split. Short `.md`/`.txt` deliveries are also posted as a rendered message beside the attachment.
+- **fixed**: a tmux turn could deliver only its opening line and tool footer, dropping the actual answer — the JSONL tailer discarded records caught mid-write, and now consumes whole lines only.
+- **fixed**: running the test suite killed the live daemon's tmux panes. The orphan sweep is now opt-in and tests pin their own socket dir.
+
 ## [1.2.2] - 2026-07-28
 - **fixed**: browser sessions no longer leak or replay tabs. Stale `SingletonSocket` files made a dead browser look live, `/clear` handed the next session the previous run's restore state, and a `/web` run over a URL list relaunched the browser per URL (~200 windows); liveness now checks the DevTools port, teardown prunes restore state, Chrome launches with `--no-startup-window`, and a one-browser/15-tab rule is installed into the agent-browser skill and the `/web` prompt.
 - **fixed**: `/web` never used the browser at all. The `WebFetch`/`WebSearch` denial, persistent profile, and teardown keyed on a `session.mode == "web"` that `/web` never sets, and now key on a `web_active` session flag.

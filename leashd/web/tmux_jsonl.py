@@ -162,17 +162,26 @@ class JSONLTailer:
             with path.open("rb") as fh:
                 fh.seek(self._offset)
                 chunk = fh.read()
-                self._offset = fh.tell()
         except OSError:
             return
-        for raw in chunk.splitlines():
+        # Consume whole lines only. A poll that lands mid-write sees claude's
+        # record truncated; advancing past those bytes would strand the
+        # remainder (it no longer starts with `{`, so the next poll discards
+        # it) and silently lose the whole record — the final assistant text of
+        # a turn is the largest line written and so the likeliest casualty.
+        # Leave the tail unconsumed and re-read it once the newline lands.
+        committed = chunk.rfind(b"\n") + 1
+        if not committed:
+            return
+        self._offset += committed
+        for raw in chunk[:committed].splitlines():
             line = raw.decode("utf-8", errors="replace").strip()
             if not line or not line.startswith("{"):
                 continue
             try:
                 obj = json.loads(line)
             except json.JSONDecodeError:
-                continue  # partial trailing line — retried next poll
+                continue
             if not isinstance(obj, dict):  # pragma: no cover
                 continue
             uid = obj.get("uuid")

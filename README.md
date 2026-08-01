@@ -456,6 +456,7 @@ These slash commands are available in both the Web UI and Telegram:
 | `/test` | 9-phase agent-driven test workflow with browser automation |
 | `/task <description>` | Autonomous task: implement → verify pipeline → PR (v4 default) |
 | `/tasks` | List active and recent tasks for the current chat |
+| `/file <path>` | Send a real file from an approved directory to the chat (globs work) |
 | `/stop` | Stop all ongoing work (agent, task, loop) without resetting session |
 | `/cancel` | Cancel the active task in the current chat |
 | `/plugin` | Manage Claude Code plugins mid-session (install, remove, enable, disable) |

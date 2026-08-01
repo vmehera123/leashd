@@ -2,6 +2,7 @@
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
+from urllib.parse import quote, unquote
 
 import pytest
 
@@ -309,13 +310,61 @@ class TestTaskUpdate:
 
 
 class TestSendFile:
-    async def test_sends_file_as_message(self, connector):
+    async def test_sends_authenticated_download_link(self, connector, tmp_path):
+        report = tmp_path / "report.txt"
+        report.write_text("hello")
         connector._ws_handler.send_to = AsyncMock()
-        await connector.send_file("web:1", "/tmp/report.txt")
+        delivered = await connector.send_file("web:1", str(report))
 
+        assert delivered is True
         msg = connector._ws_handler.send_to.call_args[0][1]
         assert msg.type == "message"
-        assert "/tmp/report.txt" in msg.payload["text"]
+        text = msg.payload["text"]
+        assert "/api/files/download?path=" in text
+        assert quote(str(report), safe="") in text
+        assert "5 B" in text
+
+    async def test_caption_labels_the_notice(self, connector, tmp_path):
+        report = tmp_path / "report.txt"
+        report.write_text("hello")
+        connector._ws_handler.send_to = AsyncMock()
+        await connector.send_file("web:1", str(report), caption="docs/report.txt")
+
+        msg = connector._ws_handler.send_to.call_args[0][1]
+        assert "docs/report.txt" in msg.payload["text"]
+
+    async def test_missing_file_reports_failure(self, connector):
+        connector._ws_handler.send_to = AsyncMock()
+        delivered = await connector.send_file("web:1", "/nonexistent/report.txt")
+
+        assert delivered is False
+        connector._ws_handler.send_to.assert_not_awaited()
+
+    async def test_brackets_in_the_name_do_not_break_the_link(
+        self, connector, tmp_path
+    ):
+        report = tmp_path / "[draft] notes.md"
+        report.write_text("hello")
+        connector._ws_handler.send_to = AsyncMock()
+
+        await connector.send_file("web:1", str(report), caption="[draft] notes.md")
+
+        text = connector._ws_handler.send_to.call_args[0][1].payload["text"]
+        assert text.startswith("📎 [\\[draft\\] notes.md](/api/files/download?path=")
+
+    async def test_spaces_and_unicode_in_the_path_are_encoded(
+        self, connector, tmp_path
+    ):
+        report = tmp_path / "звіт final.md"
+        report.write_text("hello")
+        connector._ws_handler.send_to = AsyncMock()
+
+        await connector.send_file("web:1", str(report))
+
+        text = connector._ws_handler.send_to.call_args[0][1].payload["text"]
+        url = text.split("](", 1)[1].split(")", 1)[0]
+        assert " " not in url
+        assert unquote(url.split("path=", 1)[1]) == str(report)
 
 
 class TestHandlerRegistration:

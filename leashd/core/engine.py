@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import shlex
 import signal
 import time
 import uuid
@@ -34,6 +35,14 @@ from leashd.core.events import (
     TASK_SUBMITTED,
     Event,
     EventBus,
+)
+from leashd.core.file_delivery import (
+    display_name,
+    extract_file_markers,
+    pending_marker_start,
+    resolve_outgoing_files,
+    strip_file_markers,
+    visible_text,
 )
 from leashd.core.interactions import PlanReviewDecision
 from leashd.core.message_logger import MessageLogger
@@ -176,6 +185,13 @@ _TOOLS_EXCLUDED_FROM_LIMIT = frozenset(
 )
 
 
+def _file_size(path: Path) -> int | None:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return None
+
+
 class _ToolCallbackState:
     __slots__ = (
         "_bg_tasks",
@@ -245,9 +261,11 @@ class _StreamingResponder:
         """Return current streaming state for reconnecting clients."""
         if not self._active or self._message_id is None:
             return None
-        text = self._buffer[
-            self._display_offset : self._display_offset + _MAX_STREAMING_DISPLAY
-        ]
+        text = visible_text(
+            self._buffer[
+                self._display_offset : self._display_offset + _MAX_STREAMING_DISPLAY
+            ]
+        )
         if not text:
             return None
         return {"message_id": self._message_id, "text": text}
@@ -258,9 +276,11 @@ class _StreamingResponder:
         self._all_message_ids.clear()
 
     def _build_display(self) -> str:
-        text = self._buffer[
-            self._display_offset : self._display_offset + _MAX_STREAMING_DISPLAY
-        ]
+        text = visible_text(
+            self._buffer[
+                self._display_offset : self._display_offset + _MAX_STREAMING_DISPLAY
+            ]
+        )
         return text + _STREAMING_CURSOR
 
     def _build_tools_summary(self) -> str:
@@ -289,7 +309,12 @@ class _StreamingResponder:
             and len(self._buffer) > self._display_offset + _MAX_STREAMING_DISPLAY
         ):
             window_end = self._display_offset + _MAX_STREAMING_DISPLAY
-            committed = self._buffer[self._display_offset : window_end]
+            raw_window = self._buffer[self._display_offset : window_end]
+            split = pending_marker_start(raw_window)
+            if split > 0:
+                window_end = self._display_offset + split
+                raw_window = self._buffer[self._display_offset : window_end]
+            committed = strip_file_markers(raw_window) or raw_window
             await self._connector.edit_message(
                 self._chat_id, self._message_id, committed
             )
@@ -332,7 +357,7 @@ class _StreamingResponder:
             return
 
         if self._message_id is not None and not self._cursor_paused:
-            tail = self._buffer[self._display_offset :]
+            tail = visible_text(self._buffer[self._display_offset :])
             if tail:
                 await self._connector.edit_message(
                     self._chat_id, self._message_id, tail
@@ -370,7 +395,7 @@ class _StreamingResponder:
     async def cleanup(self) -> None:
         """Remove the streaming cursor and deactivate. Used on error paths."""
         if self._message_id is not None:
-            tail = self._buffer[self._display_offset :] if self._buffer else ""
+            tail = visible_text(self._buffer[self._display_offset :])
             if tail:
                 with contextlib.suppress(Exception):
                     await self._connector.edit_message(
@@ -391,7 +416,7 @@ class _StreamingResponder:
             await self._connector.clear_activity(self._chat_id)
             self._has_activity = False
         await self._connector.close_agent_group(self._chat_id)
-        if len(final_text) > len(self._buffer):
+        if len(final_text) > len(strip_file_markers(self._buffer)):
             # final_text has content not in the streaming buffer (e.g.
             # sub-agent output filtered during streaming).  _display_offset
             # was calculated from _buffer and is meaningless here.
@@ -400,7 +425,7 @@ class _StreamingResponder:
         else:
             source = self._buffer
             offset = self._display_offset
-        tail = source[offset:] if offset < len(source) else source
+        tail = visible_text(source[offset:] if offset < len(source) else source)
 
         summary = self._build_tools_summary()
         last_line = tail.rstrip().rsplit("\n", 1)[-1]
@@ -1174,10 +1199,14 @@ class Engine:
                 cost=response.cost,
             )
 
+            clean_content, requested_files = extract_file_markers(response.content)
+            if requested_files:
+                response = response.model_copy(update={"content": clean_content})
+
             duration_ms = round((time.monotonic() - start) * 1000)
             stored_content = response.content
             if responder and responder.buffer:
-                stored_content = responder.buffer
+                stored_content = strip_file_markers(responder.buffer)
             elif responder and not responder.buffer and response.content:
                 logger.warning(
                     "streaming_buffer_empty_at_persist",
@@ -1211,6 +1240,9 @@ class Engine:
                         data={"chat_id": chat_id, "content": response.content},
                     )
                 )
+
+                if requested_files:
+                    await self._deliver_marked_files(chat_id, session, requested_files)
 
             logger.info(
                 "request_completed",
@@ -1913,6 +1945,9 @@ class Engine:
         if command == "screen":
             return await self._handle_screen_command(session)
 
+        if command == "file":
+            return await self._handle_file_command(session, chat_id, args)
+
         forwarded = await self._forward_native_command(session, command, args, chat_id)
         if forwarded is not None:
             return forwarded
@@ -1921,6 +1956,98 @@ class Engine:
             "unknown_command", user_id=user_id, chat_id=chat_id, command=command
         )
         return f"Unknown command: /{command}"
+
+    async def _handle_file_command(
+        self, session: Session, chat_id: str, args: str
+    ) -> str:
+        """``/file <path>…`` — upload real files from the working directory."""
+        raw = args.strip()
+        if not raw:
+            return (
+                "Usage: /file <path> [more paths]\n"
+                f"Sends the real file to this chat. Paths are relative to "
+                f"{self._active_dir_name(session)}; globs work "
+                "(e.g. /file .leashd/logs/*.log)."
+            )
+        try:
+            requested = shlex.split(raw)
+        except ValueError:
+            requested = raw.split()
+
+        delivered, errors = await self._deliver_files(
+            chat_id, session, requested, trigger="command"
+        )
+        if errors:
+            lines = [] if not delivered else [f"Sent {len(delivered)} file(s)."]
+            lines.append("Could not send:")
+            lines.extend(f"• {e}" for e in errors)
+            return "\n".join(lines)
+        return ""
+
+    async def _deliver_files(
+        self,
+        chat_id: str,
+        session: Session,
+        raw_paths: list[str],
+        *,
+        trigger: str,
+    ) -> tuple[list[Path], list[str]]:
+        """Gate requested paths and hand the survivors to the connector.
+
+        Delivery is an egress channel, so every accepted upload and every
+        refusal is recorded in the audit trail alongside tool decisions.
+        """
+        paths, refusals = resolve_outgoing_files(
+            raw_paths,
+            working_directory=session.working_directory,
+            sandbox=self.sandbox,
+        )
+        for refusal in refusals:
+            self.audit.log_file_delivery(
+                session.session_id,
+                chat_id=chat_id,
+                trigger=trigger,
+                delivered=False,
+                reason=refusal,
+            )
+        errors = list(refusals)
+        delivered: list[Path] = []
+        for path in paths:
+            label = display_name(path, session.working_directory)
+            sent = False
+            if self.connector:
+                sent = await self.connector.send_file(chat_id, str(path), caption=label)
+            self.audit.log_file_delivery(
+                session.session_id,
+                chat_id=chat_id,
+                trigger=trigger,
+                delivered=sent,
+                path=str(path),
+                size=_file_size(path),
+                reason=None if sent else "upload failed",
+            )
+            if sent:
+                delivered.append(path)
+                logger.info("file_delivered", chat_id=chat_id, path=str(path))
+            else:
+                errors.append(f"{label}: upload failed.")
+                logger.warning("file_delivery_failed", chat_id=chat_id, path=str(path))
+        if errors:
+            logger.info("file_delivery_rejected", chat_id=chat_id, reasons=errors)
+        return delivered, errors
+
+    async def _deliver_marked_files(
+        self, chat_id: str, session: Session, raw_paths: list[str]
+    ) -> None:
+        """Deliver files the agent asked for via ``[[leashd:file …]]`` markers."""
+        _delivered, errors = await self._deliver_files(
+            chat_id, session, raw_paths, trigger="marker"
+        )
+        if errors and self.connector:
+            await self.connector.send_message(
+                chat_id,
+                "\U0001f4ce Could not send:\n" + "\n".join(f"• {e}" for e in errors),
+            )
 
     async def _handle_screen_command(self, session: Session) -> str:
         capture = getattr(self.agent, "capture_screen", None)
