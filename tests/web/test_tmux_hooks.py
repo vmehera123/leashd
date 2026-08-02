@@ -12,11 +12,13 @@ from leashd.web.tmux_hooks import create_tmux_hook_router
 class StubTSM:
     def __init__(self):
         self.lifecycle_calls: list[tuple[str, dict]] = []
+        self.pane_tokens: list[str | None] = []
 
     def verify_secret(self, token):
         return token == "good-secret"
 
-    async def on_pre_tool(self, body):
+    async def on_pre_tool(self, body, *, pane_token=None):
+        self.pane_tokens.append(pane_token)
         return {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
@@ -25,7 +27,8 @@ class StubTSM:
             }
         }
 
-    async def on_permission_request(self, body):
+    async def on_permission_request(self, body, *, pane_token=None):
+        self.pane_tokens.append(pane_token)
         return {
             "hookSpecificOutput": {
                 "hookEventName": "PermissionRequest",
@@ -33,7 +36,8 @@ class StubTSM:
             }
         }
 
-    async def on_lifecycle(self, event, body):
+    async def on_lifecycle(self, event, body, *, pane_token=None):
+        self.pane_tokens.append(pane_token)
         self.lifecycle_calls.append((event, body))
 
 
@@ -59,6 +63,27 @@ def test_missing_secret_is_forbidden(client_tsm):
     client, _ = client_tsm
     r = client.post("/internal/tmux/hook/PreToolUse", json={"tool_name": "Bash"})
     assert r.status_code == 403
+
+
+def test_pane_token_header_is_forwarded(client_tsm):
+    """The pane identity header is how a hook is routed back to the leashd
+    session that owns the pane; the transport must pass it through, and absence
+    must arrive as None rather than an empty string."""
+    client, tsm = client_tsm
+    headers = {"X-Leashd-Token": "good-secret", "X-Leashd-Pane": "pane-abc"}
+    client.post(
+        "/internal/tmux/hook/PreToolUse", json={"tool_name": "Bash"}, headers=headers
+    )
+    client.post(
+        "/internal/tmux/hook/PermissionRequest",
+        json={"tool_name": "Bash"},
+        headers=headers,
+    )
+    client.post("/internal/tmux/hook/Stop", json={}, headers=headers)
+    client.post(
+        "/internal/tmux/hook/Stop", json={}, headers={"X-Leashd-Token": "good-secret"}
+    )
+    assert tsm.pane_tokens == ["pane-abc", "pane-abc", "pane-abc", None]
 
 
 def test_pre_tool_returns_decision(client_tsm):
@@ -109,7 +134,7 @@ def test_non_dict_json_body_coerced_to_empty(client_tsm):
 
 def test_lifecycle_error_tolerated():
     class _BoomTSM(StubTSM):
-        async def on_lifecycle(self, event, body):
+        async def on_lifecycle(self, event, body, *, pane_token=None):
             raise RuntimeError("lifecycle exploded")
 
     client = _client(_BoomTSM())
@@ -142,12 +167,12 @@ class _FaultTSM(StubTSM):
         super().__init__()
         self._mode = mode
 
-    async def on_pre_tool(self, body):
+    async def on_pre_tool(self, body, *, pane_token=None):
         if self._mode == "raise":
             raise RuntimeError("gatekeeper exploded")
         return "not-a-decision-dict"  # malformed
 
-    async def on_permission_request(self, body):
+    async def on_permission_request(self, body, *, pane_token=None):
         if self._mode == "raise":
             raise RuntimeError("approval pipeline exploded")
         return {"wrong": "shape"}  # malformed, missing hookSpecificOutput

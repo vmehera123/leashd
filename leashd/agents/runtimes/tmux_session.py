@@ -86,6 +86,13 @@ _ASYNC_HOOK_EVENTS = (
 _HOOK_NO_EXPIRY_SECONDS = 365 * 24 * 3600
 _ORPHAN_REAP_DEBOUNCE_SECONDS = 30.0
 
+# Per-spawn pane identity, written into that pane's own managed --settings hook
+# headers and echoed back on every hook it fires. Claude mints its session uuid
+# itself, so this is the only exact route from a hook to the leashd session that
+# owns the pane; without it, concurrent panes in ONE working directory
+# cross-bind (specs/app/12 §6.1).
+_PANE_TOKEN_HEADER = "X-Leashd-Pane"  # noqa: S105
+
 _SEND_KEYS_INLINE_LIMIT = 4096
 
 # Claude Code marketplace plugin that reviews Claude's own code changes for
@@ -800,6 +807,7 @@ class TmuxClaudeSession:
         self.tmux_name = tmux_name
         self.settings_path = settings_path
         self.append_system_prompt_path: Path | None = None
+        self.pane_token: str | None = None
         self.claude_uuid: str | None = None
         self.turn: TmuxTurn | None = None
         # Per-turn plan-gate state — shared logic with the engine's
@@ -2050,7 +2058,8 @@ class TmuxSessionManager:
 
         self._sessions: dict[str, TmuxClaudeSession] = {}  # leashd session_id
         self._by_uuid: dict[str, str] = {}  # claude uuid → leashd session_id
-        self._pending_by_cwd: dict[str, str] = {}  # cwd → leashd session_id
+        self._by_pane_token: dict[str, str] = {}  # pane token → leashd session_id
+        self._pending_pane_tokens: dict[str, str] = {}  # session_id → unclaimed
 
         # Late-bound safety collaborators (None until bind_safety()).
         self._gatekeeper: ToolGatekeeper | None = None
@@ -2257,6 +2266,41 @@ class TmuxSessionManager:
         # claude runs on the same host; always loopback regardless of web_host.
         return f"http://127.0.0.1:{self._config.web_port}/internal/tmux/hook/{event}"
 
+    def _mint_pane_token(self, session_id: str) -> str:
+        """Mint the pane-identity token for the settings file about to be
+        written, and park it until the spawn that consumes that file registers
+        its session via :meth:`_adopt_pane_token`.
+
+        One token per *spawn*, not per session: a pane that is replaced under
+        the same leashd session id (pane death + respawn, ``/clear``) must not
+        be able to bind its in-flight hooks to its successor.
+        """
+        token = secrets.token_urlsafe(12)
+        self._pending_pane_tokens[session_id] = token
+        return token
+
+    def _adopt_pane_token(self, session_id: str) -> str | None:
+        """Bind the token minted for this session's newest settings file to it,
+        retiring every earlier generation so the reaped pane's hooks resolve to
+        nothing (fail closed) rather than to its replacement."""
+        self._drop_pane_tokens(session_id)
+        token = self._pending_pane_tokens.pop(session_id, None)
+        if token is None:
+            return None
+        self._by_pane_token[token] = session_id
+        return token
+
+    def _drop_pane_tokens(self, session_id: str) -> None:
+        for token, sid in list(self._by_pane_token.items()):
+            if sid == session_id:
+                del self._by_pane_token[token]
+
+    def _hook_headers(self, pane_token: str | None) -> dict[str, str]:
+        headers = {"X-Leashd-Token": self._secret}
+        if pane_token:
+            headers[_PANE_TOKEN_HEADER] = pane_token
+        return headers
+
     def _pre_tool_hook_timeout(self) -> int:
         """Timeout (s) for a *human-gated* synchronous hook.
 
@@ -2289,7 +2333,11 @@ class TmuxSessionManager:
         return max(eff + 60, self._config.tmux_hook_timeout_seconds)
 
     def _sync_hook_block(
-        self, event: str, *, human_gated: bool = True
+        self,
+        event: str,
+        *,
+        pane_token: str | None = None,
+        human_gated: bool = True,
     ) -> dict[str, Any]:
         """A synchronous HTTP hook block (blocks the tool until leashd answers).
 
@@ -2312,7 +2360,7 @@ class TmuxSessionManager:
                     "type": "http",
                     "url": self._hook_url(event),
                     "timeout": timeout,
-                    "headers": {"X-Leashd-Token": self._secret},
+                    "headers": self._hook_headers(pane_token),
                 }
             ],
         }
@@ -2358,12 +2406,19 @@ class TmuxSessionManager:
         independent human/AI approval. It only re-enters the full pipeline
         when ``PreToolUse`` returned a non-final ``defer`` (native-auto
         pass-through) or never ran at all.
+
+        Every hook block also carries this pane's identity token
+        (``X-Leashd-Pane``), which is how the receiver routes a hook back to
+        THIS leashd session — see :meth:`_bind_uuid`.
         """
         self._socket_dir.mkdir(parents=True, exist_ok=True)
-        headers = {"X-Leashd-Token": self._secret}
+        pane_token = self._mint_pane_token(session_id)
+        headers = self._hook_headers(pane_token)
         hooks: dict[str, Any] = {
-            "PreToolUse": [self._sync_hook_block("PreToolUse")],
-            "PermissionRequest": [self._sync_hook_block("PermissionRequest")],
+            "PreToolUse": [self._sync_hook_block("PreToolUse", pane_token=pane_token)],
+            "PermissionRequest": [
+                self._sync_hook_block("PermissionRequest", pane_token=pane_token)
+            ],
         }
         for event in _ASYNC_HOOK_EVENTS:
             hooks[event] = [
@@ -2406,11 +2461,22 @@ class TmuxSessionManager:
         gap (hard-deny → ``deny``, else → ``defer``) and ``PermissionRequest``
         re-enters the full pipeline when the classifier escalates. No async
         lifecycle hooks — ``claude-cli`` has its own NDJSON stream.
+
+        Carries the same ``X-Leashd-Pane`` identity token as the tmux settings
+        file, so concurrent headless ``auto`` runs in one directory resolve to
+        their own safety context too.
         """
         self._socket_dir.mkdir(parents=True, exist_ok=True)
+        pane_token = self._mint_pane_token(session_id)
         hooks: dict[str, Any] = {
-            "PreToolUse": [self._sync_hook_block("PreToolUse", human_gated=False)],
-            "PermissionRequest": [self._sync_hook_block("PermissionRequest")],
+            "PreToolUse": [
+                self._sync_hook_block(
+                    "PreToolUse", pane_token=pane_token, human_gated=False
+                )
+            ],
+            "PermissionRequest": [
+                self._sync_hook_block("PermissionRequest", pane_token=pane_token)
+            ],
         }
         path = self._socket_dir / f"{session_id}.cli.settings.json"
         payload: dict[str, Any] = {
@@ -2455,8 +2521,8 @@ class TmuxSessionManager:
         native_auto_allowed: bool = False,
     ) -> None:
         """Register a pane-less ``claude-cli`` session so the auto-mode HTTP
-        hooks resolve to its safety context via :meth:`_bind_uuid` (Claude
-        mints a fresh UUID; resolution falls back to the in-flight cwd)."""
+        hooks resolve to its safety context via :meth:`_bind_uuid`, keyed on
+        the identity token in the settings file this run was given."""
         cs = TmuxClaudeSession(
             session_id=session_id,
             chat_id=chat_id,
@@ -2472,7 +2538,7 @@ class TmuxSessionManager:
         )
         cs.last_prompt = last_prompt
         self._sessions[session_id] = cs
-        self._pending_by_cwd[working_directory] = session_id
+        cs.pane_token = self._adopt_pane_token(session_id)
 
     def unregister_cli_session(self, session_id: str) -> None:
         """Drop a registered ``claude-cli`` session and its settings file."""
@@ -2480,9 +2546,8 @@ class TmuxSessionManager:
         for uuid_key, sid in list(self._by_uuid.items()):
             if sid == session_id:
                 del self._by_uuid[uuid_key]
-        for cwd, sid in list(self._pending_by_cwd.items()):
-            if sid == session_id:
-                del self._pending_by_cwd[cwd]
+        self._drop_pane_tokens(session_id)
+        self._pending_pane_tokens.pop(session_id, None)
         if cs is not None:
             with contextlib.suppress(Exception):
                 cs.settings_path.unlink(missing_ok=True)
@@ -2514,9 +2579,8 @@ class TmuxSessionManager:
         for uuid_key, sid in list(self._by_uuid.items()):
             if sid == session_id:
                 del self._by_uuid[uuid_key]
-        for cwd, sid in list(self._pending_by_cwd.items()):
-            if sid == session_id:
-                del self._pending_by_cwd[cwd]
+        self._drop_pane_tokens(session_id)
+        self._pending_pane_tokens.pop(session_id, None)
         if cs is not None:
             await cs.teardown()
             if self._tmux_session_exists(cs.tmux_name) is not False:
@@ -2750,10 +2814,16 @@ class TmuxSessionManager:
         self._preflight()
         server = self._ensure_server()
 
-        # Tear down any stale session under the deterministic name first.
+        # Tear down any stale session under the deterministic name first, and
+        # retire its identity so the dying pane's in-flight hooks cannot bind
+        # to the pane replacing it under this same session id.
         old = self._sessions.pop(session_id, None)
         if old is not None:
             await old.teardown()
+            for uuid_key, sid in list(self._by_uuid.items()):
+                if sid == session_id:
+                    del self._by_uuid[uuid_key]
+            self._drop_pane_tokens(session_id)
 
         await self._reap_leftover_chat_panes(chat_id, keep=session_id)
 
@@ -2836,7 +2906,7 @@ class TmuxSessionManager:
         cs.native_auto_active = perm_mode == "auto"
         cs.attach(tmux_session, pane)
         self._sessions[session_id] = cs
-        self._pending_by_cwd[working_directory] = session_id
+        cs.pane_token = self._adopt_pane_token(session_id)
         # Resume reuses the same Claude UUID — register eagerly so the
         # PreToolUse hook can resolve it before SessionStart arrives.
         if resume_uuid:
@@ -2851,6 +2921,7 @@ class TmuxSessionManager:
             on_event=self._dispatch_jsonl_event,
             session=cs,
             resume=resume_uuid is not None,
+            cwd_is_shared=lambda: self.cwd_has_rival_pane(session_id),
         )
         cs.jsonl_task = asyncio.create_task(tailer.run())
 
@@ -2879,34 +2950,66 @@ class TmuxSessionManager:
         return cs
 
     def _bind_uuid(
-        self, cwd: str, claude_uuid: str, *, allow_pending_bind: bool = True
+        self, claude_uuid: str, *, pane_token: str | None = None
     ) -> TmuxClaudeSession | None:
-        """Resolve a hook's Claude UUID to a leashd session.
+        """Resolve a hook to the leashd session that owns the pane which fired it.
 
-        First by known mapping, else by the in-flight spawn for that cwd
-        (Claude mints a fresh UUID we haven't seen until the first hook).
+        The pane's identity token (``X-Leashd-Pane``, written into that pane's
+        own ``--settings`` file at spawn) is AUTHORITATIVE and exact. Claude
+        mints its session uuid itself, so a first hook carries a uuid leashd
+        has never seen; the token is what makes that hook resolvable without
+        guessing. It is per-spawn, so an unknown token means the pane is from a
+        retired generation or a previous daemon — resolve to nothing and let
+        the caller fail closed rather than fall back to a guess.
 
-        ``allow_pending_bind`` gates that cwd fallback. Only events meaning "a
-        pane is starting or running" (SessionStart, UserPromptSubmit, tool use)
-        may adopt an unseen UUID for the in-flight spawn. A *terminal* event
-        (Stop, SessionEnd) must not: spawning a new phase pane reaps the prior
-        one and evicts its UUID, so that pane's still-in-flight Stop arrives
-        with a now-unknown UUID and would otherwise bind to the freshly-spawned
-        pane via this fallback and complete its turn before the agent has run —
-        the empty ``num_turns=0`` turn that makes a /task verify phase read an
-        unwritten result and falsely escalate.
+        The uuid map is kept as the path for a hook with no token (a pane
+        spawned by an older leashd) and as the link the JSONL tailer uses to
+        find this session's transcript.
         """
-        sid = self._by_uuid.get(claude_uuid)
-        if sid is None and allow_pending_bind:
-            sid = self._pending_by_cwd.get(cwd)
-            if sid is not None:
+        if pane_token:
+            sid = self._by_pane_token.get(pane_token)
+            if sid is None:
+                return None
+            cs = self._sessions.get(sid)
+            if cs is None:
+                return None
+            if claude_uuid:
                 self._by_uuid[claude_uuid] = sid
+                if cs.claude_uuid is None:
+                    cs.claude_uuid = claude_uuid
+                    logger.info(
+                        "tmux_pane_bound",
+                        session_id=sid,
+                        chat_id=cs.chat_id,
+                        claude_uuid=claude_uuid,
+                        cwd=cs.working_directory,
+                    )
+            return cs
+        sid = self._by_uuid.get(claude_uuid)
         if sid is None:
             return None
         cs = self._sessions.get(sid)
         if cs is not None and cs.claude_uuid is None:
             cs.claude_uuid = claude_uuid
         return cs
+
+    def cwd_has_rival_pane(self, session_id: str) -> bool:
+        """True when another live session shares this one's working directory.
+
+        The JSONL tailer's newest-file fallback guesses by mtime inside
+        ``~/.claude/projects/<encoded-cwd>/``; with two panes writing there it
+        can adopt the sibling's transcript and stream another chat's
+        conversation into this one. Ambiguity is a reason to stream nothing,
+        not to guess.
+        """
+        cs = self._sessions.get(session_id)
+        if cs is None:
+            return False
+        return any(
+            other.session_id != session_id
+            and other.working_directory == cs.working_directory
+            for other in self._sessions.values()
+        )
 
     def verify_secret(self, token: str | None) -> bool:
         import hmac
@@ -3007,7 +3110,9 @@ class TmuxSessionManager:
                 return
         self._spawn_perm_selector_drive(cs, hook_out)
 
-    async def on_pre_tool(self, body: dict[str, Any]) -> dict[str, Any]:
+    async def on_pre_tool(
+        self, body: dict[str, Any], *, pane_token: str | None = None
+    ) -> dict[str, Any]:
         """Bridge a synchronous ``PreToolUse`` hook into the gatekeeper.
 
         Returns Claude Code's ``hookSpecificOutput`` envelope. Source-of-truth
@@ -3021,8 +3126,7 @@ class TmuxSessionManager:
         tool_input = body.get("tool_input") or {}
         if not isinstance(tool_input, dict):
             tool_input = {}
-        cwd = str(body.get("cwd", ""))
-        cs = self._bind_uuid(cwd, claude_uuid)
+        cs = self._bind_uuid(claude_uuid, pane_token=pane_token)
         if cs is not None and cs.turn is not None:
             cs.turn.mark_activity()
             if cs.turn.on_tool_activity is not None and cs.turn.claim_hook_activity(
@@ -3056,7 +3160,7 @@ class TmuxSessionManager:
                 cs.inflight_decisions[key] = fut
 
         try:
-            out = await self._on_pre_tool_impl(body)
+            out = await self._on_pre_tool_impl(body, pane_token=pane_token)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -3083,21 +3187,23 @@ class TmuxSessionManager:
             self._spawn_selector_drive(cs, tool_name, out)
         return out
 
-    async def _on_pre_tool_impl(self, body: dict[str, Any]) -> dict[str, Any]:
+    async def _on_pre_tool_impl(
+        self, body: dict[str, Any], *, pane_token: str | None = None
+    ) -> dict[str, Any]:
         claude_uuid = str(body.get("session_id", ""))
-        cwd = str(body.get("cwd", ""))
         tool_name = str(body.get("tool_name", ""))
         tool_input = body.get("tool_input") or {}
         if not isinstance(tool_input, dict):
             tool_input = {}
 
-        cs = self._bind_uuid(cwd, claude_uuid)
+        cs = self._bind_uuid(claude_uuid, pane_token=pane_token)
         if cs is None or not self.is_bound:
             # Fail closed: an unmapped session / unbound pipeline cannot be
             # safely auto-allowed (spec constraint A; README fail-safe).
             logger.warning(
                 "tmux_pre_tool_unresolved",
                 claude_uuid=claude_uuid,
+                pane_token=pane_token,
                 bound=self.is_bound,
             )
             self._schedule_orphan_reap()
@@ -3211,7 +3317,9 @@ class TmuxSessionManager:
         # model and the pane hung.)
         return _permission_to_hook(decision)
 
-    async def on_permission_request(self, body: dict[str, Any]) -> dict[str, Any]:
+    async def on_permission_request(
+        self, body: dict[str, Any], *, pane_token: str | None = None
+    ) -> dict[str, Any]:
         """Bridge a synchronous ``PermissionRequest`` hook into the gatekeeper.
 
         Fires when Claude's native ``auto`` classifier escalates a risky
@@ -3224,17 +3332,17 @@ class TmuxSessionManager:
         plan gate; ``AskUserQuestion`` is not a classifier-escalated action.
         """
         claude_uuid = str(body.get("session_id", ""))
-        cwd = str(body.get("cwd", ""))
         tool_name = str(body.get("tool_name", ""))
         tool_input = body.get("tool_input") or {}
         if not isinstance(tool_input, dict):
             tool_input = {}
 
-        cs = self._bind_uuid(cwd, claude_uuid)
+        cs = self._bind_uuid(claude_uuid, pane_token=pane_token)
         if cs is None or not self.is_bound:
             logger.warning(
                 "tmux_permission_request_unresolved",
                 claude_uuid=claude_uuid,
+                pane_token=pane_token,
                 bound=self.is_bound,
             )
             self._schedule_orphan_reap()
@@ -3357,15 +3465,22 @@ class TmuxSessionManager:
             self._gatekeeper.enable_tool_auto_approve(cs.chat_id, "Write")
             self._gatekeeper.enable_tool_auto_approve(cs.chat_id, "Edit")
 
-    async def on_lifecycle(self, event: str, body: dict[str, Any]) -> None:
-        """Handle async lifecycle hooks (Stop, SessionStart, …)."""
+    async def on_lifecycle(
+        self, event: str, body: dict[str, Any], *, pane_token: str | None = None
+    ) -> None:
+        """Handle async lifecycle hooks (Stop, SessionStart, …).
+
+        A terminal event (Stop, SessionEnd) is only ever applied to the pane
+        that fired it. That used to need a guard against adopting an unseen
+        uuid — a reaped pane's in-flight Stop would otherwise complete its
+        successor's turn before the agent ran (the empty ``num_turns=0`` turn
+        that made a /task verify phase read an unwritten result and falsely
+        escalate). The per-spawn pane token now rules that out by construction:
+        the reaped generation's token is retired at respawn, so its late Stop
+        resolves to nothing.
+        """
         claude_uuid = str(body.get("session_id", ""))
-        cwd = str(body.get("cwd", ""))
-        cs = self._bind_uuid(
-            cwd,
-            claude_uuid,
-            allow_pending_bind=event in ("SessionStart", "UserPromptSubmit"),
-        )
+        cs = self._bind_uuid(claude_uuid, pane_token=pane_token)
         if cs is None:
             if event not in ("SessionStart", "UserPromptSubmit"):
                 self._schedule_orphan_reap()
@@ -3822,7 +3937,8 @@ class TmuxSessionManager:
         """
         self._sessions.clear()
         self._by_uuid.clear()
-        self._pending_by_cwd.clear()
+        self._by_pane_token.clear()
+        self._pending_pane_tokens.clear()
         if not self._socket_path.exists():
             return 0
         try:

@@ -35,9 +35,11 @@ def create_tmux_hook_router(tsm: TmuxSessionManager) -> APIRouter:
         event: str,
         request: Request,
         x_leashd_token: str = Header(default=""),
+        x_leashd_pane: str = Header(default=""),
     ) -> JSONResponse:
         if not tsm.verify_secret(x_leashd_token):
             return JSONResponse(status_code=403, content={"error": "forbidden"})
+        pane_token = x_leashd_pane or None
         try:
             body = await request.json()
         except Exception:
@@ -53,7 +55,7 @@ def create_tmux_hook_router(tsm: TmuxSessionManager) -> APIRouter:
             # the transcript and the agent continues/ends. Mirrors the
             # unmapped-session fail-closed contract in TmuxSessionManager.
             try:
-                decision = await tsm.on_pre_tool(body)
+                decision = await tsm.on_pre_tool(body, pane_token=pane_token)
                 if not (
                     isinstance(decision, dict) and "hookSpecificOutput" in decision
                 ):
@@ -72,7 +74,7 @@ def create_tmux_hook_router(tsm: TmuxSessionManager) -> APIRouter:
             # policy + approval pipeline (synchronous, like PreToolUse). Same
             # fail-closed contract as PreToolUse above.
             try:
-                decision = await tsm.on_permission_request(body)
+                decision = await tsm.on_permission_request(body, pane_token=pane_token)
                 if not (
                     isinstance(decision, dict) and "hookSpecificOutput" in decision
                 ):
@@ -86,7 +88,7 @@ def create_tmux_hook_router(tsm: TmuxSessionManager) -> APIRouter:
 
         # Async lifecycle hooks (Stop, SessionStart, SessionEnd, …).
         try:
-            await tsm.on_lifecycle(event, body)
+            await tsm.on_lifecycle(event, body, pane_token=pane_token)
         except Exception:
             logger.warning("tmux_hook_lifecycle_error", hook_event=event, exc_info=True)
         return JSONResponse(content={})

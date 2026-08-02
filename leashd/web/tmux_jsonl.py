@@ -58,10 +58,12 @@ class JSONLTailer:
         ],
         session: TmuxClaudeSession,
         resume: bool = False,
+        cwd_is_shared: Callable[[], bool] | None = None,
     ) -> None:
         self._projects_root = projects_root
         self._on_event = on_event
         self._session = session
+        self._cwd_is_shared = cwd_is_shared
         self._path: Path | None = None
         self._discovered_path = False
         self._offset = 0
@@ -72,6 +74,7 @@ class JSONLTailer:
         self._skip_history_on_resume_pending = resume
         self._resume_drop_pending = resume
         self._resume_saw_synthetic = False
+        self._ambiguous_logged = False
         self._preexisting = self._snapshot_existing_jsonl()
 
     def _project_dir(self) -> Path:
@@ -85,7 +88,11 @@ class JSONLTailer:
         claude session in the same project (the user's own interactive
         ``claude``, a concurrent chat) keeps appending to its file, so an
         mtime heuristic alone latches onto a foreign transcript and streams
-        someone else's conversation into this chat."""
+        someone else's conversation into this chat.
+
+        A sibling that spawned inside the same discovery window is invisible to
+        this snapshot, which is why ``cwd_is_shared`` disables the fallback
+        outright while another live session shares the directory."""
         proj_dir = self._project_dir()
         if not proj_dir.is_dir():
             return set()
@@ -125,6 +132,15 @@ class JSONLTailer:
                 self._discovered_path = False
                 return found
         if time.monotonic() - self._started < _DISCOVER_AFTER:
+            return None
+        if self._cwd_is_shared is not None and self._cwd_is_shared():
+            if not self._ambiguous_logged:
+                self._ambiguous_logged = True
+                logger.warning(
+                    "tmux_jsonl_discovery_ambiguous",
+                    session_id=self._session.session_id,
+                    cwd=cwd,
+                )
             return None
         proj_dir = self._project_dir()
         if not proj_dir.is_dir():

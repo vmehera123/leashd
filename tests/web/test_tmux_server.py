@@ -17,7 +17,7 @@ class StubTSM:
     def verify_secret(self, token):
         return token == "good-secret"
 
-    async def on_pre_tool(self, body):
+    async def on_pre_tool(self, body, *, pane_token=None):
         return {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
@@ -26,7 +26,7 @@ class StubTSM:
             }
         }
 
-    async def on_permission_request(self, body):
+    async def on_permission_request(self, body, *, pane_token=None):
         return {
             "hookSpecificOutput": {
                 "hookEventName": "PermissionRequest",
@@ -34,7 +34,7 @@ class StubTSM:
             }
         }
 
-    async def on_lifecycle(self, event, body):
+    async def on_lifecycle(self, event, body, *, pane_token=None):
         return None
 
 

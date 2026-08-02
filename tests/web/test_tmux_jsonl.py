@@ -407,6 +407,48 @@ async def test_fallback_discovery_never_adopts_preexisting_session_file(
     assert sess.claude_uuid == "uuid-own"
 
 
+async def test_discovery_disabled_while_another_pane_shares_the_cwd(
+    tmp_path, monkeypatch
+):
+    """Two panes spawned in one working directory inside the same discovery
+    window are invisible to each other's preexisting-file snapshot, so the
+    mtime heuristic can adopt the sibling's transcript. Ambiguity must stream
+    nothing rather than stream another chat's conversation."""
+    from leashd.agents.runtimes.tmux_session import encode_project_dir
+
+    async def on_event(_sess, _obj):
+        return None
+
+    root = tmp_path / "projects"
+    proj = root / encode_project_dir("/work")
+    proj.mkdir(parents=True)
+
+    sess = _fake_session("/work", uuid=None)
+    shared = True
+    tailer = JSONLTailer(
+        projects_root=root,
+        on_event=on_event,
+        session=sess,
+        cwd_is_shared=lambda: shared,
+    )
+    monkeypatch.setattr("leashd.web.tmux_jsonl._DISCOVER_AFTER", 0.0)
+    tailer._started_wall = 0.0
+
+    sibling = proj / "uuid-sibling.jsonl"
+    sibling.write_text("{}\n")
+    assert tailer._resolve_path() is None
+    assert sess.claude_uuid is None
+
+    shared = False
+    assert tailer._resolve_path() == sibling
+
+    sess.claude_uuid = "uuid-own"
+    own = proj / "uuid-own.jsonl"
+    own.write_text("{}\n")
+    shared = True
+    assert tailer._resolve_path() == own
+
+
 async def test_discovered_path_repoints_once_hook_uuid_known(tmp_path, monkeypatch):
     sess = _fake_session("/work", uuid=None)
     tailer, _events, root = _tailer(tmp_path, sess)

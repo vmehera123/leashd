@@ -79,6 +79,16 @@ def _session(
     return cs
 
 
+def _adopt_token(tsm, cs) -> str:
+    """Give a test session the pane identity a real spawn would have written
+    into its managed settings file."""
+    tsm._mint_pane_token(cs.session_id)
+    token = tsm._adopt_pane_token(cs.session_id)
+    assert token is not None
+    cs.pane_token = token
+    return token
+
+
 class _StubGatekeeper:
     def __init__(self, result):
         self.result = result
@@ -165,6 +175,28 @@ def test_write_managed_settings(cfg):
     stop = data["hooks"]["Stop"][0]["hooks"][0]
     assert stop["async"] is True
     assert stop["headers"]["X-Leashd-Token"] == "s3cr3t-token"
+    pane = pre["headers"]["X-Leashd-Pane"]
+    assert pane
+    assert stop["headers"]["X-Leashd-Pane"] == pane
+    assert (
+        data["hooks"]["PermissionRequest"][0]["hooks"][0]["headers"]["X-Leashd-Pane"]
+        == pane
+    )
+
+
+def test_write_managed_settings_mints_a_token_per_spawn(cfg):
+    """Each settings write is a new pane generation, so the token must rotate —
+    that is what stops a reaped pane's in-flight hooks from binding to the pane
+    that replaced it under the same leashd session id."""
+    tsm = TmuxSessionManager(cfg)
+
+    def _pane_token(path):
+        data = json.loads(path.read_text())
+        return data["hooks"]["PreToolUse"][0]["hooks"][0]["headers"]["X-Leashd-Pane"]
+
+    first = _pane_token(tsm.write_managed_settings("sess1"))
+    second = _pane_token(tsm.write_managed_settings("sess1"))
+    assert first != second
 
 
 class _FakeRule:
@@ -426,17 +458,45 @@ def test_has_pending_human_ors_interaction_and_approval(cfg):
     assert tsm.has_pending_human("web:idle") is False
 
 
-def test_bind_uuid_pending_by_cwd_then_known(cfg):
+def test_bind_uuid_by_pane_token_then_known(cfg):
     tsm = TmuxSessionManager(cfg)
     cs = _session(tsm, cwd="/work")
-    tsm._pending_by_cwd["/work"] = cs.session_id
+    token = _adopt_token(tsm, cs)
 
-    resolved = tsm._bind_uuid("/work", "claude-uuid-9")
+    resolved = tsm._bind_uuid("claude-uuid-9", pane_token=token)
     assert resolved is cs
     assert cs.claude_uuid == "claude-uuid-9"
     assert tsm._by_uuid["claude-uuid-9"] == cs.session_id
-    # Subsequent calls resolve directly by uuid.
-    assert tsm._bind_uuid("/anything", "claude-uuid-9") is cs
+    assert tsm._bind_uuid("claude-uuid-9") is cs
+
+
+def test_bind_uuid_two_sessions_one_cwd_each_bind_to_own_session(cfg):
+    """The same-directory cross-binding regression (specs/app/12 §6.1): two
+    panes spawned in one working directory must each resolve to their OWN
+    leashd session, not to whichever spawned last."""
+    tsm = TmuxSessionManager(cfg)
+    a = _session(tsm, session_id="sa", chat_id="web:a", cwd="/repo")
+    token_a = _adopt_token(tsm, a)
+    b = _session(tsm, session_id="sb", chat_id="web:b", cwd="/repo")
+    token_b = _adopt_token(tsm, b)
+
+    assert tsm._bind_uuid("uuid-a", pane_token=token_a) is a
+    assert tsm._bind_uuid("uuid-b", pane_token=token_b) is b
+    assert a.claude_uuid == "uuid-a"
+    assert b.claude_uuid == "uuid-b"
+    assert tsm._by_uuid == {"uuid-a": "sa", "uuid-b": "sb"}
+
+
+def test_bind_uuid_unknown_pane_token_never_falls_back(cfg):
+    """A token from a retired pane generation (or a previous daemon) must
+    resolve to nothing so the caller fails closed — never to a live sibling."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm, cwd="/work")
+    _adopt_token(tsm, cs)
+    tsm._by_uuid["known-uuid"] = cs.session_id
+
+    assert tsm._bind_uuid("known-uuid", pane_token="retired-token") is None
+    assert tsm._bind_uuid("unseen-uuid", pane_token="retired-token") is None
 
 
 async def test_on_pre_tool_unresolved_denies(cfg):
@@ -877,40 +937,95 @@ async def test_on_lifecycle_post_tool_use_does_not_end_the_turn(cfg):
     assert not turn.stop_event.is_set()
 
 
-def test_bind_uuid_terminal_event_skips_pending_cwd_fallback(cfg):
-    """A terminal hook (Stop/SessionEnd) with an unseen UUID must NOT adopt the
-    in-flight spawn via the cwd fallback — that stale hook from a reaped prior
-    pane would otherwise complete the fresh pane's turn before it ran."""
+def test_bind_uuid_terminal_event_from_reaped_pane_does_not_bind(cfg):
+    """A terminal hook (Stop/SessionEnd) from a reaped prior pane must NOT
+    resolve to the pane that replaced it — that stale hook would otherwise
+    complete the fresh pane's turn before it ran."""
     tsm = TmuxSessionManager(cfg)
     cs = _session(tsm, cwd="/work")
-    tsm._pending_by_cwd["/work"] = cs.session_id
+    stale = _adopt_token(tsm, cs)
+    fresh = _adopt_token(tsm, cs)
 
-    assert tsm._bind_uuid("/work", "stale-uuid", allow_pending_bind=False) is None
+    assert tsm._bind_uuid("stale-uuid", pane_token=stale) is None
     assert "stale-uuid" not in tsm._by_uuid
     assert cs.claude_uuid is None
-    assert tsm._bind_uuid("/work", "fresh-uuid") is cs
+    assert tsm._bind_uuid("fresh-uuid", pane_token=fresh) is cs
 
 
 async def test_on_lifecycle_stale_stop_does_not_complete_fresh_pane_turn(cfg):
     """Verify-phase false-escalation regression: a new phase pane is spawned
-    (pending_by_cwd points at it) and a just-reaped prior pane's in-flight Stop
-    arrives with a now-unknown UUID. It must NOT complete the fresh turn — that
-    empty num_turns=0 turn made /task verify read an unwritten result and
-    falsely escalate 'missing Status: line'."""
+    under the same leashd session id and a just-reaped prior pane's in-flight
+    Stop arrives. It must NOT complete the fresh turn — that empty num_turns=0
+    turn made /task verify read an unwritten result and falsely escalate
+    'missing Status: line'."""
     tsm = TmuxSessionManager(cfg)
     cs = _session(tsm, session_id="verify2", cwd="/work")
-    tsm._pending_by_cwd["/work"] = "verify2"
+    stale_token = _adopt_token(tsm, cs)
+    fresh_token = _adopt_token(tsm, cs)
     turn = cs.begin_turn(on_text_chunk=None, on_tool_activity=None)
 
-    await tsm.on_lifecycle("Stop", {"session_id": "stale-impl-uuid", "cwd": "/work"})
+    await tsm.on_lifecycle(
+        "Stop",
+        {"session_id": "stale-impl-uuid", "cwd": "/work"},
+        pane_token=stale_token,
+    )
     assert not turn.stop_event.is_set()
     assert "stale-impl-uuid" not in tsm._by_uuid
 
     await tsm.on_lifecycle(
-        "SessionStart", {"session_id": "verify2-uuid", "cwd": "/work"}
+        "SessionStart",
+        {"session_id": "verify2-uuid", "cwd": "/work"},
+        pane_token=fresh_token,
     )
-    await tsm.on_lifecycle("Stop", {"session_id": "verify2-uuid", "cwd": "/work"})
+    await tsm.on_lifecycle(
+        "Stop", {"session_id": "verify2-uuid", "cwd": "/work"}, pane_token=fresh_token
+    )
     assert turn.stop_event.is_set()
+
+
+async def test_concurrent_panes_one_cwd_do_not_cross_deliver_tool_activity(cfg):
+    """Two live turns in ONE working directory: each pane's PreToolUse must
+    drive its own chat's tool indicator. Before per-pane binding, the first
+    chat received the other panes' tool_start events."""
+    tsm = TmuxSessionManager(cfg)
+    _bind(tsm, _StubGatekeeper(PermissionAllow(updated_input={})))
+    a = _session(tsm, session_id="sa", chat_id="web:a", cwd="/repo")
+    b = _session(tsm, session_id="sb", chat_id="web:b", cwd="/repo")
+    token_a = _adopt_token(tsm, a)
+    token_b = _adopt_token(tsm, b)
+
+    seen: dict[str, list[str]] = {"web:a": [], "web:b": []}
+
+    def _recorder(chat_id):
+        async def _on_activity(activity):
+            if activity is not None:
+                seen[chat_id].append(activity.tool_name)
+
+        return _on_activity
+
+    a.begin_turn(on_text_chunk=None, on_tool_activity=_recorder("web:a"))
+    b.begin_turn(on_text_chunk=None, on_tool_activity=_recorder("web:b"))
+
+    await tsm.on_pre_tool(
+        {
+            "session_id": "uuid-a",
+            "cwd": "/repo",
+            "tool_name": "Read",
+            "tool_input": {"file_path": "/repo/a.py"},
+        },
+        pane_token=token_a,
+    )
+    await tsm.on_pre_tool(
+        {
+            "session_id": "uuid-b",
+            "cwd": "/repo",
+            "tool_name": "Glob",
+            "tool_input": {"pattern": "*.py"},
+        },
+        pane_token=token_b,
+    )
+
+    assert seen == {"web:a": ["Read"], "web:b": ["Glob"]}
 
 
 async def test_process_blocks_streams_and_records():
@@ -2477,8 +2592,11 @@ def test_register_unregister_cli_session(cfg):
         last_prompt="do x",
         settings_path=sp,
     )
-    assert tsm._pending_by_cwd["/work"] == "clis1"
-    cs = tsm._bind_uuid("/work", "claude-uuid-1")
+    token = json.loads(sp.read_text())["hooks"]["PreToolUse"][0]["hooks"][0]["headers"][
+        "X-Leashd-Pane"
+    ]
+    assert tsm._by_pane_token[token] == "clis1"
+    cs = tsm._bind_uuid("claude-uuid-1", pane_token=token)
     assert cs is not None
     assert cs.session_id == "clis1"
     assert cs.last_prompt == "do x"
@@ -2486,8 +2604,8 @@ def test_register_unregister_cli_session(cfg):
 
     tsm.unregister_cli_session("clis1")
     assert "clis1" not in tsm._sessions
-    assert "/work" not in tsm._pending_by_cwd
-    assert tsm._bind_uuid("/work", "claude-uuid-2") is None
+    assert token not in tsm._by_pane_token
+    assert tsm._bind_uuid("claude-uuid-2", pane_token=token) is None
     assert not sp.exists()
 
 

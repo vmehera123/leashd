@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.4.0] - 2026-08-02
+- **fixed**: concurrent conversations in the *same* working directory cross-bound — three chats in one directory collapsed onto one Claude session uuid, one of them received all three chats' tool events, and two turns finished only on the 45s idle backstop (64.3s / 18.0s / 64.2s). Each pane now carries a per-spawn identity token in its own managed `--settings` hook headers, so a hook resolves to the session that owns the pane rather than to a single cwd-keyed slot the newest spawn overwrote (after: three distinct uuids, no cross-delivery, 18.4s / 18.8s / 19.6s).
+- **fixed**: the same token retires the reaped-pane phantom turn by construction — a dying pane's in-flight `Stop` can no longer complete the turn of the pane that replaced it under the same session id.
+- **fixed**: the JSONL tailer no longer guesses a transcript by mtime while another live session shares the working directory, which could stream another chat's conversation into this one.
+
 ## [1.3.0] - 2026-08-01
 - **added**: `/file <path>` uploads real files to the chat, and an agent hands one over with `[[leashd:file <path>]]`. Sandbox and credential gates run per delivery (symlinks are resolved before the check), every upload or refusal lands in `audit.jsonl`, and a malformed path or an escaping glob comes back as a capped refusal list rather than an exception or a thousand-line message.
 - **added**: Telegram renders agent Markdown properly — headings, bold, lists, code fences and tables format instead of arriving as raw source. Emphasis that would cross a tag boundary (`**a *b***`, `**COUNT(*):**`) stays literal rather than emitting markup Telegram rejects, and the 4096 ceiling is counted in UTF-16 units so emoji-heavy replies still split. Short `.md`/`.txt` deliveries are also posted as a rendered message beside the attachment.
