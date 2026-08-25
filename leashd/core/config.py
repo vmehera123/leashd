@@ -67,7 +67,10 @@ class LeashdConfig(BaseSettings):
     test_max_turns: int = 200
     task_max_turns: int = 300
     max_concurrent_agents: int = 5
-    agent_timeout_seconds: int = 3600  # 60 minutes
+    agent_timeout_seconds: int = 10800  # 3 hours; 0 = disabled (no wall-clock
+    # limit). The engine-wide ceiling for a single turn, paused while a human
+    # interaction is pending. Runtime liveness aborts (dead pane / dead JSONL
+    # tailer) and /stop, /cancel still apply when disabled.
     system_prompt: str | None = None
     allowed_tools: list[str] = []
     disallowed_tools: list[str] = []

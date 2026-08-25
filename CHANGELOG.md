@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.5.0] - 2026-08-25
+- **changed**: the engine-wide turn timeout (`agent_timeout_seconds`) now defaults to **3 hours** (was 60 minutes) and accepts `0` to disable it entirely. The 1.0 refactor disabled every runtime-level ceiling so a long run is never force-stopped mid-work, but this engine wall-clock survived and still killed an actively-working turn at exactly 60 minutes, discarding the session resume token with it. Runtime liveness aborts (dead pane, dead JSONL tailer) and `/stop`, `/cancel` still apply when disabled.
+- **added**: `/resume` reattaches the conversation a timeout, interrupt, or `/stop` dropped, instead of losing the context and starting fresh. leashd remembers the last live resume token per chat (persisted across daemon restarts), so `/resume` puts you back where you were and `/resume <message>` resumes and sends in one step. `/clear` still wipes it.
+
 ## [1.4.0] - 2026-08-02
 - **fixed**: concurrent conversations in the *same* working directory cross-bound — three chats in one directory collapsed onto one Claude session uuid, one of them received all three chats' tool events, and two turns finished only on the 45s idle backstop (64.3s / 18.0s / 64.2s). Each pane now carries a per-spawn identity token in its own managed `--settings` hook headers, so a hook resolves to the session that owns the pane rather than to a single cwd-keyed slot the newest spawn overwrote (after: three distinct uuids, no cross-delivery, 18.4s / 18.8s / 19.6s).
 - **fixed**: the same token retires the reaped-pane phantom turn by construction — a dying pane's in-flight `Stop` can no longer complete the turn of the pane that replaced it under the same session id.

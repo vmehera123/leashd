@@ -4457,3 +4457,122 @@ class TestNativeCommandPassthrough:
         result = await eng.handle_command("user1", "screen", "", "chat1")
 
         assert "tmux runtime" in result
+
+
+class TestResumeCommand:
+    def _engine(self, config, audit_logger, policy_engine, mock_connector, agent=None):
+        return Engine(
+            connector=mock_connector,
+            agent=agent or FakeAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+    async def test_resume_restores_token_dropped_by_stop(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        eng = self._engine(config, audit_logger, policy_engine, mock_connector)
+        await eng.handle_message("user1", "hello", "chat1")
+        session = eng.session_manager.get("user1", "chat1")
+        assert session.agent_resume_token == "test-session-123"
+
+        await eng.handle_command("user1", "stop", "", "chat1")
+        assert session.agent_resume_token is None
+        assert session.resumable_token == "test-session-123"
+
+        result = await eng.handle_command("user1", "resume", "", "chat1")
+
+        assert "resumed" in result.lower()
+        assert session.agent_resume_token == "test-session-123"
+
+    async def test_resume_restores_token_dropped_by_timeout(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        eng = self._engine(config, audit_logger, policy_engine, mock_connector)
+        await eng.handle_message("user1", "hello", "chat1")
+        session = eng.session_manager.get("user1", "chat1")
+
+        eng.session_manager.stash_resume_token(session)
+        session.agent_resume_token = None
+
+        result = await eng.handle_command("user1", "resume", "", "chat1")
+
+        assert session.agent_resume_token == "test-session-123"
+        assert "resumed" in result.lower()
+
+    async def test_resume_with_text_sends_the_message(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        class RecordingAgent(FakeAgent):
+            def __init__(self):
+                super().__init__()
+                self.prompts = []
+
+            async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
+                self.prompts.append(prompt)
+                return await super().execute(
+                    prompt, session, can_use_tool=can_use_tool, **kwargs
+                )
+
+        agent = RecordingAgent()
+        eng = self._engine(
+            config, audit_logger, policy_engine, mock_connector, agent=agent
+        )
+        await eng.handle_message("user1", "hello", "chat1")
+        session = eng.session_manager.get("user1", "chat1")
+        await eng.handle_command("user1", "stop", "", "chat1")
+
+        result = await eng.handle_command("user1", "resume", "carry on", "chat1")
+
+        assert result == ""
+        assert session.agent_resume_token == "test-session-123"
+        assert any("carry on" in prompt for prompt in agent.prompts)
+
+    async def test_resume_without_history_reports_nothing_to_resume(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        eng = self._engine(config, audit_logger, policy_engine, mock_connector)
+
+        result = await eng.handle_command("user1", "resume", "", "chat1")
+
+        assert "nothing to resume" in result.lower()
+
+    async def test_resume_on_live_conversation_is_a_noop(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        eng = self._engine(config, audit_logger, policy_engine, mock_connector)
+        await eng.handle_message("user1", "hello", "chat1")
+        session = eng.session_manager.get("user1", "chat1")
+
+        result = await eng.handle_command("user1", "resume", "", "chat1")
+
+        assert "already live" in result.lower()
+        assert session.agent_resume_token == "test-session-123"
+
+    async def test_resume_refuses_while_agent_is_running(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        eng = self._engine(config, audit_logger, policy_engine, mock_connector)
+        await eng.handle_message("user1", "hello", "chat1")
+        eng._executing_sessions["chat1"] = "sess-1"
+
+        result = await eng.handle_command("user1", "resume", "", "chat1")
+
+        assert "still running" in result.lower()
+
+    async def test_clear_wipes_the_resumable_token(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        eng = self._engine(config, audit_logger, policy_engine, mock_connector)
+        await eng.handle_message("user1", "hello", "chat1")
+        session = eng.session_manager.get("user1", "chat1")
+        await eng.handle_command("user1", "stop", "", "chat1")
+        assert session.resumable_token == "test-session-123"
+
+        await eng.handle_command("user1", "clear", "", "chat1")
+
+        assert session.resumable_token is None
+        result = await eng.handle_command("user1", "resume", "", "chat1")
+        assert "nothing to resume" in result.lower()

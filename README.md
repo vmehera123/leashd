@@ -458,6 +458,7 @@ These slash commands are available in both the Web UI and Telegram:
 | `/tasks` | List active and recent tasks for the current chat |
 | `/file <path>` | Send a real file from an approved directory to the chat (globs work) |
 | `/stop` | Stop all ongoing work (agent, task, loop) without resetting session |
+| `/resume` | Reattach the conversation a timeout, interrupt, or `/stop` dropped. `/resume <message>` resumes and sends in one step |
 | `/cancel` | Cancel the active task in the current chat |
 | `/plugin` | Manage Claude Code plugins mid-session (install, remove, enable, disable) |
 | `/ws` | Manage workspaces inline. Blocked while an agent is running. |

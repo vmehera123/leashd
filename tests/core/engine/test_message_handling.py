@@ -1,6 +1,7 @@
 """Engine tests — core message handling, errors, logging, context."""
 
 import asyncio
+import math
 import time
 from unittest.mock import AsyncMock, patch
 
@@ -735,3 +736,81 @@ class TestAgentDeadlinePauseDuringQuestion:
         result = await eng.handle_message("user1", "hello", "chat1")
         assert "timed out" not in result.lower()
         assert "Done" in result
+
+
+class TestAgentDeadlineDisabled:
+    def test_positive_timeout_counts_down_and_expires(self):
+        from leashd.core.engine import AgentDeadline
+
+        deadline = AgentDeadline(30)
+        assert deadline.disabled is False
+        assert 0 < deadline.remaining <= 30
+        assert deadline.expired is False
+        assert AgentDeadline(0.0001).remaining < 30
+
+    def test_zero_timeout_disables_the_deadline(self):
+        from leashd.core.engine import AgentDeadline
+
+        deadline = AgentDeadline(0)
+        assert deadline.disabled is True
+        assert deadline.remaining == math.inf
+        assert deadline.expired is False
+
+    def test_disabled_deadline_survives_pause_resume_reset(self):
+        from leashd.core.engine import AgentDeadline
+
+        deadline = AgentDeadline(0)
+        deadline.pause()
+        assert deadline.expired is False
+        assert deadline.remaining == math.inf
+        deadline.resume()
+        deadline.reset()
+        assert deadline.disabled is True
+        assert deadline.expired is False
+        assert deadline.remaining == math.inf
+
+    def test_negative_timeout_is_treated_as_disabled(self):
+        from leashd.core.engine import AgentDeadline
+
+        deadline = AgentDeadline(-5)
+        assert deadline.disabled is True
+        assert deadline.expired is False
+
+    async def test_zero_timeout_lets_a_long_turn_finish(
+        self, config, audit_logger, policy_engine
+    ):
+        """The regression: a legitimately long turn is no longer killed mid-work."""
+        cancel_called = False
+
+        class SlowAgent(BaseAgent):
+            async def execute(self, prompt, session, **kwargs):
+                await asyncio.sleep(0.3)
+                return AgentResponse(content="finished the long turn")
+
+            async def cancel(self, session_id):
+                nonlocal cancel_called
+                cancel_called = True
+
+            async def shutdown(self):
+                pass
+
+        config_no_timeout = LeashdConfig(
+            approved_directories=config.approved_directories,
+            max_turns=5,
+            agent_timeout_seconds=0,
+            audit_log_path=config.audit_log_path,
+        )
+
+        eng = Engine(
+            connector=None,
+            agent=SlowAgent(),
+            config=config_no_timeout,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        result = await eng.handle_message("u1", "hello", "c1")
+        assert "finished the long turn" in result
+        assert "timed out" not in result.lower()
+        assert cancel_called is False

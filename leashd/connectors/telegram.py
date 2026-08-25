@@ -293,6 +293,7 @@ class TelegramConnector(BaseConnector):
                     "task",
                     "cancel",
                     "tasks",
+                    "resume",
                     "stop",
                     "web",
                     "goal",

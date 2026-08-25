@@ -18,7 +18,7 @@ class TestLeashdConfig:
         assert config.test_max_turns == 200
         assert config.task_max_turns == 300
         assert config.max_concurrent_agents == 5
-        assert config.agent_timeout_seconds == 3600
+        assert config.agent_timeout_seconds == 10800
         assert config.storage_backend == "sqlite"
         assert config.default_mode == "auto"
         assert config.approval_timeout_seconds is None

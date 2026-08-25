@@ -41,7 +41,7 @@ Each layer overrides the one before it: `~/.leashd/config.yaml` → `.env` → e
 | `LEASHD_WEB_MAX_TURNS` | `int` | `300` | Maximum agent turns in `/web` mode. Falls back to `LEASHD_MAX_TURNS` if not set. |
 | `LEASHD_TEST_MAX_TURNS` | `int` | `200` | Maximum agent turns in `/test` mode. Falls back to `LEASHD_MAX_TURNS` if not set. |
 | `LEASHD_MAX_CONCURRENT_AGENTS` | `int` | `5` | Maximum parallel agent subprocesses. Prevents resource exhaustion from concurrent sessions. |
-| `LEASHD_AGENT_TIMEOUT_SECONDS` | `int` | `3600` | Agent execution timeout in seconds (60 minutes) |
+| `LEASHD_AGENT_TIMEOUT_SECONDS` | `int` | `10800` | Wall-clock ceiling for a single agent turn, in seconds (3 hours). Set to `0` to disable it entirely — the turn then runs until it finishes, `/stop`/`/cancel`, or a runtime liveness abort. Paused while a human approval or question is pending. |
 | `LEASHD_SYSTEM_PROMPT` | `str \| None` | `None` | Additional system prompt appended to the agent |
 | `LEASHD_ALLOWED_TOOLS` | `list[str]` | `[]` | Whitelist of tools the agent can use (empty = all) |
 | `LEASHD_DISALLOWED_TOOLS` | `list[str]` | `[]` | Blacklist of tools the agent cannot use |
@@ -200,7 +200,7 @@ LEASHD_APPROVED_DIRECTORIES=/path/to/your/project
 LEASHD_MAX_TURNS=250
 LEASHD_WEB_MAX_TURNS=300
 LEASHD_TEST_MAX_TURNS=200
-LEASHD_AGENT_TIMEOUT_SECONDS=3600
+LEASHD_AGENT_TIMEOUT_SECONDS=10800
 LEASHD_SYSTEM_PROMPT="Focus on writing tests first."
 LEASHD_DEFAULT_MODE=default
 

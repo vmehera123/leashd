@@ -146,6 +146,7 @@ const SLASH_COMMANDS = [
   { command: "/git", description: "Git operations" },
   { command: "/cancel", description: "Cancel current task" },
   { command: "/stop", description: "Stop all work" },
+  { command: "/resume", description: "Reattach the previous conversation" },
   { command: "/tasks", description: "List active tasks" },
   { command: "/status", description: "Session status" },
   { command: "/clear", description: "Clear session" },

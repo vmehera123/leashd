@@ -22,6 +22,7 @@ class Session(BaseModel):
     chat_id: str
     working_directory: str
     agent_resume_token: str | None = None
+    resumable_token: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     last_used: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     total_cost: float = 0.0
@@ -130,6 +131,7 @@ class SessionManager:
         session.total_cost += cost
         if agent_resume_token:
             session.agent_resume_token = agent_resume_token
+            session.resumable_token = agent_resume_token
 
         if self._store:
             await self._store.save(session)
@@ -141,6 +143,13 @@ class SessionManager:
             total_cost=session.total_cost,
             has_resume_token=session.agent_resume_token is not None,
         )
+
+    @staticmethod
+    def stash_resume_token(session: Session) -> None:
+        """Remember the live resume token before a timeout, interrupt, or error
+        drops it, so ``/resume`` can put the conversation back."""
+        if session.agent_resume_token:
+            session.resumable_token = session.agent_resume_token
 
     def reset_mode(self, session: Session) -> None:
         """Reset interactive mode to the configured default, preserving the
@@ -158,6 +167,7 @@ class SessionManager:
             return
         session.session_id = str(uuid.uuid4())
         session.agent_resume_token = None
+        session.resumable_token = None
         session.message_count = 0
         session.total_cost = 0.0
         session.mode = self._default_mode

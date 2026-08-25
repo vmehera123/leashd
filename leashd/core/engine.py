@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import math
 import os
 import shlex
 import signal
@@ -147,16 +148,27 @@ _BROWSER_SHUTDOWN_POLL_SECONDS = 0.3
 
 
 class AgentDeadline:
-    """Mutable deadline that pauses during user interactions and can be reset."""
+    """Mutable deadline that pauses during user interactions and can be reset.
+
+    A non-positive timeout disables the deadline: the turn then runs until it
+    completes on its own, is cancelled via /stop or /cancel, or a runtime
+    liveness check aborts it.
+    """
 
     __slots__ = ("_deadline", "_paused_remaining", "_timeout")
 
     def __init__(self, timeout: float) -> None:
-        self._timeout = timeout
-        self._deadline = time.monotonic() + timeout
+        self._timeout = max(0.0, timeout)
+        self._deadline = time.monotonic() + self._timeout
         self._paused_remaining: float | None = None
 
+    @property
+    def disabled(self) -> bool:
+        return self._timeout <= 0
+
     def pause(self) -> None:
+        if self.disabled:
+            return
         if self._paused_remaining is None:
             self._paused_remaining = max(0.0, self._deadline - time.monotonic())
 
@@ -171,13 +183,15 @@ class AgentDeadline:
 
     @property
     def remaining(self) -> float:
+        if self.disabled:
+            return math.inf
         if self._paused_remaining is not None:
             return self._paused_remaining
         return max(0.0, self._deadline - time.monotonic())
 
     @property
     def expired(self) -> bool:
-        return self.remaining <= 0
+        return not self.disabled and self.remaining <= 0
 
 
 _TOOLS_EXCLUDED_FROM_LIMIT = frozenset(
@@ -1160,6 +1174,7 @@ class Engine:
                 self._interrupted_chats.discard(chat_id)
                 if responder:
                     await responder.deactivate()
+                self.session_manager.stash_resume_token(session)
                 session.agent_resume_token = None
                 await self.session_manager.save(session)
                 if self.connector:
@@ -1363,6 +1378,7 @@ class Engine:
                 self._interrupted_chats.discard(chat_id)
                 if responder:
                     await responder.deactivate()
+                self.session_manager.stash_resume_token(session)
                 session.agent_resume_token = None
                 await self.session_manager.save(session)
                 await self.event_bus.emit(
@@ -1435,6 +1451,7 @@ class Engine:
                 session.agent_resume_token
                 and session.agent_resume_token == pre_exec_resume_token
             ):
+                self.session_manager.stash_resume_token(session)
                 session.agent_resume_token = None
                 logger.info(
                     "stale_session_cleared_on_error",
@@ -1531,10 +1548,10 @@ class Engine:
         )
         try:
             while not agent_task.done():
-                remaining = deadline.remaining
-                if remaining <= 0:
+                if deadline.expired:
                     raise TimeoutError
-                done, _ = await asyncio.wait({agent_task}, timeout=remaining)
+                slice_timeout = None if deadline.disabled else deadline.remaining
+                done, _ = await asyncio.wait({agent_task}, timeout=slice_timeout)
                 if done:
                     break
             return agent_task.result()
@@ -1563,6 +1580,7 @@ class Engine:
                     agent_resume_token=session.agent_resume_token,
                 )
             elif pre_exec_resume_token:
+                self.session_manager.stash_resume_token(session)
                 session.agent_resume_token = None
                 logger.info(
                     "stale_session_cleared_on_timeout",
@@ -1807,11 +1825,17 @@ class Engine:
                 )
             )
             await self._cleanup_session(session, chat_id)
+            self.session_manager.stash_resume_token(session)
             session.agent_resume_token = None
             self.session_manager.reset_mode(session)
             await self.session_manager.save(session)
             logger.info("all_work_stopped", user_id=user_id, chat_id=chat_id)
             return "All work stopped."
+
+        if command == "resume":
+            return await self._handle_resume_command(
+                session, args, chat_id, user_id, attachments
+            )
 
         if command == "tasks":
             return await self._handle_tasks_command(user_id, chat_id)
@@ -2445,6 +2469,54 @@ class Engine:
             directories=[str(d) for d in ws.directories],
         )
         return f"Workspace '{ws.name}' active \u2014 {dir_list}\nPrimary: {primary}"
+
+    async def _handle_resume_command(
+        self,
+        session: Session,
+        args: str,
+        chat_id: str,
+        user_id: str,
+        attachments: list[Attachment] | None = None,
+    ) -> str:
+        """Reattach the conversation the agent was in before a timeout,
+        interrupt, or /stop dropped it."""
+        if self._executing_sessions.get(chat_id):
+            return "An agent is still running here. Send /stop first, then /resume."
+
+        text = args.strip()
+        if session.agent_resume_token:
+            if not text:
+                return "This conversation is already live — just send your message."
+            await self.handle_message(user_id, text, chat_id, attachments=attachments)
+            return ""
+
+        token = session.resumable_token
+        if not token:
+            return (
+                "Nothing to resume — this chat has no earlier conversation to "
+                "reattach to. Send a message to start a fresh one."
+            )
+
+        session.agent_resume_token = token
+        await self.session_manager.save(session)
+        logger.info(
+            "session_resumed",
+            user_id=user_id,
+            chat_id=chat_id,
+            session_id=session.session_id,
+            agent_resume_token=token,
+        )
+
+        if text:
+            await self._send_transient(
+                chat_id, "\u21a9\ufe0f Resumed the previous conversation."
+            )
+            await self.handle_message(user_id, text, chat_id, attachments=attachments)
+            return ""
+        return (
+            "\u21a9\ufe0f Resumed the previous conversation. "
+            "Your next message continues where it left off."
+        )
 
     async def _handle_tasks_command(self, _user_id: str, chat_id: str) -> str:
         """List active and recent tasks for this chat."""

@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     session_id TEXT NOT NULL,
     working_directory TEXT NOT NULL,
     agent_resume_token TEXT,
+    resumable_token TEXT,
     created_at TEXT NOT NULL,
     last_used TEXT NOT NULL,
     total_cost REAL DEFAULT 0.0,
@@ -123,6 +124,10 @@ class SqliteSessionStore:
                 await self._db.execute(
                     "ALTER TABLE sessions ADD COLUMN task_run_id TEXT"
                 )
+            if "resumable_token" not in existing:
+                await self._db.execute(
+                    "ALTER TABLE sessions ADD COLUMN resumable_token TEXT"
+                )
             # Rename claude_session_id → agent_resume_token for existing DBs
             if "claude_session_id" in existing and "agent_resume_token" not in existing:
                 await self._db.execute(
@@ -167,16 +172,17 @@ class SqliteSessionStore:
         await self._db.execute(
             """INSERT OR REPLACE INTO sessions
                (user_id, chat_id, session_id, working_directory,
-                agent_resume_token, created_at, last_used,
+                agent_resume_token, resumable_token, created_at, last_used,
                 total_cost, message_count, is_active,
                 workspace_name, mode, mode_instruction, task_run_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 session.user_id,
                 session.chat_id,
                 session.session_id,
                 session.working_directory,
                 session.agent_resume_token,
+                session.resumable_token,
                 session.created_at.isoformat(),
                 session.last_used.isoformat(),
                 session.total_cost,
@@ -221,6 +227,9 @@ class SqliteSessionStore:
             chat_id=row["chat_id"],
             working_directory=row["working_directory"],
             agent_resume_token=row["agent_resume_token"],
+            resumable_token=(
+                row["resumable_token"] if "resumable_token" in keys else None
+            ),
             created_at=datetime.fromisoformat(row["created_at"]).replace(
                 tzinfo=timezone.utc
             ),
