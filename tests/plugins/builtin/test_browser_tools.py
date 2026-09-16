@@ -724,8 +724,16 @@ class TestStripAgentBrowserFlags:
         )
 
     def test_only_flags_no_subcommand(self):
-        # Edge: --verbose at end of tokens; helper returns bare agent-browser.
-        assert strip_agent_browser_flags("agent-browser --verbose") == "agent-browser"
+        assert (
+            strip_agent_browser_flags("agent-browser --verbose")
+            == "agent-browser --verbose"
+        )
+
+    def test_flag_before_a_pipe_is_not_given_the_pipe_as_its_value(self):
+        assert (
+            strip_agent_browser_flags("agent-browser --session s | head")
+            == "agent-browser --session s | head"
+        )
 
 
 class TestIsAgentBrowserCommand:

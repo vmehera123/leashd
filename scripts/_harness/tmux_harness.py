@@ -40,9 +40,11 @@ TOKEN = os.environ.get("TG_TOKEN", "TESTTOKEN")
 CHAT_ID = os.environ.get("CHAT_ID", "284184690")
 USER_ID = os.environ.get("USER_ID", "284184690")
 EDIT_DELAY_S = float(os.environ.get("EDIT_DELAY_MS", "0")) / 1000.0
+PERSIST = os.environ.get("PERSIST", "0") == "1"
 
 MAX_TEXT_LEN = 4096
 MAX_CALLBACK_DATA_BYTES = 64
+MAX_COPY_TEXT_CHARS = 256
 MAX_CAPTION_LEN = 1024
 MAX_UPLOAD_BYTES = 50 * 1000 * 1000
 MAX_PHOTO_BYTES = 10 * 1000 * 1000
@@ -130,6 +132,10 @@ class _EntityParser(HTMLParser):
         if tag not in ALLOWED_TAGS:
             self._fail(f'Unsupported start tag "{tag}"')
             return
+        if tag == "pre" and self.stack:
+            self._fail("Pre entities can't be nested")
+        if self.stack and self.stack[-1] == "pre" and tag != "code":
+            self._fail(f'Unsupported start tag "{tag}" inside pre')
         self.stack.append(tag)
 
     def handle_startendtag(self, tag: str, attrs: Any) -> None:
@@ -179,6 +185,11 @@ def _invalid_button_data(rm_raw: str | None) -> str | None:
             data = b.get("callback_data")
             if data is not None and len(str(data).encode()) > MAX_CALLBACK_DATA_BYTES:
                 return str(data)
+            copied = b.get("copy_text")
+            if copied is not None and not (
+                1 <= len(str((copied or {}).get("text", ""))) <= MAX_COPY_TEXT_CHARS
+            ):
+                return str(copied)
     return None
 
 
@@ -201,7 +212,11 @@ def _store_buttons(message_id: int, rm_raw: str | None) -> None:
         return
     rows = rm.get("inline_keyboard") or []
     flat = [
-        {"text": b.get("text", ""), "callback_data": b.get("callback_data", "")}
+        {
+            "text": b.get("text", ""),
+            "callback_data": b.get("callback_data", ""),
+            "copy_text": (b.get("copy_text") or {}).get("text", ""),
+        }
         for row in rows
         for b in row
     ]
@@ -598,14 +613,31 @@ def build_message_store() -> Any:
     that reads history back (``/session`` replays a conversation's last message
     on switch). ``build_engine`` hardcodes the sqlite paths to the user's real
     ``~/.leashd/``, so the store is constructed here and injected instead of
-    switching ``storage_backend``.
+    switching ``storage_backend``. ``PERSIST=1`` keeps it across restarts.
     """
     from leashd.storage.sqlite import SqliteSessionStore
 
     HARNESS_DIR.mkdir(parents=True, exist_ok=True)
     db = HARNESS_DIR / "messages.db"
-    db.unlink(missing_ok=True)
+    if not PERSIST:
+        db.unlink(missing_ok=True)
     return SqliteSessionStore(db)
+
+
+def build_session_store() -> Any:
+    """Sessions in the harness dir, so a restart can re-adopt their panes.
+
+    ``PERSIST=1`` only. A daemon restart matches each surviving pane back to
+    its stored conversation and terminates the ones it cannot place, so with
+    in-memory sessions every restart reads as "the conversation moved on" and
+    the pane under test is killed before it can be observed.
+    """
+    if not PERSIST:
+        return None
+    from leashd.storage.sqlite import SqliteSessionStore
+
+    HARNESS_DIR.mkdir(parents=True, exist_ok=True)
+    return SqliteSessionStore(HARNESS_DIR / "sessions.db")
 
 
 async def run_engine() -> None:
@@ -626,7 +658,12 @@ async def run_engine() -> None:
     multi = MultiConnector([tg, web])
     web._on_connect = lambda cid: multi.register_route(cid, web)
     web._on_disconnect = lambda cid: multi.unregister_route(cid)
-    engine = build_engine(config, connector=multi, message_store=msg_store)
+    engine = build_engine(
+        config,
+        connector=multi,
+        message_store=msg_store,
+        session_store=build_session_store(),
+    )
     _engine[0] = engine
     _telegram[0] = tg
     await engine.startup()

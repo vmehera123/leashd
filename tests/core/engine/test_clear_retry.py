@@ -280,3 +280,48 @@ class TestRetryableResponseMatching:
     async def test_clean_response_is_never_transient(self):
         ok = AgentResponse(content="API Error: 529 overloaded", session_id="s")
         assert not Engine._is_retryable_response(ok)
+
+    async def test_a_typed_api_error_is_never_transient(self):
+        typed = AgentResponse(
+            content=_OVERLOADED_TEXT,
+            session_id="s",
+            is_error=True,
+            error_kind="overloaded",
+        )
+        assert not Engine._is_retryable_response(typed)
+
+
+_OVERLOADED_TEXT = (
+    "API Error: 529 Overloaded. This is a server-side issue, usually temporary "
+    "— try again in a moment."
+)
+
+
+class TypedApiErrorAgent(BaseAgent):
+    def __init__(self):
+        self.prompts: list[str] = []
+
+    async def execute(self, prompt, session, *, can_use_tool=None, **kwargs):
+        self.prompts.append(prompt)
+        return AgentResponse(
+            content=_OVERLOADED_TEXT,
+            session_id="pane",
+            is_error=True,
+            error_kind="overloaded",
+        )
+
+    async def cancel(self, session_id):
+        pass
+
+    async def shutdown(self):
+        pass
+
+
+class TestTypedApiErrorIsNotResent:
+    async def test_the_prompt_runs_once(self, config, audit_logger, policy_engine):
+        agent = TypedApiErrorAgent()
+        eng = _engine(agent, config, policy_engine, audit_logger)
+
+        await eng.handle_message("user1", "hello", "chat1")
+
+        assert agent.prompts == ["hello"]

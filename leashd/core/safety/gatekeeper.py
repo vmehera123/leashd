@@ -15,6 +15,7 @@ from leashd.core.events import (
     Event,
 )
 from leashd.core.safety.analyzer import (
+    command_units,
     is_shell_control_segment,
     network_read_scope,
     split_chain_segments,
@@ -165,7 +166,11 @@ def _approval_key(
     if idx >= len(tokens):
         return "Bash"
     prefix = tokens[idx]
-    if prefix in _TARGET_BEARING_COMMANDS:
+    if prefix in _TARGET_BEARING_COMMANDS or (
+        prefix == "agent-browser"
+        and idx + 1 < len(tokens)
+        and tokens[idx + 1][:1] in _SKIP_CHARS
+    ):
         return f"Bash::{' '.join(tokens[idx:])}"
     max_words = 2 if prefix == "agent-browser" else 3
     if idx + 1 < len(tokens) and tokens[idx + 1][:1] not in _SKIP_CHARS:
@@ -177,6 +182,35 @@ def _approval_key(
         ):
             prefix = f"{tokens[idx]} {tokens[idx + 1]} {tokens[idx + 2]}"
     return f"Bash::{prefix}"
+
+
+AGENT_BROWSER_BROWSING_SCOPE = "agent-browser browsing"
+
+
+def _agent_browser_browsing_keys() -> frozenset[str]:
+    from leashd.plugins.builtin.browser_tools import AGENT_BROWSER_AUTO_APPROVE
+
+    return AGENT_BROWSER_AUTO_APPROVE
+
+
+def approve_all_grant(approval_key: str) -> frozenset[str]:
+    browsing = _agent_browser_browsing_keys()
+    return browsing if approval_key in browsing else frozenset({approval_key})
+
+
+def approve_all_group(approval_key: str) -> str:
+    if approval_key in _agent_browser_browsing_keys():
+        return AGENT_BROWSER_BROWSING_SCOPE
+    return ""
+
+
+def _stage_needs_grant(
+    policy: PolicyEngine, stage: str, *, after_pipe: bool, explicit: bool
+) -> bool:
+    classification = policy.classify("Bash", {"command": stage})
+    if policy.evaluate(classification) == PolicyDecision.ALLOW:
+        return False
+    return classification.matched_rule is not None or after_pipe or not explicit
 
 
 DEFAULT_PATH_TOOLS = frozenset(
@@ -197,6 +231,7 @@ class ToolGatekeeper:
         approval_coordinator: ApprovalCoordinator | None = None,
         approval_timeout: int | None = None,
         path_tools: frozenset[str] | None = None,
+        browser_auto_approve: bool = False,
     ) -> None:
         self._sandbox = sandbox
         self._audit = audit
@@ -207,6 +242,15 @@ class ToolGatekeeper:
         self._path_tools = path_tools or DEFAULT_PATH_TOOLS
         self._auto_approved_chats: set[str] = set()
         self._auto_approved_tools: dict[str, set[str]] = {}
+        self._standing_grants: frozenset[str] = (
+            _agent_browser_browsing_keys() if browser_auto_approve else frozenset()
+        )
+
+    def set_browser_auto_approve(self, enabled: bool) -> None:
+        grants = _agent_browser_browsing_keys() if enabled else frozenset()
+        if grants != self._standing_grants:
+            self._standing_grants = grants
+            logger.info("browser_auto_approve_set", enabled=enabled)
 
     def enable_auto_approve(self, chat_id: str) -> None:
         self._auto_approved_chats.add(chat_id)
@@ -218,10 +262,29 @@ class ToolGatekeeper:
             "auto_approve_enabled", chat_id=chat_id, scope="tool", tool_name=tool_name
         )
 
+    def grant_approve_all(self, chat_id: str, approval_key: str) -> None:
+        granted = approve_all_grant(approval_key)
+        self._auto_approved_tools.setdefault(chat_id, set()).update(granted)
+        logger.info(
+            "auto_approve_enabled",
+            chat_id=chat_id,
+            scope=approve_all_group(approval_key) or "tool",
+            tool_name=approval_key,
+            granted=len(granted),
+        )
+
     def get_auto_approve_status(self, chat_id: str) -> tuple[bool, set[str]]:
         blanket = chat_id in self._auto_approved_chats
-        per_tool = self._auto_approved_tools.get(chat_id, set())
+        per_tool = self._auto_approved_tools.get(chat_id, set()) | self._standing_grants
         return blanket, per_tool
+
+    @staticmethod
+    def describe_grants(keys: Collection[str]) -> list[str]:
+        browsing = _agent_browser_browsing_keys()
+        granted = set(keys)
+        if not browsing <= granted:
+            return sorted(granted)
+        return [AGENT_BROWSER_BROWSING_SCOPE, *sorted(granted - browsing)]
 
     def disable_auto_approve(self, chat_id: str) -> None:
         self._auto_approved_chats.discard(chat_id)
@@ -502,7 +565,7 @@ class ToolGatekeeper:
         stored ``Bash::uv run`` matches current ``Bash::uv run pytest``.
         Word-boundary check prevents ``Bash::git`` matching ``Bash::gitx``.
         """
-        approved = self._auto_approved_tools.get(chat_id, set())
+        approved = self._auto_approved_tools.get(chat_id, set()) | self._standing_grants
         if key in approved:
             return True
         if not key.startswith("Bash::"):
@@ -516,6 +579,32 @@ class ToolGatekeeper:
                 return True
         return False
 
+    def _approval_keys(
+        self, tool_name: str, tool_input: dict[str, Any], classification: Any
+    ) -> list[str]:
+        whole = _approval_key(
+            tool_name,
+            tool_input,
+            gated_command=getattr(classification, "matched_command", None),
+        )
+        policy = self._policy_engine
+        if policy is None or normalize_tool_name(tool_name) != "Bash":
+            return [whole]
+        explicit = getattr(classification, "matched_rule", None) is not None
+        keys: list[str] = []
+        for text, kind in command_units(str(tool_input.get("command", ""))):
+            if kind == "pipeline" or not _stage_needs_grant(
+                policy,
+                text,
+                after_pipe=kind in ("piped", "substituted"),
+                explicit=explicit,
+            ):
+                continue
+            key = _approval_key("Bash", {"command": text})
+            if key not in keys:
+                keys.append(key)
+        return keys or [whole]
+
     async def _handle_approval(
         self,
         session_id: str,
@@ -527,12 +616,12 @@ class ToolGatekeeper:
         task_run_id: str | None = None,
     ) -> PermissionAllow | PermissionDeny:
         blanket = chat_id in self._auto_approved_chats
-        key = _approval_key(
-            tool_name,
-            tool_input,
-            gated_command=getattr(classification, "matched_command", None),
-        )
-        if blanket or self._matches_auto_approved(chat_id, key):
+        uncovered = [
+            key
+            for key in self._approval_keys(tool_name, tool_input, classification)
+            if not self._matches_auto_approved(chat_id, key)
+        ]
+        if blanket or not uncovered:
             logger.info(
                 "tool_auto_approved",
                 session_id=session_id,
@@ -562,7 +651,7 @@ class ToolGatekeeper:
             chat_id=chat_id,
             tool_name=tool_name,
             tool_input=tool_input,
-            key=key,
+            key=uncovered[0],
             classification=classification,
         )
 

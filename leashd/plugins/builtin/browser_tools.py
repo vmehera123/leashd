@@ -257,6 +257,9 @@ _AGENT_BROWSER_KNOWN_SUBS: frozenset[str] = (
 )
 
 
+_SHELL_OPERATOR_CHARS = frozenset("|;&<>")
+
+
 def strip_agent_browser_flags(command: str) -> str:
     """Drop leading ``-x``/``--flag [value]`` tokens between ``agent-browser``
     and its real subcommand.
@@ -283,16 +286,20 @@ def strip_agent_browser_flags(command: str) -> str:
             continue
         if i + 1 < len(tokens):
             nxt = tokens[i + 1]
-            if nxt.startswith("-") or nxt in _AGENT_BROWSER_KNOWN_SUBS:
-                i += 1  # bool flag — don't consume the next token
+            if (
+                nxt.startswith("-")
+                or nxt in _AGENT_BROWSER_KNOWN_SUBS
+                or nxt[:1] in _SHELL_OPERATOR_CHARS
+            ):
+                i += 1
             else:
-                i += 2  # --flag value
+                i += 2
         else:
             i += 1
-    if i == 1:
-        return command
     rest = tokens[i:]
-    return "agent-browser " + " ".join(rest) if rest else "agent-browser"
+    if i == 1 or not rest or rest[0][:1] in _SHELL_OPERATOR_CHARS:
+        return command
+    return "agent-browser " + " ".join(rest)
 
 
 def classify_agent_browser_command(

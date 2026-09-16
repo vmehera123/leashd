@@ -46,7 +46,7 @@ Each layer overrides the one before it: `~/.leashd/config.yaml` → `.env` → e
 | `LEASHD_ALLOWED_TOOLS` | `list[str]` | `[]` | Whitelist of tools the agent can use (empty = all) |
 | `LEASHD_DISALLOWED_TOOLS` | `list[str]` | `[]` | Blacklist of tools the agent cannot use |
 | `LEASHD_MCP_SERVERS` | `dict` | `{}` | JSON dict of MCP server configurations |
-| `LEASHD_EFFORT` | `Literal["low", "medium", "high", "xhigh", "max"] \| None` | `"xhigh"` | Thinking depth for the agent. `xhigh` sits between `high` and `max`; Claude runtimes saturate `xhigh` to `max` (no native rung), Codex maps both `xhigh` and `max` to its own `xhigh` |
+| `LEASHD_EFFORT` | `Literal["low", "medium", "high", "xhigh", "max"] \| None` | `"xhigh"` | Thinking depth for the agent. `xhigh` sits between `high` and `max`; Claude runtimes pass it through (a Claude Code CLI older than 2.1.111, such as the SDK runtime's bundled one, gets `high`), Codex maps both `xhigh` and `max` to its own `xhigh` |
 
 ### Safety Settings
 
@@ -101,6 +101,7 @@ Each layer overrides the one before it: `~/.leashd/config.yaml` → `.env` → e
 |---|---|---|---|
 | `LEASHD_BROWSER_BACKEND` | `Literal["playwright", "agent-browser"]` | `"playwright"` | Browser automation backend. `playwright` uses Playwright MCP; `agent-browser` uses the agent-browser CLI skill. |
 | `LEASHD_BROWSER_HEADLESS` | `bool` | `false` | Run Playwright browser in headless mode (no visible window). Useful for CI or remote sessions. Only applies to `playwright` backend. |
+| `LEASHD_BROWSER_AUTO_APPROVE` | `bool` | `false` | Approve agent-browser browsing (open, click, fill, eval, tabs…) in every conversation without asking — the same grant `/test` uses. Cookies, auth, storage, state, clipboard, `connect` and installs still ask, and so does anything a browsing command pipes into. Set with `leashd browser auto-approve on`. |
 | `LEASHD_BROWSER_USER_DATA_DIR` | `str \| None` | `None` | Chrome user data directory for persistent `/web` sessions. When set, `/web` injects `--user-data-dir` into Playwright MCP args at runtime. `/test` always uses a temporary profile. |
 
 ### Streaming

@@ -142,6 +142,7 @@ class TestGrantsDoNotWiden:
     def gatekeeper(self):
         gate = ToolGatekeeper.__new__(ToolGatekeeper)
         gate._auto_approved_chats = set()
+        gate._standing_grants = frozenset()
         gate._auto_approved_tools = {
             "chat": {key("curl -s https://api.github.com/repos/a/b")}
         }

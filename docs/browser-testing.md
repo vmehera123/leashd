@@ -207,6 +207,8 @@ Each built-in policy preset handles browser tools differently:
 
 The rules are defined in the respective YAML files under `policies/`. The readonly/mutation split lets the default policy auto-allow observation (snapshots, screenshots, console logs) while gating interactions (clicks, typing, navigation) behind your approval.
 
+For agent-browser, every policy still asks for credential commands (`cookies`, `auth`, `storage`, `state`, `clipboard`) and privileged ones (`connect`, `install`, `plugin`, `batch`, `doctor --fix`, …) — `permissive` included. Under `default`, one "Always allow" on a browsing command covers all browsing for that conversation; `leashd browser auto-approve on` grants it to every conversation.
+
 See [Policies](policies.md) for the full rule matching algorithm and comparison table.
 
 ## BrowserToolsPlugin

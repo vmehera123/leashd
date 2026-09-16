@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, TypeVar, cast
 import structlog
 from telegram import (
     CallbackQuery,
+    CopyTextButton,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
@@ -32,9 +33,16 @@ from telegram.ext import (
 from leashd.connectors.base import (
     ATTACHMENT_MAX_BYTES,
     ATTACHMENT_SUPPORTED_TYPES,
+    ApprovalCard,
     Attachment,
     BaseConnector,
     InlineButton,
+)
+from leashd.connectors.telegram_approval import (
+    copy_text,
+    render_approval,
+    render_receipt,
+    tool_label,
 )
 from leashd.connectors.telegram_markdown import (
     Chunk,
@@ -46,6 +54,7 @@ from leashd.connectors.telegram_markdown import (
 )
 from leashd.connectors.telegram_sessions import ChatSessionRouter
 from leashd.core.chat_sessions import index_of
+from leashd.core.safety.gatekeeper import approve_all_group
 from leashd.exceptions import ConnectorError
 
 if TYPE_CHECKING:
@@ -290,6 +299,7 @@ def _summarize_prompt(text: str) -> str:
 
 
 _APPROVE_ALL_LABEL_CHARS = 44
+_BROWSING_STILL_ASKS = "cookies, auth, storage, connect and installs still ask"
 
 
 def _approve_all_scope(tool_name: str) -> str:
@@ -301,12 +311,33 @@ def _approve_all_scope(tool_name: str) -> str:
     return body[: _APPROVE_ALL_LABEL_CHARS - 1].rstrip() + "…"
 
 
+def _approve_all_phrase(tool_name: str) -> str:
+    group = approve_all_group(tool_name)
+    if group:
+        return group
+    scope = _approve_all_scope(tool_name)
+    return f"'{scope}'" if tool_name.startswith("Bash::") else scope
+
+
 def _approve_all_label(tool_name: str) -> str:
     if not tool_name:
-        return "Approve all in session"
-    if tool_name.startswith("Bash::"):
-        return f"Approve all '{_approve_all_scope(tool_name)}' cmds"
-    return f"Approve all {_approve_all_scope(tool_name)}"
+        return "⏩ Allow every tool from now on"
+    return f"⏩ Always allow {_approve_all_phrase(tool_name)}"
+
+
+def _approval_status(
+    resolved: bool, decision: str, approved: bool, tool_name: str
+) -> str:
+    if not resolved:
+        return "⌛ Expired · no longer waiting"
+    if decision == "all":
+        if not tool_name:
+            return "✅ Approved · every tool allowed from now on"
+        status = f"✅ Approved · {_approve_all_phrase(tool_name)} allowed from now on"
+        if approve_all_group(tool_name):
+            return f"{status} ({_BROWSING_STILL_ASKS})"
+        return status
+    return "✅ Approved" if approved else "❌ Rejected"
 
 
 @dataclass
@@ -345,6 +376,7 @@ class TelegramConnector(BaseConnector):
         self._plan_message_ids: dict[str, list[str]] = {}
         self._question_message_ids: dict[str, str] = {}
         self._approval_tool_names: dict[str, str] = {}
+        self._approval_cards: dict[str, ApprovalCard] = {}
         self._prompt_chats: dict[str, str] = {}
         self._router = ChatSessionRouter()
         self._deferred: dict[str, list[_Prompt]] = {}
@@ -450,6 +482,7 @@ class TelegramConnector(BaseConnector):
 
     def discard_prompt(self, prompt_id: str) -> None:
         """Drop a prompt that was answered or expired, held or on screen."""
+        self._approval_cards.pop(prompt_id, None)
         for chat_id, tracked in list(self._onscreen.items()):
             remaining = [p for p in tracked if p.prompt_id != prompt_id]
             for settled in tracked:
@@ -1083,30 +1116,39 @@ class TelegramConnector(BaseConnector):
     async def request_approval(
         self, chat_id: str, approval_id: str, description: str, tool_name: str = ""
     ) -> str | None:
-        self._approval_tool_names[approval_id] = tool_name
+        card = ApprovalCard(
+            approval_key=tool_name,
+            tool_name=tool_name.split("::", 1)[0],
+            description=description,
+        )
+        return await self.request_approval_card(chat_id, approval_id, card)
+
+    async def request_approval_card(
+        self, chat_id: str, approval_id: str, card: ApprovalCard
+    ) -> str | None:
+        self._approval_tool_names[approval_id] = card.approval_key
+        self._approval_cards[approval_id] = card
         self._prompt_chats[approval_id] = chat_id
         return await self._raise_prompt(
             chat_id,
             approval_id,
-            _summarize_prompt(f"Approve {tool_name or 'a tool call'}"),
-            lambda: self._render_approval(chat_id, approval_id, description, tool_name),
+            _summarize_prompt(f"Approve {tool_label(card.tool_name)}"),
+            lambda: self._render_approval(chat_id, approval_id, card),
         )
 
     async def _render_approval(
-        self, chat_id: str, approval_id: str, description: str, tool_name: str
+        self, chat_id: str, approval_id: str, card: ApprovalCard
     ) -> str | None:
-        approve_all_text = _approve_all_label(tool_name)
-
         buttons = [
             [
                 InlineButton(
-                    text="Approve",
+                    text="✅ Approve",
                     callback_data=_truncate_callback_data(
                         f"{_APPROVAL_PREFIX}yes:{approval_id}"
                     ),
                 ),
                 InlineButton(
-                    text="Reject",
+                    text="❌ Reject",
                     callback_data=_truncate_callback_data(
                         f"{_APPROVAL_PREFIX}no:{approval_id}"
                     ),
@@ -1114,15 +1156,20 @@ class TelegramConnector(BaseConnector):
             ],
             [
                 InlineButton(
-                    text=approve_all_text,
+                    text=_approve_all_label(card.approval_key),
                     callback_data=_truncate_callback_data(
                         f"{_APPROVAL_PREFIX}all:{approval_id}"
                     ),
                 ),
             ],
         ]
-        msg_id = await self._send_message_with_id_and_buttons(
-            chat_id, description, buttons
+        command = copy_text(card)
+        if command:
+            buttons.append([InlineButton(text="📋 Copy command", copy_text=command)])
+        msg_id = await self._send_chunk_with_buttons(
+            chat_id,
+            render_approval(card, slot=index_of(chat_id), limit=_MAX_MESSAGE_LENGTH),
+            buttons,
         )
         logger.info(
             "telegram_approval_requested",
@@ -1652,10 +1699,15 @@ class TelegramConnector(BaseConnector):
         message = query.message
         if not isinstance(message, Message):
             return
-        chunk = Chunk(
-            f"{message.text or ''}\n\n{status}",
-            f"{message.text_html or ''}\n\n{escape(status)}",
+        await self._edit_resolved_prompt(
+            query,
+            Chunk(
+                f"{message.text or ''}\n\n{status}",
+                f"{message.text_html or ''}\n\n{escape(status)}",
+            ),
         )
+
+    async def _edit_resolved_prompt(self, query: CallbackQuery, chunk: Chunk) -> None:
         await _send_rendered(
             lambda body, mode: query.edit_message_text(text=body, parse_mode=mode),
             chunk,
@@ -1681,6 +1733,7 @@ class TelegramConnector(BaseConnector):
 
         if not approval_id:
             return
+        card = self._approval_cards.pop(approval_id, None)
 
         approved = decision in ("yes", "all")
         logger.info(
@@ -1708,29 +1761,17 @@ class TelegramConnector(BaseConnector):
                 self._prompt_chat(approval_id, str(query.message.chat_id)), tool_name
             )
 
-        if resolved:
-            if decision == "all":
-                if tool_name.startswith("Bash::"):
-                    scope = _approve_all_scope(tool_name)
-                    status = (
-                        f"Approved \u2713 (all future '{scope}' cmds auto-approved)"
-                    )
-                elif tool_name:
-                    scope = _approve_all_scope(tool_name)
-                    status = f"Approved \u2713 (all future {scope} auto-approved)"
-                else:
-                    status = "Approved \u2713 (all future tools auto-approved)"
-            elif approved:
-                status = "Approved \u2713"
-            else:
-                status = "Rejected \u2717"
-        else:
-            status = "Expired (approval no longer active)"
-
+        status = _approval_status(resolved, decision, approved, tool_name)
+        conversation = self._prompt_chat(approval_id, str(query.message.chat_id))
         self._prompt_chats.pop(approval_id, None)
         self.discard_prompt(approval_id)
         try:
-            await self._append_status(query, status)
+            if card is None:
+                await self._append_status(query, status)
+            else:
+                await self._edit_resolved_prompt(
+                    query, render_receipt(card, status, slot=index_of(conversation))
+                )
             chat_id = str(query.message.chat_id)
             msg_id = str(query.message.message_id)
             self.schedule_message_cleanup(chat_id, msg_id)
@@ -1981,11 +2022,13 @@ def _to_telegram_markup(
     buttons: list[list[InlineButton]],
 ) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(text=btn.text, callback_data=btn.callback_data)
-                for btn in row
-            ]
-            for row in buttons
-        ]
+        [[_to_telegram_button(btn) for btn in row] for row in buttons]
     )
+
+
+def _to_telegram_button(button: InlineButton) -> InlineKeyboardButton:
+    if button.copy_text:
+        return InlineKeyboardButton(
+            text=button.text, copy_text=CopyTextButton(button.copy_text)
+        )
+    return InlineKeyboardButton(text=button.text, callback_data=button.callback_data)

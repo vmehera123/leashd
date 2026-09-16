@@ -51,7 +51,33 @@ class InlineButton(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     text: str
-    callback_data: str
+    callback_data: str = ""
+    copy_text: str = ""
+
+
+class ApprovalCard(BaseModel):
+    """One tool call awaiting approval, as facts a connector can lay out.
+
+    ``description`` is the plain-text prompt every connector has always shown.
+    The other fields are the same call broken out, for a connector that formats
+    its prompts instead of printing that text.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    approval_key: str
+    tool_name: str
+    description: str
+    summary: str = ""
+    reason: str = ""
+    risk_level: str = ""
+    command: str = ""
+    gated_segment: str = ""
+    path: str = ""
+    preview: str = ""
+    preview_language: str = ""
+    details: tuple[tuple[str, str], ...] = ()
+    working_directory: str = ""
 
 
 MessageHandler = Callable[[str, str, str, list[Attachment]], Coroutine[Any, Any, str]]
@@ -99,6 +125,15 @@ class BaseConnector(ABC):
     async def request_approval(
         self, chat_id: str, approval_id: str, description: str, tool_name: str = ""
     ) -> str | None: ...
+
+    async def request_approval_card(
+        self, chat_id: str, approval_id: str, card: ApprovalCard
+    ) -> str | None:
+        """Raise an approval from its card. A connector that formats prompts
+        overrides this; any other gets the plain description it always had."""
+        return await self.request_approval(
+            chat_id, approval_id, card.description, card.approval_key
+        )
 
     @abstractmethod
     async def send_file(

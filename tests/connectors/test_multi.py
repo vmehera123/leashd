@@ -127,6 +127,21 @@ class TestDelegation:
         await multi.send_typing_indicator("12345")
         assert len(mock_telegram.typing_indicators) == 1
 
+    async def test_request_approval_card_is_routed(
+        self, multi, mock_telegram, mock_web
+    ):
+        from leashd.connectors.base import ApprovalCard
+
+        multi.register_route("web:abc", mock_web)
+        card = ApprovalCard(
+            approval_key="Bash::uv", tool_name="Bash", description="Install X"
+        )
+
+        await multi.request_approval_card("web:abc", "ap-1", card)
+
+        assert mock_web.approval_requests[0]["description"] == "Install X"
+        assert mock_telegram.approval_requests == []
+
     async def test_request_approval(self, multi, mock_telegram):
         result = await multi.request_approval("12345", "ap-1", "Install X", "Bash")
         assert result is not None

@@ -79,6 +79,24 @@ class TestApproval:
         assert msg.payload["request_id"] == "ap-1"
         assert msg.payload["tool"] == "Bash"
 
+    async def test_browsing_key_names_the_group_it_grants(self, connector):
+        connector._ws_handler.send_to = AsyncMock()
+        await connector.request_approval(
+            "web:1", "ap-2", "Click", "Bash::agent-browser click"
+        )
+
+        msg = connector._ws_handler.send_to.call_args[0][1]
+        assert msg.payload["approve_all_scope"] == "agent-browser browsing"
+
+    async def test_credential_browser_key_is_not_grouped(self, connector):
+        connector._ws_handler.send_to = AsyncMock()
+        await connector.request_approval(
+            "web:1", "ap-3", "Read cookies", "Bash::agent-browser cookies"
+        )
+
+        msg = connector._ws_handler.send_to.call_args[0][1]
+        assert "approve_all_scope" not in msg.payload
+
 
 class TestStreaming:
     async def test_send_message_with_id(self, connector):

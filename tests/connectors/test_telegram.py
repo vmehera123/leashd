@@ -8,7 +8,7 @@ from telegram import Message
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, InvalidToken, NetworkError, RetryAfter, TimedOut
 
-from leashd.connectors.base import InlineButton
+from leashd.connectors.base import ApprovalCard, InlineButton
 from leashd.connectors.telegram import (
     _CALLBACK_DATA_MAX_BYTES,
     _MAX_CAPTION_LENGTH,
@@ -100,6 +100,12 @@ class TestToTelegramMarkup:
         assert len(markup.inline_keyboard) == 2
         assert len(markup.inline_keyboard[1]) == 2
         assert markup.inline_keyboard[1][1].text == "C"
+
+    def test_copy_button(self):
+        markup = _to_telegram_markup([[InlineButton(text="Copy", copy_text="ls -la")]])
+        button = markup.inline_keyboard[0][0]
+        assert button.copy_text.text == "ls -la"
+        assert button.callback_data is None
 
 
 # --- Connector method tests ---
@@ -315,9 +321,9 @@ class TestRequestApproval:
         markup = call_kwargs["reply_markup"]
         assert markup is not None
         buttons = markup.inline_keyboard[0]
-        assert buttons[0].text == "Approve"
+        assert buttons[0].text == "✅ Approve"
         assert "yes:abc-123" in buttons[0].callback_data
-        assert buttons[1].text == "Reject"
+        assert buttons[1].text == "❌ Reject"
         assert "no:abc-123" in buttons[1].callback_data
 
 
@@ -616,7 +622,7 @@ class TestOnCallbackQuery:
         update.callback_query.edit_message_text.assert_awaited_once()
         call_args = update.callback_query.edit_message_text.await_args
         edited_text = call_args.kwargs["text"]
-        assert "Approved \u2713" in edited_text
+        assert "\u2705 Approved" in edited_text
 
     async def test_no_query_is_noop(self, connector):
         update = MagicMock()
@@ -710,7 +716,7 @@ class TestOnCallbackQuery:
 
         edited_text = update.callback_query.edit_message_text.await_args.kwargs["text"]
         assert "Expired" in edited_text
-        assert "Approved \u2713" not in edited_text
+        assert "\u2705 Approved" not in edited_text
 
 
 class TestSendMessageWithId:
@@ -957,7 +963,7 @@ class TestRequestApprovalButtons:
         markup = calls[-1].kwargs["reply_markup"]
         assert markup is not None
         assert len(markup.inline_keyboard) == 2
-        assert markup.inline_keyboard[1][0].text == "Approve all Write"
+        assert markup.inline_keyboard[1][0].text == "⏩ Always allow Write"
         assert markup.inline_keyboard[1][0].callback_data == "approval:all:abc-123"
 
     async def test_approve_all_button_fallback_no_tool_name(self, connector):
@@ -969,7 +975,7 @@ class TestRequestApprovalButtons:
         calls = mock_app.bot.send_message.await_args_list
         markup = calls[-1].kwargs["reply_markup"]
         assert markup is not None
-        assert markup.inline_keyboard[1][0].text == "Approve all in session"
+        assert markup.inline_keyboard[1][0].text == "⏩ Allow every tool from now on"
 
     async def test_approve_all_button_scoped_bash_key(self, connector):
         mock_app = _make_mock_app()
@@ -980,7 +986,7 @@ class TestRequestApprovalButtons:
         calls = mock_app.bot.send_message.await_args_list
         markup = calls[-1].kwargs["reply_markup"]
         assert markup is not None
-        assert markup.inline_keyboard[1][0].text == "Approve all 'uv run' cmds"
+        assert markup.inline_keyboard[1][0].text == "⏩ Always allow 'uv run'"
         assert markup.inline_keyboard[1][0].callback_data == "approval:all:abc-123"
 
     async def test_approve_all_button_names_a_curl_host(self, connector):
@@ -994,7 +1000,35 @@ class TestRequestApprovalButtons:
         calls = mock_app.bot.send_message.await_args_list
         markup = calls[-1].kwargs["reply_markup"]
         assert markup.inline_keyboard[1][0].text == (
-            "Approve all 'curl raw.githubusercontent.com' cmds"
+            "⏩ Always allow 'curl raw.githubusercontent.com'"
+        )
+
+    async def test_approve_all_button_names_the_browsing_grant(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+
+        await connector.request_approval(
+            "123", "abc-123", "Click", "Bash::agent-browser click"
+        )
+
+        markup = mock_app.bot.send_message.await_args_list[-1].kwargs["reply_markup"]
+        assert markup.inline_keyboard[1][0].text == (
+            "⏩ Always allow agent-browser browsing"
+        )
+
+    async def test_approve_all_button_keeps_credential_browser_commands_literal(
+        self, connector
+    ):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+
+        await connector.request_approval(
+            "123", "abc-123", "Cookies", "Bash::agent-browser cookies"
+        )
+
+        markup = mock_app.bot.send_message.await_args_list[-1].kwargs["reply_markup"]
+        assert markup.inline_keyboard[1][0].text == (
+            "⏩ Always allow 'agent-browser cookies'"
         )
 
     async def test_approve_all_button_text_is_trimmed(self, connector):
@@ -1011,7 +1045,7 @@ class TestRequestApprovalButtons:
         calls = mock_app.bot.send_message.await_args_list
         text = calls[-1].kwargs["reply_markup"].inline_keyboard[1][0].text
         assert len(text) < len(long_tool)
-        assert text.endswith("…' cmds")
+        assert text.endswith("…'")
 
     async def test_approve_all_callback_data_within_64_bytes(self, connector):
         mock_app = _make_mock_app()
@@ -1090,7 +1124,7 @@ class TestApproveAllCallback:
 
         edited_text = update.callback_query.edit_message_text.await_args.kwargs["text"]
         assert "Bash" in edited_text
-        assert "Approved \u2713" in edited_text
+        assert "\u2705 Approved" in edited_text
 
     async def test_all_decision_scoped_bash_status(self, connector):
         resolver = AsyncMock(return_value=True)
@@ -1102,8 +1136,21 @@ class TestApproveAllCallback:
         await connector._on_callback_query(update, MagicMock())
 
         edited_text = update.callback_query.edit_message_text.await_args.kwargs["text"]
-        assert "Approved \u2713" in edited_text
-        assert "'uv run' cmds auto-approved" in edited_text
+        assert "\u2705 Approved" in edited_text
+        assert "'uv run' allowed from now on" in edited_text
+
+    async def test_all_decision_browsing_status_says_what_still_asks(self, connector):
+        resolver = AsyncMock(return_value=True)
+        connector.set_approval_resolver(resolver)
+        connector.set_auto_approve_handler(lambda chat_id, tool_name: None)
+        connector._approval_tool_names["abc-123"] = "Bash::agent-browser open"
+
+        update = _make_callback_update("approval:all:abc-123")
+        await connector._on_callback_query(update, MagicMock())
+
+        edited_text = update.callback_query.edit_message_text.await_args.kwargs["text"]
+        assert "browsing allowed from now on" in edited_text
+        assert "installs still ask" in edited_text
 
     async def test_all_decision_scoped_bash_calls_handler_with_key(self, connector):
         resolver = AsyncMock(return_value=True)
@@ -1132,7 +1179,7 @@ class TestApproveAllCallback:
 
         resolver.assert_awaited_once_with("abc-123", True)
         edited_text = update.callback_query.edit_message_text.await_args.kwargs["text"]
-        assert "Approved \u2713" in edited_text
+        assert "\u2705 Approved" in edited_text
 
     async def test_tool_name_cleaned_up_on_all_callback(self, connector):
         resolver = AsyncMock(return_value=True)
@@ -1174,7 +1221,7 @@ class TestApproveAllCallback:
         await connector._on_callback_query(update, MagicMock())
 
         edited_text = update.callback_query.edit_message_text.await_args.kwargs["text"]
-        assert "all future tools auto-approved" in edited_text
+        assert "every tool allowed from now on" in edited_text
 
 
 class TestOnCommand:
@@ -3118,7 +3165,7 @@ class TestInputEdgeCases:
         call_args = mock_app.bot.send_message.call_args
         markup = call_args.kwargs["reply_markup"]
         approve_all_btn = markup.inline_keyboard[1][0]
-        assert approve_all_btn.text == "Approve all in session"
+        assert approve_all_btn.text == "⏩ Allow every tool from now on"
 
     async def test_request_approval_very_long_tool_name(self, connector):
         mock_app = _make_mock_app()
@@ -3290,6 +3337,110 @@ class TestGitCallbackEdgeCases:
         git_handler.assert_awaited_once_with("42", "100", "status", "")
 
 
+class TestApprovalCards:
+    async def test_a_card_goes_out_as_html_with_its_command_in_a_code_block(
+        self, connector
+    ):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        card = ApprovalCard(
+            approval_key="Bash::rm",
+            tool_name="Bash",
+            description="Tool: Bash::rm",
+            command="rm -rf build/*.o dist/*",
+            risk_level="high",
+            reason="Recursive delete",
+        )
+
+        await connector.request_approval_card("123", "ap-1", card)
+
+        kwargs = mock_app.bot.send_message.await_args.kwargs
+        assert kwargs["parse_mode"] == ParseMode.HTML
+        assert (
+            '<pre><code class="language-bash">rm -rf build/*.o dist/*</code></pre>'
+            in kwargs["text"]
+        )
+        rows = kwargs["reply_markup"].inline_keyboard
+        assert [b.text for b in rows[0]] == ["✅ Approve", "❌ Reject"]
+        assert rows[1][0].text == "⏩ Always allow 'rm'"
+        assert rows[2][0].text == "📋 Copy command"
+        assert rows[2][0].copy_text.text == "rm -rf build/*.o dist/*"
+        assert rows[2][0].callback_data is None
+
+    async def test_a_command_too_long_to_copy_gets_no_copy_button(self, connector):
+        mock_app = _make_mock_app()
+        connector._app = mock_app
+        card = ApprovalCard(
+            approval_key="Bash::python3",
+            tool_name="Bash",
+            description="d",
+            command="python3 -c '" + "x" * 300 + "'",
+        )
+
+        await connector.request_approval_card("123", "ap-1", card)
+
+        markup = mock_app.bot.send_message.await_args.kwargs["reply_markup"]
+        assert len(markup.inline_keyboard) == 2
+
+    async def test_answering_collapses_the_card_to_a_receipt(self, connector):
+        """The full card stayed in the chat with a status line appended under
+        a command the human had already read. What is left is what was
+        decided, and what for."""
+        mock_app = _make_mock_app()
+        mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=50))
+        connector._app = mock_app
+        connector.set_approval_resolver(AsyncMock(return_value=True))
+        card = ApprovalCard(
+            approval_key="Bash::uv run",
+            tool_name="Bash",
+            description="d",
+            command="uv run pytest -q",
+            working_directory="/w/protostar",
+        )
+        await connector.request_approval_card("100", "ap-1", card)
+
+        update = _make_callback_update("approval:yes:ap-1")
+        await connector._on_callback_query(update, MagicMock())
+
+        kwargs = update.callback_query.edit_message_text.await_args.kwargs
+        assert kwargs["text"] == (
+            "<b>✅ Approved</b> · <b>Bash</b> in <b>protostar</b>\n"
+            "<code>uv run pytest -q</code>"
+        )
+        assert kwargs["parse_mode"] == ParseMode.HTML
+        assert "ap-1" not in connector._approval_cards
+
+    async def test_a_receipt_names_the_conversation_that_asked(self, connector):
+        connector._app = _make_mock_app()
+        connector.set_approval_resolver(AsyncMock(return_value=True))
+        connector._router.activate("100:s2")
+        card = ApprovalCard(
+            approval_key="Write",
+            tool_name="Write",
+            description="d",
+            path="/w/p/a.py",
+            working_directory="/w/p",
+        )
+        await connector.request_approval_card("100:s2", "ap-2", card)
+
+        update = _make_callback_update("approval:no:ap-2")
+        await connector._on_callback_query(update, MagicMock())
+
+        text = update.callback_query.edit_message_text.await_args.kwargs["text"]
+        assert text == (
+            "<b>❌ Rejected</b> · <b>Write</b> in <b>p</b> · #2\n<code>a.py</code>"
+        )
+
+    async def test_a_settled_card_is_forgotten(self, connector):
+        connector._app = _make_mock_app()
+        card = ApprovalCard(approval_key="Bash", tool_name="Bash", description="d")
+        await connector.request_approval_card("100", "ap-3", card)
+
+        connector.discard_prompt("ap-3")
+
+        assert connector._approval_cards == {}
+
+
 class TestApprovalLifecycle:
     async def test_full_approve_flow(self, connector):
         mock_app = _make_mock_app()
@@ -3360,7 +3511,7 @@ class TestApprovalLifecycle:
         resolver.assert_awaited_once_with("ap-1", True)
         auto_approve_handler.assert_called_once_with("100", "Write")
         edit_text = update.callback_query.edit_message_text.call_args.kwargs["text"]
-        assert "auto-approved" in edit_text
+        assert "allowed from now on" in edit_text
         assert "Write" in edit_text
 
 
@@ -3828,7 +3979,9 @@ class TestResolvedPromptKeepsItsFormatting:
         await connector._on_callback_query(update, MagicMock())
 
         kwargs = update.callback_query.edit_message_text.await_args.kwargs
-        assert kwargs["text"] == ("Run tests? <code>uv run pytest</code>\n\nApproved ✓")
+        assert kwargs["text"] == (
+            "Run tests? <code>uv run pytest</code>\n\n✅ Approved"
+        )
         assert kwargs["parse_mode"] == ParseMode.HTML
 
     async def test_status_is_escaped_before_it_is_appended(self, connector):

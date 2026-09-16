@@ -96,6 +96,18 @@ class TestReconnectStateApprovals:
         assert result["approvals"][0]["request_id"] == "ap-1"
         assert result["approvals"][0]["tool"] == "Bash"
         assert result["approvals"][0]["description"] == "Install numpy"
+        assert "approve_all_scope" not in result["approvals"][0]
+
+    async def test_browsing_approval_keeps_its_grant_scope(self):
+        approval = _make_pending_approval(
+            "ap-1", "web:1", "Bash::agent-browser click", "Click"
+        )
+        engine = _make_mock_engine(pending_approvals={"ap-1": approval})
+        callback = _make_reconnect_state_callback(engine)
+
+        result = await callback("web:1")
+
+        assert result["approvals"][0]["approve_all_scope"] == "agent-browser browsing"
 
     async def test_filters_approvals_by_chat_id(self):
         ap1 = _make_pending_approval("ap-1", "web:1", "Bash")

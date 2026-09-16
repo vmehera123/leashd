@@ -9,7 +9,11 @@ from typing import TYPE_CHECKING, Any
 import structlog
 from pydantic import BaseModel, ConfigDict, Field
 
+from leashd.core.safety.approval_card import build_approval_card
+
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from leashd.connectors.base import BaseConnector
     from leashd.core.config import LeashdConfig
     from leashd.core.events import EventBus
@@ -21,6 +25,39 @@ _EXECUTED_BEFORE_VERDICT = (
     "This tool call already ran — the runtime did not wait for leashd's "
     "approval, so the decision arrived too late to gate it."
 )
+
+_MAX_COMMAND_CHARS = 1400
+
+
+def _command_lines(command: str, gated: str | None) -> list[str]:
+    """The command lines of a Bash approval prompt.
+
+    The gated chain segment leads. A compound command is gated on one of its
+    segments, and taking the head of the raw command showed whichever segment
+    came first instead: a prompt reading "Recursive delete — confirm the path
+    before it runs" was answered against 200 characters of the ``python3 -
+    <<'PYEOF'`` heredoc in front of it, with the ``rm -rf`` it named sitting at
+    character 622 of 704, off the end. The path the human is asked to confirm
+    is exactly what a head-truncation drops.
+
+    The whole command still follows, because approving the segment runs all of
+    it. Truncation of that is explicit — silently cutting it is what hid the
+    ``rm`` — and the segment above survives however long the command is.
+    """
+    lines: list[str] = []
+    stripped = command.strip()
+    if gated and gated.strip() and gated.strip() != stripped:
+        lines.append(f"Gated: {_clip(gated.strip())}")
+        lines.append(f"Full command: {_clip(command)}")
+    else:
+        lines.append(f"Command: {_clip(command)}")
+    return lines
+
+
+def _clip(text: str) -> str:
+    if len(text) <= _MAX_COMMAND_CHARS:
+        return text
+    return f"{text[:_MAX_COMMAND_CHARS]}… (+{len(text) - _MAX_COMMAND_CHARS} chars)"
 
 
 class ApprovalResult(BaseModel):
@@ -63,10 +100,12 @@ class ApprovalCoordinator:
         connector: BaseConnector,
         config: LeashdConfig,
         event_bus: EventBus | None = None,
+        working_directory_of: Callable[[str], str | None] | None = None,
     ) -> None:
         self.connector = connector
         self.config = config
         self._event_bus = event_bus
+        self._working_directory_of = working_directory_of
         self.pending: dict[str, PendingApproval] = {}
         self.last_outcome: dict[str, bool] = {}
 
@@ -95,10 +134,15 @@ class ApprovalCoordinator:
 
         description = self._format_description(tool_name, tool_input, classification)
         pending.description = description
-
-        msg_id = await self.connector.request_approval(
-            chat_id, approval_id, description, tool_name
+        card = build_approval_card(
+            tool_name,
+            tool_input,
+            classification,
+            description=description,
+            working_directory=self._working_directory(chat_id),
         )
+
+        msg_id = await self.connector.request_approval_card(chat_id, approval_id, card)
         pending.message_id = msg_id
 
         logger.info(
@@ -153,6 +197,11 @@ class ApprovalCoordinator:
         finally:
             self.pending.pop(approval_id, None)
             self.connector.discard_prompt(approval_id)
+
+    def _working_directory(self, chat_id: str) -> str:
+        if self._working_directory_of is None:
+            return ""
+        return self._working_directory_of(chat_id) or ""
 
     async def resolve_approval(self, approval_id: str, approved: bool) -> bool:
         pending = self.pending.get(approval_id)
@@ -249,7 +298,7 @@ class ApprovalCoordinator:
         if tool_name == "Bash" or tool_name.startswith("Bash::"):
             cmd = tool_input.get("command", "")
             if cmd:
-                parts.append(f"Command: {cmd[:200]}")
+                parts.extend(_command_lines(cmd, classification.matched_command))
             else:
                 parts.append("Command: (details unavailable)")
         elif tool_name in ("Write", "Edit", "Read"):

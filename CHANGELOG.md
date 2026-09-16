@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.7.0] - 2026-09-15
+- **changed**: Telegram approval cards show what you're approving (risk, project, Claude's summary, the command or diff, the policy's reason) and shrink to a one-line receipt once answered.
+- **changed**: "Always allow" on an agent-browser command covers all browsing, and `leashd browser auto-approve on` grants it to every conversation. Cookies, auth and storage still ask, now under `permissive.yaml` too.
+- **changed**: more read-only shell work runs without asking (`docker ps/logs`, git reads, `awk`, `--version` probes, `SELECT`s), while a pipe, `$( … )` or `bash -c` payload riding along still gets checked.
+- **changed**: the tmux runtime needs Claude Code 2.1.259+ and works with 2.1.267+; `/auto` uses Claude's native auto mode on Sonnet 5 and Fable 5.1 too.
+- **fixed**: tmux turns no longer stall on approvals: an approved prompt always gets pressed, a denial can't cancel the next call, and a message sent mid-turn no longer cuts the turn short.
+
 ## [1.6.0] - 2026-09-08
 - **added**: `/session` runs up to 9 independent conversations in one Telegram chat, each with its own agent, working directory, mode and history. One you are not looking at keeps working and reports back with a one-line notice you tap to open.
 - **added**: `leashd restart` no longer ends the work in progress: tmux panes outlive the daemon and are re-adopted on the way back in, so a turn that was still running keeps streaming where it left off. `leashd stop --end-agents` ends them instead, and the `tmux` runtime is now marked **stable**.

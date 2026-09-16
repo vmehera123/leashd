@@ -131,42 +131,33 @@ async def test_multiple_stacked_followups_each_defer_one_response():
 # -- JSONL dispatch path ----------------------------------------------------
 
 
-async def test_dispatch_result_defers_then_completes_with_combined_cost(cfg):
+_TURN_DURATION = {"type": "system", "subtype": "turn_duration", "durationMs": 900}
+
+
+async def test_dispatch_turn_duration_defers_then_completes_on_the_followup(cfg):
     tsm = TmuxSessionManager(cfg)
     cs = _session(tsm)
     turn = cs.begin_turn(on_text_chunk=None, on_tool_activity=None)
     turn.pending_followups = 1
 
-    # Response A's result line: cumulative cost recorded, but completion deferred.
-    await tsm._dispatch_jsonl_event(
-        cs, {"type": "result", "total_cost_usd": 0.04, "num_turns": 2}
-    )
+    await tsm._dispatch_jsonl_event(cs, _TURN_DURATION)
     assert not turn.stop_event.is_set()
-    assert turn.cost_usd == pytest.approx(0.04)
 
-    # Follow-up response streams in (re-arms the dedup guard) ...
     await tsm._dispatch_jsonl_event(
         cs,
         {"type": "assistant", "message": {"content": [{"type": "text", "text": "B"}]}},
     )
-    # ... and its result line completes the turn with the final cumulative cost.
-    await tsm._dispatch_jsonl_event(
-        cs, {"type": "result", "total_cost_usd": 0.06, "num_turns": 3}
-    )
+    await tsm._dispatch_jsonl_event(cs, _TURN_DURATION)
     assert turn.stop_event.is_set()
-    assert turn.cost_usd == pytest.approx(0.06)
-    assert turn.num_turns == 3
+    assert turn.is_error is False
 
 
-async def test_dispatch_result_completes_normally_without_pending(cfg):
-    """No follow-up → today's behavior: first result completes the turn."""
+async def test_dispatch_turn_duration_completes_normally_without_pending(cfg):
     tsm = TmuxSessionManager(cfg)
     cs = _session(tsm)
     turn = cs.begin_turn(on_text_chunk=None, on_tool_activity=None)
 
-    await tsm._dispatch_jsonl_event(
-        cs, {"type": "result", "total_cost_usd": 0.04, "num_turns": 1}
-    )
+    await tsm._dispatch_jsonl_event(cs, _TURN_DURATION)
     assert turn.stop_event.is_set()
 
 
@@ -185,7 +176,7 @@ async def test_inject_followup_queues_into_live_turn(cfg, monkeypatch):
 
     assert ok is True
     assert cs.turn.pending_followups == 1
-    submit.assert_awaited_once_with("now add tests")
+    submit.assert_awaited_once_with("now add tests", followup=True)
 
 
 async def test_inject_followup_returns_false_when_no_live_turn(cfg, monkeypatch):
@@ -275,7 +266,7 @@ async def test_inject_followup_stages_attachments_before_text(cfg, monkeypatch):
     # Attachment ref typed before the body text — the only key landed via
     # send_keys (the body goes through submit()).
     assert sent_keys == [("@/work/img1.png ", True)]
-    submit.assert_awaited_once_with("look at this")
+    submit.assert_awaited_once_with("look at this", followup=True)
     assert cs.turn.pending_followups == 1
 
 
@@ -544,7 +535,7 @@ async def test_injection_log_reports_claudes_queue_receipt(cfg, monkeypatch):
     monkeypatch.setattr(cs, "pane_is_dead", lambda: False)
     tsm = agent._tsm
 
-    async def _submit(text):
+    async def _submit(text, **_):
         await tsm._dispatch_jsonl_event(
             cs, {"type": "queue-operation", "operation": "enqueue", "content": text}
         )
@@ -640,3 +631,140 @@ async def test_contentless_drain_releases_only_when_nothing_to_match(cfg):
         cs, {"type": "queue-operation", "operation": "remove", "content": None}
     )
     assert turn.pending_followups == 0
+
+
+def _drain(content, operation="remove"):
+    record = {"type": "queue-operation", "operation": operation, "content": content}
+    if operation == "remove":
+        record["reason"] = "absorbed_mid_turn"
+    return record
+
+
+def _live_agent(cfg, monkeypatch, submit):
+    agent = TmuxAgent(cfg)
+    cs = _session(agent._tsm)
+    monkeypatch.setattr(cs, "pane_is_dead", lambda: False)
+    monkeypatch.setattr(cs, "send_keys", lambda *a, **k: None)
+    monkeypatch.setattr(cs, "submit", submit)
+    turn = cs.begin_turn(on_text_chunk=None, on_tool_activity=None)
+    return agent, cs, turn
+
+
+async def test_absorbed_followup_is_reported_read_once(cfg, monkeypatch):
+    agent, cs, _turn = _live_agent(cfg, monkeypatch, AsyncMock(return_value=True))
+    reads: list[str] = []
+
+    assert await agent.inject_followup(
+        "sess1", "also  run\n the tests", on_read=lambda: reads.append("read")
+    )
+
+    await agent._tsm._dispatch_jsonl_event(
+        cs, _drain("<task-notification>\n<task-id>b9epynu3n</task-id>\n")
+    )
+    assert reads == []
+
+    await agent._tsm._dispatch_jsonl_event(cs, _drain("also run the tests"))
+    await agent._tsm._dispatch_jsonl_event(cs, _drain("also run the tests"))
+    assert reads == ["read"]
+
+
+async def test_dequeued_followup_is_reported_read(cfg, monkeypatch):
+    agent, cs, turn = _live_agent(cfg, monkeypatch, AsyncMock(return_value=True))
+    reads: list[str] = []
+
+    await agent.inject_followup(
+        "sess1", "also run the tests", on_read=lambda: reads.append("read")
+    )
+    await agent._tsm._dispatch_jsonl_event(
+        cs, _drain("also run the tests", operation="dequeue")
+    )
+
+    assert reads == ["read"]
+    assert turn.pending_followups == 1
+
+
+async def test_followup_drained_before_submit_returns_is_released_and_read(
+    cfg, monkeypatch
+):
+    """Claude has drained a human follow-up 0.44s after queueing it. Text the
+    turn only learned of after submit returned was read as claude's own, so the
+    credit stayed and swallowed the turn's single completion signal."""
+    agent, cs, turn = _live_agent(cfg, monkeypatch, AsyncMock(return_value=True))
+
+    async def _submit(text, **_):
+        await agent._tsm._dispatch_jsonl_event(
+            cs, {"type": "queue-operation", "operation": "enqueue", "content": text}
+        )
+        await agent._tsm._dispatch_jsonl_event(cs, _drain(text))
+        return True
+
+    monkeypatch.setattr(cs, "submit", _submit)
+    reads: list[str] = []
+
+    assert await agent.inject_followup(
+        "sess1", "now add tests", on_read=lambda: reads.append("read")
+    )
+
+    assert reads == ["read"]
+    assert turn.pending_followups == 0
+    assert turn.pending_followup_texts == []
+    turn.complete()
+    assert turn.stop_event.is_set()
+
+
+async def test_undelivered_followup_is_withdrawn_and_never_reported_read(
+    cfg, monkeypatch
+):
+    agent, cs, turn = _live_agent(cfg, monkeypatch, AsyncMock(return_value=False))
+    reads: list[str] = []
+
+    assert (
+        await agent.inject_followup(
+            "sess1", "lost in the composer", on_read=lambda: reads.append("read")
+        )
+        is False
+    )
+    assert turn.pending_followup_texts == []
+
+    await agent._tsm._dispatch_jsonl_event(cs, _drain("lost in the composer"))
+    assert reads == []
+    assert turn.pending_followups == 0
+
+
+async def test_followup_read_matches_behind_staged_file_references(cfg, monkeypatch):
+    from leashd.connectors.base import Attachment
+
+    agent, cs, _turn = _live_agent(cfg, monkeypatch, AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        agent, "_stage_attachments", lambda atts, _cwd: ["/work/img1.png"]
+    )
+    reads: list[str] = []
+
+    await agent.inject_followup(
+        "sess1",
+        "look at this",
+        attachments=[
+            Attachment(filename="img1.png", data=b"x", media_type="image/png")
+        ],
+        on_read=lambda: reads.append("read"),
+    )
+    await agent._tsm._dispatch_jsonl_event(cs, _drain("@/work/img1.png look at this"))
+
+    assert reads == ["read"]
+
+
+async def test_failing_read_callback_does_not_break_the_drain(cfg):
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    turn = cs.begin_turn(on_text_chunk=None, on_tool_activity=None)
+    turn.pending_followups = 1
+    turn.pending_followup_texts = ["also do X"]
+
+    def _connector_gone():
+        raise RuntimeError("connector gone")
+
+    turn.watch_followup_read("also do X", _connector_gone)
+    await tsm._dispatch_jsonl_event(cs, _drain("also do X"))
+
+    assert turn.pending_followups == 0
+    assert not turn.stop_event.is_set()

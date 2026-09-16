@@ -11,7 +11,6 @@ from leashd.core.runtime_settings import (
     classify_model,
     resolve_scope_sources,
     resolve_settings,
-    to_claude_effort,
 )
 from leashd.core.workspace import Workspace
 
@@ -158,6 +157,8 @@ class TestClassifyModel:
         [
             ("opus", "claude"),
             ("sonnet", "claude"),
+            ("fable", "claude"),
+            ("claude-fable-5-1", "claude"),
             ("claude-opus-4-7", "claude"),
             ("haiku", "claude"),
             ("gpt-5.2", "codex"),
@@ -175,19 +176,3 @@ class TestClassifyModel:
 class TestEffortLevels:
     def test_valid_efforts_contains_all_five(self) -> None:
         assert {"low", "medium", "high", "xhigh", "max"} == VALID_EFFORTS
-
-    @pytest.mark.parametrize(
-        ("given", "expected"),
-        [
-            ("low", "low"),
-            ("medium", "medium"),
-            ("high", "high"),
-            ("max", "max"),
-            ("xhigh", "max"),
-            (None, None),
-        ],
-    )
-    def test_to_claude_effort_saturates_xhigh(
-        self, given: str | None, expected: str | None
-    ) -> None:
-        assert to_claude_effort(given) == expected

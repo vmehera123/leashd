@@ -33,6 +33,7 @@ class AgentResponse(BaseModel):
     num_turns: int = 0
     tools_used: list[str] = Field(default_factory=list)
     is_error: bool = False
+    error_kind: str | None = None
 
 
 @runtime_checkable
@@ -61,6 +62,8 @@ class BaseAgent(Protocol):
         session_id: str,  # noqa: ARG002
         text: str,  # noqa: ARG002
         attachments: list[Attachment] | None = None,  # noqa: ARG002
+        *,
+        on_read: Callable[[], None] | None = None,  # noqa: ARG002
     ) -> bool:
         """Type a human follow-up into a live, in-flight turn (native queue).
 
@@ -70,6 +73,10 @@ class BaseAgent(Protocol):
         falls back to queue-and-resubmit when this returns ``False``. Returns
         ``True`` if the text was queued into the running turn, ``False`` if
         there was no live turn (or the runtime doesn't support live injection).
+
+        ``on_read`` is called once the agent takes the queued text into the
+        conversation. That happens only when its current response ends, which
+        can be minutes after this returns.
         """
         return False
 

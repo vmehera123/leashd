@@ -124,6 +124,17 @@ class SessionManager:
         key = self._key(user_id, chat_id)
         return self._sessions.get(key)
 
+    def working_directory_of(self, chat_id: str) -> str | None:
+        """Where the live conversation behind *chat_id* is working."""
+        return next(
+            (
+                session.working_directory
+                for session in self._sessions.values()
+                if session.chat_id == chat_id and session.is_active
+            ),
+            None,
+        )
+
     def active_for_user(self, user_id: str) -> list[Session]:
         """Every cached live session belonging to *user_id*."""
         return [

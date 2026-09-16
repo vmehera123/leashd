@@ -154,6 +154,12 @@ _MAX_STREAMING_DISPLAY = 4000
 # ``/goal <word>`` forms that CLEAR rather than set a goal (Claude Code aliases).
 _GOAL_CLEAR_WORDS = frozenset({"clear", "stop", "off", "reset", "none", "cancel"})
 _TRANSIENT_MESSAGE_DELAY = 5.0  # seconds before auto-deleting status messages (longer than connector's 4.0s approval cleanup)
+_FOLLOWUP_QUEUED_NOTICE = "⏳ Queued — Claude reads it when its current response ends."
+_FOLLOWUP_READ_NOTICE = "📨 Claude has read your message."
+_FOLLOWUP_UNREAD_NOTICE = (
+    "⚠️ The turn ended before Claude read your message. "
+    "Send it again if it still applies."
+)
 _BROWSER_SHUTDOWN_POLLS = 10
 _BROWSER_SHUTDOWN_POLL_SECONDS = 0.3
 
@@ -702,6 +708,7 @@ class Engine:
             policy_engine=self.policy_engine,
             approval_coordinator=self.approval_coordinator,
             approval_timeout=config.approval_timeout_seconds,
+            browser_auto_approve=config.browser_auto_approve,
         )
 
         self._git_handler = git_handler
@@ -716,6 +723,9 @@ class Engine:
         self._interrupt_message_ids: dict[str, str] = {}
         self._interrupted_chats: set[str] = set()
         self._executing_sessions: dict[str, str] = {}
+        self._followup_notices: dict[
+            str, list[tuple[str, asyncio.Event, asyncio.Task[None]]]
+        ] = {}
         self._chat_session_banners: dict[str, str] = {}
         self._chat_stream_tail: dict[str, tuple[str, str]] = {}
         # Strong refs to the turns adopted from a previous daemon (asyncio only
@@ -741,9 +751,7 @@ class Engine:
                 connector.set_interaction_resolver(
                     interaction_coordinator.resolve_option
                 )
-            connector.set_auto_approve_handler(
-                self._gatekeeper.enable_tool_auto_approve
-            )
+            connector.set_auto_approve_handler(self._gatekeeper.grant_approve_all)
             connector.set_command_handler(self.handle_command)
             connector.set_interrupt_resolver(self._resolve_interrupt)
             if git_handler:
@@ -1008,6 +1016,7 @@ class Engine:
                     self.sandbox.add_directory(d)
             self.config = new_config
             self.agent.update_config(new_config)
+            self._gatekeeper.set_browser_auto_approve(new_config.browser_auto_approve)
             await self.event_bus.emit(
                 Event(
                     name=CONFIG_RELOADED,
@@ -1038,6 +1047,58 @@ class Engine:
             )
         else:
             await self.connector.send_message(chat_id, text)
+
+    async def _announce_followup(self, chat_id: str, read: asyncio.Event) -> None:
+        """Show that a live follow-up is waiting, and keep showing it until read.
+
+        The agent reads a queued follow-up only when its current response ends:
+        a median of 13s, and over a minute for one in six. A notice that cleared
+        itself after five seconds left nothing in the chat to say it had landed.
+        """
+        if self.connector is None:
+            return
+        if read.is_set():
+            await self._send_transient_notice(chat_id, _FOLLOWUP_READ_NOTICE)
+            return
+        message_id = await self.connector.send_message_with_id(
+            chat_id, _FOLLOWUP_QUEUED_NOTICE
+        )
+        if not message_id:
+            await self.connector.send_message(chat_id, _FOLLOWUP_QUEUED_NOTICE)
+            return
+        watcher = asyncio.create_task(
+            self._confirm_followup_read(chat_id, message_id, read)
+        )
+        self._followup_notices.setdefault(chat_id, []).append(
+            (message_id, read, watcher)
+        )
+
+    async def _confirm_followup_read(
+        self, chat_id: str, message_id: str, read: asyncio.Event
+    ) -> None:
+        await read.wait()
+        await self._show_followup_read(chat_id, message_id)
+
+    async def _show_followup_read(self, chat_id: str, message_id: str) -> None:
+        if self.connector is None:
+            return
+        await self.connector.edit_message(chat_id, message_id, _FOLLOWUP_READ_NOTICE)
+        self.connector.schedule_message_cleanup(
+            chat_id, message_id, delay=_TRANSIENT_MESSAGE_DELAY
+        )
+
+    async def _settle_followup_notices(self, chat_id: str) -> None:
+        """Close out a finished turn's follow-up notices, read or not."""
+        for message_id, read, watcher in self._followup_notices.pop(chat_id, []):
+            if watcher.done():
+                continue
+            watcher.cancel()
+            if read.is_set():
+                await self._show_followup_read(chat_id, message_id)
+            elif self.connector is not None:
+                await self.connector.edit_message(
+                    chat_id, message_id, _FOLLOWUP_UNREAD_NOTICE
+                )
 
     async def handle_message(
         self,
@@ -1106,8 +1167,9 @@ class Engine:
                 and not is_autonomous_task
                 and hasattr(self.agent, "inject_followup")
             ):
+                read = asyncio.Event()
                 injected = await self.agent.inject_followup(
-                    session_id, text, attachments
+                    session_id, text, attachments, on_read=read.set
                 )
                 if injected:
                     logger.info(
@@ -1121,10 +1183,7 @@ class Engine:
                         role="user",
                         content=text,
                     )
-                    await self._send_transient_notice(
-                        chat_id,
-                        "⏳ Queued — Claude will pick it up after the current step.",
-                    )
+                    await self._announce_followup(chat_id, read)
                     return ""
 
             self._pending_messages.setdefault(chat_id, []).append(
@@ -1227,6 +1286,7 @@ class Engine:
                     self.connector.schedule_message_cleanup(
                         chat_id, mid, delay=_TRANSIENT_MESSAGE_DELAY
                     )
+            await self._settle_followup_notices(chat_id)
             if self.connector:
                 await self.connector.notify_completion(chat_id)
 
@@ -1831,7 +1891,10 @@ class Engine:
 
     @staticmethod
     def _is_retryable_response(response: AgentResponse) -> bool:
-        if not response.is_error:
+        """A typed API error is never retried: Claude Code already retried it
+        before giving up, and a retry re-types the prompt into a conversation
+        that holds it. Only untyped errors fall back to reading the text."""
+        if not response.is_error or response.error_kind is not None:
             return False
         return is_retryable_error(response.content)
 
@@ -2191,7 +2254,7 @@ class Engine:
             if blanket:
                 auto_str = "on (all tools)"
             elif per_tool:
-                auto_str = ", ".join(sorted(per_tool))
+                auto_str = ", ".join(self._gatekeeper.describe_grants(per_tool))
             else:
                 auto_str = "off"
             active_name = self._active_dir_name(session)

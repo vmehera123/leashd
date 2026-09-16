@@ -353,16 +353,58 @@ class TestApprovalCoordinator:
     async def test_format_description_long_command_truncated(
         self, approval_coordinator, classification
     ):
-        long_cmd = "x" * 500
+        long_cmd = "x" * 3000
         desc = approval_coordinator._format_description(
             "Bash",
             {"command": long_cmd},
             classification,
         )
         assert "Command:" in desc
-        # The command is truncated to 200 chars
         assert long_cmd not in desc
-        assert len(desc) < 500
+        assert "(+1600 chars)" in desc
+
+    async def test_format_description_names_the_gated_segment(
+        self, approval_coordinator
+    ):
+        command = (
+            "SP=/tmp/scratch\n"
+            "python3 - <<'PYEOF'\n" + "import pathlib\n" * 60 + "PYEOF\n"
+            "rm -rf $SP/baseline && uv run python $SP/mkbaseline.py $SP/baseline"
+        )
+        classification = Classification(
+            category="recursive-delete",
+            tool_name="Bash",
+            tool_input={"command": command},
+            risk_level="high",
+            description="Recursive delete — confirm the path before it runs",
+            matched_command="rm -rf $SP/baseline",
+        )
+
+        desc = approval_coordinator._format_description(
+            "Bash::rm", {"command": command}, classification
+        )
+
+        assert "Gated: rm -rf $SP/baseline" in desc
+        assert "Full command:" in desc
+
+    async def test_format_description_single_segment_stays_one_line(
+        self, approval_coordinator
+    ):
+        classification = Classification(
+            category="recursive-delete",
+            tool_name="Bash",
+            tool_input={"command": "rm -rf build"},
+            risk_level="high",
+            description="Recursive delete — confirm the path before it runs",
+            matched_command="rm -rf build",
+        )
+
+        desc = approval_coordinator._format_description(
+            "Bash::rm", {"command": "rm -rf build"}, classification
+        )
+
+        assert "Command: rm -rf build" in desc
+        assert "Gated:" not in desc
 
     async def test_format_description_empty_input(
         self, approval_coordinator, classification
@@ -517,13 +559,13 @@ class TestApprovalBypass:
         assert result.approved is False
 
     async def test_connector_request_approval_raises(self, config, classification):
-        """RuntimeError from connector.request_approval propagates."""
+        """RuntimeError from connector.request_approval_card propagates."""
         from unittest.mock import AsyncMock
 
         from leashd.core.safety.approvals import ApprovalCoordinator
 
         mock_conn = AsyncMock()
-        mock_conn.request_approval.side_effect = RuntimeError("network down")
+        mock_conn.request_approval_card.side_effect = RuntimeError("network down")
         coord = ApprovalCoordinator(mock_conn, config)
 
         with pytest.raises(RuntimeError, match="network down"):
@@ -676,6 +718,57 @@ class TestRejectWithReason:
         )
         assert "Bash::uv run" in desc
         assert "Command: uv run pytest" in desc
+
+    async def test_the_connector_receives_a_card_for_the_call(
+        self, mock_connector, config
+    ):
+        from leashd.core.safety.approvals import ApprovalCoordinator
+
+        cards = []
+        plain_request = mock_connector.request_approval_card
+
+        async def recording(chat_id, approval_id, card):
+            cards.append(card)
+            return await plain_request(chat_id, approval_id, card)
+
+        mock_connector.request_approval_card = recording
+        coordinator = ApprovalCoordinator(
+            mock_connector,
+            config,
+            working_directory_of={"chat1": "/w/protostar"}.get,
+        )
+        classification = Classification(
+            category="credential-bash",
+            tool_name="Bash",
+            tool_input={},
+            risk_level="critical",
+            description="Shell access to a credential path",
+        )
+
+        async def approve():
+            await asyncio.sleep(0.05)
+            request = mock_connector.approval_requests[0]
+            await coordinator.resolve_approval(request["approval_id"], True)
+
+        task = asyncio.create_task(approve())
+        result = await coordinator.request_approval(
+            chat_id="chat1",
+            tool_name="Bash::source",
+            tool_input={
+                "command": "set -a; source .env; set +a",
+                "description": "Load the env file",
+            },
+            classification=classification,
+            timeout=5,
+        )
+        await task
+
+        assert result.approved is True
+        [card] = cards
+        assert card.summary == "Load the env file"
+        assert card.working_directory == "/w/protostar"
+        assert card.command == "set -a; source .env; set +a"
+        assert card.description == mock_connector.approval_requests[0]["description"]
 
 
 class TestApprovalCancellationExtended:

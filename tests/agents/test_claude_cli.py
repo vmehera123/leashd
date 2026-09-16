@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from leashd.agents.base import AgentResponse
 from leashd.agents.runtimes._helpers import (
     AGENT_BROWSER_GUIDANCE,
     AUTO_MODE_INSTRUCTION,
@@ -18,10 +19,14 @@ from leashd.agents.runtimes._helpers import (
     build_append_system_prompt,
     build_runtime_guidance,
     build_workspace_context,
+    claude_cli_supports,
+    claude_cli_version,
+    claude_effort,
     describe_tool,
     friendly_error,
     is_retryable_error,
     model_supports_native_auto,
+    parse_version,
     prepend_instruction,
     read_local_mcp_servers,
     truncate,
@@ -59,6 +64,14 @@ def session(tmp_path):
 def agent(config):
     with patch.object(ClaudeCliAgent, "_find_cli", return_value="/usr/bin/claude"):
         return ClaudeCliAgent(config)
+
+
+@pytest.fixture(autouse=True)
+def installed_cli_version():
+    with patch(
+        "leashd.agents.runtimes.claude_cli.claude_cli_version", return_value=None
+    ) as version:
+        yield version
 
 
 # ---------------------------------------------------------------------------
@@ -333,12 +346,9 @@ class TestBuildCommand:
         finally:
             reset_tmux_session_manager()
 
-    def test_permission_mode_auto_non_opus_downgrades(self, agent, session):
-        # Sonnet/Haiku silently ignore --permission-mode auto in claude CLI
-        # (verified against 2.1.145: ``auto mode unavailable for this model``).
-        # leashd downgrades to acceptEdits so the YAML pipeline owns approvals.
+    def test_permission_mode_auto_unsupported_model_downgrades(self, agent, session):
         reset_tmux_session_manager()
-        agent._config.claude_model = "claude-sonnet-4-6"
+        agent._config.claude_model = "claude-sonnet-4-5"
         tsm = get_or_create_tmux_session_manager(agent._config)
         tsm.bind_safety(
             gatekeeper=MagicMock(),
@@ -358,9 +368,6 @@ class TestBuildCommand:
             reset_tmux_session_manager()
 
     def test_permission_mode_auto_none_model_downgrades(self, agent, session):
-        # claude_cli leaves model unset to mean "Claude's own default", which
-        # is currently Sonnet — not Opus. Fail-safe: downgrade to acceptEdits
-        # rather than launch a pane that silently runs in default mode.
         reset_tmux_session_manager()
         tsm = get_or_create_tmux_session_manager(agent._config)
         tsm.bind_safety(
@@ -584,7 +591,7 @@ class TestBuildCommand:
         idx = cmd.index("--effort")
         assert cmd[idx + 1] == "high"
 
-    def test_effort_flag_xhigh_saturates_to_max(self, tmp_path):
+    def test_effort_flag_passes_xhigh_through(self, tmp_path):
         config = LeashdConfig(
             approved_directories=[tmp_path],
             effort="xhigh",
@@ -599,7 +606,32 @@ class TestBuildCommand:
         )
         cmd = agent._build_command(session)
         idx = cmd.index("--effort")
-        assert cmd[idx + 1] == "max"
+        assert cmd[idx + 1] == "xhigh"
+
+    def test_effort_flag_xhigh_is_high_on_a_cli_without_the_rung(
+        self, agent, session, installed_cli_version
+    ):
+        installed_cli_version.return_value = (2, 1, 110)
+        cmd = agent._build_command(session)
+        assert cmd[cmd.index("--effort") + 1] == "high"
+        installed_cli_version.assert_called_with("/usr/bin/claude")
+
+    def test_resume_renders_the_system_prompt_fresh(self, agent, session):
+        """Every claude-cli turn after the first resumes, and 2.1.267+ would
+        replay the first turn's system prompt, mode instructions included."""
+        assert "--system-prompt-snapshot" not in agent._build_command(session)
+        session.agent_resume_token = "session-abc"
+        cmd = agent._build_command(session)
+        assert cmd[cmd.index("--system-prompt-snapshot") + 1] == "off"
+
+    def test_resume_on_a_cli_without_snapshots(
+        self, agent, session, installed_cli_version
+    ):
+        installed_cli_version.return_value = (2, 1, 265)
+        session.agent_resume_token = "session-abc"
+        cmd = agent._build_command(session)
+        assert "--resume" in cmd
+        assert "--system-prompt-snapshot" not in cmd
 
     def test_allowed_tools(self, tmp_path):
         config = LeashdConfig(
@@ -667,30 +699,155 @@ class TestReadLocalMcpServers:
 
 
 class TestModelSupportsNativeAuto:
-    # Empirically verified against claude CLI 2.1.145 (see plan docs):
-    # Opus → "auto mode on"; Sonnet / Haiku → "auto mode unavailable for this model".
+    @pytest.fixture(autouse=True)
+    def first_party(self, monkeypatch):
+        for name in (
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_USE_FOUNDRY",
+            "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+            "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+            "CLAUDE_CODE_USE_MANTLE",
+            "CLAUDE_CODE_USE_VERTEX",
+        ):
+            monkeypatch.delenv(name, raising=False)
 
-    def test_opus_alias_supported(self):
-        assert model_supports_native_auto("opus") is True
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "opus",
+            "sonnet",
+            "fable",
+            "opus[1m]",
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-fable-5-1",
+            "claude-opus-4-8",
+            "Claude-Opus-4-7",
+            "claude-opus-4-6",
+            "claude-sonnet-4-6",
+        ],
+    )
+    def test_models_the_cli_runs_in_auto(self, model):
+        assert model_supports_native_auto(model) is True
 
-    def test_full_opus_name_supported(self):
-        assert model_supports_native_auto("claude-opus-4-7") is True
-        assert model_supports_native_auto("claude-opus-4-6") is True
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "haiku",
+            "claude-haiku-4-5-20251001",
+            "claude-opus-4-5",
+            "claude-opus-4-1-20250805",
+            "claude-opus-4-20250514",
+            "claude-sonnet-4-5-20250929",
+            "claude-sonnet-4-20250514",
+            "claude-3-7-sonnet-latest",
+            "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        ],
+    )
+    def test_models_the_cli_refuses(self, model):
+        assert model_supports_native_auto(model) is False
 
-    def test_opus_case_insensitive(self):
-        assert model_supports_native_auto("Claude-Opus-4-7") is True
-
-    def test_sonnet_not_supported(self):
-        assert model_supports_native_auto("sonnet") is False
+    def test_third_party_providers_also_refuse_4_6(self, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
         assert model_supports_native_auto("claude-sonnet-4-6") is False
+        assert model_supports_native_auto("us.anthropic.claude-opus-4-6-v1") is False
+        assert model_supports_native_auto("claude-opus-5") is True
 
-    def test_haiku_not_supported(self):
-        assert model_supports_native_auto("haiku") is False
-        assert model_supports_native_auto("claude-haiku-4-5") is False
+    def test_anthropic_aws_keeps_4_6(self, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CODE_USE_ANTHROPIC_AWS", "1")
+        assert model_supports_native_auto("claude-sonnet-4-6") is True
 
     def test_none_fails_safe(self):
-        # claude_cli leaves model unset to mean "Claude's own default" (Sonnet).
         assert model_supports_native_auto(None) is False
+
+
+class TestClaudeCliVersion:
+    @pytest.fixture(autouse=True)
+    def fresh_cache(self):
+        claude_cli_version.cache_clear()
+        yield
+        claude_cli_version.cache_clear()
+
+    def test_parse_version(self):
+        assert parse_version("2.1.270 (Claude Code)") == (2, 1, 270)
+        assert parse_version("tmux 3.5a") == (3, 5)
+        assert parse_version("no digits here") is None
+
+    def test_reads_each_cli_once(self, monkeypatch):
+        from types import SimpleNamespace
+
+        calls = []
+
+        def _run(cmd, **kwargs):
+            calls.append(cmd)
+            return SimpleNamespace(stdout="2.1.270 (Claude Code)\n")
+
+        monkeypatch.setattr("leashd.agents.runtimes._helpers.subprocess.run", _run)
+        assert claude_cli_version("/opt/claude") == (2, 1, 270)
+        assert claude_cli_version("/opt/claude") == (2, 1, 270)
+        assert calls == [["/opt/claude", "--version"]]
+
+    def test_a_cli_that_cannot_run_has_no_version(self, monkeypatch):
+        def _run(cmd, **kwargs):
+            raise FileNotFoundError(cmd[0])
+
+        monkeypatch.setattr("leashd.agents.runtimes._helpers.subprocess.run", _run)
+        assert claude_cli_version("/missing/claude") is None
+
+    def test_supports(self):
+        assert claude_cli_supports("system_prompt_snapshot", None) is True
+        assert claude_cli_supports("system_prompt_snapshot", (2, 1, 265)) is False
+        assert claude_cli_supports("system_prompt_snapshot", (2, 1, 266)) is True
+        assert claude_cli_supports("effort_xhigh", (2, 1, 110)) is False
+        assert claude_cli_supports("effort_xhigh", (2, 1, 111)) is True
+
+    @pytest.mark.parametrize(
+        ("effort", "version", "expected"),
+        [
+            ("xhigh", None, "xhigh"),
+            ("xhigh", (2, 1, 270), "xhigh"),
+            ("xhigh", (2, 1, 59), "high"),
+            ("max", (2, 1, 59), "max"),
+            ("low", (2, 1, 59), "low"),
+            (None, (2, 1, 59), None),
+        ],
+    )
+    def test_claude_effort(self, effort, version, expected):
+        assert claude_effort(effort, version) == expected
+
+
+async def test_execute_registers_the_auto_floor_for_a_native_auto_model(tmp_path):
+    """The floor settings carry hooks that resolve only to a registered
+    session; an unresolved hook is denied, so every gated call in ``/auto``
+    failed while ``execute`` asked about the model without naming it."""
+    config = LeashdConfig(approved_directories=[tmp_path], claude_model="sonnet")
+    with patch.object(ClaudeCliAgent, "_find_cli", return_value="/usr/bin/claude"):
+        agent = ClaudeCliAgent(config)
+    session = Session(
+        session_id="s1",
+        user_id="u1",
+        chat_id="c1",
+        working_directory=str(tmp_path),
+        mode="auto",
+    )
+    tsm = MagicMock(is_bound=True)
+    tsm.write_auto_floor_settings.return_value = tmp_path / "floor.json"
+    with (
+        patch(
+            "leashd.agents.runtimes.tmux_session.get_or_create_tmux_session_manager",
+            return_value=tsm,
+        ),
+        patch.object(
+            agent,
+            "_run_with_retry",
+            AsyncMock(return_value=AgentResponse(content="ok")),
+        ),
+    ):
+        await agent.execute("hi", session)
+    tsm.register_cli_session.assert_called_once()
+    assert tsm.register_cli_session.call_args.kwargs["settings_path"] == (
+        tmp_path / "floor.json"
+    )
 
 
 class TestSessionToPermissionMode:

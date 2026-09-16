@@ -30,7 +30,7 @@ from leashd.agents.runtimes._helpers import (
 from leashd.agents.runtimes._helpers import (
     truncate as _truncate,
 )
-from leashd.agents.runtimes.claude_code import ClaudeCodeAgent
+from leashd.agents.runtimes.claude_code import ClaudeCodeAgent, _sdk_cli_version
 from leashd.core.config import LeashdConfig
 from leashd.core.session import Session
 from leashd.exceptions import AgentError
@@ -154,6 +154,56 @@ def session(tmp_path):
     )
 
 
+@pytest.fixture(autouse=True)
+def sdk_cli_version():
+    with patch(
+        "leashd.agents.runtimes.claude_code._sdk_cli_version", return_value=None
+    ) as version:
+        yield version
+
+
+class TestSdkCliVersion:
+    """The SDK launches its own bundled CLI before any installed one, and that
+    bundled build can be too old for flags the installed CLI takes."""
+
+    def test_reads_the_bundled_cli_first(self, tmp_path, monkeypatch):
+        import claude_agent_sdk
+
+        package = tmp_path / "claude_agent_sdk"
+        (package / "_bundled").mkdir(parents=True)
+        (package / "_bundled" / "claude").write_text("")
+        monkeypatch.setattr(claude_agent_sdk, "__file__", str(package / "__init__.py"))
+        monkeypatch.setattr(
+            "leashd.agents.runtimes.claude_code.shutil.which",
+            lambda _: "/usr/local/bin/claude",
+        )
+        with patch(
+            "leashd.agents.runtimes.claude_code.claude_cli_version",
+            return_value=(2, 1, 59),
+        ) as version:
+            assert _sdk_cli_version() == (2, 1, 59)
+        version.assert_called_once_with(str(package / "_bundled" / "claude"))
+
+    def test_falls_back_to_the_installed_cli(self, tmp_path, monkeypatch):
+        import claude_agent_sdk
+
+        monkeypatch.setattr(
+            claude_agent_sdk,
+            "__file__",
+            str(tmp_path / "claude_agent_sdk" / "__init__.py"),
+        )
+        monkeypatch.setattr(
+            "leashd.agents.runtimes.claude_code.shutil.which",
+            lambda _: "/usr/local/bin/claude",
+        )
+        with patch(
+            "leashd.agents.runtimes.claude_code.claude_cli_version",
+            return_value=(2, 1, 270),
+        ) as version:
+            assert _sdk_cli_version() == (2, 1, 270)
+        version.assert_called_once_with("/usr/local/bin/claude")
+
+
 class TestClaudeCodeAgent:
     def test_build_options_basic(self, agent, session):
         opts = agent._build_options(session, can_use_tool=None)
@@ -167,6 +217,20 @@ class TestClaudeCodeAgent:
         session.agent_resume_token = "existing-session-id"
         opts = agent._build_options(session, can_use_tool=None)
         assert opts.resume == "existing-session-id"
+        assert opts.extra_args["system-prompt-snapshot"] == "off"
+
+    def test_build_options_fresh_launch_keeps_the_prompt_snapshot(self, agent, session):
+        opts = agent._build_options(session, can_use_tool=None)
+        assert "system-prompt-snapshot" not in opts.extra_args
+
+    def test_build_options_resume_on_a_cli_without_snapshots(
+        self, agent, session, sdk_cli_version
+    ):
+        sdk_cli_version.return_value = (2, 1, 59)
+        session.agent_resume_token = "existing-session-id"
+        opts = agent._build_options(session, can_use_tool=None)
+        assert opts.resume == "existing-session-id"
+        assert "system-prompt-snapshot" not in opts.extra_args
 
     def test_build_options_with_system_prompt(self, tmp_path):
         config = LeashdConfig(
@@ -1105,8 +1169,7 @@ class TestClaudeCodeAgent:
 
     def test_build_options_effort_default(self, agent, session):
         opts = agent._build_options(session, can_use_tool=None)
-        # Global default is "xhigh" which saturates to "max" for Claude.
-        assert opts.effort == "max"
+        assert opts.effort == "xhigh"
 
     def test_build_options_effort_high(self, tmp_path):
         config = LeashdConfig(approved_directories=[tmp_path], effort="high")
@@ -1120,7 +1183,7 @@ class TestClaudeCodeAgent:
         opts = high_agent._build_options(session, can_use_tool=None)
         assert opts.effort == "high"
 
-    def test_build_options_effort_xhigh_saturates_to_max(self, tmp_path):
+    def test_build_options_effort_xhigh_passes_through(self, tmp_path):
         config = LeashdConfig(approved_directories=[tmp_path], effort="xhigh")
         xhigh_agent = ClaudeCodeAgent(config)
         session = Session(
@@ -1130,7 +1193,15 @@ class TestClaudeCodeAgent:
             working_directory=str(tmp_path),
         )
         opts = xhigh_agent._build_options(session, can_use_tool=None)
-        assert opts.effort == "max"
+        assert opts.effort == "xhigh"
+
+    def test_build_options_effort_xhigh_is_high_on_a_cli_without_the_rung(
+        self, agent, session, sdk_cli_version
+    ):
+        """The SDK's bundled 2.1.59 exits on ``--effort xhigh``."""
+        sdk_cli_version.return_value = (2, 1, 59)
+        opts = agent._build_options(session, can_use_tool=None)
+        assert opts.effort == "high"
 
     def test_build_options_effort_none(self, tmp_path):
         config = LeashdConfig(approved_directories=[tmp_path], effort=None)

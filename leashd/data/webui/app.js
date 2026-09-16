@@ -1737,18 +1737,23 @@ function approvalScope(tool) {
   return tool.startsWith("Bash::") ? tool.slice(6) : tool;
 }
 
-function approveAllLabel(tool) {
+function approveAllLabel(tool, group) {
+  if (group) return `Approve all ${group}`;
   const scope = approvalScope(tool);
   const shown = scope.length > 44 ? scope.slice(0, 43) + "…" : scope;
   return `Approve all “${shown}”`;
 }
 
-function approveAllTitle(tool) {
+function approveAllTitle(tool, group) {
+  if (group) {
+    return `Auto-approve ${group} in this conversation. ` +
+      "Cookies, auth, storage, connect and installs still ask.";
+  }
   return `Auto-approve every future ${approvalScope(tool)} in this conversation`;
 }
 
 function onApprovalRequest(payload) {
-  const { request_id, tool, description } = payload;
+  const { request_id, tool, description, approve_all_scope: group } = payload;
   PendingStateCache.saveApproval(state.sessionId, payload);
   hideEmptyState();
 
@@ -1777,7 +1782,7 @@ function onApprovalRequest(payload) {
     (tool
       ? `<div class="approval-actions approval-actions-all">` +
         `<button class="btn-approve-all approval-btn" data-action="approve-all">` +
-        `${escapeHtml(approveAllLabel(tool))}</button>` +
+        `${escapeHtml(approveAllLabel(tool, group))}</button>` +
         `</div>`
       : "");
 
@@ -1791,12 +1796,12 @@ function onApprovalRequest(payload) {
   };
   const approveAllBtn = card.querySelector('[data-action="approve-all"]');
   if (approveAllBtn) {
-    approveAllBtn.title = approveAllTitle(tool);
+    approveAllBtn.title = approveAllTitle(tool, group);
     approveAllBtn.onclick = () => {
       wsSend("approval_response", {
         approval_id: request_id, approved: true, approve_all: true, tool,
       });
-      resolveApprovalCard(row, true, approveAllLabel(tool));
+      resolveApprovalCard(row, true, approveAllLabel(tool, group));
     };
   }
 

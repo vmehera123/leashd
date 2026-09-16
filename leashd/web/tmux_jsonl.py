@@ -288,8 +288,4 @@ class JSONLTailer:
                 session_id=self._session.session_id,
                 exc_info=True,
             )
-            # The tailer is the fallback turn-completion signal (JSONL
-            # `result`). If it dies, only the Stop hook can end the turn — and
-            # if that is also lost the turn hangs to the ceiling. End the turn
-            # with an error so TmuxAgent.execute() unblocks promptly.
             self._session.complete_turn(is_error=True)

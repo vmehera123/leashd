@@ -206,12 +206,10 @@ def _make_reconnect_state_callback(engine: Any) -> Any:
         result: dict[str, Any] = {}
 
         if engine.approval_coordinator:
+            from leashd.connectors.web import approval_request_payload
+
             approvals = [
-                {
-                    "request_id": p.approval_id,
-                    "tool": p.tool_name,
-                    "description": p.description,
-                }
+                approval_request_payload(p.approval_id, p.tool_name, p.description)
                 for p in engine.approval_coordinator.pending.values()
                 if p.chat_id == chat_id
             ]

@@ -203,3 +203,17 @@ class TestReloadConfig:
             await reload_engine.reload_config()
 
         assert reload_engine.agent._config is new_config
+
+    async def test_reload_applies_browser_auto_approve(self, reload_engine, tmp_path):
+        new_config = _make_config(tmp_path).model_copy(
+            update={"browser_auto_approve": True}
+        )
+
+        with (
+            patch("leashd.config_store.inject_global_config_as_env"),
+            patch("leashd.core.config.LeashdConfig", return_value=new_config),
+        ):
+            await reload_engine.reload_config()
+
+        _, grants = reload_engine._gatekeeper.get_auto_approve_status("chat1")
+        assert "Bash::agent-browser click" in grants

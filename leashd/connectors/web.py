@@ -19,6 +19,7 @@ from leashd.connectors.base import (
     MessageHandler,
 )
 from leashd.core.file_delivery import format_bytes
+from leashd.core.safety.gatekeeper import approve_all_group
 from leashd.web.app import create_app
 from leashd.web.models import ServerMessage
 from leashd.web.ws_handler import WebSocketHandler
@@ -28,6 +29,20 @@ if TYPE_CHECKING:
     from leashd.storage.base import MessageStore
 
 logger = structlog.get_logger()
+
+
+def approval_request_payload(
+    approval_id: str, tool_name: str, description: str
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "request_id": approval_id,
+        "tool": tool_name,
+        "description": description,
+    }
+    group = approve_all_group(tool_name)
+    if group:
+        payload["approve_all_scope"] = group
+    return payload
 
 
 class WebConnector(BaseConnector):
@@ -186,11 +201,7 @@ class WebConnector(BaseConnector):
             chat_id,
             ServerMessage(
                 type="approval_request",
-                payload={
-                    "request_id": approval_id,
-                    "tool": tool_name,
-                    "description": description,
-                },
+                payload=approval_request_payload(approval_id, tool_name, description),
             ),
         )
         await self._send_push(

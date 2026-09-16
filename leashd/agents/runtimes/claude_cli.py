@@ -32,6 +32,7 @@ from leashd.agents.runtimes._helpers import (
     build_agent_cli_args,
     build_append_system_prompt,
     build_content_blocks,
+    claude_cli_version,
     describe_tool,
     friendly_error,
     is_retryable_error,
@@ -104,6 +105,11 @@ class ClaudeCliAgent(BaseAgent):
             "Claude Code CLI not found. Install with: npm install -g @anthropic-ai/claude-code"
         )
 
+    def _model(self, settings: RuntimeSettings | None) -> str | None:
+        return (
+            settings.claude_model if settings else None
+        ) or self._config.claude_model
+
     def _auto_floor(
         self, session: Session, *, model: str | None = None
     ) -> tuple[str, Any | None, Path | None]:
@@ -119,12 +125,11 @@ class ClaudeCliAgent(BaseAgent):
         ``task`` phases and an unbound hook bridge degrade to ``acceptEdits`` +
         the stdio pipeline (today's behavior).
 
-        ``model`` gates native auto: Claude CLI's native auto classifier ships
-        only with Opus models (verified empirically against 2.1.145 — Sonnet
-        and Haiku show ``auto mode unavailable for this model``). For non-Opus
-        models we degrade to ``acceptEdits`` so leashd's YAML policy pipeline
-        governs approvals instead of round-tripping every tool call through
-        the PreToolUse hook (broken UX in /auto).
+        ``model`` gates native auto the way the CLI does
+        (:func:`model_supports_native_auto`). A model the CLI would refuse
+        degrades to ``acceptEdits`` so leashd's YAML policy pipeline governs
+        approvals instead of round-tripping every tool call through the
+        PreToolUse hook (broken UX in /auto).
         """
         perm_mode = SESSION_TO_PERMISSION_MODE.get(session.mode, "default")
         if session.task_run_id and perm_mode == "plan":
@@ -143,7 +148,7 @@ class ClaudeCliAgent(BaseAgent):
             logger.info(
                 "native_auto_unavailable_fell_back_to_accept_edits",
                 session_id=session.session_id,
-                reason="model_not_opus",
+                reason="model_unsupported",
                 model=model,
             )
             perm_mode = "acceptEdits"
@@ -192,10 +197,7 @@ class ClaudeCliAgent(BaseAgent):
             "--include-partial-messages",
         ]
 
-        model = (
-            settings.claude_model if settings else None
-        ) or self._config.claude_model
-
+        model = self._model(settings)
         perm_mode, _tsm, settings_path = self._auto_floor(session, model=model)
         system_prompt = build_append_system_prompt(
             self._config, session, native_auto=perm_mode == "auto"
@@ -211,6 +213,7 @@ class ClaudeCliAgent(BaseAgent):
                 append_system_prompt=system_prompt,
                 resume_token=session.agent_resume_token,
                 interactive=False,
+                cli_version=claude_cli_version(self._cli_path),
             )
         )
         # security-guidance plugin: non-auto modes write no managed --settings,
@@ -273,7 +276,9 @@ class ClaudeCliAgent(BaseAgent):
         cmd = self._build_command(session, settings)
 
         if session.mode == "auto":
-            _pm, tsm, settings_path = self._auto_floor(session)
+            _pm, tsm, settings_path = self._auto_floor(
+                session, model=self._model(settings)
+            )
             if tsm is not None and settings_path is not None:
                 # Register so the auto-mode HTTP hooks resolve to this
                 # session's safety context (Claude mints a fresh UUID;

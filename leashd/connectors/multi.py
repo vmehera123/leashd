@@ -9,6 +9,7 @@ from typing import Any
 import structlog
 
 from leashd.connectors.base import (
+    ApprovalCard,
     BaseConnector,
     CommandHandler,
     InlineButton,
@@ -70,6 +71,13 @@ class MultiConnector(BaseConnector):
     ) -> str | None:
         return await self._get_connector(chat_id).request_approval(
             chat_id, approval_id, description, tool_name
+        )
+
+    async def request_approval_card(
+        self, chat_id: str, approval_id: str, card: ApprovalCard
+    ) -> str | None:
+        return await self._get_connector(chat_id).request_approval_card(
+            chat_id, approval_id, card
         )
 
     async def send_file(

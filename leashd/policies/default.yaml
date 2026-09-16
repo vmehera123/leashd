@@ -57,6 +57,14 @@ rules:
   # executes, quoting respected, so a path named inside a quoted remote payload
   # (`ssh host 'ls ~/.ssh/'`) is not a local credential access and does not
   # match.
+  - name: credential-metadata
+    tool: Bash
+    command_patterns:
+      - "^(ls|stat|file|test|\\[\\[?)(\\s|$)(?=.*(\\.env\\b(?!\\.(example|sample|template|dist))|\\.ssh/|\\.aws/|\\.gnupg/|authorized_keys|\\.pem\\b|\\.key\\b|\\.p12\\b|\\.pfx\\b|\\.keystore\\b|id_rsa|id_ed25519|id_ecdsa|id_dsa|\\.git-credentials\\b|credentials\\b|secrets?\\.|token\\.json\\b))"
+      - "^git\\s+(-C\\s+\\S+\\s+)?(status|check-ignore|ls-files)\\b(?=.*(\\.env\\b(?!\\.(example|sample|template|dist))|\\.ssh/|\\.aws/|\\.gnupg/|authorized_keys|\\.pem\\b|\\.key\\b|\\.p12\\b|\\.pfx\\b|\\.keystore\\b|id_rsa|id_ed25519|id_ecdsa|id_dsa|\\.git-credentials\\b|credentials\\b|secrets?\\.|token\\.json\\b))"
+    action: allow
+    description: "Metadata of a credential path (listing, existence, ignore status) without reading it"
+
   - name: credential-bash
     tool: Bash
     command_patterns:
@@ -91,7 +99,7 @@ rules:
   - name: sql-write
     tool: Bash
     command_patterns:
-      - "(?i)^\\s*(INSERT\\s+(OR\\s+\\w+\\s+)?INTO|UPDATE\\s+\\S+\\s+SET|DELETE\\s+FROM|REPLACE\\s+INTO|ALTER\\s+(TABLE|DATABASE|INDEX|VIEW)|CREATE\\s+((UNIQUE|TEMP|TEMPORARY)\\s+)*(TABLE|INDEX|DATABASE|VIEW|TRIGGER)|ATTACH\\s|DETACH\\s|VACUUM\\b|REINDEX\\b|PRAGMA\\s+\\w+\\s*=)"
+      - "(?i)(^|[;(])\\s*(INSERT\\s+(OR\\s+\\w+\\s+)?INTO|UPDATE\\s+\\S+\\s+SET|DELETE\\s+FROM|REPLACE\\s+INTO|ALTER\\s+(TABLE|DATABASE|INDEX|VIEW)|CREATE\\s+((UNIQUE|TEMP|TEMPORARY)\\s+)*(TABLE|INDEX|DATABASE|VIEW|TRIGGER)|ATTACH\\s|DETACH\\s|VACUUM\\b|REINDEX\\b|PRAGMA\\s+\\w+\\s*=|COPY\\s)"
     action: require_approval
     description: "SQL statement that writes"
     risk_level: high
@@ -158,6 +166,7 @@ rules:
       - "^agent-browser\\s+doctor\\b[^|]*(\\|\\s*(jq|head|tail|wc|grep|rg|sort|uniq|column|cat|cut|tr)\\b[^|]*)*$"
       - "^agent-browser\\s+session\\b[^|]*(\\|\\s*(jq|head|tail|wc|grep|rg|sort|uniq|column|cat|cut|tr)\\b[^|]*)*$"
       - "^agent-browser\\s+tab(\\s+list)?(\\s+--\\S+)*\\s*(\\|\\s*(jq|head|tail|wc|grep|rg|sort|uniq|column|cat|cut|tr)\\b[^|]*)*$"
+      - "^agent-browser(\\s+(--version|-V|--help|-h))?\\s*(\\|\\s*(jq|head|tail|wc|grep|rg|sort|uniq|column|cat|cut|tr)\\b[^|]*)*$"
     action: allow
     description: "Read-only agent-browser observation"
 
@@ -186,17 +195,26 @@ rules:
   - name: sql-read
     tool: Bash
     command_patterns:
-      - "(?i)^\\s*(SELECT\\b|WITH\\b|EXPLAIN\\b|\\.tables\\b|\\.schema\\b|\\.databases\\b|\\.dbinfo\\b|\\.indexes\\b)"
+      - "(?i)^(?![^\\\\]*(\\b(INSERT|UPDATE|DELETE|MERGE|COPY|CREATE|DROP|ALTER|TRUNCATE|ATTACH|DETACH|VACUUM|REINDEX|GRANT|REVOKE)\\b|\\bREPLACE\\s+INTO\\b|\\bPRAGMA\\s+\\w+\\s*=))\\s*(SELECT|WITH|EXPLAIN|PRAGMA|\\.tables|\\.schema|\\.databases|\\.dbinfo|\\.indexes)\\b[^;\\\\]*(;\\s*((SELECT|WITH|EXPLAIN|PRAGMA|\\.tables|\\.schema|\\.databases|\\.dbinfo|\\.indexes)\\b[^;\\\\]*)?)*$"
     action: allow
     description: "Read-only SQL query"
 
   - name: read-only-bash
     tool: Bash
     command_patterns:
-      - "^(cd|ls|cat|head|tail|find|grep|wc|du|df|pwd|echo|date|whoami|which|type|file|stat)\\b"
-      - "^git\\s+(-[a-zA-Z]\\s+\\S+\\s+|--[a-z-]+(=\\S+)?\\s+)*?(status|log|diff|show|branch|remote|tag)\\b"
+      - "^(cd|ls|cat|head|tail|grep|wc|du|df|pwd|echo|date|whoami|which|type|file|stat|read)\\b"
+      - "^find\\b(?![^|]*\\s-(delete|exec|execdir|ok|okdir|fprint|fprint0|fprintf|fls)\\b)"
+      - "^git\\s+(-(?!c\\s)[a-zA-Z]\\s+\\S+\\s+|--(?!config-env|exec-path)[a-z-]+(=\\S+)?\\s+)*?(status|log|diff|show|branch|remote|tag|rev-parse|rev-list|ls-files|ls-tree|blame|describe|shortlog|merge-base|cat-file|check-ignore|name-rev|count-objects|for-each-ref|show-ref|reflog(?!\\s+(expire|delete)\\b)|stash\\s+(list|show)|worktree\\s+list|config\\s+(--get|--get-all|--get-regexp|--list|-l))\\b"
       # `tee` and `split` are absent because writing files is what they are for.
-      - "^(sort|uniq|cut|tr|column|nl|rev|tac|comm|join|paste|fold|expand|unexpand|fmt|shuf|jq|rg|ag|tree|printf|seq|true|false|test|sleep|yes)\\b"
+      - "^(sort|uniq|cut|tr|column|nl|rev|tac|comm|join|paste|fold|expand|unexpand|fmt|shuf|jq|tree|printf|seq|true|false|test|sleep|yes)\\b"
+      - "^rg\\b(?![^|]*\\s--pre(=|\\s|$))"
+      - "^ag\\b(?![^|]*\\s--pager\\b)"
+      - "^\\[\\[?\\s"
+      - "^python3?\\s+-m\\s+json\\.tool\\b"
+      - "^[gm]?awk\\b(?![^|]*\\s(-[fiEl]\\b|--(file|include|load|exec)\\b))"
+      - "^(node|npm|npx|pnpm|yarn|bun|deno|python3?|uv|pip3?|ruby|go|cargo|rustc|java|docker|podman|git|make|tmux|gh|kubectl|helm|terraform|brew|psql|sqlite3|jq|rg|curl|wget|ssh|openssl|ffmpeg|claude|codex|tsc|vite|playwright)\\s+(--version|-V)\\s*$"
+      - "^(node|npm|npx|pnpm|yarn|bun|deno)\\s+-v\\s*$"
+      - "^(go|kubectl|helm|terraform|gh)\\s+version(\\s+--\\S+)*\\s*$"
       # `base64` is absent: decode-to-shell smuggles an executable payload
       # past a text allowlist.
       - "^(basename|dirname|realpath|readlink|diff|cmp|md5|md5sum|shasum|sha1sum|sha256sum|sha512sum|cksum|od|xxd|hexdump|strings)\\b"
@@ -211,6 +229,19 @@ rules:
       # reporting verb in front would otherwise vouch for.
       - "^tmux\\b(?![^|]*\\\\;)[^|]*\\s(list-sessions|list-panes|list-windows|list-clients|list-buffers|list-keys|list-commands|capture-pane|display-message|show-options|show-environment|has-session|info)\\b"
     action: allow
+
+  - name: docker-readonly
+    tool: Bash
+    command_patterns:
+      - "^(docker|podman)(\\s+(--context|-c|--host|-H|--log-level|-l|--config)(=|\\s+)\\S+)*\\s+(ps|images|logs|info|version|top|port|history|diff|stats)\\b"
+      - "^(docker|podman)(\\s+(--context|-c|--host|-H|--log-level|-l|--config)(=|\\s+)\\S+)*\\s+(container\\s+)?inspect\\b(?=[^|]*\\s(-f|--format)(=|\\s))"
+      - "^(docker|podman)(\\s+(--context|-c|--host|-H|--log-level|-l|--config)(=|\\s+)\\S+)*\\s+(container|image|volume|network|context|node|service|stack)\\s+(ls|list|logs|top|port|history|ps|stats|diff)\\b"
+      - "^(docker|podman)(\\s+(--context|-c|--host|-H|--log-level|-l|--config)(=|\\s+)\\S+)*\\s+(image|volume|network|context)\\s+inspect\\b"
+      - "^(docker|podman)(\\s+(--context|-c|--host|-H|--log-level|-l|--config)(=|\\s+)\\S+)*\\s+system\\s+(df|info)\\b"
+      - "^((docker|podman)(\\s+(--context|-c|--host|-H|--log-level|-l|--config)(=|\\s+)\\S+)*\\s+compose|docker-compose|podman-compose)(\\s+(-f|--file|-p|--project-name|--profile|--env-file|--project-directory|--ansi|--progress|--parallel)(=|\\s+)\\S+)*\\s+(ps|logs|images|top|port|ls|version)\\b"
+      - "^((docker|podman)(\\s+(--context|-c|--host|-H|--log-level|-l|--config)(=|\\s+)\\S+)*\\s+compose|docker-compose|podman-compose)(\\s+(-f|--file|-p|--project-name|--profile|--env-file|--project-directory|--ansi|--progress|--parallel)(=|\\s+)\\S+)*\\s+config\\b(?=[^|]*\\s(--services|--volumes|--profiles|--images|--quiet|-q)\\b)"
+    action: allow
+    description: "Read-only Docker/Podman inspection"
 
   - name: plan-file-writes
     tools: [Write, Edit]

@@ -169,6 +169,7 @@ def build_engine(
     message_store: MessageStore | None = None,
     agent: BaseAgent | None = None,
     reap_orphan_tmux: bool = False,
+    session_store: SessionStore | None = None,
 ) -> Engine:
     if config is None:
         config = LeashdConfig()  # type: ignore[call-arg]  # pydantic-settings loads from env
@@ -243,11 +244,12 @@ def build_engine(
     global_leashd_dir.mkdir(parents=True, exist_ok=True)
     session_db_path = global_leashd_dir / "sessions.db"
 
-    session_store: SessionStore
-    if config.storage_backend == "sqlite":
-        session_store = SqliteSessionStore(session_db_path)
-    else:
-        session_store = MemorySessionStore()
+    if session_store is None:
+        session_store = (
+            SqliteSessionStore(session_db_path)
+            if config.storage_backend == "sqlite"
+            else MemorySessionStore()
+        )
 
     # Message store — centralized at ~/.leashd/messages.db, never switches with /dir
     resolved_storage = global_leashd_dir / "messages.db"
@@ -290,7 +292,12 @@ def build_engine(
     approval_coordinator = None
     interaction_coordinator = None
     if connector:
-        approval_coordinator = ApprovalCoordinator(connector, config, event_bus)
+        approval_coordinator = ApprovalCoordinator(
+            connector,
+            config,
+            event_bus,
+            working_directory_of=session_manager.working_directory_of,
+        )
         interaction_coordinator = InteractionCoordinator(
             connector,
             config,

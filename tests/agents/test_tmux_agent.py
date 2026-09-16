@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -74,6 +75,9 @@ def _session(tmp_path, **over):
 
 
 class FakeCS:
+    _api_error: str | None = None
+    _interrupted = False
+
     def __init__(self, *, num_turns=2, cost=0.1, text="done", is_error=False):
         self.claude_uuid = "claude-xyz"
         self.turn: TmuxTurn | None = None
@@ -119,10 +123,15 @@ class FakeCS:
         self.session_id = "sess1"
         self.chat_id = "web:c1"
         self.working_directory = "/work"
+        self.followup_injecting = False
+        self.tool_running = False
 
     @property
     def goal_indicator_seen(self):
         return self._goal_indicator_seen
+
+    def tool_in_flight(self):
+        return self.tool_running
 
     def dedicated_selector_present(self, screen=None):
         return self.dedicated_selector
@@ -155,6 +164,8 @@ class FakeCS:
             self.turn.text_parts.append(self._text)
             self.turn.num_turns = self._num_turns
             self.turn.cost_usd = self._cost
+            self.turn.api_error = self._api_error
+            self.turn.interrupted = self._interrupted
             self.turn.complete(is_error=self._is_error)
 
     async def await_ready(self, timeout):
@@ -190,6 +201,15 @@ class FakeTSM:
         self.spawn_kwargs: dict = {}
         self.shutdown_called = False
         self.terminated: str | None = None
+        self.regates: list = []
+        self.regate_result = False
+
+    async def regate_orphaned_permission(self, cs):
+        self.regates.append(cs)
+        return self.regate_result
+
+    def spawn_orphaned_permission_regate(self, cs):
+        return asyncio.ensure_future(self.regate_orphaned_permission(cs))
 
     def get(self, session_id):
         return self._cs if self.spawned else None
@@ -291,28 +311,28 @@ async def test_execute_auto_mode_passes_native_perm_mode(tmp_path):
     assert tsm.spawn_kwargs["model"] == "opus"
 
 
-async def test_execute_auto_mode_non_opus_model_downgrades(tmp_path):
-    # Verified against claude CLI 2.1.145: Sonnet/Haiku panes show
-    # ``auto mode unavailable for this model``. Leashd downgrades the
-    # interactive permission mode to acceptEdits so the leashd hook +
-    # pane-selector drive owns approvals (under Claude Code 2.1.x
-    # bypassPermissions no longer blocks on PreToolUse hooks, so it can't
-    # gate — see tmux.py).
+async def test_execute_auto_mode_unsupported_model_downgrades(tmp_path):
+    """A model the CLI will not run in auto (Sonnet 4.5 here) gets acceptEdits,
+    so the leashd hook and pane-selector drive own approvals instead of a pane
+    that silently runs in manual mode."""
     tsm = FakeTSM(FakeCS(text="ok"))
-    agent = _agent(_cfg(tmp_path, claude_model="claude-sonnet-4-6"), tsm)
+    agent = _agent(_cfg(tmp_path, claude_model="claude-sonnet-4-5"), tsm)
     await agent.execute("go", _session(tmp_path, mode="auto"))
     assert tsm.spawn_kwargs["perm_mode"] == "acceptEdits"
-    assert tsm.spawn_kwargs["model"] == "claude-sonnet-4-6"
+    assert tsm.spawn_kwargs["model"] == "claude-sonnet-4-5"
 
 
-async def test_execute_auto_mode_explicit_opus_keeps_auto(tmp_path):
-    # Full Opus model name still resolves through the predicate
-    # (``"opus" in "claude-opus-4-7".lower()``).
+@pytest.mark.parametrize(
+    "model",
+    ["claude-opus-4-7", "claude-sonnet-5", "sonnet", "fable", "claude-fable-5-1"],
+)
+async def test_execute_auto_mode_keeps_auto_on_models_the_cli_allows(tmp_path, model):
+    """Claude Code 2.1.270 runs Sonnet 5 and Fable 5.1 in auto mode, not only Opus."""
     tsm = FakeTSM(FakeCS(text="ok"))
-    agent = _agent(_cfg(tmp_path, claude_model="claude-opus-4-7"), tsm)
+    agent = _agent(_cfg(tmp_path, claude_model=model), tsm)
     await agent.execute("go", _session(tmp_path, mode="auto"))
     assert tsm.spawn_kwargs["perm_mode"] == "auto"
-    assert tsm.spawn_kwargs["model"] == "claude-opus-4-7"
+    assert tsm.spawn_kwargs["model"] == model
 
 
 async def test_execute_auto_task_phase_uses_accept_edits(tmp_path):
@@ -603,6 +623,158 @@ async def test_execute_reports_a_dialog_nobody_will_answer(tmp_path, monkeypatch
 
     notices = [c for c in chunks if "waiting on a permission prompt" in c]
     assert len(notices) == 1
+    assert "could not match to a tool call" in notices[0]
+    assert "Send any message" not in notices[0]
+    assert cs in tsm.regates
+    assert resp.is_error is False
+
+
+async def test_an_unattended_dialog_is_regated_rather_than_reported(
+    tmp_path, monkeypatch
+):
+    """A dialog the re-gate answers is not one nobody will answer, so the
+    notice saying so is sent only when the re-gate could not place it."""
+    import leashd.agents.runtimes.tmux as tmux_mod
+
+    monkeypatch.setattr(tmux_mod, "UNATTENDED_DIALOG_STALL_S", 0.0)
+    monkeypatch.setattr(tmux_mod, "LIVENESS_POLL_INTERVAL", 0.01)
+    cs = FakeCS(text="released")
+    cs._complete_on_enter = False
+    cs.screen = " Do you want to proceed?\n ❯ 1. Yes\n   2. No"
+    cs.dedicated_selector = True
+    tsm = FakeTSM(cs)
+    cfg = _cfg(tmp_path)
+    cfg.agent_timeout_seconds = 0
+    agent = _agent(cfg, tsm)
+
+    async def _regated(target):
+        tsm.regates.append(target)
+        if cs.turn is None:
+            return False
+        cs.dedicated_selector = False
+        cs.screen = "✻ Working… (esc to interrupt)"
+        cs.turn.text_parts.append(cs._text)
+        cs.turn.complete()
+        return True
+
+    tsm.regate_orphaned_permission = _regated
+    chunks: list[str] = []
+
+    async def _on_text(text):
+        chunks.append(text)
+
+    resp = await agent.execute("research", _session(tmp_path), on_text_chunk=_on_text)
+
+    assert tsm.regates == [cs, cs]
+    assert not [c for c in chunks if "waiting on a permission prompt" in c]
+    assert resp.is_error is False
+    assert resp.content == "released"
+
+
+async def test_a_blinking_bullet_does_not_hide_a_wedged_dialog(tmp_path, monkeypatch):
+    """claude blinks the ⏺ beside the tool call its dialog is holding, so no
+    two captures of a wedged pane were byte-identical and the stall never
+    armed: an adopted pane sat on its orphaned dialog with nothing re-gating
+    it. The blink is not progress."""
+    import leashd.agents.runtimes.tmux as tmux_mod
+
+    monkeypatch.setattr(tmux_mod, "UNATTENDED_DIALOG_STALL_S", 0.0)
+    monkeypatch.setattr(tmux_mod, "LIVENESS_POLL_INTERVAL", 0.01)
+    cs = FakeCS(text="released")
+    cs._complete_on_enter = False
+    cs.dedicated_selector = True
+    ticks = {"n": 0}
+
+    def _blinking_screen():
+        ticks["n"] += 1
+        bullet = "⏺" if ticks["n"] % 2 else " "
+        return f"{bullet} Loading .env\n Do you want to proceed?\n ❯ 1. Yes\n   2. No"
+
+    cs.capture = _blinking_screen
+    tsm = FakeTSM(cs)
+
+    async def _regated(target):
+        tsm.regates.append(target)
+        if cs.turn is None:
+            return False
+        cs.turn.text_parts.append(cs._text)
+        cs.turn.complete()
+        return True
+
+    tsm.regate_orphaned_permission = _regated
+    cfg = _cfg(tmp_path)
+    cfg.agent_timeout_seconds = 0
+    agent = _agent(cfg, tsm)
+
+    resp = await agent.execute("research", _session(tmp_path))
+
+    assert tsm.regates == [cs, cs]
+    assert resp.content == "released"
+
+
+async def test_the_dialog_a_regate_uncovers_is_regated_too(tmp_path, monkeypatch):
+    """Two back-to-back `.env` prompts on the harness. Answering the orphaned
+    one uncovered the prompt claude had queued behind it, and the watchdog,
+    still marked as having fired, never looked at the pane again."""
+    import leashd.agents.runtimes.tmux as tmux_mod
+
+    monkeypatch.setattr(tmux_mod, "UNATTENDED_DIALOG_STALL_S", 0.0)
+    monkeypatch.setattr(tmux_mod, "LIVENESS_POLL_INTERVAL", 0.01)
+    cs = FakeCS(text="released")
+    cs._complete_on_enter = False
+    cs.screen = " ls -la .env; echo bravo\n Do you want to proceed?\n ❯ 1. Yes"
+    cs.dedicated_selector = True
+    tsm = FakeTSM(cs)
+    queued = [" ls -la .env; echo alpha\n Do you want to proceed?\n ❯ 1. Yes"]
+
+    async def _regated(target):
+        if cs.turn is None:
+            return False
+        tsm.regates.append(target)
+        if queued:
+            cs.screen = queued.pop()
+            return True
+        cs.dedicated_selector = False
+        cs.screen = "✻ Working… (esc to interrupt)"
+        cs.turn.text_parts.append(cs._text)
+        cs.turn.complete()
+        return True
+
+    tsm.regate_orphaned_permission = _regated
+    cfg = _cfg(tmp_path)
+    cfg.agent_timeout_seconds = 0
+    agent = _agent(cfg, tsm)
+
+    resp = await asyncio.wait_for(agent.execute("probe", _session(tmp_path)), 5)
+
+    assert tsm.regates == [cs, cs]
+    assert resp.content == "released"
+
+
+async def test_execute_regates_an_orphaned_dialog_before_waiting_on_the_prompt(
+    tmp_path,
+):
+    """The protostar restart. The daemon went down while a permission hook
+    waited on its verdict, the pane kept the dialog, and the next message
+    waited out the ready timeout and was dropped with "never reached the
+    prompt". The dialog is re-gated first, and the pane it releases takes the
+    message."""
+    cs = FakeCS(text="status")
+    cs.ready = False
+    tsm = FakeTSM(cs)
+
+    async def _released(target):
+        tsm.regates.append(target)
+        cs.ready = True
+        return True
+
+    tsm.regate_orphaned_permission = _released
+    agent = _agent(_cfg(tmp_path), tsm)
+
+    resp = await agent.execute("what's the status?", _session(tmp_path))
+
+    assert tsm.regates == [cs]
+    assert ("what's the status?", True) in cs.sent
     assert resp.is_error is False
 
 
@@ -875,7 +1047,7 @@ async def test_execute_idle_completion_reports_an_interrupted_turn(tmp_path):
 
     idle = next(e for e in logs if e["event"] == "tmux_turn_idle_completed")
     assert idle["interrupted"] is True
-    assert any("interrupted" in c for c in chunks)
+    assert "".join(chunks).count("last tool call was interrupted") == 1
     assert "/resume" in "".join(chunks)
     assert resp.is_error is False
 
@@ -934,6 +1106,92 @@ async def test_policy_block_replaces_the_generic_interrupted_note(tmp_path):
     note = "".join(chunks)
     assert "Blocked by your safety policy" in note
     assert "last tool call was interrupted" not in note
+
+
+async def test_execute_turn_claude_ended_on_an_interrupt_says_so_once(tmp_path):
+    cs = FakeCS(text="Running the check")
+    cs._interrupted = True
+    agent = _agent(_cfg(tmp_path), FakeTSM(cs))
+
+    chunks: list[str] = []
+    resp = await agent.execute("do it", _session(tmp_path), on_text_chunk=chunks.append)
+
+    assert "".join(chunks).count("last tool call was interrupted") == 1
+    assert resp.is_error is False
+
+
+async def test_policy_block_replaces_the_interrupted_note_on_a_signalled_end(tmp_path):
+    cs = FakeCS(text="Let me clean up the scratch dir")
+    cs._interrupted = True
+    cs._policy_block = _BIDLENS_BLOCK
+    agent = _agent(_cfg(tmp_path), FakeTSM(cs))
+
+    chunks: list[str] = []
+    await agent.execute("do it", _session(tmp_path), on_text_chunk=chunks.append)
+
+    note = "".join(chunks)
+    assert "Blocked by your safety policy" in note
+    assert "last tool call was interrupted" not in note
+
+
+async def test_execute_api_error_turn_carries_its_kind_and_the_fix(tmp_path):
+    from structlog.testing import capture_logs
+
+    text = "There's an issue with the selected model (claude-bogus-9-9)."
+    cs = FakeCS(text=text, is_error=True)
+    cs._api_error = "model_not_found"
+    agent = _agent(_cfg(tmp_path), FakeTSM(cs))
+
+    chunks: list[str] = []
+    with capture_logs() as logs:
+        resp = await agent.execute(
+            "hi", _session(tmp_path), on_text_chunk=chunks.append
+        )
+
+    assert resp.is_error is True
+    assert resp.error_kind == "model_not_found"
+    assert resp.content.startswith(text)
+    assert "leashd model set" in resp.content
+    assert "leashd model set" in "".join(chunks)
+    done = next(e for e in logs if e["event"] == "agent_execute_completed")
+    assert done["error_kind"] == "model_not_found"
+    assert done["is_error"] is True
+
+
+async def test_execute_rate_limited_turn_keeps_claudes_own_words(tmp_path):
+    text = "You've hit your limit · resets 12:50pm (Europe/London)"
+    cs = FakeCS(text=text, is_error=True)
+    cs._api_error = "rate_limit"
+    agent = _agent(_cfg(tmp_path), FakeTSM(cs))
+
+    resp = await agent.execute("hi", _session(tmp_path))
+
+    assert resp.is_error is True
+    assert resp.error_kind == "rate_limit"
+    assert resp.content == text
+
+
+async def test_execute_api_error_waits_for_claudes_message_to_be_read(tmp_path):
+    cs = FakeCS(text="", is_error=True)
+    cs._api_error = "authentication_failed"
+    cs.jsonl_task = asyncio.get_running_loop().create_future()
+    agent = _agent(_cfg(tmp_path), FakeTSM(cs))
+
+    async def tail_the_error():
+        await asyncio.sleep(0.2)
+        assert cs.turn is not None
+        cs.turn.text_parts.append("Login expired · Please run /login")
+        cs.turn.end_response(from_transcript=True)
+
+    tailer = asyncio.create_task(tail_the_error())
+    try:
+        resp = await agent.execute("hi", _session(tmp_path))
+        await tailer
+    finally:
+        cs.jsonl_task.cancel()
+
+    assert resp.content.startswith("Login expired · Please run /login")
+    assert "claude auth login" in resp.content
 
 
 async def test_no_policy_block_sends_no_block_notice(tmp_path):
@@ -1114,6 +1372,146 @@ async def test_execute_followup_deferral_finalizes_when_idle_at_composer(tmp_pat
     assert "tmux_goal_idle_finalized" not in events
     assert resp.is_error is False
     assert "here is the merged answer" in resp.content
+
+
+_QUOTED_DIALOG = " Do you want to proceed?\n ❯ 1. Yes\n   2. No"
+
+
+async def test_an_interrupted_idle_pane_ends_its_turn_whatever_is_painted_above(
+    tmp_path,
+):
+    """The leashd #2 wedge. A deny drive's Escape interrupted the agent, and
+    claude fires no Stop for an interrupt. A permission dialog quoted in an
+    earlier diff stayed painted above the idle composer, and read as a live
+    selector it refreshed the turn's activity on every poll, so the idle
+    backstop never aged and the turn waited out the three-hour deadline."""
+    from structlog.testing import capture_logs
+
+    cs = FakeCS(text="The new drive tests hung")
+    cs._complete_on_enter = False
+    cs._stream_text_on_submit = True
+    cs.screen = _QUOTED_DIALOG
+    cs.dedicated_selector = True
+    cs._idle_at_composer = True
+    cs._was_interrupted = True
+    cfg = _cfg(
+        tmp_path, tmux_completion_idle_grace_seconds=1, tmux_turn_ceiling_seconds=3
+    )
+    agent = _agent(cfg, FakeTSM(cs))
+
+    chunks: list[str] = []
+    with capture_logs() as logs:
+        resp = await agent.execute(
+            "fix the bugs", _session(tmp_path), on_text_chunk=chunks.append
+        )
+
+    assert "tmux_turn_idle_completed" in [e["event"] for e in logs]
+    assert resp.is_error is False
+    assert "last tool call was interrupted" in "".join(chunks)
+
+
+async def test_a_dialog_no_regate_could_match_stops_counting_as_activity(
+    tmp_path, monkeypatch
+):
+    """A dialog the re-gate could not name has already been reported to the
+    chat. Refreshing the turn's activity for it on every poll as well left the
+    turn no exit short of the deadline."""
+    from structlog.testing import capture_logs
+
+    monkeypatch.setattr("leashd.agents.runtimes.tmux.UNATTENDED_DIALOG_STALL_S", 0.0)
+    cs = FakeCS(text="Deleting the probe folder")
+    cs._complete_on_enter = False
+    cs._stream_text_on_submit = True
+    cs.screen = _QUOTED_DIALOG
+    cs.dedicated_selector = True
+    tsm = FakeTSM(cs)
+    cfg = _cfg(
+        tmp_path, tmux_no_progress_timeout_seconds=1, tmux_turn_ceiling_seconds=4
+    )
+    agent = _agent(cfg, tsm)
+
+    with capture_logs() as logs:
+        resp = await agent.execute("clean up", _session(tmp_path))
+
+    assert tsm.regates == [cs, cs]
+    assert "tmux_turn_no_progress_finalized_with_text" in [e["event"] for e in logs]
+    assert "Deleting the probe folder" in resp.content
+
+
+@pytest.mark.parametrize("owed", ["being_typed", "still_owed"])
+@pytest.mark.usefixtures("_advancing_clock")
+async def test_the_idle_backstop_waits_for_a_followup(owed, tmp_path):
+    """The protostar #1 wedge. "what are you doing?" was typed into the
+    composer while two tools ran, claude 2.1.270 drops `esc to interrupt`
+    from the footer while text sits unsent, and the backstop ended an
+    85-minute turn on its first sentence in the second before claude queued
+    the follow-up. Both replies claude went on to write were dropped."""
+    from structlog.testing import capture_logs
+
+    cs = FakeCS(text="I'll start by reading the decision memos")
+    cs._complete_on_enter = False
+    cs._stream_text_on_submit = True
+    cs._idle_at_composer = True
+    if owed == "being_typed":
+        cs.followup_injecting = True
+    else:
+        _followup_begin(cs)
+    agent = _agent(_cfg(tmp_path, tmux_turn_ceiling_seconds=1), FakeTSM(cs))
+
+    with capture_logs() as logs:
+        resp = await agent.execute("decisions: 1. emoji", _session(tmp_path))
+
+    assert "tmux_turn_idle_completed" not in [e["event"] for e in logs]
+    assert "timed out" in resp.content
+
+
+async def test_a_tool_still_running_keeps_the_turn_open(tmp_path):
+    """Two parallel tools ran for 60s with no hook and no transcript record
+    between them, which is longer than the idle grace."""
+    from structlog.testing import capture_logs
+
+    cs = FakeCS(text="Running the pilot")
+    cs._complete_on_enter = False
+    cs._stream_text_on_submit = True
+    cs._idle_at_composer = True
+    cs.tool_running = True
+    cfg = _cfg(
+        tmp_path, tmux_completion_idle_grace_seconds=1, tmux_turn_ceiling_seconds=2
+    )
+    agent = _agent(cfg, FakeTSM(cs))
+
+    with capture_logs() as logs:
+        resp = await agent.execute("run the pilot", _session(tmp_path))
+
+    assert "tmux_turn_idle_completed" not in [e["event"] for e in logs]
+    assert "timed out" in resp.content
+
+
+async def test_a_human_wait_is_logged_once_not_on_every_poll(tmp_path):
+    from structlog.testing import capture_logs
+
+    cs = FakeCS()
+    cs._complete_on_enter = False
+    tsm = FakeTSM(cs)
+    agent = _agent(_cfg(tmp_path), tsm)
+    polls = {"n": 0}
+
+    def _pending(chat_id):
+        polls["n"] += 1
+        if polls["n"] <= 20:
+            return True
+        assert cs.turn is not None
+        cs.turn.complete()
+        return False
+
+    tsm.has_pending_human = _pending
+
+    with capture_logs() as logs:
+        await agent.execute("go", _session(tmp_path))
+
+    blocked = [e for e in logs if e["event"] == "tmux_turn_blocked_on_human"]
+    assert len(blocked) == 1
+    assert blocked[0]["log_level"] == "info"
 
 
 # ── /goal backstop (indicator-aware) ─────────────────────────────

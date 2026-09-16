@@ -121,6 +121,25 @@ class TestHandleCommand:
 
         assert "Auto-approve: on (all tools)" in result
 
+    async def test_status_names_the_browsing_grant_once(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        eng = Engine(
+            connector=mock_connector,
+            agent=FakeAgent(),
+            config=config.model_copy(update={"browser_auto_approve": True}),
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_message("user1", "hello", "chat1")
+        eng._gatekeeper.enable_tool_auto_approve("chat1", "Write")
+
+        result = await eng.handle_command("user1", "status", "", "chat1")
+
+        assert "Auto-approve: agent-browser browsing, Write" in result
+
     async def test_default_command_sets_mode(
         self, config, audit_logger, policy_engine, mock_connector
     ):

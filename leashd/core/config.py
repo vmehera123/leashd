@@ -171,6 +171,7 @@ class LeashdConfig(BaseSettings):
     browser_backend: Literal["playwright", "agent-browser"] = "agent-browser"
     browser_user_data_dir: str | None = None
     browser_headless: bool = True
+    browser_auto_approve: bool = False
 
     # Security-guidance plugin (Claude Code marketplace plugin).
     # OFF by default — opt-in. When on, leashd installs and enables

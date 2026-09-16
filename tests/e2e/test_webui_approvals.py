@@ -263,6 +263,30 @@ class TestApproveAll:
         label = await authed_page.text_content(f"{card_sel} .btn-approve-all")
         assert label == "Approve all “curl raw.githubusercontent.com”"
 
+    async def test_browsing_grant_is_named_as_a_group(
+        self, authed_page: Page, test_server: SimpleNamespace
+    ) -> None:
+        await inject(
+            test_server.ws_handler,
+            test_server.chat_ids,
+            "approval_request",
+            {
+                "request_id": "ap-all-browse",
+                "tool": "Bash::agent-browser click",
+                "description": "Click",
+                "approve_all_scope": "agent-browser browsing",
+            },
+        )
+        button = '[data-approval-id="ap-all-browse"] .btn-approve-all'
+        await authed_page.wait_for_selector(button, timeout=5000)
+
+        assert await authed_page.text_content(button) == (
+            "Approve all agent-browser browsing"
+        )
+        title = await authed_page.get_attribute(button, "title")
+        assert title is not None
+        assert "Cookies, auth, storage, connect and installs still ask." in title
+
     async def test_it_approves_and_enables_auto_approve(
         self, authed_page: Page, test_server: SimpleNamespace, capture: dict
     ) -> None:

@@ -87,6 +87,8 @@ Key behaviors:
 - **Tool check is mandatory** — A rule must have `tools` defined and the tool name must be in the list.
 - **Regex matching** — Patterns are compiled as Python `re` regexes. They use `search()`, not `match()`, so patterns match anywhere in the string.
 - **Command patterns** — Only checked for `Bash` tool calls. The pattern is matched against `tool_input["command"]`.
+- **Every piece is judged** — A Bash command is split into chain segments, pipeline stages and the bodies of `$( … )`, backtick and `<( … )` substitutions. Any `deny` piece denies, then any `require_approval` piece asks, and the command is allowed only when every piece is allowed, so `cat x.sh | bash` or `ls $(python3 evil.py)` no longer rides a read-only allow. A pipeline as a whole is only checked against `deny` rules.
+- **Allow rules see only what runs** — `allow` patterns match the shell skeleton (quoted text blanked, redirections stripped), never a `bash -c`/`python3 -c` payload or the raw redirect text. The exception is a SQL client (`sqlite3`, `psql -c`, `docker exec <c> psql`), where every statement it is handed must match.
 - **Path patterns** — Checked against `tool_input["file_path"]` (primary) or `tool_input["path"]` (fallback).
 
 If no rule matches, `evaluate()` returns the `default_action` from settings (typically `require_approval`).
@@ -107,7 +109,7 @@ leashd ships with three policy files in `policies/`:
 flowchart TB
     subgraph Default["default.yaml — Balanced"]
         d_deny["DENY: credentials, force push, sudo, curl\|bash, DROP/TRUNCATE"]
-        d_allow["ALLOW: agent tools, reads, safe bash, plan files, browser readonly"]
+        d_allow["ALLOW: agent tools, reads, read-only bash (ls, grep, awk, git log, docker ps/logs, --version), loopback GETs, plan files, browser readonly"]
         d_approval["APPROVAL: git mutations, file writes, network bash, browser mutations"]
         d_default["Default: require_approval"]
         d_timeout["Timeout: 300s"]
@@ -137,7 +139,7 @@ flowchart TB
 | File writes | Approval | Approval | Allow |
 | Read tools | Allow | Allow | Allow |
 | Web tools | Allow | Approval | Allow |
-| Safe bash (ls, git status) | Allow | Allow (minimal) | Allow (extended) |
+| Read-only bash (ls, git log, docker ps, awk) | Allow | Allow (minimal) | Allow (extended) |
 | Git mutations | Approval | Approval | Approval |
 | Browser tools (readonly) | Allow | Approval | Allow |
 | Browser tools (mutation) | Approval | Approval | Allow |

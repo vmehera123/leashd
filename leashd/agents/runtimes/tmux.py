@@ -14,8 +14,8 @@ runtime works through both the Web UI and Telegram exactly like
 ``BaseAgent.execute()`` is request→response while the pane is long-lived:
 the first call spawns the session, later calls send-keys the prompt into
 the *same* pane (multi-turn), and each call blocks until the turn completes
-(authoritative ``Stop`` hook; JSONL ``result`` line as corroboration /
-fallback) before returning a populated ``AgentResponse``.
+(authoritative ``Stop`` or ``StopFailure`` hook; JSONL ``turn_duration`` record
+as corroboration / fallback) before returning a populated ``AgentResponse``.
 """
 
 from __future__ import annotations
@@ -36,6 +36,7 @@ from leashd.agents.runtimes._helpers import (
     NATIVE_AUTO_INSTRUCTION,
     PLAN_MODE_INSTRUCTION,
     SESSION_TO_PERMISSION_MODE,
+    api_error_hint,
     build_append_system_prompt,
     model_supports_native_auto,
     safe_callback,
@@ -74,15 +75,12 @@ LIVENESS_POLL_INTERVAL = 5.0
 # drive of our own running, before the turn is reported as wedged on it. A live
 # turn repaints its elapsed-time counter every second, so an unchanging screen
 # this long is proof nothing is happening — not merely the dismissed dialog
-# still painted behind working output.
+# still painted behind working output. The ⏺ bullet claude blinks beside a
+# tool call it is still waiting on does not count as a change.
 UNATTENDED_DIALOG_STALL_S = 45.0
 
-# The Stop lifecycle hook can fire before the JSONL tailer has drained claude's
-# final assistant ``text`` block (already on disk, lands just before the
-# authoritative ``result`` line). Poll for that ``result`` line before reading
-# the assembled text, so a turn that ended with a tool call followed by a text
-# answer doesn't surface only the tool markers (a non-empty assembled_text that
-# is missing the real reply). Bounded; breaks the instant the result lands.
+BLOCKED_ON_HUMAN_LOG_INTERVAL_S = 60.0
+
 FINAL_TEXT_GRACE_SECONDS = 2.0
 FINAL_TEXT_POLL_INTERVAL = 0.1
 
@@ -196,13 +194,13 @@ def _unattended_dialog_notice() -> str:
     keystroke no component will ever send. Nothing else notices: there is no
     pending human interaction to pause the turn on, no pane death, no tailer
     failure — the turn just goes silent until the engine-wide timeout hours
-    later. One such wedge ran 67 minutes before the user asked whether the
-    agent was stuck, which is why this says how to release it: typing into the
-    pane is what answered the dialog that time.
+    later. It is sent only once the prompt could not be re-gated
+    (``regate_orphaned_permission``), and it no longer says a message releases
+    it: a message into a modal pane fails with "never reached the prompt".
     """
     return (
         "⏳ The agent is waiting on a permission prompt in its terminal that "
-        "leashd could not answer. Send any message to release it, or /stop to abort."
+        "leashd could not match to a tool call. Check /screen, or /stop to abort."
     )
 
 
@@ -224,6 +222,23 @@ _INTERRUPTED_NOTE = (
     "⚠️ The agent's last tool call was interrupted, so this turn stopped early. "
     "Send /resume to pick it back up."
 )
+
+
+async def _reply_content(
+    turn: TmuxTurn,
+    on_text_chunk: Callable[[str], Coroutine[Any, Any, None]] | None,
+) -> str:
+    content = turn.assembled_text or "(no text in turn — see the terminal)"
+    hint = api_error_hint(turn.api_error)
+    if hint is None:
+        return content
+    if on_text_chunk is not None:
+        await safe_callback(
+            on_text_chunk,
+            f"\n\n{hint}\n",
+            log_event="tmux_api_error_notice_failed",
+        )
+    return f"{content}\n\n{hint}"
 
 
 def _policy_block_note(block: PolicyBlock) -> str:
@@ -484,7 +499,7 @@ class TmuxAgent(BaseAgent):
             logger.info(
                 "native_auto_unavailable_fell_back_to_accept_edits",
                 session_id=session.session_id,
-                reason="model_not_opus",
+                reason="model_unsupported",
                 model=model,
             )
             perm_mode = (
@@ -600,6 +615,7 @@ class TmuxAgent(BaseAgent):
         staged_attachments = False
         plan_revisions = 0
         while True:
+            await self._tsm.regate_orphaned_permission(cs)
             if not await cs.await_ready(PANE_READY_TIMEOUT):
                 _raise_not_ready(cs)
 
@@ -678,7 +694,11 @@ class TmuxAgent(BaseAgent):
         elif cs.claude_uuid:
             session.agent_resume_token = cs.claude_uuid
 
-        if not turn.is_error and not turn.result_seen and cs.jsonl_task is not None:
+        if (
+            not turn.result_seen
+            and cs.jsonl_task is not None
+            and (not turn.is_error or turn.api_error is not None)
+        ):
             waited = 0.0
             while waited < FINAL_TEXT_GRACE_SECONDS:
                 await asyncio.sleep(FINAL_TEXT_POLL_INTERVAL)
@@ -686,7 +706,9 @@ class TmuxAgent(BaseAgent):
                 if turn.result_seen:
                     break
 
-        content = turn.assembled_text or "(no text in turn — see the terminal)"
+        content = await _reply_content(turn, on_text_chunk)
+        turn.mark_reply_taken()
+        is_error = turn.is_error or turn.api_error is not None
         logger.info(
             "agent_execute_completed",
             session_id=session.session_id,
@@ -694,7 +716,8 @@ class TmuxAgent(BaseAgent):
             num_turns=turn.num_turns,
             cost_usd=turn.cost_usd,
             tools_used_count=len(turn.tools_used),
-            is_error=turn.is_error,
+            is_error=is_error,
+            error_kind=turn.api_error,
             runtime="tmux",
         )
         return AgentResponse(
@@ -704,7 +727,8 @@ class TmuxAgent(BaseAgent):
             duration_ms=turn.duration_ms,
             num_turns=turn.num_turns,
             tools_used=turn.tools_used,
-            is_error=turn.is_error,
+            is_error=is_error,
+            error_kind=turn.api_error,
         )
 
     async def _await_turn(
@@ -720,19 +744,23 @@ class TmuxAgent(BaseAgent):
         goal_idle_grace: float,
         goal_stuck_ceiling: float,
     ) -> AgentResponse | None:
-        """Block until the live turn completes (Stop / JSONL result) or can
-        never complete (dead pane, dead tailer, no-progress, or the absolute
-        ceiling). Returns an error ``AgentResponse`` on an abort/timeout, or
+        """Block until the live turn completes (Stop, StopFailure, or the JSONL
+        turn_duration record) or can never complete (dead pane, dead tailer,
+        no-progress, or the absolute ceiling). Returns an error
+        ``AgentResponse`` on an abort/timeout, or
         ``None`` on clean completion so ``execute`` can finalize — or, for a
         rejected plan, re-prompt with the adjustment feedback. A pending human
         pauses the deadline (parity with claude-cli)."""
         started = time.monotonic()
         notified_blocked = False
         blocked_since: float | None = None
+        blocked_logged_at: float | None = None
         blocked_kind: str | None = None
         notified_unattended = False
         unattended_screen: str | None = None
         unattended_since: float | None = None
+        regate: asyncio.Task[bool] | None = None
+        regate_unmatched = False
 
         async def _abort(event: str, content: str, **fields: Any) -> AgentResponse:
             """End a turn that can never legitimately complete: log, unblock
@@ -813,22 +841,38 @@ class TmuxAgent(BaseAgent):
                         log_event="tmux_blocked_notice_failed",
                     )
                 turn.mark_activity()
-                logger.warning(
-                    "tmux_turn_blocked_on_human",
-                    session_id=session.session_id,
-                    chat_id=session.chat_id,
-                    elapsed_s=int(time.monotonic() - blocked_since),
-                )
+                blocked_now = time.monotonic()
+                if (
+                    blocked_logged_at is None
+                    or blocked_now - blocked_logged_at
+                    >= BLOCKED_ON_HUMAN_LOG_INTERVAL_S
+                ):
+                    blocked_logged_at = blocked_now
+                    logger.info(
+                        "tmux_turn_blocked_on_human",
+                        session_id=session.session_id,
+                        chat_id=session.chat_id,
+                        elapsed_s=int(blocked_now - blocked_since),
+                    )
                 continue
 
             stalled_screen = None
             if not cs.answer_drive_active:
                 with contextlib.suppress(Exception):
                     stalled_screen = cs.capture()
-            if stalled_screen and cs.dedicated_selector_present(stalled_screen):
-                if stalled_screen != unattended_screen:
-                    unattended_screen = stalled_screen
+            if (
+                stalled_screen
+                and cs.dedicated_selector_present(stalled_screen)
+                and not (
+                    cs.is_idle_at_composer(stalled_screen)
+                    and cs.was_interrupted(stalled_screen)
+                )
+            ):
+                settled_screen = stalled_screen.replace("⏺", " ")
+                if settled_screen != unattended_screen:
+                    unattended_screen = settled_screen
                     unattended_since = time.monotonic()
+                    regate_unmatched = False
                 elif not notified_unattended and unattended_since is not None:
                     stalled_s = time.monotonic() - unattended_since
                     if stalled_s > UNATTENDED_DIALOG_STALL_S:
@@ -839,17 +883,36 @@ class TmuxAgent(BaseAgent):
                             chat_id=session.chat_id,
                             stalled_s=int(stalled_s),
                         )
-                        if on_text_chunk is not None:
-                            await safe_callback(
-                                on_text_chunk,
-                                f"\n\n{_unattended_dialog_notice()}\n",
-                                log_event="tmux_unattended_notice_failed",
-                            )
-                turn.mark_activity()
+                        regate = self._tsm.spawn_orphaned_permission_regate(cs)
+                if not regate_unmatched:
+                    turn.mark_activity()
             else:
                 unattended_screen = None
                 unattended_since = None
                 notified_unattended = False
+                regate_unmatched = False
+
+            if regate is not None and regate.done():
+                released = (
+                    not regate.cancelled()
+                    and regate.exception() is None
+                    and regate.result()
+                )
+                regate = None
+                if released:
+                    unattended_since = time.monotonic()
+                    notified_unattended = False
+                else:
+                    regate_unmatched = True
+                    if on_text_chunk is not None:
+                        await safe_callback(
+                            on_text_chunk,
+                            f"\n\n{_unattended_dialog_notice()}\n",
+                            log_event="tmux_unattended_notice_failed",
+                        )
+
+            if cs.tool_in_flight():
+                turn.mark_activity()
 
             human_wait_still_settling = (
                 blocked_since is not None or cs.answer_drive_active
@@ -863,6 +926,7 @@ class TmuxAgent(BaseAgent):
             # again. (The streamed "⏳ Waiting…" chunk can't be retracted, so
             # this is the signal that work resumed.)
             blocked_since = None
+            blocked_logged_at = None
             if notified_blocked:
                 notified_blocked = False
                 approved = self._tsm.last_approval_approved(session.chat_id)
@@ -924,27 +988,20 @@ class TmuxAgent(BaseAgent):
             if (
                 completion_idle_grace > 0
                 and not cs.goal_active
-                and turn.assembled_text
+                and not cs.followup_injecting
+                and turn.pending_followups == 0
                 and now - turn.last_activity > completion_idle_grace
                 and cs.is_idle_at_composer()
+                and (turn.assembled_text or cs.was_interrupted())
             ):
-                interrupted = cs.was_interrupted()
+                turn.interrupted = turn.interrupted or cs.was_interrupted()
                 logger.info(
                     "tmux_turn_idle_completed",
                     session_id=session.session_id,
                     chat_id=session.chat_id,
                     idle_s=int(now - turn.last_activity),
-                    interrupted=interrupted,
+                    interrupted=turn.interrupted,
                 )
-                # A recorded policy block IS the explanation for this
-                # interrupt, and execute() reports it for every completion
-                # path — so the generic note would only bury the real cause.
-                if interrupted and on_text_chunk is not None and not cs.policy_block:
-                    await safe_callback(
-                        on_text_chunk,
-                        f"\n\n{_INTERRUPTED_NOTE}\n",
-                        log_event="tmux_interrupt_notice_failed",
-                    )
                 turn.force_complete()
                 break
 
@@ -983,6 +1040,12 @@ class TmuxAgent(BaseAgent):
                     is_error=True,
                 )
 
+        if turn.interrupted and on_text_chunk is not None and not cs.policy_block:
+            await safe_callback(
+                on_text_chunk,
+                f"\n\n{_INTERRUPTED_NOTE}\n",
+                log_event="tmux_interrupt_notice_failed",
+            )
         return None
 
     async def inject_followup(
@@ -990,6 +1053,8 @@ class TmuxAgent(BaseAgent):
         session_id: str,
         text: str,
         attachments: list[Attachment] | None = None,
+        *,
+        on_read: Callable[[], None] | None = None,
     ) -> bool:
         """Type a human follow-up into the live composer of an in-flight turn.
 
@@ -1017,6 +1082,12 @@ class TmuxAgent(BaseAgent):
         completion signal, waiting forever for a response to a prompt claude
         was never given: the turn hangs, and neither the original message nor
         the follow-up is ever answered.
+
+        The text is registered on the turn before any keystroke goes out.
+        Claude has drained a human follow-up 0.44s after queueing it, which can
+        be before ``submit`` returns, and a drain of text the turn does not know
+        yet gives back no credit and reports no read. ``on_read`` fires on that
+        drain (``TmuxTurn.note_followup_read``).
         """
         cs = self._tsm.get(session_id)
         if cs is None or cs.pane_is_dead():
@@ -1036,21 +1107,26 @@ class TmuxAgent(BaseAgent):
         turn = cs.turn
         if turn is None or turn.stop_event.is_set():
             return False
-        # Bump the counter synchronously (before any await) so a result/Stop
-        # landing during submit()'s sleeps already sees the pending follow-up
-        # and defers instead of ending the turn.
+        normalized = " ".join(text.split())
         turn.pending_followups += 1
+        turn.pending_followup_texts.append(normalized)
+        if on_read is not None:
+            turn.watch_followup_read(normalized, on_read)
         enqueued_before = cs.followup_enqueued_at
-        if attachments:
-            for staged in self._stage_attachments(attachments, cs.working_directory):
-                cs.send_keys(f"@{staged} ", literal=True)
-            await asyncio.sleep(0.3)
-        # submit() returns fast here: the pane already shows "esc to interrupt",
-        # so its started-check is immediately true after one Enter — exactly the
-        # "claude queued it" outcome.
-        delivered = await cs.submit(text)
+        cs.followup_injecting = True
+        try:
+            if attachments:
+                for staged in self._stage_attachments(
+                    attachments, cs.working_directory
+                ):
+                    cs.send_keys(f"@{staged} ", literal=True)
+                await asyncio.sleep(0.3)
+            delivered = await cs.submit(text, followup=True)
+        finally:
+            cs.followup_injecting = False
         if not delivered:
             turn.pending_followups = max(0, turn.pending_followups - 1)
+            turn.withdraw_followup(normalized, on_read)
             cs.clear_composer()
             logger.warning(
                 "tmux_followup_delivery_unconfirmed",
@@ -1059,7 +1135,6 @@ class TmuxAgent(BaseAgent):
                 pending_followups=turn.pending_followups,
             )
             return False
-        turn.pending_followup_texts.append(" ".join(text.split()))
         logger.info(
             "tmux_followup_injected",
             session_id=session_id,
@@ -1279,6 +1354,9 @@ class TmuxAgent(BaseAgent):
             return early
         if cs.claude_uuid:
             session.agent_resume_token = cs.claude_uuid
+        content = await _reply_content(turn, on_text_chunk)
+        turn.mark_reply_taken()
+        is_error = turn.is_error or turn.api_error is not None
         logger.info(
             "agent_execute_completed",
             session_id=session.session_id,
@@ -1286,18 +1364,20 @@ class TmuxAgent(BaseAgent):
             num_turns=turn.num_turns,
             cost_usd=turn.cost_usd,
             tools_used_count=len(turn.tools_used),
-            is_error=turn.is_error,
+            is_error=is_error,
+            error_kind=turn.api_error,
             reattached=True,
             runtime="tmux",
         )
         return AgentResponse(
-            content=turn.assembled_text or "(no text in turn — see the terminal)",
+            content=content,
             session_id=cs.claude_uuid,
             cost=turn.cost_usd,
             duration_ms=turn.duration_ms,
             num_turns=turn.num_turns,
             tools_used=turn.tools_used,
-            is_error=turn.is_error,
+            is_error=is_error,
+            error_kind=turn.api_error,
         )
 
     async def shutdown(self) -> None:

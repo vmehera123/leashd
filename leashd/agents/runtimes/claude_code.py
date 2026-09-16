@@ -6,6 +6,8 @@ import asyncio
 import contextlib
 import json
 import os
+import platform
+import shutil
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -48,6 +50,9 @@ from leashd.agents.runtimes._helpers import (
     build_agent_browser_env,
     build_content_blocks,
     build_workspace_context,
+    claude_cli_supports,
+    claude_cli_version,
+    claude_effort,
     describe_tool,
     friendly_error,
     is_retryable_error,
@@ -56,7 +61,6 @@ from leashd.agents.runtimes._helpers import (
     safe_callback,
 )
 from leashd.agents.types import PermissionAllow, PermissionDeny
-from leashd.core.runtime_settings import to_claude_effort
 from leashd.exceptions import AgentError
 
 if TYPE_CHECKING:
@@ -71,6 +75,15 @@ if TYPE_CHECKING:
     from leashd.core.session import Session
 
 logger = structlog.get_logger()
+
+
+def _sdk_cli_version() -> tuple[int, ...] | None:
+    import claude_agent_sdk
+
+    binary = "claude.exe" if platform.system() == "Windows" else "claude"
+    bundled = Path(claude_agent_sdk.__file__).parent / "_bundled" / binary
+    cli = str(bundled) if bundled.is_file() else shutil.which("claude")
+    return claude_cli_version(cli) if cli else None
 
 
 class _SafeSDKClient(ClaudeSDKClient):
@@ -234,10 +247,11 @@ class ClaudeCodeAgent(BaseAgent):
             max_buffer_size=MAX_BUFFER_SIZE,
             include_partial_messages=True,
         )
-        effort = to_claude_effort(
-            (settings.effort if settings else None) or self._config.effort
+        cli_version = _sdk_cli_version()
+        effort = claude_effort(
+            (settings.effort if settings else None) or self._config.effort, cli_version
         )
-        opts.effort = effort
+        opts.effort = effort  # type: ignore[assignment]
 
         model = (
             settings.claude_model if settings else None
@@ -306,6 +320,8 @@ class ClaudeCodeAgent(BaseAgent):
             )
         if session.agent_resume_token:
             opts.resume = session.agent_resume_token
+            if claude_cli_supports("system_prompt_snapshot", cli_version):
+                opts.extra_args["system-prompt-snapshot"] = "off"
 
         local_servers = read_local_mcp_servers(session.working_directory)
         leashd_servers = self._config.mcp_servers

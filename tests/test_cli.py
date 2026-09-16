@@ -1876,6 +1876,52 @@ class TestBrowserSetBackend:
         assert "agent-browser" in captured.out
 
 
+class TestBrowserAutoApprove:
+    def test_on_persists_and_says_what_still_asks(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_browser_auto_approve
+        from leashd.config_store import get_browser_config
+
+        _handle_browser_auto_approve("on")
+
+        assert get_browser_config()["auto_approve"] is True
+        out = capsys.readouterr().out
+        assert "approved in every conversation" in out
+        assert "Cookies, auth, storage, connect and installs still ask." in out
+
+    def test_on_names_the_profile_it_acts_as(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_browser_auto_approve
+
+        save_global_config({"browser": {"user_data_dir": "/tmp/leashd-profile"}})
+        _handle_browser_auto_approve("on")
+
+        assert "logged into /tmp/leashd-profile" in capsys.readouterr().out
+
+    def test_off_persists(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_browser_auto_approve
+        from leashd.config_store import get_browser_config
+
+        save_global_config({"browser": {"auto_approve": True}})
+        _handle_browser_auto_approve("off")
+
+        assert get_browser_config()["auto_approve"] is False
+        assert "asks again" in capsys.readouterr().out
+
+    def test_bare_command_shows_the_setting(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_browser_auto_approve
+
+        _handle_browser_auto_approve(None)
+
+        assert "Auto-approve browsing: off" in capsys.readouterr().out
+
+    def test_browser_show_includes_it(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_browser_show
+
+        save_global_config({"browser": {"auto_approve": True}})
+        _handle_browser_show()
+
+        assert "Auto-approve browsing: on" in capsys.readouterr().out
+
+
 class TestBrowserHeadless:
     def test_headless_on(self, fake_config_dir, capsys):
         from leashd.cli import _handle_browser_headless

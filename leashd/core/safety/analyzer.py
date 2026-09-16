@@ -306,6 +306,50 @@ def split_chain_segments(command: str) -> list[str]:
     return segments
 
 
+def split_pipeline_stages(segment: str) -> list[str]:
+    stages: list[str] = []
+    current: list[str] = []
+    in_single = in_double = in_backtick = escaped = False
+    depth = 0
+    i = 0
+    while i < len(segment):
+        ch = segment[i]
+        following = segment[i + 1 : i + 2]
+        if escaped:
+            escaped = False
+        elif ch == "\\" and not in_single:
+            escaped = True
+        elif ch == "'" and not in_double:
+            in_single = not in_single
+        elif ch == '"' and not in_single:
+            in_double = not in_double
+        elif in_single or in_double:
+            pass
+        elif ch == "`":
+            in_backtick = not in_backtick
+        elif in_backtick:
+            pass
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(depth - 1, 0)
+        elif depth == 0 and ch == "\n":
+            break
+        elif depth == 0 and ch == "|" and following == "|":
+            current.append("||")
+            i += 2
+            continue
+        elif depth == 0 and ch == "|":
+            stages.append("".join(current).strip())
+            current = []
+            i += 2 if following == "&" else 1
+            continue
+        current.append(ch)
+        i += 1
+    stages.append("".join(current).strip())
+    return [stage for stage in stages if stage]
+
+
 _REDIRECT_RE = re.compile(
     r"\s*(?:&>>?|\d?>>?|\d?<<<|\d?<<|\d?<)\s*(?:&\d+|[^\s;|&<>]+)"
 )
@@ -352,10 +396,18 @@ def strip_redirections(command: str) -> str:
 _ENV_ASSIGN_PREFIX_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=[^\s$`|<>&;()]*\s+(?=\S)")
 _KEYWORD_PREFIX_RE = re.compile(r"^(?:do|then|else|elif|if|while|until|!)\s+(?=\S)")
 _RUNNER_PREFIX_RE = re.compile(
-    r"^(?:command|exec|nohup|time|env|stdbuf|nice|xargs)\s+(?=\S)"
+    r"^(?:command|exec|nohup|time|stdbuf|nice)\s+(?=\S)"
+    r"|^env(?:\s+(?:-[iv0]+|-u\s*[A-Za-z_]\w*|--unset=[A-Za-z_]\w*|-C\s*\S+|--chdir=\S+))*"
+    r"\s+(?=[^\s|;&])"
+    r"|^xargs(?:\s+(?:-[0rtpxo]+|-[ILnPsdEa]\s*\S+|--null|--no-run-if-empty|--verbose))*"
+    r"\s+(?=[^\s|;&-])"
 )
 _TIMEOUT_PREFIX_RE = re.compile(r"^timeout\s+(?:-\S+\s+)*[\d.]+[smhd]?\s+(?=\S)")
 _GROUP_OPEN_RE = re.compile(r"^[({]\s*(?=\S)")
+_FUNCTION_HEADER_RE = re.compile(
+    r"^(?:function\s+)?[A-Za-z_][\w-]*\s*\(\)\s*\{\s*(?=\S)"
+    r"|^function\s+[A-Za-z_][\w-]*\s*\{\s*(?=\S)"
+)
 
 
 def strip_command_wrappers(command: str) -> str:
@@ -381,15 +433,32 @@ def strip_command_wrappers(command: str) -> str:
             _KEYWORD_PREFIX_RE,
             _RUNNER_PREFIX_RE,
             _GROUP_OPEN_RE,
+            _FUNCTION_HEADER_RE,
         ):
             command = pattern.sub("", command, count=1)
     return command
 
 
+_INERT_ASSIGNMENT = r"[A-Za-z_][A-Za-z0-9_]*=[^\s$`|<>&;()]*"
+_EXPORTABLE_NAME = (
+    r"(?!(?:LD_|DYLD_|GIT_|PYTHON|PERL|RUBY|NODE_|LESS|BASH_ENV\b|ENV\b|PATH\b|"
+    r"PAGER\b|EDITOR\b|VISUAL\b|PROMPT_COMMAND\b|IFS\b|PS4\b|SHELLOPTS\b|BASHOPTS\b))"
+    r"[A-Za-z_][A-Za-z0-9_]*"
+)
+_EXPORTED_ASSIGNMENT = _EXPORTABLE_NAME + r"(?:=[^\s$`|<>&;()]*)?"
 _SHELL_CONTROL_SEGMENT_RE = re.compile(
-    r"^(?:done|fi|esac|do|then|else|;;|\}|\)|"
-    r"for\s+[A-Za-z_][A-Za-z0-9_]*\s+in\s+[^$`(]*|"
-    r"[A-Za-z_][A-Za-z0-9_]*=[^\s$`|<>&;()]*)$"
+    r"^(?:done|fi|esac|do|then|else|;;|\}|\)|break|continue|:|"
+    r"(?:exit|return)(?:\s+\d+)?|"
+    r"for\s+[A-Za-z_][A-Za-z0-9_]*\s+in(?:\s.*)?|"
+    + _INERT_ASSIGNMENT
+    + r"|(?:export|readonly|local|typeset|declare(?:\s+-[a-zA-Z]+)?)"
+    + r"(?:\s+"
+    + _EXPORTED_ASSIGNMENT
+    + r")+|"
+    r"unset(?:\s+-[fv])?(?:\s+[A-Za-z_][A-Za-z0-9_]*)+|"
+    r"set(?:\s+(?:[-+][a-zA-Z]+|pipefail|errexit|nounset|xtrace|allexport|noclobber|noglob))+|"
+    r"set\s+--(?:\s+[^`|<>&;()]*)?|"
+    r"shopt\s+-[su](?:\s+\w+)+)$"
 )
 
 
@@ -460,6 +529,154 @@ def unwrap_capture_assignment(command: str) -> str:
                     inner = command[start:position].strip()
                     return inner if position == len(command) - 1 else command
     return command
+
+
+def _matching_paren(text: str, start: int) -> int:
+    depth = 1
+    in_single = in_double = escaped = False
+    for position in range(start, len(text)):
+        ch = text[position]
+        if escaped:
+            escaped = False
+        elif ch == "\\" and not in_single:
+            escaped = True
+        elif ch == "'" and not in_double:
+            in_single = not in_single
+        elif ch == '"' and not in_single:
+            in_double = not in_double
+        elif in_single or in_double:
+            continue
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return position
+    return len(text)
+
+
+def _closing_backtick(text: str, start: int) -> int:
+    escaped = False
+    for position in range(start, len(text)):
+        ch = text[position]
+        if escaped:
+            escaped = False
+        elif ch == "\\":
+            escaped = True
+        elif ch == "`":
+            return position
+    return len(text)
+
+
+def _consume_heredocs(
+    text: str,
+    start: int,
+    pending: list[tuple[str, bool, bool]],
+    bodies: list[str],
+) -> int:
+    position = start
+    lines: list[str] = []
+    while pending and position < len(text):
+        end = text.find("\n", position)
+        line = text[position:] if end == -1 else text[position:end]
+        delimiter, quoted, strip_tabs = pending[0]
+        if (line.lstrip("\t") if strip_tabs else line).strip() == delimiter:
+            pending.pop(0)
+            if not quoted:
+                _collect_substitutions("\n".join(lines), bodies, quotes_literal=True)
+            lines = []
+        else:
+            lines.append(line)
+        position = len(text) if end == -1 else end + 1
+    if pending and lines and not pending[0][1]:
+        _collect_substitutions("\n".join(lines), bodies, quotes_literal=True)
+    return position
+
+
+def _collect_substitutions(
+    text: str, bodies: list[str], *, quotes_literal: bool
+) -> None:
+    pending: list[tuple[str, bool, bool]] = []
+    in_single = in_double = escaped = False
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        shell_quoting = not quotes_literal and not in_double
+        if escaped:
+            escaped = False
+        elif ch == "\\" and not in_single:
+            escaped = True
+        elif in_single:
+            in_single = ch != "'"
+        elif ch == "'" and shell_quoting:
+            in_single = True
+        elif ch == '"' and not quotes_literal:
+            in_double = not in_double
+        elif text.startswith("$(", i):
+            end = _matching_paren(text, i + 2)
+            if text.startswith("$((", i) and _matching_paren(text, i + 3) == end - 1:
+                i += 3
+                continue
+            bodies.append(text[i + 2 : end])
+            i = end + 1
+            continue
+        elif shell_quoting and text.startswith(("<(", ">("), i):
+            end = _matching_paren(text, i + 2)
+            bodies.append(text[i + 2 : end])
+            i = end + 1
+            continue
+        elif ch == "`":
+            end = _closing_backtick(text, i + 1)
+            bodies.append(text[i + 1 : end])
+            i = end + 1
+            continue
+        elif (
+            ch == "<"
+            and shell_quoting
+            and (heredoc := _HEREDOC_START_RE.match(text, i))
+        ):
+            pending.append(
+                (
+                    heredoc.group("delim"),
+                    bool(heredoc.group("q")),
+                    bool(heredoc.group("dash")),
+                )
+            )
+            i = heredoc.end()
+            continue
+        elif ch == "\n" and pending and not in_double:
+            i = _consume_heredocs(text, i + 1, pending, bodies)
+            continue
+        i += 1
+
+
+def command_substitutions(command: str) -> list[str]:
+    bodies: list[str] = []
+    _collect_substitutions(command, bodies, quotes_literal=False)
+    return [body.strip() for body in bodies if body.strip()]
+
+
+def command_units(command: str) -> list[tuple[str, str]]:
+    units: list[tuple[str, str]] = []
+    for segment in split_chain_segments(command):
+        for body in command_substitutions(segment):
+            units.extend(
+                (text, kind if kind == "pipeline" else "substituted")
+                for text, kind in command_units(body)
+            )
+        if (
+            is_shell_control_segment(segment)
+            or unwrap_capture_assignment(segment) != segment
+        ):
+            continue
+        stages = split_pipeline_stages(segment)
+        if len(stages) < 2:
+            units.append((segment, "command"))
+            continue
+        units.append((segment, "pipeline"))
+        units.append((stages[0], "command"))
+        units.extend((stage, "piped") for stage in stages[1:])
+    return units
 
 
 _NETWORK_READ_BINARIES = frozenset({"curl", "wget"})

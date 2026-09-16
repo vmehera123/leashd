@@ -7,6 +7,7 @@ from leashd.core.safety.analyzer import (
     analyze_path,
     is_shell_control_segment,
     shell_match_texts,
+    split_pipeline_stages,
     strip_benign_prefixes,
     strip_cd_prefix,
     strip_command_wrappers,
@@ -416,14 +417,38 @@ class TestStripCommandWrappers:
 class TestIsShellControlSegment:
     @pytest.mark.parametrize(
         "segment",
-        ["done", "fi", "esac", "do", "then", "else", "for f in a b", "SP=/tmp/x"],
+        [
+            "done",
+            "fi",
+            "esac",
+            "do",
+            "then",
+            "else",
+            "for f in a b",
+            "for f in $(ls)",
+            "SP=/tmp/x",
+            "export APPROVED_DIR=/tmp/x TG_PORT=18391",
+            "set -euo pipefail",
+            "set +a",
+            "set -- $spec",
+            "unset FOO BAR",
+            "exit 1",
+        ],
     )
     def test_control_segments(self, segment):
         assert is_shell_control_segment(segment)
 
     @pytest.mark.parametrize(
         "segment",
-        ["ls -la", "agent-browser eval 'x'", "SP=$(rm -rf /)", "for f in $(ls)"],
+        [
+            "ls -la",
+            "agent-browser eval 'x'",
+            "SP=$(rm -rf /)",
+            "export GIT_EXTERNAL_DIFF=./evil.sh",
+            "export PATH=/tmp/evil",
+            "export LD_PRELOAD=/tmp/x.so",
+            "set -- $(rm -rf /)",
+        ],
     )
     def test_real_commands(self, segment):
         assert not is_shell_control_segment(segment)
@@ -526,3 +551,44 @@ class TestShellMatchTexts:
     def test_unbalanced_quote_keeps_the_tail_visible(self):
         """An unclosed quote must not hide the rest of the line from a rule."""
         assert "rm -rf /" in shell_match_texts('echo " ; rm -rf /')[0]
+
+
+class TestSplitPipelineStages:
+    def test_splits_on_pipes(self):
+        assert split_pipeline_stages("agent-browser eval x | sh") == [
+            "agent-browser eval x",
+            "sh",
+        ]
+
+    def test_quoted_pipe_is_part_of_an_argument(self):
+        assert split_pipeline_stages('agent-browser snapshot | grep -E "a|b"') == [
+            "agent-browser snapshot",
+            'grep -E "a|b"',
+        ]
+
+    def test_pipe_inside_a_substitution_stays_in_its_stage(self):
+        command = "ID=$(curl -s http://127.0.0.1/x | python3 -c 'print(1)')"
+        assert split_pipeline_stages(command) == [command]
+
+    def test_pipe_inside_backticks_stays_in_its_stage(self):
+        assert split_pipeline_stages("echo `ls | wc -l`") == ["echo `ls | wc -l`"]
+
+    def test_logical_or_is_not_a_pipe(self):
+        assert split_pipeline_stages("a || b") == ["a || b"]
+
+    def test_stderr_pipe_splits(self):
+        assert split_pipeline_stages("agent-browser open x |& tail -1") == [
+            "agent-browser open x",
+            "tail -1",
+        ]
+
+    def test_escaped_pipe_is_literal(self):
+        assert split_pipeline_stages("echo a\\|b") == ["echo a\\|b"]
+
+    def test_heredoc_body_is_data_not_stages(self):
+        command = "cat <<'EOF' | agent-browser eval --stdin | head -5\na | sh\nEOF"
+        assert split_pipeline_stages(command) == [
+            "cat <<'EOF'",
+            "agent-browser eval --stdin",
+            "head -5",
+        ]

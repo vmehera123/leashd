@@ -263,6 +263,11 @@ def _inject_browser_config(data: dict[str, Any], *, force: bool = False) -> None
         key = "LEASHD_BROWSER_HEADLESS"
         if force or key not in os.environ:
             os.environ[key] = str(headless).lower()
+    auto_approve = browser.get("auto_approve")
+    if auto_approve is not None:
+        key = "LEASHD_BROWSER_AUTO_APPROVE"
+        if force or key not in os.environ:
+            os.environ[key] = str(auto_approve).lower()
 
 
 def get_web_config(data: dict[str, Any] | None = None) -> dict[str, Any]:

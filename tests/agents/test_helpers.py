@@ -6,8 +6,27 @@ from unittest.mock import patch
 
 from leashd.agents.runtimes._helpers import (
     _is_uv_project,
+    api_error_hint,
     build_agent_browser_env,
 )
+
+
+class TestApiErrorHint:
+    def test_a_logged_out_host_is_told_where_to_log_in(self):
+        hint = api_error_hint("authentication_failed")
+        assert hint is not None
+        assert "claude auth login" in hint
+        assert "machine running leashd" in hint
+
+    def test_an_unusable_model_points_at_leashd_model_set(self):
+        hint = api_error_hint("model_not_found")
+        assert hint is not None
+        assert "leashd model set" in hint
+        assert "/clear" in hint
+
+    def test_errors_claude_already_explains_get_no_hint(self):
+        for kind in ("rate_limit", "overloaded", "server_error", "unknown", "", None):
+            assert api_error_hint(kind) is None
 
 
 class TestIsUvProject:

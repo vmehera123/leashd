@@ -37,7 +37,7 @@ rules:
     tool: Bash
     command_patterns:
       - "^(ls|pwd|echo|date|whoami|which|type)\\b"
-      - "^git\\s+(-[a-zA-Z]\\s+\\S+\\s+|--[a-z-]+(=\\S+)?\\s+)*?(status|log|diff|show)\\b"
+      - "^git\\s+(-(?!c\\s)[a-zA-Z]\\s+\\S+\\s+|--(?!config-env|exec-path)[a-z-]+(=\\S+)?\\s+)*?(status|log|diff|show)\\b"
     action: allow
 
   - name: plan-file-writes

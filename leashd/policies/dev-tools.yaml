@@ -27,6 +27,6 @@ rules:
       # go — local subcommands (excludes run, install, get)
       - "^go\\s+(build|test|vet|fmt|mod|generate)\\b"
       # make — common safe targets only (excludes deploy, release, push)
-      - "^make\\s+(test|check|lint|build|clean|format|fmt|all|dev|install)\\b"
+      - "^make(\\s+(-C\\s*\\S+|--directory(=|\\s+)\\S+|-f\\s*\\S+|--file(=|\\s+)\\S+|-j\\s*\\d*|--jobs(=\\d+)?|-[sknw]+))*\\s+(test|check|lint|build|clean|format|fmt|all|dev|install)\\b"
     action: allow
     description: "Package managers restricted to safe subcommands"

@@ -7,9 +7,11 @@ CLI-based (claude_cli) agent implementations.
 from __future__ import annotations
 
 import base64
+import functools
 import json
 import os
 import re
+import subprocess
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -23,7 +25,7 @@ if TYPE_CHECKING:
 
     from leashd.connectors.base import Attachment
     from leashd.core.config import LeashdConfig
-    from leashd.core.runtime_settings import RuntimeSettings
+    from leashd.core.runtime_settings import EffortLevel, RuntimeSettings
     from leashd.core.session import Session
 
 logger = structlog.get_logger()
@@ -133,19 +135,91 @@ SESSION_TO_PERMISSION_MODE: dict[str, PermissionMode] = {
 }
 
 
-def model_supports_native_auto(model: str | None) -> bool:
-    """True only for Opus-family models, which carry the native auto classifier.
+_VERSION_RE = re.compile(r"(\d+)\.(\d+)(?:\.(\d+))?")
 
-    Verified empirically against Claude CLI 2.1.145: Sonnet and Haiku show
-    ``auto mode unavailable for this model`` in the TUI status bar and the
-    headless ``-p`` path reports ``default permission mode`` — ``--permission-mode
-    auto`` is silently downgraded. ``None`` returns False as a fail-safe (the
-    claude-cli runtime leaves the model unspecified to mean "Claude's own
-    default", which is currently Sonnet).
+_CLAUDE_FEATURE_VERSIONS: dict[str, tuple[int, int, int]] = {
+    "effort_xhigh": (2, 1, 111),
+    "system_prompt_snapshot": (2, 1, 266),
+}
+
+_NATIVE_AUTO_REFUSED_MODEL = re.compile(
+    r"claude-3-|claude-(?:opus|sonnet)-4-(?:[015](?!\d)|\d{8})|haiku"
+)
+_THIRD_PARTY_REFUSED_MODEL = re.compile(r"claude-(?:opus|sonnet)-4-6(?!\d)")
+_PROVIDER_ENV_REFUSES_4_6 = (
+    ("CLAUDE_CODE_USE_BEDROCK", True),
+    ("CLAUDE_CODE_USE_FOUNDRY", True),
+    ("CLAUDE_CODE_USE_ANTHROPIC_AWS", False),
+    ("CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD", False),
+    ("CLAUDE_CODE_USE_MANTLE", True),
+    ("CLAUDE_CODE_USE_VERTEX", True),
+)
+
+
+def parse_version(text: str) -> tuple[int, ...] | None:
+    m = _VERSION_RE.search(text)
+    if not m:
+        return None
+    return tuple(int(g) for g in m.groups() if g is not None)
+
+
+@functools.cache
+def claude_cli_version(cli_path: str) -> tuple[int, ...] | None:
+    try:
+        out = subprocess.run(  # noqa: S603
+            [cli_path, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning("claude_version_unavailable", cli_path=cli_path, error=str(exc))
+        return None
+    return parse_version(out)
+
+
+def claude_cli_supports(feature: str, version: tuple[int, ...] | None) -> bool:
+    """Does a Claude Code CLI at ``version`` accept ``feature``?
+
+    An unknown version is taken to be current. A CLI exits on a flag or value
+    it does not know, and the SDK runtime's bundled CLI lags far behind the
+    installed one.
+    """
+    return version is None or version >= _CLAUDE_FEATURE_VERSIONS[feature]
+
+
+def claude_effort(
+    effort: EffortLevel | None, version: tuple[int, ...] | None
+) -> EffortLevel | None:
+    if effort == "xhigh" and not claude_cli_supports("effort_xhigh", version):
+        return "high"
+    return effort
+
+
+def _provider_refuses_4_6_auto() -> bool:
+    for name, refuses in _PROVIDER_ENV_REFUSES_4_6:
+        if os.environ.get(name, "").strip().lower() not in ("", "0", "false"):
+            return refuses
+    return False
+
+
+def model_supports_native_auto(model: str | None) -> bool:
+    """Will the CLI keep ``--permission-mode auto`` on this model?
+
+    Mirrors the CLI's own gate (2.1.270): Claude 3, Opus 4.0/4.1/4.5, Sonnet
+    4.0/4.5 and Haiku are refused, and so are Opus 4.6 and Sonnet 4.6 on
+    Bedrock, Vertex, Foundry and Mantle. A refused model runs in manual mode
+    without saying so. ``None`` returns False as a fail-safe: the claude-cli
+    runtime leaves the model unset to mean Claude's own default.
     """
     if model is None:
         return False
-    return "opus" in model.lower()
+    lowered = model.lower()
+    if _NATIVE_AUTO_REFUSED_MODEL.search(lowered):
+        return False
+    return not (
+        _THIRD_PARTY_REFUSED_MODEL.search(lowered) and _provider_refuses_4_6_auto()
+    )
 
 
 def truncate(text: str, max_len: int = 60) -> str:
@@ -170,6 +244,25 @@ def is_retryable_error(content: str) -> bool:
     if any(p in lowered for p in RETRYABLE_PATTERNS):
         return True
     return HTTP_5XX_PATTERN.search(lowered) is not None
+
+
+_API_ERROR_HINTS: dict[str, str] = {
+    "authentication_failed": (
+        "🔑 Claude Code is not signed in on the machine running leashd. Run "
+        "`claude auth login` in a terminal there, then send your message again."
+    ),
+    "model_not_found": (
+        "🔧 The Claude account on the machine running leashd can't use this "
+        "model. Pick one it can with `leashd model set <model>` and "
+        "`leashd reload`, then `/clear` so the next message starts on it."
+    ),
+}
+
+
+def api_error_hint(kind: str | None) -> str | None:
+    """What to do about a typed Claude Code API error, when Claude's own message
+    points at a fix that can't be reached from a chat."""
+    return _API_ERROR_HINTS.get(kind) if kind else None
 
 
 def friendly_error(raw: str) -> str:
@@ -297,6 +390,7 @@ def build_agent_cli_args(
     append_system_prompt: str | None,
     resume_token: str | None,
     interactive: bool = False,
+    cli_version: tuple[int, ...] | None = None,
 ) -> list[str]:
     """The agent/model/instruction-shaping ``claude`` CLI flags.
 
@@ -315,9 +409,13 @@ def build_agent_cli_args(
         derails linear workflows like ``/test`` and bypasses leashd's
         single-agent streaming, transcript and gating. Suppressing it keeps
         the interactive agent behaviourally identical to ``claude_cli``.
-    """
-    from leashd.core.runtime_settings import to_claude_effort
 
+    A resumed launch renders the system prompt fresh
+    (``--system-prompt-snapshot off``). From Claude Code 2.1.267 the CLI
+    otherwise replays the prompt the conversation started with, dropping every
+    mode instruction set since. ``cli_version`` holds back what an older CLI
+    would reject.
+    """
     args: list[str] = []
     for d in session.workspace_directories:
         if d != session.working_directory:
@@ -334,7 +432,9 @@ def build_agent_cli_args(
                 )
             ),
         ]
-    effort = to_claude_effort((settings.effort if settings else None) or config.effort)
+    effort = claude_effort(
+        (settings.effort if settings else None) or config.effort, cli_version
+    )
     if effort:
         args += ["--effort", effort]
     if model:
@@ -392,6 +492,8 @@ def build_agent_cli_args(
 
     if resume_token:
         args += ["--resume", resume_token]
+        if claude_cli_supports("system_prompt_snapshot", cli_version):
+            args += ["--system-prompt-snapshot", "off"]
     return args
 
 

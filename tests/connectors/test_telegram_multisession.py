@@ -251,7 +251,9 @@ class TestBlockingPromptsWaitForTheirSlot:
 
         await _switch_to(connector, "284184690:s2")
 
-        rendered = [t for t in _sent_texts(connector) if t.startswith("Run: ")]
+        rendered = [
+            t.rsplit("\n\n", 1)[-1] for t in _sent_texts(connector) if "Run: " in t
+        ]
         assert rendered == ["Run: first", "Run: second"]
 
 
@@ -344,7 +346,9 @@ class TestLeavingTakesAPromptBackDown:
 
         await _switch_to(connector, "284184690")
 
-        rendered = [t for t in _sent_texts(connector) if t.startswith("Run: ")]
+        rendered = [
+            t.rsplit("\n\n", 1)[-1] for t in _sent_texts(connector) if "Run: " in t
+        ]
         assert rendered == ["Run: first", "Run: first", "Run: second"]
 
     async def test_a_reissued_prompt_is_cleaned_up_when_it_settles(self, connector):

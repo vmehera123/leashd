@@ -343,6 +343,35 @@ rules:
         )
         assert permissive_policy_engine.evaluate(c) == PolicyDecision.ALLOW
 
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "agent-browser cookies get",
+            "agent-browser auth login github",
+            "agent-browser storage local",
+            "agent-browser state save s.json",
+            "agent-browser clipboard read",
+            "agent-browser --session x cookies get",
+        ],
+    )
+    def test_permissive_policy_asks_for_browser_credentials(
+        self, permissive_policy_engine, command
+    ):
+        c = permissive_policy_engine.classify("Bash", {"command": command})
+        assert permissive_policy_engine.evaluate(c) == PolicyDecision.REQUIRE_APPROVAL
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "agent-browser click @e1",
+            "agent-browser open https://example.com",
+            "agent-browser get title | head -1",
+        ],
+    )
+    def test_permissive_policy_allows_browsing(self, permissive_policy_engine, command):
+        c = permissive_policy_engine.classify("Bash", {"command": command})
+        assert permissive_policy_engine.evaluate(c) == PolicyDecision.ALLOW
+
     def test_classification_deny_reason_populated(self, engine):
         c = engine.classify("Read", {"file_path": "/home/user/.env"})
         assert c.deny_reason is not None

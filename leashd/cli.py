@@ -306,6 +306,8 @@ def _handle_browser(args: argparse.Namespace) -> None:
     elif sub == "headless":
         state = getattr(args, "state", None)
         _handle_browser_headless(state)
+    elif sub == "auto-approve":
+        _handle_browser_auto_approve(getattr(args, "state", None))
 
 
 def _handle_browser_show() -> None:
@@ -319,6 +321,9 @@ def _handle_browser_show() -> None:
     headless = browser.get("headless", False)
     print(f"Headless: {'on' if headless else 'off'}")
 
+    auto_approve = browser.get("auto_approve", False)
+    print(f"Auto-approve browsing: {'on' if auto_approve else 'off'}")
+
     user_data_dir = browser.get("user_data_dir")
     if user_data_dir:
         print(f"Browser profile: {user_data_dir}")
@@ -326,6 +331,38 @@ def _handle_browser_show() -> None:
     else:
         print("Browser profile: not configured (using temporary profile)")
         print("  Run 'leashd browser set-profile <path>' to persist login sessions.")
+
+
+_BROWSER_STILL_ASKS = "Cookies, auth, storage, connect and installs still ask."
+
+
+def _handle_browser_auto_approve(state: str | None) -> None:
+    data = load_global_config()
+    browser = get_browser_config(data)
+
+    if state is None:
+        current = browser.get("auto_approve", False)
+        print(f"Auto-approve browsing: {'on' if current else 'off'}")
+        return
+
+    enabled = state == "on"
+    browser = data.get("browser", {})
+    if not isinstance(browser, dict):
+        browser = {}
+    browser["auto_approve"] = enabled
+    data["browser"] = browser
+    save_global_config(data)
+    inject_global_config_as_env(force=True)
+
+    if enabled:
+        print("✓ agent-browser browsing is approved in every conversation")
+        profile = browser.get("user_data_dir")
+        if profile:
+            print(f"  It acts as whoever is logged into {profile}.")
+        print(f"  {_BROWSER_STILL_ASKS}")
+    else:
+        print("✓ agent-browser browsing asks again, once per conversation")
+    _notify_daemon_reload()
 
 
 def _handle_browser_set_profile(path: str) -> None:
@@ -1884,6 +1921,11 @@ def main() -> None:
         "set-backend", help="Set browser automation backend"
     )
     browser_backend.add_argument("backend", choices=["playwright", "agent-browser"])
+    browser_auto_approve = browser_sub.add_parser(
+        "auto-approve",
+        help="Show or toggle approving agent-browser browsing in every conversation",
+    )
+    browser_auto_approve.add_argument("state", nargs="?", choices=["on", "off"])
     browser_headless = browser_sub.add_parser(
         "headless", help="Show or toggle headless mode (on/off)"
     )

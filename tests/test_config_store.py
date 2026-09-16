@@ -525,6 +525,28 @@ class TestInjectBrowserConfig:
         assert "LEASHD_BROWSER_BACKEND" not in os.environ
 
 
+class TestInjectBrowserAutoApproveConfig:
+    def test_bridges_auto_approve_to_env(self, fake_config_dir, monkeypatch):
+        save_global_config({"browser": {"auto_approve": True}})
+        monkeypatch.delenv("LEASHD_BROWSER_AUTO_APPROVE", raising=False)
+        inject_global_config_as_env()
+        assert os.environ["LEASHD_BROWSER_AUTO_APPROVE"] == "true"
+
+    def test_missing_auto_approve_not_injected(self, fake_config_dir, monkeypatch):
+        save_global_config({"browser": {}})
+        monkeypatch.delenv("LEASHD_BROWSER_AUTO_APPROVE", raising=False)
+        inject_global_config_as_env()
+        assert "LEASHD_BROWSER_AUTO_APPROVE" not in os.environ
+
+    def test_config_reads_the_bridged_value(self, fake_config_dir, tmp_path):
+        from leashd.core.config import LeashdConfig
+
+        save_global_config({"browser": {"auto_approve": True}})
+        inject_global_config_as_env()
+        config = LeashdConfig(approved_directories=[tmp_path])
+        assert config.browser_auto_approve is True
+
+
 class TestInjectBrowserHeadlessConfig:
     def test_bridges_headless_true_to_env(self, fake_config_dir, monkeypatch):
         save_global_config({"browser": {"headless": True}})
