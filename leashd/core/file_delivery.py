@@ -24,7 +24,7 @@ _MARKER_HINT = "[[leashd:file"
 FILE_MARKER_RE = re.compile(r"[ \t]*\[\[leashd:file[ \t]+([^\]\n]+)\]\]")
 
 _SENSITIVE_NAME_RE = re.compile(
-    r"^\.env($|\.)|\.env$|"
+    r"^\.env($|\.(?!(example|sample|template|dist)$))|\.env$|"
     r"^\.(npmrc|netrc|pgpass|htpasswd|pypirc|dockercfg)$|"
     r"^id_(rsa|dsa|ecdsa|ed25519)|"
     r"^(secring|authorized_keys|known_hosts)|"

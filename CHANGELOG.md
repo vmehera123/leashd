@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.8.0] - 2026-09-17
+- **changed**: "Approve all" on `ssh` or an `scp` upload covers that host, not one exact remote command.
+- **added**: fewer prompts: linters, formatters and type checkers (`ruff`, `mypy`, `tsc`, `eslint`, `make check` …), reads inside `docker exec`, and loopback GETs with a quoted or schemeless URL run without asking.
+- **fixed**: policy rules can name MCP tools as `mcp__<server>__<tool>`, and `ToolSearch` is no longer refused, which hid `WebFetch`, `WebSearch` and every MCP tool.
+- **fixed**: a quoted inline assignment no longer disguises a command (`A='x ls' rm -rf dir` passed as `ls`).
+
 ## [1.7.0] - 2026-09-15
 - **changed**: Telegram approval cards show what you're approving (risk, project, Claude's summary, the command or diff, the policy's reason) and shrink to a one-line receipt once answered.
 - **changed**: "Always allow" on an agent-browser command covers all browsing, and `leashd browser auto-approve on` grants it to every conversation. Cookies, auth and storage still ask, now under `permissive.yaml` too.

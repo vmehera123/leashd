@@ -44,7 +44,7 @@ rules:
 | Field | Required | Type | Description |
 |---|---|---|---|
 | `name` | Yes | `str` | Unique rule identifier |
-| `tools` | Yes | `list[str]` | Tool names this rule applies to. A rule with no tools never matches. |
+| `tools` | Yes | `list[str]` | Tool names this rule applies to. A rule with no tools never matches. Name an MCP tool the way Claude Code does (`mcp__leadline__get_opportunity`) to cover that server only; the bare `get_opportunity` covers the tool on any server. |
 | `command_patterns` | No | `list[str]` | Regex patterns matched against `tool_input["command"]`. Only relevant for Bash. |
 | `path_patterns` | No | `list[str]` | Regex patterns matched against `tool_input["file_path"]` or `tool_input["path"]`. |
 | `action` | Yes | `str` | One of: `allow`, `deny`, `require_approval` |
@@ -91,7 +91,7 @@ Key behaviors:
 - **Allow rules see only what runs** — `allow` patterns match the shell skeleton (quoted text blanked, redirections stripped), never a `bash -c`/`python3 -c` payload or the raw redirect text. The exception is a SQL client (`sqlite3`, `psql -c`, `docker exec <c> psql`), where every statement it is handed must match.
 - **Path patterns** — Checked against `tool_input["file_path"]` (primary) or `tool_input["path"]` (fallback).
 
-If no rule matches, `evaluate()` returns the `default_action` from settings (typically `require_approval`).
+If no rule matches, `evaluate()` returns the `default_action` from settings (typically `require_approval`). The one exception is `ToolSearch`, which is allowed when no rule names it: Claude Code hides `WebFetch`, `WebSearch` and every MCP tool until ToolSearch loads them, so refusing it would refuse tools the policy allows. Each tool it loads is still checked when it is called.
 
 ## Three Actions
 
@@ -109,7 +109,7 @@ leashd ships with three policy files in `policies/`:
 flowchart TB
     subgraph Default["default.yaml — Balanced"]
         d_deny["DENY: credentials, force push, sudo, curl\|bash, DROP/TRUNCATE"]
-        d_allow["ALLOW: agent tools, reads, read-only bash (ls, grep, awk, git log, docker ps/logs, --version), loopback GETs, plan files, browser readonly"]
+        d_allow["ALLOW: agent tools, reads, read-only bash (ls, grep, awk, git log, docker ps/logs, reads inside docker exec, --version), loopback GETs, linters/formatters/type checkers, plan files, browser readonly"]
         d_approval["APPROVAL: git mutations, file writes, network bash, browser mutations"]
         d_default["Default: require_approval"]
         d_timeout["Timeout: 300s"]

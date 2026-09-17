@@ -62,7 +62,7 @@
  {
   "command": "make check 2>&1 | grep -E \"word|word|word\" | head -5; L=$(ls -t logs/alpha-*.bravo | head -1); echo \"== $L\"; grep -c \"\" \"$L\"; grep -E \"word_word|word\" \"$L\" | tail -3 | cut -c1-300; tail -3 cobalt/delta/ember-8000/falcon-garnet.log",
   "verdict": "allow",
-  "category": "dev-build-tools",
+  "category": "dev-checks",
   "before": "require_approval"
  },
  {
@@ -140,7 +140,7 @@
  {
   "command": "uv run ruff check alpha projects tests 2>&1 | tail -5; echo \"--- word alpha/bravo/cobalt.py word word word word word? ---\"; git stash list >/dev/null 2>&1; git diff --stat alpha/bravo/cobalt.py alpha/cobalt.py; echo \"--- word word size word word word ---\"; uv run ruff format --opt alpha/bravo/cobalt.py alpha/cobalt.py 2>/dev/null | grep -c \"^[+-]\"",
   "verdict": "allow",
-  "category": "dev-build-tools",
+  "category": "dev-checks",
   "before": "require_approval"
  },
  {
@@ -650,7 +650,7 @@
  {
   "command": "make -C ~/projects/alpha/bravo check 2>&1 | grep -v -E '^word/.*[0-9]+%' | grep -E 'word|word|word|word word word|word|word word|word |word|word word'",
   "verdict": "allow",
-  "category": "dev-build-tools",
+  "category": "dev-checks",
   "before": "require_approval"
  },
  {
@@ -1166,7 +1166,7 @@
  {
   "command": "uv run ruff format tests/alpha/bravo_cobalt_delta.py tests/alpha/bravo_cobalt_ember.py tests/alpha/bravo_falcon_garnet.py && awk 'NR>1 {print $1}' tests/alpha/bravo_cobalt_ember.py",
   "verdict": "allow",
-  "category": "dev-build-tools",
+  "category": "dev-checks",
   "before": "require_approval"
  },
  {
@@ -2132,7 +2132,7 @@
  {
   "command": "make check 2>&1 | grep -E \"[0-9]+ (word|word)|word [0-9]+ word|word\" | head",
   "verdict": "allow",
-  "category": "dev-build-tools",
+  "category": "dev-checks",
   "before": "allow"
  },
  {
@@ -2149,14 +2149,14 @@
  },
  {
   "command": "cd ~/projects/alpha/bravo; pgrep -f \"word -N -L 8000\" >/dev/null && echo \"word word\" || echo \"word word\"; curl -s -m 8 http://127.0.0.1:8000/health -o /dev/null -w \"word:%{http_code}\\n\"",
-  "verdict": "require_approval",
-  "category": "network-bash",
+  "verdict": "allow",
+  "category": "read-only-bash",
   "before": "require_approval"
  },
  {
   "command": "docker compose up -d --no-build alpha 2>&1 | tail -3 && curl -fsS --retry 40 --opt 1 --opt http://127.0.0.1:8000/api/health; echo; docker compose logs --tail 25 alpha",
   "verdict": "require_approval",
-  "category": "unmatched",
+  "category": "network-bash",
   "before": "require_approval"
  },
  {
@@ -2336,7 +2336,7 @@
  {
   "command": "uv run ruff check alpha/bravo --opt cobalt 2>&1 | head -20; echo \"word=$?\"",
   "verdict": "allow",
-  "category": "dev-build-tools",
+  "category": "dev-checks",
   "before": "allow"
  },
  {
@@ -2365,8 +2365,8 @@
  },
  {
   "command": "for W in wf_alpha-bravo wf_cobalt-delta; do D=~/.claude/projects/app/00000000-0000-4000-8000-000000000001/ember/falcon/$W; echo \"$W: $(grep -c '\"type\":\"word\"' $D/garnet.jsonl) word\"; done; find harbor projects tests -name '*.word' -not -path '*__word__*' | wc -l",
-  "verdict": "require_approval",
-  "category": "unmatched",
+  "verdict": "allow",
+  "category": "read-only-bash",
   "before": "require_approval"
  },
  {
@@ -2402,7 +2402,7 @@
  {
   "command": "export VAR1=/tmp/alpha_bravo_cobalt/delta VAR2=8000 && curl -s \"http://127.0.0.1:8000/ember/falcon?garnet=0\" | uv run python -c \"import json\nprint(json.dumps({'ok': True}))\" | tail -8",
   "verdict": "require_approval",
-  "category": "network-bash",
+  "category": "unmatched",
   "before": "require_approval"
  },
  {
@@ -2492,7 +2492,7 @@
  {
   "command": "curl -s \"localhost:8000/api/v1/alpha?bravo=500\" | uv run python -c \"import json\nprint(json.dumps({'ok': True}))\"",
   "verdict": "require_approval",
-  "category": "network-bash",
+  "category": "unmatched",
   "before": "require_approval"
  },
  {
@@ -2708,7 +2708,7 @@
  {
   "command": "curl -s localhost:8000/api/v1/alpha > /tmp/scratch/dashboard.json; curl -s \"localhost:8000/api/v1/bravo?open=true&cobalt=500\" | uv run python -c \"import json\nprint(json.dumps({'ok': True}))\"",
   "verdict": "require_approval",
-  "category": "network-bash",
+  "category": "unmatched",
   "before": "require_approval"
  },
  {
@@ -2774,7 +2774,7 @@
  {
   "command": "VAR1=$(curl -s -m 5 'http://127.0.0.1:8000/api/v1/alpha?q=ea-bravo' | uv run --no-project python -c 'import json; print(json.dumps({\"ok\": True}))'); echo \"word=$VAR1\"; agent-browser tab cobalt --label delta \"http://localhost:8001/alpha/$VAR1\" 2>&1 | tail -1; agent-browser wait --text \"word word\" 2>&1 | tail -1; agent-browser snapshot -i -c 2>&1 | head -45",
   "verdict": "require_approval",
-  "category": "network-bash",
+  "category": "agent-browser-mutations",
   "before": "require_approval"
  },
  {
@@ -2786,7 +2786,7 @@
  {
   "command": "curl -fsS --retry 10 --opt 1 --opt http://127.0.0.1:8000/api/health; echo; docker exec alpha-bravo-cobalt-1 delta --quiet --eval 'word.word(word.word({word:1}))' 2>&1 | tail -2; docker ps --format '{{.Names}}\\t{{.Status}}'",
   "verdict": "require_approval",
-  "category": "unmatched",
+  "category": "network-bash",
   "before": "require_approval"
  },
  {
@@ -2846,7 +2846,7 @@
  {
   "command": "make check 2>&1 | grep -E \"word|word|word|word\" | head -5; git status --short | grep -v \"^M \" | head",
   "verdict": "allow",
-  "category": "dev-build-tools",
+  "category": "dev-checks",
   "before": "allow"
  },
  {
@@ -2948,7 +2948,7 @@
  {
   "command": "make check 2>&1 | grep -E \"word|word|word|word\" | tail -5",
   "verdict": "allow",
-  "category": "dev-build-tools",
+  "category": "dev-checks",
   "before": "allow"
  },
  {
@@ -3295,8 +3295,8 @@
  },
  {
   "command": "VAR1=$(date -u +%Y%m%word%H%M%word) && VAR2=$(date -u +%word%word) && F=alpha/bravo/cobalt/${VAR1}-delta-to-ember-falcon-garnet-harbor-indigo-juniper.md && test ! -e $F && cat > $F <<EOF\nfirst line\nsecond line\nEOF\necho \"$F\"; echo \"$VAR2\"; ls alpha/bravo/cobalt/ | sort | tail -4",
-  "verdict": "require_approval",
-  "category": "unmatched",
+  "verdict": "allow",
+  "category": "read-only-bash",
   "before": "require_approval"
  },
  {
@@ -3458,7 +3458,7 @@
  {
   "command": "make check 2>&1 | grep -E \"word|word|word\" | head -4",
   "verdict": "allow",
-  "category": "dev-build-tools",
+  "category": "dev-checks",
   "before": "allow"
  },
  {
@@ -3566,7 +3566,7 @@
  {
   "command": "export VAR1=/tmp/alpha_bravo_cobalt/delta\nVAR2=$(curl -s \"http://127.0.0.1:8000/ember/falcon?garnet_id=8001\" | python3 -c \"import json; print(json.dumps({'ok': True}))\")\necho \"word $VAR2\"\nuv run python scripts/_cobalt/harbor.py tap 8001 \"$VAR2\" 2>&1 | tail -2",
   "verdict": "require_approval",
-  "category": "network-bash",
+  "category": "unmatched",
   "before": "require_approval"
  },
  {
@@ -3668,7 +3668,7 @@
  {
   "command": "make check 2>&1 | grep -E \"[0-9]+ (word|word)|word|word:\" | head",
   "verdict": "allow",
-  "category": "dev-build-tools",
+  "category": "dev-checks",
   "before": "allow"
  },
  {
@@ -3829,8 +3829,8 @@
  },
  {
   "command": "for W in wf_alpha-bravo wf_cobalt-delta; do D=~/.claude/projects/app/00000000-0000-4000-8000-000000000001/ember/falcon/$W; echo \"$W: $(grep -c '\"type\":\"word\"' $D/garnet.jsonl) word\"; done; echo \"--- word word ---\"; find harbor projects tests -type f -not -path '*__word__*' | sort",
-  "verdict": "require_approval",
-  "category": "unmatched",
+  "verdict": "allow",
+  "category": "read-only-bash",
   "before": "require_approval"
  },
  {
@@ -3967,8 +3967,8 @@
  },
  {
   "command": "VAR1=$(date -u +%Y%m%word%H%M%word); VAR2=$(date -u +%Y-%m-%word%H:%M:%word); F=alpha/bravo/cobalt/${VAR1}-delta-to-ember-falcon-garnet-harbor-indigo.md; test -e $F && echo juniper || cat > $F <<EOF\nfirst line\nsecond line\nEOF\necho $F",
-  "verdict": "require_approval",
-  "category": "unmatched",
+  "verdict": "allow",
+  "category": "read-only-bash",
   "before": "require_approval"
  },
  {
@@ -4040,7 +4040,7 @@
  {
   "command": "uv run ruff --version 2>&1 | tail -2",
   "verdict": "allow",
-  "category": "dev-build-tools",
+  "category": "dev-checks",
   "before": "allow"
  },
  {

@@ -33,7 +33,7 @@ import structlog
 from pydantic import BaseModel, ConfigDict
 
 from leashd.core.events import TOOL_ALLOWED, TOOL_DENIED, TOOL_GATED
-from leashd.core.safety.gatekeeper import normalize_tool_name
+from leashd.core.safety.policy import normalize_tool_name
 from leashd.plugins.base import LeashdPlugin, PluginMeta
 
 if TYPE_CHECKING:

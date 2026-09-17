@@ -17,12 +17,14 @@ from leashd.core.events import (
 from leashd.core.safety.analyzer import (
     command_units,
     is_shell_control_segment,
+    mentions_credential_path,
     network_read_scope,
+    remote_login_scope,
     split_chain_segments,
     strip_benign_prefixes,
     unwrap_capture_assignment,
 )
-from leashd.core.safety.policy import PolicyDecision
+from leashd.core.safety.policy import PolicyDecision, normalize_tool_name
 
 if TYPE_CHECKING:
     from collections.abc import Collection
@@ -34,18 +36,6 @@ if TYPE_CHECKING:
     from leashd.core.safety.sandbox import SandboxEnforcer
 
 logger = structlog.get_logger()
-
-_MCP_PREFIX_RE = re.compile(r"^mcp__[a-zA-Z0-9_-]+__")
-
-
-def normalize_tool_name(tool_name: str) -> str:
-    """Strip ``mcp__<server>__`` prefix so policy/auto-approve keys match.
-
-    The SDK passes MCP tool names as ``mcp__playwright__browser_navigate``
-    but policies and auto-approve entries use bare ``browser_navigate``.
-    """
-    return _MCP_PREFIX_RE.sub("", tool_name)
-
 
 _SKIP_CHARS = frozenset("-/.~$")
 
@@ -119,6 +109,12 @@ def _approval_key(
     approval taps on 19 hosts; the bare binary would have granted the whole
     internet. Anything that is not a plain read falls through to the full
     invocation above.
+    ``ssh`` and an ``scp`` upload are keyed on the host they reach — see
+    :func:`remote_login_scope` — so "Approve all" on one remote command covers
+    the next command on that host. Neither host scope is used when the
+    command names a credential path anywhere the local shell acts on it: a
+    redirection feeding ``~/.aws/credentials`` into the connection is not
+    something a host grant was ever given for.
     For others: just the tool name ('Write', 'Edit', etc.)
     MCP prefixes (``mcp__<server>__``) are stripped before key generation.
     """
@@ -143,7 +139,9 @@ def _approval_key(
             strip_benign_prefixes(segments[0] if segments else raw)
         )
     )
-    scope = network_read_scope(segment)
+    scope = None
+    if not mentions_credential_path(source):
+        scope = network_read_scope(segment) or remote_login_scope(segment)
     if scope:
         return f"Bash::{scope}"
     # Keep only the leading segment before any shell operator.
@@ -334,7 +332,7 @@ class ToolGatekeeper:
             )
             return await self._emit_and_allow(session_id, tool_name, tool_input)
 
-        classification = self._policy_engine.classify_compound(normalized, tool_input)
+        classification = self._policy_engine.classify_compound(tool_name, tool_input)
         decision = self._policy_engine.evaluate(classification)
 
         logger.info(
@@ -440,7 +438,7 @@ class ToolGatekeeper:
             )
             return None
 
-        classification = self._policy_engine.classify_compound(normalized, tool_input)
+        classification = self._policy_engine.classify_compound(tool_name, tool_input)
         decision = self._policy_engine.evaluate(classification)
         gated = classification.matched_rule is not None and decision in (
             PolicyDecision.DENY,
@@ -564,6 +562,12 @@ class ToolGatekeeper:
         For Bash keys, a stored broader key covers a narrower current key:
         stored ``Bash::uv run`` matches current ``Bash::uv run pytest``.
         Word-boundary check prevents ``Bash::git`` matching ``Bash::gitx``.
+
+        A key for a target-bearing command (``curl``, ``ssh``, ``kill`` …)
+        only ever covers itself. Its words are the target, so extending one is
+        widening it: a host grant ``Bash::curl api.github.com`` used to cover
+        the full-invocation key of ``curl api.github.com -d @secrets``, which
+        declines the host scope precisely because it uploads.
         """
         approved = self._auto_approved_tools.get(chat_id, set()) | self._standing_grants
         if key in approved:
@@ -572,6 +576,10 @@ class ToolGatekeeper:
             return False
         for stored in approved:
             if not stored.startswith("Bash::"):
+                continue
+            if stored.removeprefix("Bash::").split(" ", 1)[0] in (
+                _TARGET_BEARING_COMMANDS
+            ):
                 continue
             if key.startswith(stored) and (
                 len(key) == len(stored) or key[len(stored)] == " "

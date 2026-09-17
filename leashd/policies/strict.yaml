@@ -5,7 +5,7 @@ rules:
   - name: credential-files
     tools: [Read, Write, Edit]
     path_patterns:
-      - "\\.env$|\\.env\\."
+      - "\\.env$|\\.env\\.(?!(example|sample|template|dist)$)"
       - "\\.ssh/|\\.aws/|\\.gnupg/"
       - "\\.key$|\\.pem$|\\.p12$|\\.pfx$|\\.keystore$"
       - "id_rsa|id_ed25519|id_ecdsa|id_dsa|credentials|secrets?|token\\.json$"

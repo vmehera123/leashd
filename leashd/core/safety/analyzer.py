@@ -2,6 +2,7 @@
 
 import re
 import shlex
+from collections.abc import Iterator
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -40,7 +41,7 @@ class PathAnalysis(BaseModel):
 
 
 _CREDENTIAL_PATTERNS = [
-    re.compile(r"\.env($|\.)"),
+    re.compile(r"\.env($|\.(?!(?:example|sample|template|dist)(?![\w.-])))"),
     re.compile(r"\.ssh/"),
     re.compile(r"\.aws/"),
     re.compile(r"\.gnupg/"),
@@ -166,8 +167,18 @@ def _preceded_by_executor(skeleton_so_far: str) -> bool:
     tokens = unquoted.split()
     if tokens and tokens[-1] in _EXECUTOR_FLAGS:
         return True
-    running = _COMMAND_POSITION_RE.split(unquoted)[-1].split()
+    running_text = _COMMAND_POSITION_RE.split(unquoted)[-1].strip()
+    if (
+        tokens
+        and _SQL_STATEMENT_FLAG_RE.fullmatch(tokens[-1])
+        and SQL_CLIENT_RE.match(running_text)
+    ):
+        return True
+    running = running_text.split()
     return bool(running) and running[0] in _EXECUTOR_COMMANDS
+
+
+_SQL_STATEMENT_FLAG_RE = re.compile(r"-[A-Za-z]*[ce]")
 
 
 _HEREDOC_START_RE = re.compile(
@@ -303,7 +314,14 @@ def split_chain_segments(command: str) -> list[str]:
     if seg:
         segments.append(seg)
 
-    return segments
+    return [
+        cleaned
+        for cleaned in (_LEADING_CONTINUATION_RE.sub("", seg) for seg in segments)
+        if cleaned
+    ]
+
+
+_LEADING_CONTINUATION_RE = re.compile(r"^(?:\\\n\s*)+")
 
 
 def split_pipeline_stages(segment: str) -> list[str]:
@@ -393,7 +411,10 @@ def strip_redirections(command: str) -> str:
     return "".join(out).strip()
 
 
-_ENV_ASSIGN_PREFIX_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=[^\s$`|<>&;()]*\s+(?=\S)")
+_ENV_ASSIGN_PREFIX_RE = re.compile(
+    r"^[A-Za-z_][A-Za-z0-9_]*="
+    r"(?:'[^']*'|\"[^\"$`\\]*\"|[^\s$`|<>&;()'\"\\])*\s+(?=\S)"
+)
 _KEYWORD_PREFIX_RE = re.compile(r"^(?:do|then|else|elif|if|while|until|!)\s+(?=\S)")
 _RUNNER_PREFIX_RE = re.compile(
     r"^(?:command|exec|nohup|time|stdbuf|nice)\s+(?=\S)"
@@ -439,17 +460,21 @@ def strip_command_wrappers(command: str) -> str:
     return command
 
 
-_INERT_ASSIGNMENT = r"[A-Za-z_][A-Za-z0-9_]*=[^\s$`|<>&;()]*"
+_INERT_VALUE = r"(?:'[^']*'|\"(?:[^\"$`\\]|\$(?!\())*\"|[^\s$`|<>&;()'\"\\]|\$(?!\())*"
+_INERT_ASSIGNMENT = r"[A-Za-z_][A-Za-z0-9_]*=" + _INERT_VALUE
 _EXPORTABLE_NAME = (
     r"(?!(?:LD_|DYLD_|GIT_|PYTHON|PERL|RUBY|NODE_|LESS|BASH_ENV\b|ENV\b|PATH\b|"
     r"PAGER\b|EDITOR\b|VISUAL\b|PROMPT_COMMAND\b|IFS\b|PS4\b|SHELLOPTS\b|BASHOPTS\b))"
     r"[A-Za-z_][A-Za-z0-9_]*"
 )
-_EXPORTED_ASSIGNMENT = _EXPORTABLE_NAME + r"(?:=[^\s$`|<>&;()]*)?"
+_EXPORTED_ASSIGNMENT = _EXPORTABLE_NAME + r"(?:=" + _INERT_VALUE + r")?"
 _SHELL_CONTROL_SEGMENT_RE = re.compile(
-    r"^(?:done|fi|esac|do|then|else|;;|\}|\)|break|continue|:|"
+    r"^(?:done|fi|esac|do|then|else|;;|\{|\}|\)|break|continue|:|"
     r"(?:exit|return)(?:\s+\d+)?|"
     r"for\s+[A-Za-z_][A-Za-z0-9_]*\s+in(?:\s.*)?|"
+    r"case\s+(?:\"[^\"`]*\"|[^\s`;|&<>()]+)\s+in|"
+    r"(?:function\s+)?[A-Za-z_][\w-]*\s*\(\)\s*\{?|"
+    r"function\s+[A-Za-z_][\w-]*\s*\{?|"
     + _INERT_ASSIGNMENT
     + r"|(?:export|readonly|local|typeset|declare(?:\s+-[a-zA-Z]+)?)"
     + r"(?:\s+"
@@ -471,8 +496,16 @@ def is_shell_control_segment(segment: str) -> bool:
     hence ``default_action``) outvotes the real command beside it. An
     assignment whose value can execute (``$``, backtick, an operator) is NOT
     inert and stays in the vote.
+
+    A keyword in front (``then break``) and a redirection behind (``done >
+    log.txt``) do not turn scaffolding into a command either.
     """
-    return bool(_SHELL_CONTROL_SEGMENT_RE.match(segment.strip()))
+    text = strip_redirections(segment.strip())
+    prev = None
+    while text != prev:
+        prev = text
+        text = _KEYWORD_PREFIX_RE.sub("", text, count=1)
+    return bool(_SHELL_CONTROL_SEGMENT_RE.match(text))
 
 
 def strip_benign_prefixes(command: str) -> str:
@@ -656,7 +689,40 @@ def command_substitutions(command: str) -> list[str]:
     return [body.strip() for body in bodies if body.strip()]
 
 
+_FUNCTION_DEFINITION_RE = re.compile(
+    r"^(?:function\s+(?P<keyword>[A-Za-z_][\w-]*)\s*(?:\(\))?|(?P<name>[A-Za-z_][\w-]*)\s*\(\))\s*\{"
+)
+_FUNCTION_SCOPE_BREAKERS_RE = re.compile(
+    r"(?<![$<>])\((?!\))|\bunset\b|\bsource\b|(?:^|[\s;&|])\.\s"
+)
+
+
+def _function_call_head(text: str) -> str:
+    prev = None
+    while text != prev:
+        prev = text
+        for pattern in (_ENV_ASSIGN_PREFIX_RE, _KEYWORD_PREFIX_RE, _GROUP_OPEN_RE):
+            text = pattern.sub("", text, count=1)
+    words = text.split(maxsplit=1)
+    return words[0] if words else ""
+
+
 def command_units(command: str) -> list[tuple[str, str]]:
+    """The commands a Bash call runs, each tagged with how it runs.
+
+    A call to a function defined earlier in the same command is not a unit of
+    its own: the function's body is, and every command in that body is
+    classified where it is defined. Voting on the call as well asked the human
+    to approve ``Bash::js`` for ``js() { agent-browser eval --stdin; }; js``.
+    Only a plain call counts — ``command curl`` and ``timeout 5 curl`` run the
+    binary, not a function that shadows it — and only when nothing in the
+    command can take the definition back out of scope: a subshell, ``unset``,
+    or a sourced file.
+    """
+    track_functions = not _FUNCTION_SCOPE_BREAKERS_RE.search(
+        shell_match_texts(command)[0]
+    )
+    functions: set[str] = set()
     units: list[tuple[str, str]] = []
     for segment in split_chain_segments(command):
         for body in command_substitutions(segment):
@@ -664,18 +730,28 @@ def command_units(command: str) -> list[tuple[str, str]]:
                 (text, kind if kind == "pipeline" else "substituted")
                 for text, kind in command_units(body)
             )
+        peeled = segment
+        while (stripped := _KEYWORD_PREFIX_RE.sub("", peeled, count=1)) != peeled:
+            peeled = stripped
+        definition = _FUNCTION_DEFINITION_RE.match(peeled)
+        if track_functions and definition:
+            functions.add(definition.group("keyword") or definition.group("name"))
         if (
             is_shell_control_segment(segment)
-            or unwrap_capture_assignment(segment) != segment
+            or unwrap_capture_assignment(peeled) != peeled
         ):
             continue
         stages = split_pipeline_stages(segment)
         if len(stages) < 2:
-            units.append((segment, "command"))
+            if _function_call_head(segment) not in functions:
+                units.append((segment, "command"))
             continue
         units.append((segment, "pipeline"))
-        units.append((stages[0], "command"))
-        units.extend((stage, "piped") for stage in stages[1:])
+        units.extend(
+            (stage, "command" if position == 0 else "piped")
+            for position, stage in enumerate(stages)
+            if _function_call_head(stage) not in functions
+        )
     return units
 
 
@@ -683,64 +759,207 @@ _NETWORK_READ_BINARIES = frozenset({"curl", "wget"})
 
 _SHELL_OPERATOR_TOKENS = frozenset({"|", "||", "&&", ";", "&", ">", ">>", "<", "<<"})
 
-_UPLOAD_FLAGS = frozenset(
-    {
-        "-d",
-        "-F",
-        "-T",
-        "--data",
-        "--data-ascii",
-        "--data-binary",
-        "--data-raw",
-        "--data-urlencode",
-        "--form",
-        "--form-string",
-        "--json",
-        "--upload-file",
-        "--post-data",
-        "--post-file",
-        "--body-data",
-        "--body-file",
-    }
+_SWITCH = "switch"
+_VALUE = "value"
+_REFUSE = "refuse"
+_METHOD = "method"
+_OUTPUT = "output"
+_OUTPUT_DIR = "output-dir"
+_CWD_OUTPUT = "cwd-output"
+_URL = "url"
+
+_TAKES_VALUE = frozenset({_VALUE, _REFUSE, _METHOD, _OUTPUT, _OUTPUT_DIR, _URL})
+
+_CURL_SHORT_FLAGS = {
+    **dict.fromkeys("0123456#:BfgGIijkLlMNnpqRsSvVZah", _SWITCH),
+    **dict.fromkeys("AbCeEHmPrtuUwyYz", _VALUE),
+    **dict.fromkeys("dFTxKQ", _REFUSE),
+    **dict.fromkeys("oDc", _OUTPUT),
+    **dict.fromkeys("OJ", _CWD_OUTPUT),
+    "X": _METHOD,
+}
+
+_CURL_LONG_FLAGS = {
+    **dict.fromkeys(
+        (
+            "--user-agent",
+            "--cookie",
+            "--referer",
+            "--header",
+            "--max-time",
+            "--connect-timeout",
+            "--retry",
+            "--retry-delay",
+            "--retry-max-time",
+            "--write-out",
+            "--user",
+            "--range",
+            "--time-cond",
+            "--speed-limit",
+            "--speed-time",
+            "--limit-rate",
+            "--max-filesize",
+            "--max-redirs",
+            "--cacert",
+            "--capath",
+            "--cert",
+            "--cert-type",
+            "--key",
+            "--key-type",
+            "--pass",
+            "--ciphers",
+            "--curves",
+            "--proto",
+            "--proto-redir",
+            "--proto-default",
+            "--tls-max",
+            "--expect100-timeout",
+            "--keepalive-time",
+            "--happy-eyeballs-timeout-ms",
+            "--interface",
+            "--local-port",
+            "--noproxy",
+            "--oauth2-bearer",
+            "--aws-sigv4",
+            "--continue-at",
+            "--create-file-mode",
+            "--parallel-max",
+            "--request-target",
+        ),
+        _VALUE,
+    ),
+    **dict.fromkeys(
+        (
+            "--output",
+            "--dump-header",
+            "--cookie-jar",
+            "--trace",
+            "--trace-ascii",
+            "--stderr",
+            "--etag-save",
+            "--hsts",
+            "--alt-svc",
+            "--libcurl",
+        ),
+        _OUTPUT,
+    ),
+    **dict.fromkeys(
+        ("--remote-name", "--remote-name-all", "--remote-header-name"), _CWD_OUTPUT
+    ),
+    "--output-dir": _OUTPUT_DIR,
+    "--request": _METHOD,
+    "--url": _URL,
+}
+
+_WGET_SHORT_FLAGS = {
+    **dict.fromkeys("qvdhVcNSrmkKpExFb46", _SWITCH),
+    **dict.fromkeys("TtUwQlARDIXBn", _VALUE),
+    **dict.fromkeys("eiH", _REFUSE),
+    **dict.fromkeys("Ooa", _OUTPUT),
+    "P": _OUTPUT_DIR,
+}
+
+_WGET_LONG_FLAGS = {
+    **dict.fromkeys(
+        (
+            "--timeout",
+            "--tries",
+            "--user-agent",
+            "--header",
+            "--wait",
+            "--waitretry",
+            "--user",
+            "--password",
+            "--http-user",
+            "--http-password",
+            "--quota",
+            "--limit-rate",
+            "--level",
+            "--referer",
+            "--max-redirect",
+            "--dns-timeout",
+            "--connect-timeout",
+            "--read-timeout",
+            "--ca-certificate",
+            "--certificate",
+            "--private-key",
+            "--load-cookies",
+            "--accept",
+            "--reject",
+            "--accept-regex",
+            "--reject-regex",
+            "--domains",
+            "--exclude-domains",
+            "--include-directories",
+            "--exclude-directories",
+            "--restrict-file-names",
+            "--progress",
+            "--base",
+            "--local-encoding",
+            "--remote-encoding",
+        ),
+        _VALUE,
+    ),
+    **dict.fromkeys(
+        (
+            "--output-document",
+            "--output-file",
+            "--append-output",
+            "--save-cookies",
+            "--warc-file",
+            "--rejected-log",
+        ),
+        _OUTPUT,
+    ),
+    "--directory-prefix": _OUTPUT_DIR,
+    "--method": _METHOD,
+}
+
+_NETWORK_FLAGS = {
+    "curl": (_CURL_SHORT_FLAGS, _CURL_LONG_FLAGS),
+    "wget": (_WGET_SHORT_FLAGS, _WGET_LONG_FLAGS),
+}
+
+_REFUSED_LONG_FLAG_PREFIXES = (
+    "--data",
+    "--form",
+    "--json",
+    "--upload",
+    "--post",
+    "--body",
+    "--proxy",
+    "--preproxy",
+    "--socks",
+    "--unix-socket",
+    "--abstract-unix-socket",
+    "--resolve",
+    "--connect-to",
+    "--doh",
+    "--config",
+    "--variable",
+    "--expand",
+    "--url-query",
+    "--input-file",
+    "--execute",
+    "--span-hosts",
+    "--mail",
+    "--quote",
+    "--ftp",
+    "--telnet",
 )
-
-_OPAQUE_TARGET_FLAGS = frozenset(
-    {
-        "-x",
-        "--proxy",
-        "--preproxy",
-        "--socks4",
-        "--socks4a",
-        "--socks5",
-        "--socks5-hostname",
-        "--unix-socket",
-        "--abstract-unix-socket",
-        "--resolve",
-        "--connect-to",
-        "-K",
-        "--config",
-    }
-)
-
-_WGET_OPAQUE_TARGET_FLAGS = frozenset({"-i", "--input-file", "-e", "--execute"})
-
-# Every short flag above, plus the output and method flags. A bundled cluster
-# (``-sO``, ``-sd @payload``) hides them from an exact-match check, and getting
-# their arguments right inside a cluster is not worth the subtlety — a cluster
-# carrying any of these declines to collapse and costs one extra tap.
-_SHORT_FLAGS_NEEDING_CARE = frozenset("dFTxKieXoO")
-
-_SHORT_FLAG_CLUSTER_RE = re.compile(r"^-[a-zA-Z]{2,}$")
-
-_METHOD_FLAGS = frozenset({"-X", "--request"})
 
 _READ_METHODS = frozenset({"GET", "HEAD"})
 
-_OUTPUT_FLAGS = frozenset({"-o", "--output", "--output-dir", "-O", "--output-document"})
-
-_CWD_OUTPUT_FLAGS = frozenset({"-O", "--remote-name"})
+_DISCARDED_OUTPUTS = frozenset({"-", "/dev/null", "/dev/stdout", "/dev/stderr"})
 
 _URL_TOKEN_RE = re.compile(r"^(?:--url=)?(?:[a-zA-Z][a-zA-Z0-9+.-]*://)")
+
+_SCHEMELESS_URL_RE = re.compile(
+    r"(?P<host>localhost|\d{1,3}(?:\.\d{1,3}){3}|\[[0-9A-Fa-f:.]+\]|"
+    r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)+"
+    r"[A-Za-z](?:[A-Za-z0-9-]*[A-Za-z0-9])?)"
+    r"(?::\d{1,5})?(?:[/?#]\S*)?"
+)
 
 
 def _url_host(token: str) -> str | None:
@@ -752,10 +971,23 @@ def _url_host(token: str) -> str | None:
     does not — the variable sits where the host is still being decided.
     """
     token = token.removeprefix("--url=")
+    if not _URL_TOKEN_RE.match(token):
+        match = _SCHEMELESS_URL_RE.fullmatch(token)
+        return match.group("host").strip("[]").lower() if match else None
     parts = urlsplit(token)
     if "$" in parts.netloc or "`" in parts.netloc:
         return None
     return parts.hostname.lower() if parts.hostname else None
+
+
+def _write_target(value: str, *, is_dir: bool) -> str | None:
+    if value in _DISCARDED_OUTPUTS:
+        return ""
+    if not value or "$" in value or "`" in value:
+        return None
+    if is_dir:
+        return value
+    return (value.rsplit("/", 1)[0] or "/") if "/" in value else "."
 
 
 def network_read_scope(command: str) -> str | None:
@@ -786,68 +1018,72 @@ def network_read_scope(command: str) -> str | None:
     Command substitution and variables disqualify it too — the host must be
     visible here, not assembled at runtime — as does a credential path, so a
     grant for a host never widens into ``-o ~/.ssh/authorized_keys``.
+
+    Every argument has to be accounted for. A flag's value is skipped only
+    when the flag is known to take one, and whatever is left must be a URL —
+    schemed or not, since ``curl -s '127.0.0.1:8000/api?x=1'`` is how a dev
+    server is usually probed. An unrecognised word is a reason to ask rather
+    than a word to ignore: ignoring it let ``curl https://ok.example evil.example``
+    key on ``ok.example`` alone. Output that is thrown away (``-o /dev/null``,
+    ``-D -``) is not a write.
     """
     if "$(" in command or "`" in command:
         return None
     try:
-        tokens = shlex.split(command)
+        tokens = shlex.split(command.replace("\\\n", " "))
     except ValueError:
         return None
     if not tokens or tokens[0] not in _NETWORK_READ_BINARIES:
         return None
 
     binary = tokens[0]
-    opaque = _OPAQUE_TARGET_FLAGS
-    if binary == "wget":
-        opaque = opaque | _WGET_OPAQUE_TARGET_FLAGS
+    short_flags, long_flags = _NETWORK_FLAGS[binary]
     hosts: set[str] = set()
-    output_dir: str | None = None
-    index = 1
-    while index < len(tokens):
-        token = tokens[index]
+    outputs: set[str] = set()
+    remaining = iter(tokens[1:])
+    for token in remaining:
         if token in _SHELL_OPERATOR_TOKENS:
             break
-        if _SHORT_FLAG_CLUSTER_RE.match(token) and (
-            set(token[1:]) & _SHORT_FLAGS_NEEDING_CARE
-        ):
+        if token.startswith("--") and len(token) > 2:
+            name, has_inline, inline = token.partition("=")
+            if name.startswith(_REFUSED_LONG_FLAG_PREFIXES):
+                return None
+            role = long_flags.get(name, _SWITCH)
+            if role not in _TAKES_VALUE:
+                if role == _CWD_OUTPUT:
+                    outputs.add(".")
+                continue
+            value = inline if has_inline else next(remaining, None)
+        elif token.startswith("-") and len(token) > 1:
+            role = _SWITCH
+            value = None
+            for position, letter in enumerate(token[1:], start=2):
+                role = short_flags.get(letter, _REFUSE)
+                if role == _CWD_OUTPUT:
+                    outputs.add(".")
+                if role in _TAKES_VALUE:
+                    value = token[position:] or next(remaining, None)
+                    break
+            if role not in _TAKES_VALUE:
+                continue
+        else:
+            role, value = _URL, token
+        if role == _REFUSE or value is None:
             return None
-        flag = token.split("=", 1)[0]
-        if flag in _UPLOAD_FLAGS or flag in opaque:
-            return None
-        if flag in _METHOD_FLAGS or flag == "--method":
-            value = (
-                token.split("=", 1)[1]
-                if "=" in token
-                else (tokens[index + 1] if index + 1 < len(tokens) else "")
-            )
+        if role == _METHOD:
             if value.upper() not in _READ_METHODS:
                 return None
-            index += 1 if "=" in token else 2
-            continue
-        if flag in _CWD_OUTPUT_FLAGS:
-            output_dir = "."
-            index += 1
-            continue
-        if flag in _OUTPUT_FLAGS:
-            value = (
-                token.split("=", 1)[1]
-                if "=" in token
-                else (tokens[index + 1] if index + 1 < len(tokens) else "")
-            )
-            if not value or "$" in value:
+        elif role in (_OUTPUT, _OUTPUT_DIR):
+            target = _write_target(value, is_dir=role == _OUTPUT_DIR)
+            if target is None:
                 return None
-            if flag == "--output-dir":
-                output_dir = value
-            else:
-                output_dir = value.rsplit("/", 1)[0] if "/" in value else "."
-            index += 1 if "=" in token else 2
-            continue
-        if _URL_TOKEN_RE.match(token):
-            host = _url_host(token)
+            if target:
+                outputs.add(target)
+        elif role == _URL:
+            host = _url_host(value)
             if not host:
                 return None
             hosts.add(host)
-        index += 1
 
     if not hosts:
         return None
@@ -855,9 +1091,282 @@ def network_read_scope(command: str) -> str | None:
         return None
 
     destination = ",".join(sorted(hosts))
-    if output_dir:
-        return f"{binary} {destination}>{output_dir}"
+    if outputs:
+        return f"{binary} {destination}>{','.join(sorted(outputs))}"
     return f"{binary} {destination}"
+
+
+_SHELL_CREDENTIAL_RE = re.compile(
+    r"\.env\b(?!\.(?:example|sample|template|dist)\b)|\.ssh/|\.aws/|\.gnupg/|"
+    r"authorized_keys|\.pem\b|\.key\b|\.p12\b|\.pfx\b|\.keystore\b|"
+    r"id_rsa|id_ed25519|id_ecdsa|id_dsa|\.git-credentials\b|credentials\b|"
+    r"secrets?\.|token\.json\b"
+)
+
+
+def mentions_credential_path(command: str) -> bool:
+    """Whether the text the shell acts on names a credential path.
+
+    Quoted runs are blanked first, so ``ssh host 'cat ~/.ssh/config'`` — a
+    path on the remote machine — does not count, while a redirection such as
+    ``< ~/.aws/credentials`` feeding that same connection does.
+    """
+    return bool(_SHELL_CREDENTIAL_RE.search(shell_match_texts(command)[0]))
+
+
+_SSH_SWITCHES = frozenset("46aCfkNnqsTtvxy")
+_SSH_VALUE_FLAGS = frozenset("bBceilmop")
+_SCP_SWITCHES = frozenset("46BCpqrTv")
+_SCP_VALUE_FLAGS = frozenset("ciloP")
+
+_SSH_SCOPED_OPTIONS = frozenset(
+    {
+        "addressfamily",
+        "batchmode",
+        "checkhostip",
+        "compression",
+        "connectionattempts",
+        "connecttimeout",
+        "escapechar",
+        "hashknownhosts",
+        "identitiesonly",
+        "kbdinteractiveauthentication",
+        "loglevel",
+        "numberofpasswordprompts",
+        "passwordauthentication",
+        "port",
+        "preferredauthentications",
+        "pubkeyauthentication",
+        "requesttty",
+        "serveralivecountmax",
+        "serveraliveinterval",
+        "stricthostkeychecking",
+        "tcpkeepalive",
+        "updatehostkeys",
+        "user",
+        "userknownhostsfile",
+        "verifyhostkeydns",
+        "visualhostkey",
+    }
+)
+
+_REMOTE_HOST_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?")
+_REMOTE_USER_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]*")
+_PORT_RE = re.compile(r"\d{1,5}")
+
+
+class _RemoteTarget:
+    def __init__(self) -> None:
+        self.user: str | None = None
+        self.host: str | None = None
+        self.port: str | None = None
+
+    def set(self, field: str, value: str) -> bool:
+        pattern = {
+            "user": _REMOTE_USER_RE,
+            "host": _REMOTE_HOST_RE,
+            "port": _PORT_RE,
+        }[field]
+        if not pattern.fullmatch(value):
+            return False
+        current = getattr(self, field)
+        if current is not None and current != value:
+            return False
+        setattr(self, field, value)
+        return True
+
+    def set_destination(self, destination: str) -> bool:
+        destination = destination.removeprefix("ssh://")
+        user, at, host = destination.rpartition("@")
+        if at and not self.set("user", user):
+            return False
+        return self.set("host", host)
+
+    def scope(self, binary: str) -> str | None:
+        if self.host is None:
+            return None
+        name = f"{self.user}@{self.host}" if self.user else self.host
+        port = f" -p {self.port}" if self.port and self.port != "22" else ""
+        return f"{binary} {name}{port}"
+
+
+def _apply_ssh_option(target: _RemoteTarget, setting: str) -> bool:
+    key, _, value = setting.replace("=", " ", 1).partition(" ")
+    key = key.strip().lower()
+    value = value.strip()
+    if key not in _SSH_SCOPED_OPTIONS or not value:
+        return False
+    if key in ("port", "user"):
+        return target.set(key, value)
+    return True
+
+
+def _apply_login_flags(
+    token: str,
+    remaining: Iterator[str],
+    target: _RemoteTarget,
+    *,
+    switches: frozenset[str],
+    value_flags: frozenset[str],
+    port_flag: str,
+) -> bool:
+    for position, letter in enumerate(token[1:], start=2):
+        if letter in switches:
+            continue
+        if letter not in value_flags:
+            return False
+        value = token[position:] or next(remaining, None)
+        if value is None or "$" in value or "`" in value:
+            return False
+        if _SHELL_CREDENTIAL_RE.search(value):
+            return False
+        if letter == port_flag:
+            return target.set("port", value)
+        if letter == "l" and port_flag == "p":
+            return target.set("user", value)
+        if letter == "o":
+            return _apply_ssh_option(target, value)
+        return True
+    return True
+
+
+def _ssh_scope(remaining: Iterator[str]) -> str | None:
+    target = _RemoteTarget()
+    for word in remaining:
+        if word in _SHELL_OPERATOR_TOKENS or word.startswith("--"):
+            break
+        if word.startswith("-") and len(word) > 1:
+            if not _apply_login_flags(
+                word,
+                remaining,
+                target,
+                switches=_SSH_SWITCHES,
+                value_flags=_SSH_VALUE_FLAGS,
+                port_flag="p",
+            ):
+                return None
+            continue
+        if target.host is not None:
+            break
+        if "$" in word or "`" in word or not target.set_destination(word):
+            return None
+    return target.scope("ssh")
+
+
+def _scp_scope(remaining: Iterator[str]) -> str | None:
+    target = _RemoteTarget()
+    paths: list[str] = []
+    for token in remaining:
+        if token in _SHELL_OPERATOR_TOKENS:
+            break
+        if token.startswith("-") and len(token) > 1 and not paths:
+            if not _apply_login_flags(
+                token,
+                remaining,
+                target,
+                switches=_SCP_SWITCHES,
+                value_flags=_SCP_VALUE_FLAGS,
+                port_flag="P",
+            ):
+                return None
+            continue
+        paths.append(token)
+    if len(paths) < 2:
+        return None
+    *sources, destination = paths
+    for source in sources:
+        if "$" in source or "`" in source or _SHELL_CREDENTIAL_RE.search(source):
+            return None
+        if ":" in source.split("/", 1)[0]:
+            return None
+    remote, colon, _ = destination.partition(":")
+    if not colon or "/" in remote or "$" in remote or "`" in remote:
+        return None
+    if not target.set_destination(remote):
+        return None
+    return target.scope("scp")
+
+
+def remote_login_scope(command: str) -> str | None:
+    """The host an ``ssh`` session or ``scp`` upload should be approved for.
+
+    Returns ``ssh [user@]host[ -p port]`` (or ``scp …`` for an upload), or
+    ``None`` when the invocation is not one a host-wide grant can safely cover.
+
+    Keying on the whole invocation made "Approve all" grant one literal remote
+    command: an agent tending a training pod ran seven different ``ssh … root@pod
+    '…'`` calls in an hour and every one of them asked again. The remote
+    command runs on the far machine, so the host is the thing being trusted —
+    which also means the grant is only as narrow as the host, and anything that
+    changes what the connection reaches declines: a jump host, a proxy or local
+    command, port or agent forwarding, a config file, a variable in the
+    destination. ``scp`` collapses only for an upload of literal local paths;
+    a download writes to this machine and keeps its full-invocation key.
+    """
+    lexer = shlex.shlex(command.replace("\\\n", " "), posix=True)
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    remaining = iter(lexer)
+    try:
+        binary = next(remaining, None)
+        if binary == "ssh":
+            return _ssh_scope(remaining)
+        if binary == "scp":
+            return _scp_scope(remaining)
+    except ValueError:
+        return None
+    return None
+
+
+_DOCKER_EXEC_PREFIX = (
+    r"(?:docker|podman)\s+(?:container\s+)?exec"
+    r"(?:\s+(?:-[it]*[euw](?:=|\s+)[^\s\"'`$]+"
+    r"|--(?:env|user|workdir|detach-keys)(?:=|\s+)[^\s\"'`$]+|-[dit]+"
+    r"|--(?:interactive|tty|detach)))*"
+    r"\s+\w[\w.-]*\s+"
+    r"|(?:(?:docker|podman)\s+compose|docker-compose|podman-compose)"
+    r"(?:\s+(?:-f|--file|-p|--project-name|--profile|--project-directory)"
+    r"(?:=|\s+)[^\s\"'`$]+)*"
+    r"\s+exec(?:\s+(?:-[euw](?:=|\s+)[^\s\"'`$]+"
+    r"|--(?:env|user|workdir|index)(?:=|\s+)[^\s\"'`$]+|-[dT]+"
+    r"|--(?:detach|no-TTY|no-tty)))*"
+    r"\s+\w[\w.-]*\s+"
+)
+
+_DOCKER_EXEC_RE = re.compile(rf"^(?:{_DOCKER_EXEC_PREFIX})(?P<inner>\S.*)$", re.DOTALL)
+
+SQL_CLIENT_RE = re.compile(
+    rf"^(?:{_DOCKER_EXEC_PREFIX})?"
+    r"(?:sqlite3?|duckdb|psql|mysql|mariadb)\b"
+    r"(?!.*\s(?:-f|--file|-init)\b)"
+)
+
+_CONTAINER_ENVIRONMENT_RE = re.compile(
+    r"^(?:env|printenv|export|set|declare|compgen)\b|/proc/[^\s/]*/environ"
+)
+
+
+def docker_exec_command(command: str) -> str | None:
+    """The command a ``docker exec`` / ``docker compose exec`` runs inside.
+
+    ``docker exec db df -h /`` is a disk check and ``docker exec db psql -c
+    "SELECT …"`` is a query, but both were one unmatched ``docker exec`` to
+    the policy — the most-asked docker command in a week of sessions. Judging
+    what runs inside by the same rules as a local command lets reads through.
+
+    Declines, leaving the whole call unmatched, when a flag the prefix does
+    not know is present (``--privileged``, a quoted ``-e``) and when the inner
+    command dumps the container's environment: that is where a compose
+    project keeps its passwords, which is also why ``docker inspect`` is only
+    allowed with a ``--format``.
+    """
+    match = _DOCKER_EXEC_RE.match(command)
+    if not match:
+        return None
+    inner = match.group("inner")
+    if _CONTAINER_ENVIRONMENT_RE.search(inner):
+        return None
+    return inner
 
 
 def analyze_bash(command: str) -> CommandAnalysis:

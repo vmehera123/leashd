@@ -92,9 +92,30 @@ class TestLoopbackReads:
     def test_pipe_to_shell_outranks_the_loopback_allow(self, engine, command):
         assert verdict(engine, command) == PolicyDecision.DENY
 
-    def test_a_quoted_url_fails_safe(self, engine):
-        """Quoting hides the host from the skeleton, so the rule must not fire."""
-        command = 'curl -s "http://127.0.0.1:8091/control/state"'
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'curl -s "http://127.0.0.1:8091/control/state?limit=5&open=true"',
+            "curl -s '127.0.0.1:28000/api/v1/dashboard'",
+            "curl -s -o /dev/null -D - -w '%{http_code}' http://localhost:28080/",
+        ],
+    )
+    def test_a_quoted_or_schemeless_url_is_read_like_any_other(self, engine, command):
+        """A query string has to be quoted, so the host is read from the parsed URL."""
+        assert verdict(engine, command) == PolicyDecision.ALLOW
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'curl -s "http://evil.example/x" "http://127.0.0.1:8091/y"',
+            "curl -s evil.example 127.0.0.1:8091/y",
+            "curl -s $TARGET http://127.0.0.1:8091/y",
+            "curl -o ~/.zshrc http://127.0.0.1:8091/y",
+        ],
+    )
+    def test_a_quote_or_a_bare_word_cannot_launder_a_foreign_host(
+        self, engine, command
+    ):
         assert verdict(engine, command) == PolicyDecision.REQUIRE_APPROVAL
 
     def test_autonomous_policy_agrees(self, autonomous_engine):

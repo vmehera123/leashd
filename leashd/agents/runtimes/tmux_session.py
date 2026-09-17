@@ -51,7 +51,8 @@ from leashd.agents.runtimes.tmux_manifest import (
     session_id_from_tmux_name,
     write_manifest,
 )
-from leashd.core.safety.gatekeeper import FILE_EDIT_TOOLS, normalize_tool_name
+from leashd.core.safety.gatekeeper import FILE_EDIT_TOOLS
+from leashd.core.safety.policy import normalize_tool_name
 from leashd.exceptions import AgentError
 
 if TYPE_CHECKING:

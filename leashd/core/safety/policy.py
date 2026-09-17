@@ -10,8 +10,11 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
 from leashd.core.safety.analyzer import (
+    SQL_CLIENT_RE,
     RiskLevel,
     command_units,
+    docker_exec_command,
+    network_read_scope,
     shell_match_texts,
     split_chain_segments,
     strip_benign_prefixes,
@@ -19,17 +22,26 @@ from leashd.core.safety.analyzer import (
 
 logger = structlog.get_logger()
 
-_SQL_CLIENT_RE = re.compile(
-    r"^(?:docker\s+exec\s+(?:-[a-zA-Z]+\s+)*[\w.-]+\s+)?"
-    r"(?:sqlite3?|duckdb|psql|mysql|mariadb)\b"
-    r"(?!.*\s(?:-f|--file|-init)\b)"
-)
-
 _AWK_RE = re.compile(r"^[gm]?awk\b")
+
+_NETWORK_READ_RE = re.compile(r"^(?:curl|wget)\b")
 
 _AWK_UNSAFE_PROGRAM_RE = re.compile(
     r"\bsystem\s*\(|\bgetline\b|\bprintf?\b[^;{}()]*[>|]"
 )
+
+_MCP_PREFIX_RE = re.compile(r"^mcp__[a-zA-Z0-9_-]+__")
+
+
+def normalize_tool_name(tool_name: str) -> str:
+    """Strip the ``mcp__<server>__`` prefix from an MCP tool name.
+
+    Claude Code names MCP tools ``mcp__playwright__browser_navigate``; the bare
+    ``browser_navigate`` is what the sandbox, auto-approve keys and older policy
+    rules use. A policy rule may name either form — see
+    :meth:`PolicyEngine.classify`.
+    """
+    return _MCP_PREFIX_RE.sub("", tool_name)
 
 
 class PolicyDecision(Enum):
@@ -49,6 +61,15 @@ class PolicyRule(BaseModel):
     reason: str | None = None
     description: str | None = None
     risk_level: RiskLevel = "medium"
+
+
+_TOOL_SEARCH_RULE = PolicyRule(
+    name="tool-search",
+    action=PolicyDecision.ALLOW,
+    tools=["ToolSearch"],
+    reason="Loads deferred tool schemas; every tool it loads is gated when called",
+    risk_level="low",
+)
 
 
 class Classification(BaseModel):
@@ -130,13 +151,26 @@ class PolicyEngine:
         )
 
     def classify(self, tool_name: str, tool_input: dict[str, Any]) -> Classification:
+        """Classify one tool call against the rules, first match wins.
+
+        A rule's ``tools`` entry matches an MCP call by its full Claude Code
+        name (``mcp__leadline__get_opportunity``), which scopes it to that
+        server, or by its bare name (``get_opportunity``), which matches that
+        tool on any server.
+
+        ``ToolSearch`` is allowed when no rule names it. Claude Code defers
+        ``WebFetch``, ``WebSearch`` and every MCP tool until ToolSearch loads
+        their schemas, so refusing it silently refused all of them, including
+        the ones the policy allows.
+        """
         command_texts = (
             self._bash_match_texts(tool_input.get("command", ""))
             if tool_name == "Bash"
             else ([], [])
         )
-        for rule in self.rules:
-            if self._rule_matches(rule, tool_name, tool_input, command_texts):
+        names = {tool_name, normalize_tool_name(tool_name)}
+        for rule in (*self.rules, _TOOL_SEARCH_RULE):
+            if self._rule_matches(rule, names, tool_name, tool_input, command_texts):
                 return Classification(
                     category=rule.name,
                     tool_name=tool_name,
@@ -178,6 +212,12 @@ class PolicyEngine:
         Normalizing is linear in the command length and identical for every
         rule, so it is done once per call rather than once per rule — a 100K
         character command was paying it a dozen times over.
+
+        Two commands are judged by what they amount to rather than how they
+        are spelled. A ``curl``/``wget`` read is matched in the canonical form
+        :func:`network_read_scope` gives it (``curl 127.0.0.1``), because the
+        URL a dev-server probe needs quoted is blanked out of the skeleton.
+        ``docker exec <container> <cmd>`` is allowed by what ``<cmd>`` is.
         """
         # Local import — browser_tools imports from safety modules, so
         # defer this to call time to keep the module graph acyclic.
@@ -187,12 +227,17 @@ class PolicyEngine:
         normalized = strip_agent_browser_flags(strip_benign_prefixes(command))
         candidates = shell_match_texts(normalized)
         skeleton, payloads = candidates[0], candidates[1:]
-        if payloads and _SQL_CLIENT_RE.match(skeleton):
+        inner = docker_exec_command(normalized)
+        if inner is not None:
+            allow_texts = PolicyEngine._bash_match_texts(inner)[0]
+        elif payloads and SQL_CLIENT_RE.match(skeleton):
             allow_texts = payloads
         elif _AWK_RE.match(skeleton) and any(
             _AWK_UNSAFE_PROGRAM_RE.search(payload) for payload in payloads
         ):
             allow_texts = []
+        elif _NETWORK_READ_RE.match(skeleton):
+            allow_texts = [network_read_scope(normalized) or skeleton]
         else:
             allow_texts = [skeleton]
         gate_texts = list(candidates)
@@ -203,16 +248,13 @@ class PolicyEngine:
     def _rule_matches(
         self,
         rule: PolicyRule,
+        names: set[str],
         tool_name: str,
         tool_input: dict[str, Any],
         command_texts: tuple[list[str], list[str]],
     ) -> bool:
         """Whether *rule* covers this call."""
-        if rule.tools and tool_name not in rule.tools:
-            return False
-
-        # If rule has no tools, it won't match anything (rules must specify tools)
-        if not rule.tools:
+        if names.isdisjoint(rule.tools):
             return False
 
         if rule.command_patterns:

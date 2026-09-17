@@ -17,7 +17,7 @@ rules:
   - name: credential-files
     tools: [Read, Write, Edit]
     path_patterns:
-      - "\\.env$|\\.env\\."
+      - "\\.env$|\\.env\\.(?!(example|sample|template|dist)$)"
       - "\\.ssh/|\\.aws/|\\.gnupg/"
       - "\\.key$|\\.pem$|\\.p12$|\\.pfx$|\\.keystore$"
       - "id_rsa|id_ed25519|id_ecdsa|id_dsa|credentials|secrets?|token\\.json$"
@@ -206,13 +206,10 @@ rules:
     action: allow
     description: "Read-only agent-browser observation"
 
-  # A dev server the run just started is a read: loopback host plus a read
-  # method is allowed, everything else falls to `network-bash` below. Guards
-  # and their reasoning are spelled out on the same rule in `default.yaml`.
   - name: loopback-read
     tool: Bash
     command_patterns:
-      - "^(?:curl|wget)\\b(?![^|]*\\s-[a-zA-Z]*[dFT]\\b)(?![^|]*\\s--(?:data|form|upload-file|json|post-data|post-file)\\b)(?![^|]*\\s(?:-X|--request)\\s+(?!GET\\b|HEAD\\b))(?![^|]*\\shttps?://(?!(?:127\\.0\\.0\\.1|localhost|0\\.0\\.0\\.0|\\[::1\\])[:/\\s]))[^|]*\\s(?:https?://)?(?:127\\.0\\.0\\.1|localhost|0\\.0\\.0\\.0|\\[::1\\])(?::\\d+)?(?:/\\S*)?\\s*(?:\\|\\s*(?:jq|head|tail|wc|grep|rg|sort|uniq|column|cat|cut|tr|sed|xargs)\\b[^|]*)*$"
+      - "^(?:curl|wget) (?:127\\.0\\.0\\.1|localhost|0\\.0\\.0\\.0|::1)(?:,(?:127\\.0\\.0\\.1|localhost|0\\.0\\.0\\.0|::1))*$"
     action: allow
     description: "Read-only request to a loopback address"
 
@@ -233,7 +230,10 @@ rules:
       - "^rg\\b(?![^|]*\\s--pre(=|\\s|$))"
       - "^ag\\b(?![^|]*\\s--pager\\b)"
       - "^\\[\\[?\\s"
-      - "^python3?\\s+-m\\s+json\\.tool\\b"
+      - "^(uv\\s+run\\s+(--no-project\\s+)?)?python3?\\s+-m\\s+json\\.tool\\b"
+      - "^(vm_stat|memory_pressure|nproc)\\b"
+      - "^sysctl\\b(?![^|]*(\\s-w\\b|=))"
+      - "^pmset\\s+-g\\b"
       - "^[gm]?awk\\b(?![^|]*\\s(-[fiEl]\\b|--(file|include|load|exec)\\b))"
       - "^(node|npm|npx|pnpm|yarn|bun|deno|python3?|uv|pip3?|ruby|go|cargo|rustc|java|docker|podman|git|make|tmux|gh|kubectl|helm|terraform|brew|psql|sqlite3|jq|rg|curl|wget|ssh|openssl|ffmpeg|claude|codex|tsc|vite|playwright)\\s+(--version|-V)\\s*$"
       - "^(node|npm|npx|pnpm|yarn|bun|deno)\\s+-v\\s*$"
@@ -241,7 +241,7 @@ rules:
       - "^(basename|dirname|realpath|readlink|diff|cmp|md5|md5sum|shasum|sha1sum|sha256sum|sha512sum|cksum|od|xxd|hexdump|strings)\\b"
       - "^(ps|pgrep|pstree|lsof|jobs|uptime|id|groups|hostname|uname|arch|sw_vers|locale|printenv|env)\\b"
       - "^sed\\b(?![^|]*\\s-[a-zA-Z]*[if]\\b)(?![^|]*\\s--(?:in-place|file)\\b)"
-      - "^tmux\\b(?![^|]*\\\\;)[^|]*\\s(list-sessions|list-panes|list-windows|list-clients|list-buffers|list-keys|list-commands|capture-pane|display-message|show-options|show-environment|has-session|info)\\b"
+      - "^tmux\\b(?![^|]*\\\\;)[^|]*\\s(list-sessions|list-panes|list-windows|list-clients|list-buffers|list-keys|list-commands|capture-pane|display-message|display|show-options|show-environment|has-session|info)\\b"
     action: allow
 
   - name: docker-readonly
@@ -252,6 +252,7 @@ rules:
       - "^(docker|podman)(\\s+(--context|-c|--host|-H|--log-level|-l|--config)(=|\\s+)\\S+)*\\s+(container|image|volume|network|context|node|service|stack)\\s+(ls|list|logs|top|port|history|ps|stats|diff)\\b"
       - "^(docker|podman)(\\s+(--context|-c|--host|-H|--log-level|-l|--config)(=|\\s+)\\S+)*\\s+(image|volume|network|context)\\s+inspect\\b"
       - "^(docker|podman)(\\s+(--context|-c|--host|-H|--log-level|-l|--config)(=|\\s+)\\S+)*\\s+system\\s+(df|info)\\b"
+      - "^(docker|podman)(\\s+(--context|-c|--host|-H|--log-level|-l|--config)(=|\\s+)\\S+)*\\s+(manifest\\s+inspect|buildx\\s+(ls|du|version)|context\\s+show)\\b"
       - "^((docker|podman)(\\s+(--context|-c|--host|-H|--log-level|-l|--config)(=|\\s+)\\S+)*\\s+compose|docker-compose|podman-compose)(\\s+(-f|--file|-p|--project-name|--profile|--env-file|--project-directory|--ansi|--progress|--parallel)(=|\\s+)\\S+)*\\s+(ps|logs|images|top|port|ls|version)\\b"
       - "^((docker|podman)(\\s+(--context|-c|--host|-H|--log-level|-l|--config)(=|\\s+)\\S+)*\\s+compose|docker-compose|podman-compose)(\\s+(-f|--file|-p|--project-name|--profile|--env-file|--project-directory|--ansi|--progress|--parallel)(=|\\s+)\\S+)*\\s+config\\b(?=[^|]*\\s(--services|--volumes|--profiles|--images|--quiet|-q)\\b)"
     action: allow
@@ -270,10 +271,13 @@ rules:
   - name: dev-linters
     tool: Bash
     command_patterns:
-      - "^(ruff|mypy|eslint|prettier|black|flake8)\\b"
-      - "^(uv\\s+run\\s+ruff|uv\\s+run\\s+mypy)\\b"
+      - "^((uv|poetry|hatch|pdm|rye)\\s+run(\\s+(--(project|directory|package|python|group|extra)|-p)(=|\\s+)\\S+|\\s+--?[a-z][\\w-]*)*\\s+|uvx(\\s+(--python|-p)(=|\\s+)\\S+|\\s+--?[a-z][\\w-]*)*\\s+|pipx\\s+run\\s+|python3?\\s+-m\\s+|(npx|bunx)(\\s+--?[\\w-]+)*\\s+|(pnpm|yarn|bun|npm)\\s+exec(\\s+--)?\\s+|(pnpm|yarn)\\s+|bun\\s+x\\s+)?(ruff|mypy|dmypy|pyright|basedpyright|black|isort|flake8|pylint|pyflakes|pycodestyle|pydocstyle|autopep8|yapf|ty|tsc|vue-tsc|svelte-check|eslint|prettier|biome|oxlint|stylelint|dprint|golangci-lint|gofmt|goimports|staticcheck|rustfmt|shellcheck|shfmt|markdownlint|markdownlint-cli2|yamllint|taplo|hadolint|actionlint|sqlfluff|rubocop|swiftlint|swiftformat|ktlint|clang-format)(\\s|$)"
+      - "^(npm|pnpm|yarn|bun)(\\s+(-C|--dir|--prefix|--filter|-F|--workspace|-w|--cwd)(=|\\s+)\\S+|\\s+(-r|--recursive|-s|--silent|--if-present|-ws|--workspaces))*\\s+(run\\s+)?(lint|format|fmt|typecheck|type-check|types|check-types|tsc|check)([:-][\\w:-]*)?(\\s|$)"
+      - "^(make|just)(\\s+(-C\\s*\\S+|--directory(=|\\s+)\\S+|-f\\s*\\S+|--file(=|\\s+)\\S+|-j\\s*\\d*|--jobs(=\\d+)?|-[sknw]+))*\\s+(lint|format|fmt|typecheck|type-check|types|check)([:-][\\w:-]*)?(\\s|$)"
+      - "^go\\s+(vet|fmt)(\\s|$)"
+      - "^cargo\\s+(fmt|clippy|check)(\\s|$)"
     action: allow
-    description: "Linter / formatter"
+    description: "Linter, formatter or type checker"
 
   - name: dev-package-managers
     tool: Bash

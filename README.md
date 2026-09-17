@@ -116,7 +116,7 @@ The pipeline is runtime-agnostic and connector-agnostic: same sandbox, same rule
 
 | Policy | Auto-allows | Requires approval |
 |---|---|---|
-| **`default.yaml`** *(recommended)* | reads, search, read-only shell (`ls`, `grep`, `ps`, `awk`, `git log/diff`, `docker ps/logs`, `--version`), loopback GETs, read-only browser | git push/rebase/merge, network, browser mutations |
+| **`default.yaml`** *(recommended)* | reads, search, read-only shell (`ls`, `grep`, `ps`, `awk`, `git log/diff`, `docker ps/logs`, reads inside `docker exec`, `--version`), loopback GETs, linters/formatters/type checkers (`ruff`, `mypy`, `tsc`, `pnpm lint`, `make check` …), read-only browser | git push/rebase/merge, network, browser mutations |
 | **`strict.yaml`** | `Read`, `Glob`, `Grep`, `LS` only | everything else (2-min timeout) |
 | **`permissive.yaml`** | reads, writes, package managers, test runners, `git add/commit/stash`, all browser | git push, network, browser cookies/auth/storage, anything unlisted (10-min timeout) |
 | **`dev-tools.yaml`** *(overlay)* | linters, test runners, package managers | — |
