@@ -50,6 +50,7 @@ class BaseAgent(Protocol):
         on_retry: Callable[[], Coroutine[Any, Any, None]] | None = None,
         attachments: list[Attachment] | None = None,
         settings: RuntimeSettings | None = None,
+        on_status: Callable[[str | None], Coroutine[Any, Any, None]] | None = None,
     ) -> AgentResponse: ...
 
     @property

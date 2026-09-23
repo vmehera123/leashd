@@ -67,7 +67,7 @@ from leashd.core.runtime_settings import (
 from leashd.core.safety.audit import AuditLogger
 from leashd.core.safety.gatekeeper import ToolGatekeeper
 from leashd.core.safety.policy import PolicyEngine
-from leashd.core.safety.sandbox import SandboxEnforcer
+from leashd.core.safety.sandbox import SandboxEnforcer, sandbox_directories
 from leashd.core.workspace import load_workspaces
 from leashd.exceptions import AgentError
 from leashd.middleware.base import MessageContext
@@ -300,6 +300,7 @@ class _StreamingResponder:
         self._all_message_ids: list[str] = []
         self._cursor_paused: bool = False
         self._current_activity: ToolActivity | None = None
+        self._status: str | None = None
         self._lock = asyncio.Lock()
 
     @property
@@ -314,10 +315,12 @@ class _StreamingResponder:
         """Return current streaming state for reconnecting clients."""
         if not self._active or self._message_id is None:
             return None
-        text = visible_text(
-            self._buffer[
-                self._display_offset : self._display_offset + _MAX_STREAMING_DISPLAY
-            ]
+        text = self._with_status(
+            visible_text(
+                self._buffer[
+                    self._display_offset : self._display_offset + _MAX_STREAMING_DISPLAY
+                ]
+            )
         )
         if not text:
             return None
@@ -332,13 +335,18 @@ class _StreamingResponder:
             await self._connector.delete_message(self._chat_id, msg_id)
         self._all_message_ids.clear()
 
+    def _with_status(self, text: str) -> str:
+        if not self._status:
+            return text
+        return f"{text}\n\n{self._status}" if text else self._status
+
     def _build_display(self) -> str:
         text = visible_text(
             self._buffer[
                 self._display_offset : self._display_offset + _MAX_STREAMING_DISPLAY
             ]
         )
-        return text + _STREAMING_CURSOR
+        return self._with_status(text) + _STREAMING_CURSOR
 
     def _build_tools_summary(self) -> str:
         if not self._tool_counts:
@@ -414,6 +422,38 @@ class _StreamingResponder:
                 )
                 self._last_edit = now
 
+    async def on_status(self, text: str | None) -> None:
+        """Show a line under the streamed reply for as long as it applies.
+
+        The line is never part of the buffer, so the reply the chat is left
+        with and the one stored for the turn read as if it had never been
+        there. ``None`` takes it down, and a message that held nothing else is
+        deleted rather than left behind as a bare cursor.
+        """
+        self._status = text or None
+        if not self._active:
+            return
+        async with self._lock:
+            if not self._active:
+                return
+            if self._message_id is None:
+                if self._status is not None and not await self._advance():
+                    self._active = False
+                return
+            if self._status is None and not visible_text(
+                self._buffer[self._display_offset :]
+            ):
+                await self._connector.delete_message(self._chat_id, self._message_id)
+                if self._message_id in self._all_message_ids:
+                    self._all_message_ids.remove(self._message_id)
+                self._message_id = None
+                return
+            self._cursor_paused = False
+            await self._connector.edit_message(
+                self._chat_id, self._message_id, self._build_display()
+            )
+            self._last_edit = time.monotonic()
+
     async def on_activity(self, activity: ToolActivity | None) -> None:
         if activity is None:
             self._current_activity = None
@@ -438,7 +478,7 @@ class _StreamingResponder:
 
     async def _show_activity(self, activity: ToolActivity) -> None:
         if self._message_id is not None and not self._cursor_paused:
-            tail = visible_text(self._buffer[self._display_offset :])
+            tail = self._with_status(visible_text(self._buffer[self._display_offset :]))
             if tail:
                 await self._connector.edit_message(
                     self._chat_id, self._message_id, tail
@@ -463,6 +503,7 @@ class _StreamingResponder:
         self._all_message_ids.clear()
         self._cursor_paused = False
         self._current_activity = None
+        self._status = None
         self._suspended = False
         self._closed = False
 
@@ -675,7 +716,7 @@ class Engine:
         self.session_manager = session_manager
         self.policy_engine = policy_engine
         self.sandbox = sandbox or SandboxEnforcer(
-            [*config.approved_directories, Path.home() / ".claude" / "plans"]
+            sandbox_directories(config.approved_directories)
         )
         self._dir_names = build_directory_names(config.approved_directories)
         self._default_directory = str(config.approved_directories[0])
@@ -683,7 +724,7 @@ class Engine:
         self._workspaces = load_workspaces(ws_root)
         for ws in self._workspaces.values():
             for d in ws.directories:
-                self.sandbox.add_directory(d)
+                self.sandbox.add_project(d)
         self.audit = audit or AuditLogger(config.audit_log_path)
         self.approval_coordinator = approval_coordinator
         self.interaction_coordinator = interaction_coordinator
@@ -1006,14 +1047,14 @@ class Engine:
             self._dir_names = build_directory_names(new_config.approved_directories)
             self._default_directory = str(new_config.approved_directories[0])
             self.sandbox.update_directories(
-                [*new_config.approved_directories, Path.home() / ".claude" / "plans"]
+                sandbox_directories(new_config.approved_directories)
             )
             if new_config.workspace_config_root is None:
                 new_config.workspace_config_root = Path.home()
             self._workspaces = load_workspaces(new_config.workspace_config_root)
             for ws in self._workspaces.values():
                 for d in ws.directories:
-                    self.sandbox.add_directory(d)
+                    self.sandbox.add_project(d)
             self.config = new_config
             self.agent.update_config(new_config)
             self._gatekeeper.set_browser_auto_approve(new_config.browser_auto_approve)
@@ -1358,6 +1399,7 @@ class Engine:
         responder = None
         on_text_chunk = None
         on_tool_activity = None
+        on_status = None
         if self.connector and self.config.streaming_enabled:
             responder = _StreamingResponder(
                 self.connector,
@@ -1366,6 +1408,7 @@ class Engine:
             )
             on_text_chunk = responder.on_chunk
             on_tool_activity = responder.on_activity
+            on_status = responder.on_status
             self._active_responders[chat_id] = responder
 
         deadline = AgentDeadline(self.config.agent_timeout_seconds)
@@ -1393,6 +1436,7 @@ class Engine:
                 deadline=deadline,
                 on_retry=_handle_agent_retry,
                 attachments=attachments,
+                on_status=on_status,
             )
 
             if (
@@ -1422,6 +1466,7 @@ class Engine:
                     deadline=deadline,
                     on_retry=_handle_agent_retry,
                     attachments=attachments,
+                    on_status=on_status,
                 )
 
             if session.session_id != turn_session_id:
@@ -1806,6 +1851,7 @@ class Engine:
         deadline: AgentDeadline | None = None,
         on_retry: Any = None,
         attachments: list[Attachment] | None = None,
+        on_status: Any = None,
     ) -> AgentResponse:
         pre_exec_resume_token = session.agent_resume_token
         if deadline is None:
@@ -1828,6 +1874,7 @@ class Engine:
                 on_retry=on_retry,
                 attachments=attachments,
                 settings=settings,
+                on_status=on_status,
             )
         )
         try:
@@ -2982,6 +3029,7 @@ class Engine:
                 session,
                 on_text_chunk=responder.on_chunk if responder else None,
                 on_tool_activity=responder.on_activity if responder else None,
+                on_status=responder.on_status if responder else None,
             )
             if response is None:
                 return

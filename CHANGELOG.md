@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.9.0] - 2026-09-23
+- **added**: the agent can save its Claude Code auto-memory for the projects you approved; the rest of `~/.claude` stays outside the sandbox.
+- **fixed**: tmux turns no longer stall on an approved prompt when you sent a message just before it (the queued message hid the prompt, and your next message rejected it).
+- **fixed**: messages sent mid-turn work on Claude Code 2.1.278: the "⏳ Queued" notice clears, the reply arrives, and a message Claude ran as its own prompt isn't reported as unread.
+- **changed**: "⏳ Waiting for your approval" is a status line that disappears once you answer, and "✅ Approved — continuing." is gone, so neither ends up in the reply.
+
 ## [1.8.0] - 2026-09-17
 - **changed**: "Approve all" on `ssh` or an `scp` upload covers that host, not one exact remote command.
 - **added**: fewer prompts: linters, formatters and type checkers (`ruff`, `mypy`, `tsc`, `eslint`, `make check` …), reads inside `docker exec`, and loopback GETs with a quoted or schemeless URL run without asking.

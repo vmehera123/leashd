@@ -1,11 +1,13 @@
 """Engine tests — safety hooks, approval flow, auto-approve."""
 
 import asyncio
+from pathlib import Path
 
 from leashd.agents.base import AgentResponse, BaseAgent
 from leashd.core.engine import Engine
 from leashd.core.interactions import InteractionCoordinator
 from leashd.core.safety.approvals import ApprovalCoordinator
+from leashd.core.safety.sandbox import claude_memory_directories
 from leashd.core.session import SessionManager
 from tests.core.engine.conftest import FakeAgent
 
@@ -29,6 +31,21 @@ class TestSafetyHookWiring:
         result = await hook("Read", {"file_path": "/etc/passwd"}, None)
         assert result.behavior == "deny"
         assert "outside allowed" in result.message
+
+    async def test_the_projects_claude_memory_is_inside_the_sandbox(
+        self, engine, fake_agent, tmp_dir
+    ):
+        await engine.handle_message("user1", "hello", "chat1")
+        hook = fake_agent.last_can_use_tool
+        memory = claude_memory_directories(tmp_dir)[0] / "MEMORY.md"
+        settings = Path.home() / ".claude" / "settings.json"
+
+        allowed = await hook("Read", {"file_path": str(memory)}, None)
+        denied = await hook("Read", {"file_path": str(settings)}, None)
+
+        assert allowed.behavior == "allow"
+        assert denied.behavior == "deny"
+        assert "outside allowed" in denied.message
 
     async def test_destructive_bash_denied(self, engine, fake_agent):
         await engine.handle_message("user1", "hello", "chat1")

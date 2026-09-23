@@ -111,6 +111,44 @@ def _is_interrupt_record(record: dict[str, Any]) -> bool:
     )
 
 
+_PASTED_BLOCK_RE = re.compile(
+    r'\n*<pasted_content id="([^"]*)">\n?(.*?)\n?</pasted_content id="\1">\n*',
+    re.DOTALL,
+)
+
+
+def _queued_text(content: str | None) -> str:
+    """Human input as claude recorded it, put back the way it was typed.
+
+    Claude Code 2.1.278 records a bracketed paste of 20 or more characters as
+    a ``<pasted_content id="…">`` block padded with newlines of its own, and
+    leashd pastes every multi-line or long message and a share of short ones.
+    A follow-up compared as recorded never matched what leashd typed.
+    """
+    if not content:
+        return ""
+    unwrapped = _PASTED_BLOCK_RE.sub(lambda match: match.group(2), content)
+    return " ".join(unwrapped.split())
+
+
+def _is_followup_text(queued: str, followup: str) -> bool:
+    """True when claude's copy of an input is this follow-up, including one
+    sent behind the ``@path`` references ``inject_followup`` types first."""
+    return queued == followup or queued.endswith(f" {followup}")
+
+
+def _prompt_text(record: dict[str, Any]) -> str:
+    message = record.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, str):
+        return content
+    return "\n".join(
+        str(block.get("text", ""))
+        for block in _content_blocks(record)
+        if block.get("type") == "text"
+    )
+
+
 # Effectively-infinite PreToolUse/PermissionRequest hook timeout for the
 # default no-expiry human wait. Claude Code has no infinite hook value and no
 # heartbeat, so the hook must be a finite int that outlives any human wait;
@@ -733,6 +771,7 @@ _ORPHANED_PERM_SETTLE_S = 3.0
 _TRANSCRIPT_TAIL_BYTES = 4 * 1024 * 1024
 _HOOKED_CALLS_KEPT = 64
 _PERM_QUESTION_WRAP_ROWS = 2
+_QUEUED_INPUT_HINT_RE = re.compile(r"^  \S.*\bto send now\s*$")
 _SPINNER_SCAN_ROWS = 6
 _SPINNER_ROW_RE = re.compile(r"^\s*[·✢✳✶✻✽]\s+\S[^…]*…\s*(?:\(.*)?$")
 _TOOL_IN_FLIGHT_MAX_S = 660.0
@@ -829,6 +868,47 @@ def _is_box_rule(line: str) -> bool:
     head = line[1:] if line.startswith(" ") else line
     run = len(head) - len(head.lstrip(_PERM_BOX_RULE_CHARS))
     return run >= _PERM_BOX_RULE_MIN_CHARS
+
+
+def _without_queued_input(rows: list[str]) -> list[str]:
+    """The rows with claude's preview of queued input cut out.
+
+    Input typed while claude is busy waits in its queue, drawn as one ``❯``
+    row per item with two-space continuation rows, closed by a
+    ``ctrl+x ctrl+s to send now`` hint. It sits below a permission or question
+    dialog, not above it (claude 2.1.276 and 2.1.278)::
+
+         Do you want to proceed?
+         ❯ 1. Yes
+           2. No
+         Esc to cancel · Tab to amend
+        ❯ you can check what I can see using chrome
+          ctrl+x ctrl+s to send now
+
+    Every detector reading upward from the bottom took that ``❯`` for the
+    composer and saw no dialog. The approved ``ssh`` call's drive retired
+    unpressed, the unattended-dialog watchdog never fired, and the pane sat
+    on the prompt for 14 minutes until the next message's stray-dialog
+    Escape answered it "No".
+    """
+    queued: set[int] = set()
+    for hint, row in enumerate(rows):
+        if not _QUEUED_INPUT_HINT_RE.match(row):
+            continue
+        top = hint
+        for i in range(hint - 1, -1, -1):
+            if rows[i].startswith("❯"):
+                top = i
+            elif rows[i].strip() and not rows[i].startswith("  "):
+                break
+        if top < hint:
+            queued.update(range(top, hint + 1))
+    return [row for i, row in enumerate(rows) if i not in queued]
+
+
+def _dialog_rows(screen: str) -> list[str]:
+    """The rows a dialog detector reads: no side panel, no queued input."""
+    return _without_queued_input(_without_side_panel(screen).splitlines())
 
 
 @dataclass(frozen=True)
@@ -1561,14 +1641,13 @@ class TmuxTurn:
 
         Claude takes queued input into the conversation only when it builds its
         next request, so a follow-up typed during a long response waits for all
-        of it. The text can reach claude behind the ``@path`` references
-        ``inject_followup`` types first, so an item ending in it matches too.
+        of it.
         """
-        normalized = " ".join(content.split()) if content else ""
-        if not normalized:
+        queued = _queued_text(content)
+        if not queued:
             return
         for i, (text, on_read) in enumerate(self._followup_readers):
-            if normalized == text or normalized.endswith(f" {text}"):
+            if _is_followup_text(queued, text):
                 del self._followup_readers[i]
                 try:
                     on_read()
@@ -1585,11 +1664,11 @@ class TmuxTurn:
         than the early finalize, and every ``remove`` measured so far carries
         its content.
         """
-        normalized = " ".join(content.split()) if content else ""
-        if not normalized:
+        queued = _queued_text(content)
+        if not queued:
             return not self.pending_followup_texts
         for i, pending in enumerate(self.pending_followup_texts):
-            if pending == normalized:
+            if _is_followup_text(queued, pending):
                 del self.pending_followup_texts[i]
                 return True
         return False
@@ -2397,6 +2476,13 @@ class TmuxClaudeSession:
         ``await_ready``; escaping it turns a recoverable "not ready" into a
         dead pane, which is exactly how an untrusted working directory came
         back as ``paste-buffer failed: target pane has exited``.
+
+        Nor any screen still drawing a permission question with its options,
+        even one :meth:`perm_selector_present` cannot place. Escape there
+        answers "No" to a call leashd may already have approved: queued input
+        drawn under the dialog once hid it from every detector, and "Are you
+        stuck?" rejected an approved ``ssh`` call 14 minutes after it was
+        approved.
         """
         deadline = time.monotonic() + _STRAY_DIALOG_WAIT_S
         while time.monotonic() < deadline:
@@ -2422,6 +2508,11 @@ class TmuxClaudeSession:
             if self.dedicated_selector_present(screen):
                 logger.warning(
                     "tmux_submit_with_selector_on_screen", tmux_name=self.tmux_name
+                )
+                return False
+            if self._perm_question_drawn(screen):
+                logger.warning(
+                    "tmux_submit_with_unplaced_perm_prompt", tmux_name=self.tmux_name
                 )
                 return False
             logger.warning("tmux_stray_dialog_dismissed", tmux_name=self.tmux_name)
@@ -2587,9 +2678,10 @@ class TmuxClaudeSession:
         as foreign, the re-gate compared the quote, a deny drive pressed Escape
         into the idle agent, and the quote above the composer kept the turn
         alive for hours. Rows are read with the fullscreen side panel cut away,
-        since its diff can quote anything.
+        since its diff can quote anything, and without the queued input claude
+        draws under the dialog (:func:`_without_queued_input`).
         """
-        lines = _without_side_panel(screen).splitlines()
+        lines = _dialog_rows(screen)
         for i in range(len(lines) - 1, -1, -1):
             row = lines[i]
             if self._composer_row(row):
@@ -2599,6 +2691,16 @@ class TmuxClaudeSession:
             ) and self._perm_options_below(lines, i):
                 return lines, i
         return None
+
+    def _perm_question_drawn(self, screen: str) -> bool:
+        """Is a permission question with its options drawn anywhere on screen,
+        whatever sits below it?"""
+        lines = _dialog_rows(screen)
+        return any(
+            any(m in row for m in self._PERM_SELECTOR_MARKERS)
+            and self._perm_options_below(lines, i)
+            for i, row in enumerate(lines)
+        )
 
     def _composer_row(self, row: str) -> bool:
         if self._PERM_OPTION_ROW_RE.match(row):
@@ -2627,7 +2729,7 @@ class TmuxClaudeSession:
     def _ends_on_dialog(self, screen: str, markers: Sequence[str]) -> bool:
         """Is the last row carrying one of ``markers`` drawn with no composer
         under it, the way claude draws a dialog that is waiting on a key?"""
-        lines = _without_side_panel(screen).splitlines()
+        lines = _dialog_rows(screen)
         last = max(
             (i for i, row in enumerate(lines) if any(m in row for m in markers)),
             default=None,
@@ -6418,6 +6520,8 @@ class TmuxSessionManager:
                     cs.forget_hooked_call(str(block.get("tool_use_id") or ""))
             if live_turn is not None and _is_interrupt_record(obj):
                 live_turn.interrupted = True
+            if turn is not None:
+                turn.note_followup_read(_prompt_text(obj))
             return
 
         if obj_type == "queue-operation":
@@ -6452,8 +6556,9 @@ class TmuxSessionManager:
         hangs waiting on a signal that will never come — but only for text
         leashd injected, since claude queues its own notifications here too.
 
-        Either drain is also claude reading the text, which is reported to
-        whoever injected it.
+        A ``remove`` is also claude reading the text, which is reported to
+        whoever injected it. A ``dequeue`` carries no text in any CLI build, so
+        that read is reported from the prompt record it starts.
         """
         operation = obj.get("operation")
         if operation == "enqueue":

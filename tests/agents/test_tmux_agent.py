@@ -557,20 +557,22 @@ async def test_shutdown_tears_down(tmp_path):
     assert tsm.shutdown_called is True
 
 
-async def test_execute_emits_one_time_blocked_notice(tmp_path):
-    # While blocked on a pending human the turn must tell the user ONCE so it
-    # is never "stuck for no reason" — and not spam the notice every slice.
+async def test_execute_shows_the_wait_as_a_status_once(tmp_path):
     cs = FakeCS(text="approved")
     cs._complete_on_enter = False
     tsm = FakeTSM(cs)
     cfg = _cfg(tmp_path)
-    cfg.agent_timeout_seconds = 0  # each wait_for slice fires immediately
+    cfg.agent_timeout_seconds = 0
     agent = _agent(cfg, tsm)
 
     chunks: list[str] = []
+    statuses: list[str | None] = []
 
     async def _on_text(text):
         chunks.append(text)
+
+    async def _on_status(text):
+        statuses.append(text)
 
     calls = {"n": 0}
 
@@ -584,12 +586,64 @@ async def test_execute_emits_one_time_blocked_notice(tmp_path):
 
     tsm.has_pending_human = _pending
 
-    resp = await agent.execute("risky", _session(tmp_path), on_text_chunk=_on_text)
+    resp = await agent.execute(
+        "risky", _session(tmp_path), on_text_chunk=_on_text, on_status=_on_status
+    )
 
-    notices = [c for c in chunks if "Waiting for your approval" in c]
-    assert len(notices) == 1  # extended 3 slices, notified exactly once
+    assert len(statuses) == 1
+    assert "Waiting for your approval" in (statuses[0] or "")
+    assert not any("Waiting" in c for c in chunks)
     assert resp.is_error is False
     assert "approved" in resp.content
+
+
+@pytest.mark.parametrize(
+    ("kind", "approved"),
+    [("approval", True), ("approval", False), ("question", None)],
+)
+async def test_a_resolved_wait_leaves_nothing_in_the_reply(tmp_path, kind, approved):
+    cs = FakeCS(text="done after the wait")
+    cs._complete_on_enter = False
+    tsm = FakeTSM(cs)
+    tsm.pending_human_kind = lambda chat_id: kind
+    tsm.last_approval_approved = lambda chat_id: approved
+    cfg = _cfg(tmp_path)
+    cfg.agent_timeout_seconds = 0
+    agent = _agent(cfg, tsm)
+
+    chunks: list[str] = []
+    statuses: list[str | None] = []
+
+    async def _on_text(text):
+        chunks.append(text)
+
+    async def _on_status(text):
+        statuses.append(text)
+        if text is None:
+            assert cs.turn is not None
+            cs.turn.text_parts.append(cs._text)
+            cs.turn.complete()
+
+    calls = {"n": 0}
+
+    def _pending(chat_id):
+        calls["n"] += 1
+        return calls["n"] <= 2
+
+    tsm.has_pending_human = _pending
+
+    resp = await agent.execute(
+        "risky", _session(tmp_path), on_text_chunk=_on_text, on_status=_on_status
+    )
+
+    assert statuses[0] is not None
+    assert statuses[-1] is None
+    assert len(statuses) == 2
+    streamed = "".join(chunks)
+    for leftover in ("Waiting", "continuing", "Approved", "Rejected", "Got your"):
+        assert leftover not in streamed
+        assert leftover not in resp.content
+    assert resp.content == "done after the wait"
 
 
 async def test_execute_reports_a_dialog_nobody_will_answer(tmp_path, monkeypatch):
@@ -1588,20 +1642,9 @@ async def test_goal_without_indicator_finalizes_via_idle_fallback(tmp_path):
 # ── Human-wait feedback wording (kind-aware) ─────────────────────
 
 
-def test_wait_and_resume_notes_reflect_what_the_user_did():
-    # THE reported bug: a question answer was streamed back as "Approved —
-    # continuing". The resume line must reflect the actual action by kind.
-    from leashd.agents.runtimes.tmux import _resume_note, _wait_note
+def test_wait_note_is_phrased_by_kind():
+    from leashd.agents.runtimes.tmux import _wait_note
 
-    # Resume:
-    assert _resume_note("question", None) == "✅ Got your answer — continuing."
-    assert "Approved" not in _resume_note("question", None)  # the fix
-    assert _resume_note("approval", True) == "✅ Approved — continuing."
-    assert _resume_note("approval", False) == "🚫 Rejected — continuing."
-    assert "Plan" in _resume_note("plan_review", None)
-    assert _resume_note(None, None) == "▶️ Continuing."
-
-    # Wait line phrased per kind (a question isn't framed as Approve/Reject):
     assert "Approve/Reject" in _wait_note("approval")
     assert "answer" in _wait_note("question").lower()
     assert "Approve/Reject" not in _wait_note("question")

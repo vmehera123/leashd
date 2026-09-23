@@ -204,20 +204,6 @@ def _unattended_dialog_notice() -> str:
     )
 
 
-def _resume_note(kind: str | None, approved: bool | None) -> str:
-    """Line shown when the block clears, reflecting what the user actually did —
-    an answered question or a plan review is not an 'approval'."""
-    if kind == "approval":
-        if approved is False:
-            return "🚫 Rejected — continuing."
-        return "✅ Approved — continuing."
-    if kind == "plan_review":
-        return "✅ Plan reviewed — continuing."
-    if kind == "question":
-        return "✅ Got your answer — continuing."
-    return "▶️ Continuing."
-
-
 _INTERRUPTED_NOTE = (
     "⚠️ The agent's last tool call was interrupted, so this turn stopped early. "
     "Send /resume to pick it back up."
@@ -543,6 +529,7 @@ class TmuxAgent(BaseAgent):
         on_retry: Callable[[], Coroutine[Any, Any, None]] | None = None,
         attachments: list[Attachment] | None = None,
         settings: RuntimeSettings | None = None,
+        on_status: Callable[[str | None], Coroutine[Any, Any, None]] | None = None,
     ) -> AgentResponse:
         del can_use_tool, on_retry
         os.environ.pop("CLAUDECODE", None)
@@ -641,6 +628,7 @@ class TmuxAgent(BaseAgent):
                 turn,
                 session,
                 on_text_chunk,
+                on_status,
                 ceiling=ceiling,
                 no_progress=no_progress,
                 completion_idle_grace=completion_idle_grace,
@@ -737,6 +725,7 @@ class TmuxAgent(BaseAgent):
         turn: TmuxTurn,
         session: Session,
         on_text_chunk: Callable[[str], Coroutine[Any, Any, None]] | None,
+        on_status: Callable[[str | None], Coroutine[Any, Any, None]] | None,
         *,
         ceiling: float,
         no_progress: float,
@@ -833,11 +822,11 @@ class TmuxAgent(BaseAgent):
                 kind_now = self._tsm.pending_human_kind(session.chat_id)
                 if kind_now is not None:
                     blocked_kind = kind_now
-                if not notified_blocked and on_text_chunk is not None:
+                if not notified_blocked and on_status is not None:
                     notified_blocked = True
                     await safe_callback(
-                        on_text_chunk,
-                        f"\n\n{_wait_note(blocked_kind)}\n",
+                        on_status,
+                        _wait_note(blocked_kind),
                         log_event="tmux_blocked_notice_failed",
                     )
                 turn.mark_activity()
@@ -920,11 +909,6 @@ class TmuxAgent(BaseAgent):
             if human_wait_still_settling:
                 turn.mark_activity()
 
-            # If we told the user we were waiting, the block just cleared —
-            # emit a resume line reflecting what the user did (approved/rejected
-            # vs answered a question), then re-arm so a later block notifies
-            # again. (The streamed "⏳ Waiting…" chunk can't be retracted, so
-            # this is the signal that work resumed.)
             blocked_since = None
             blocked_logged_at = None
             if notified_blocked:
@@ -937,10 +921,10 @@ class TmuxAgent(BaseAgent):
                     kind=blocked_kind,
                     approved=approved if blocked_kind == "approval" else None,
                 )
-                if on_text_chunk is not None:
+                if on_status is not None:
                     await safe_callback(
-                        on_text_chunk,
-                        f"\n\n{_resume_note(blocked_kind, approved)}\n",
+                        on_status,
+                        None,
                         log_event="tmux_unblock_notice_failed",
                     )
                 blocked_kind = None
@@ -1312,6 +1296,7 @@ class TmuxAgent(BaseAgent):
         on_text_chunk: Callable[[str], Coroutine[Any, Any, None]] | None = None,
         on_tool_activity: Callable[[ToolActivity | None], Coroutine[Any, Any, None]]
         | None = None,
+        on_status: Callable[[str | None], Coroutine[Any, Any, None]] | None = None,
     ) -> AgentResponse | None:
         """Await the turn an adopted pane was already running, and answer it.
 
@@ -1342,6 +1327,7 @@ class TmuxAgent(BaseAgent):
             turn,
             session,
             on_text_chunk,
+            on_status,
             ceiling=float(self._config.tmux_turn_ceiling_seconds),
             no_progress=float(self._config.tmux_no_progress_timeout_seconds),
             completion_idle_grace=float(

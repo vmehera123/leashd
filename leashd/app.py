@@ -22,7 +22,7 @@ from leashd.core.message_logger import MessageLogger
 from leashd.core.safety.approvals import ApprovalCoordinator
 from leashd.core.safety.audit import AuditLogger
 from leashd.core.safety.policy import PolicyEngine
-from leashd.core.safety.sandbox import SandboxEnforcer
+from leashd.core.safety.sandbox import SandboxEnforcer, sandbox_directories
 from leashd.core.session import SessionManager
 from leashd.git.handler import GitCommandHandler
 from leashd.git.service import GitService
@@ -276,9 +276,7 @@ def build_engine(
             policy_paths.append(dev_tools_policy)
 
     policy_engine = PolicyEngine(policy_paths) if policy_paths else None
-    sandbox = SandboxEnforcer(
-        [*config.approved_directories, Path.home() / ".claude" / "plans"]
-    )
+    sandbox = SandboxEnforcer(sandbox_directories(config.approved_directories))
     audit = AuditLogger(resolved_audit)
 
     builtins = create_builtin_plugins(

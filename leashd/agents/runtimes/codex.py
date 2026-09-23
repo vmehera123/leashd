@@ -273,6 +273,8 @@ class CodexAgent(BaseAgent):
         on_retry: Callable[[], Coroutine[Any, Any, None]] | None = None,
         attachments: list[Any] | None = None,
         settings: RuntimeSettings | None = None,
+        on_status: Callable[[str | None], Coroutine[Any, Any, None]]  # noqa: ARG002
+        | None = None,
     ) -> AgentResponse:
         if attachments:
             logger.warning(

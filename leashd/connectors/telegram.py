@@ -826,8 +826,13 @@ class TelegramConnector(BaseConnector):
                 chat_id=self._target(chat_id),
                 message_id=int(message_id),
             )
-        except Exception:
-            logger.debug("telegram_delete_message_failed", chat_id=chat_id)
+        except Exception as exc:
+            logger.info(
+                "telegram_delete_message_failed",
+                chat_id=chat_id,
+                message_id=message_id,
+                error=str(exc),
+            )
 
     def _claim_deletion(self, chat_id: str, message_id: str) -> bool:
         """Whether this caller is the one that gets to delete that message.
@@ -945,11 +950,12 @@ class TelegramConnector(BaseConnector):
                 operation="delete_activity",
             )
             return True
-        except Exception:
-            logger.debug(
+        except Exception as exc:
+            logger.info(
                 "telegram_delete_message_failed",
                 chat_id=chat_id,
                 message_id=message_id,
+                error=str(exc),
             )
             return False
 

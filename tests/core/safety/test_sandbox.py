@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from leashd.core.safety.sandbox import SandboxEnforcer
+import pytest
+
+from leashd.core.safety.sandbox import (
+    SandboxEnforcer,
+    _claude_project_key,
+    claude_memory_directories,
+    sandbox_directories,
+)
 
 
 class TestSandboxEnforcer:
@@ -219,3 +226,142 @@ class TestSandboxBypassAttacks:
         ok, _ = sandbox.validate_path("\\..\\..\\etc\\passwd")
         # On Unix, backslashes are literal chars — resolves to cwd, not the sandbox
         assert ok is False
+
+
+_LONG_PROJECT = "/private/tmp/" + "deep_dir-" * 30 + "/ünïcode 😀/end"
+
+
+@pytest.mark.parametrize(
+    ("path", "key"),
+    [
+        (
+            "/Users/vmehera/projects/nodenova/leashd",
+            "-Users-vmehera-projects-nodenova-leashd",
+        ),
+        ("/private/tmp/leashd_fix_probe", "-private-tmp-leashd-fix-probe"),
+        ("/Users/x/Market Scout", "-Users-x-Market-Scout"),
+        ("/Users/x/my_repo.v2/😀", "-Users-x-my-repo-v2---"),
+        (
+            _LONG_PROJECT,
+            "-private-tmp-" + "deep-dir-" * 20 + "deep-di-bta6ld",
+        ),
+        (
+            "/private/tmp/" + "deep_dir-" * 30 + "/a",
+            "-private-tmp-" + "deep-dir-" * 20 + "deep-di-zhy4yj",
+        ),
+    ],
+    ids=["plain", "underscore", "space", "surrogate", "long", "long-negative-hash"],
+)
+def test_project_key_matches_claude_code(path, key):
+    """Expected keys come from claude 2.1.278's own sanitiser run under node:
+    one ``-`` per UTF-16 unit, and a hash suffix past 200 characters."""
+    assert _claude_project_key(path) == key
+
+
+class TestClaudeAgentDirectories:
+    @pytest.fixture
+    def home(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        return home
+
+    def _memory(self, home, project):
+        key = _claude_project_key(str(project.resolve()))
+        return home / ".claude" / "projects" / key / "memory"
+
+    def test_the_projects_memory_is_writable(self, home, tmp_path):
+        project = tmp_path / "leadline"
+        project.mkdir()
+        sandbox = SandboxEnforcer(sandbox_directories([project]))
+
+        ok, _ = sandbox.validate_path(self._memory(home, project) / "MEMORY.md")
+        assert ok is True
+        ok, _ = sandbox.validate_path(home / ".claude" / "plans" / "plan.md")
+        assert ok is True
+
+    @pytest.mark.parametrize(
+        "elsewhere",
+        [
+            ".claude/settings.json",
+            ".claude/.credentials.json",
+            ".claude/projects/{key}/c57cba65.jsonl",
+            ".claude/projects/-Users-x-other-project/memory/MEMORY.md",
+        ],
+    )
+    def test_nothing_else_under_claude_home_opens(self, home, tmp_path, elsewhere):
+        project = tmp_path / "leadline"
+        project.mkdir()
+        sandbox = SandboxEnforcer(sandbox_directories([project]))
+        target = elsewhere.format(key=_claude_project_key(str(project.resolve())))
+
+        ok, _ = sandbox.validate_path(home / target)
+        assert ok is False
+
+    def test_a_subdirectory_of_a_repository_writes_the_repositorys_memory(
+        self, home, tmp_path
+    ):
+        repo = tmp_path / "acp_demo"
+        (repo / ".git").mkdir(parents=True)
+        (repo / "api").mkdir()
+
+        memory = claude_memory_directories(repo / "api")
+
+        assert self._memory(home, repo) in memory
+        assert self._memory(home, repo / "api") in memory
+
+    def test_a_worktree_writes_its_main_checkouts_memory(self, home, tmp_path):
+        main = tmp_path / "leashd"
+        gitdir = main / ".git" / "worktrees" / "fix"
+        gitdir.mkdir(parents=True)
+        (gitdir / "commondir").write_text("../..\n")
+        worktree = tmp_path / "leashd-fix"
+        worktree.mkdir()
+        (worktree / ".git").write_text(f"gitdir: {gitdir}\n")
+
+        memory = claude_memory_directories(worktree)
+
+        assert self._memory(home, main) in memory
+        assert self._memory(home, worktree) in memory
+
+    def test_a_submodule_keeps_its_own_memory(self, home, tmp_path):
+        superproject = tmp_path / "super"
+        gitdir = superproject / ".git" / "modules" / "sub"
+        gitdir.mkdir(parents=True)
+        submodule = superproject / "sub"
+        submodule.mkdir()
+        (submodule / ".git").write_text("gitdir: ../.git/modules/sub\n")
+
+        memory = claude_memory_directories(submodule)
+
+        assert memory == [self._memory(home, submodule)]
+
+    @pytest.mark.parametrize("marker", ["not a gitdir pointer\n", None])
+    def test_an_unreadable_git_marker_still_names_its_checkout(
+        self, home, tmp_path, marker
+    ):
+        repo = tmp_path / "repo"
+        (repo / "api").mkdir(parents=True)
+        git_file = repo / ".git"
+        git_file.write_text(marker or "gitdir: elsewhere\n")
+        if marker is None:
+            git_file.chmod(0)
+
+        try:
+            memory = claude_memory_directories(repo / "api")
+        finally:
+            git_file.chmod(0o644)
+
+        assert self._memory(home, repo) in memory
+
+    def test_a_workspace_directory_brings_its_memory(self, home, tmp_path):
+        project = tmp_path / "leadline"
+        extra = tmp_path / "bidlens"
+        project.mkdir()
+        extra.mkdir()
+        sandbox = SandboxEnforcer(sandbox_directories([project]))
+
+        sandbox.add_project(extra)
+
+        ok, _ = sandbox.validate_path(self._memory(home, extra) / "MEMORY.md")
+        assert ok is True

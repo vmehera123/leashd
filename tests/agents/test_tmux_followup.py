@@ -768,3 +768,220 @@ async def test_failing_read_callback_does_not_break_the_drain(cfg):
 
     assert turn.pending_followups == 0
     assert not turn.stop_event.is_set()
+
+
+# -- Claude Code 2.1.278 records pasted input wrapped -----------------------
+
+
+def _pasted(text, paste_id="487b"):
+    return (
+        f'<pasted_content id="{paste_id}">\n{text}\n</pasted_content id="{paste_id}">'
+    )
+
+
+def _prompt_record(content):
+    return {"type": "user", "message": {"role": "user", "content": content}}
+
+
+async def test_pasted_followup_is_read_and_its_credit_released(cfg, monkeypatch):
+    """Reproduced on the Telegram harness with CLI 2.1.278: the follow-up was
+    drained as a ``<pasted_content>`` block, never matched, so the notice stayed
+    on "Queued" and the turn waited out the idle backstop to end, then said the
+    message had gone unread."""
+    agent, cs, turn = _live_agent(cfg, monkeypatch, AsyncMock(return_value=True))
+    reads: list[str] = []
+    text = "Also mention the section numbers.\nKeep it short."
+
+    assert await agent.inject_followup(
+        "sess1", text, on_read=lambda: reads.append("read")
+    )
+    await agent._tsm._dispatch_jsonl_event(cs, _drain(_pasted(text)))
+
+    assert reads == ["read"]
+    assert turn.pending_followups == 0
+    turn.complete()
+    assert turn.stop_event.is_set()
+
+
+async def test_two_pasted_followups_absorbed_together_end_on_one_completion(
+    cfg, monkeypatch
+):
+    """Production, 2026-09-19 14:41: both follow-ups were drained in the same
+    millisecond as pasted blocks. Both credits stayed, claude's one completion
+    was spent on them, and with a credit still owed the idle backstop never
+    fired: the reply claude finished at 15:06 never reached the chat."""
+    agent, cs, turn = _live_agent(cfg, monkeypatch, AsyncMock(return_value=True))
+    reads: list[str] = []
+    first = "You can use agent-browser for some websites"
+    second = "The research should be standalone!"
+
+    await agent.inject_followup("sess1", first, on_read=lambda: reads.append("1"))
+    await agent.inject_followup("sess1", second, on_read=lambda: reads.append("2"))
+    assert turn.pending_followups == 2
+
+    await agent._tsm._dispatch_jsonl_event(cs, _drain(_pasted(first, "0e06")))
+    await agent._tsm._dispatch_jsonl_event(cs, _drain(_pasted(second, "0e06")))
+
+    assert reads == ["1", "2"]
+    assert turn.pending_followups == 0
+    turn.complete()
+    assert turn.stop_event.is_set()
+
+
+@pytest.mark.parametrize(
+    ("text", "recorded"),
+    [
+        (
+            "You can use agent-browser for some websites",
+            "You can use agent-\n\n" + _pasted("browser for some websites", "9ab2"),
+        ),
+        (
+            "Say A5 then this tail is roughly forty characters ok",
+            "Say A5 then \n\n"
+            + _pasted("this tail is roughly forty characters ok", "9ab2"),
+        ),
+        (
+            "it was output from the lint run",
+            "it was output from \n\n" + _pasted("the lint run", "68d6") + "\n\n",
+        ),
+    ],
+)
+async def test_typed_then_pasted_followup_matches_across_claudes_padding(
+    cfg, monkeypatch, text, recorded
+):
+    """leashd types some messages and pastes the rest of them. Claude pads the
+    pasted block with newlines of its own, even in the middle of a word."""
+    agent, cs, turn = _live_agent(cfg, monkeypatch, AsyncMock(return_value=True))
+    reads: list[str] = []
+
+    await agent.inject_followup("sess1", text, on_read=lambda: reads.append("read"))
+    await agent._tsm._dispatch_jsonl_event(cs, _drain(recorded))
+
+    assert reads == ["read"]
+    assert turn.pending_followups == 0
+
+
+async def test_pasted_followup_behind_staged_file_references_is_released(
+    cfg, monkeypatch
+):
+    from leashd.connectors.base import Attachment
+
+    agent, cs, turn = _live_agent(cfg, monkeypatch, AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        agent, "_stage_attachments", lambda atts, _cwd: ["/work/img1.png"]
+    )
+    reads: list[str] = []
+    text = "look at this screenshot please"
+
+    await agent.inject_followup(
+        "sess1",
+        text,
+        attachments=[
+            Attachment(filename="img1.png", data=b"x", media_type="image/png")
+        ],
+        on_read=lambda: reads.append("read"),
+    )
+    await agent._tsm._dispatch_jsonl_event(
+        cs, _drain(f"@/work/img1.png \n\n{_pasted(text)}")
+    )
+
+    assert reads == ["read"]
+    assert turn.pending_followups == 0
+    turn.complete()
+    assert turn.stop_event.is_set()
+
+
+async def test_a_quoted_paste_block_inside_a_followup_is_kept(cfg, monkeypatch):
+    agent, cs, turn = _live_agent(cfg, monkeypatch, AsyncMock(return_value=True))
+    reads: list[str] = []
+    text = 'see <pasted_content id="aaaa">\nold\n</pasted_content id="aaaa"> above'
+
+    await agent.inject_followup("sess1", text, on_read=lambda: reads.append("read"))
+    await agent._tsm._dispatch_jsonl_event(cs, _drain(_pasted(text)))
+
+    assert reads == ["read"]
+    assert turn.pending_followups == 0
+
+
+async def test_pasted_task_notification_never_steals_a_followup_credit(cfg):
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    turn = cs.begin_turn(on_text_chunk=None, on_tool_activity=None)
+    turn.pending_followups = 1
+    turn.pending_followup_texts = ["also reply SECOND"]
+
+    await tsm._dispatch_jsonl_event(
+        cs, _drain(_pasted("<task-notification>\n<task-id>b9e</task-id>"))
+    )
+
+    assert turn.pending_followups == 1
+    assert turn.pending_followup_texts == ["also reply SECOND"]
+
+
+# -- A dequeued follow-up is read when its prompt starts ---------------------
+
+
+async def test_contentless_dequeue_is_read_from_the_prompt_it_starts(cfg, monkeypatch):
+    """No ``dequeue`` record has carried its text in any CLI build, so a
+    follow-up claude ran as its own prompt was never reported read, and the
+    notice ended on "the turn ended before Claude read your message"."""
+    agent, cs, turn = _live_agent(cfg, monkeypatch, AsyncMock(return_value=True))
+    reads: list[str] = []
+    text = "please also proceed with the app password creation"
+
+    await agent.inject_followup("sess1", text, on_read=lambda: reads.append("read"))
+    await agent._tsm._dispatch_jsonl_event(
+        cs, {"type": "queue-operation", "operation": "dequeue"}
+    )
+    assert reads == []
+    assert turn.pending_followups == 1
+
+    await agent._tsm._dispatch_jsonl_event(cs, _prompt_record(f"\n\n{_pasted(text)}\n"))
+    assert reads == ["read"]
+    assert turn.pending_followups == 1
+
+
+async def test_dequeued_prompt_with_text_blocks_is_read(cfg, monkeypatch):
+    agent, cs, _turn = _live_agent(cfg, monkeypatch, AsyncMock(return_value=True))
+    reads: list[str] = []
+
+    await agent.inject_followup(
+        "sess1", "what is in it?", on_read=lambda: reads.append("read")
+    )
+    await agent._tsm._dispatch_jsonl_event(
+        cs,
+        _prompt_record(
+            [
+                {"type": "text", "text": "@notes_5.txt what is in it?"},
+                {"type": "image", "source": {"type": "base64", "data": "x"}},
+            ]
+        ),
+    )
+
+    assert reads == ["read"]
+
+
+async def test_tool_results_and_other_prompts_are_not_read_as_the_followup(
+    cfg, monkeypatch
+):
+    agent, cs, _turn = _live_agent(cfg, monkeypatch, AsyncMock(return_value=True))
+    reads: list[str] = []
+
+    await agent.inject_followup(
+        "sess1", "also run the tests", on_read=lambda: reads.append("read")
+    )
+    await agent._tsm._dispatch_jsonl_event(
+        cs,
+        _prompt_record(
+            [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_1",
+                    "content": "also run the tests",
+                }
+            ]
+        ),
+    )
+    await agent._tsm._dispatch_jsonl_event(cs, _prompt_record("the first prompt"))
+
+    assert reads == []

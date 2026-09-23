@@ -27,6 +27,7 @@ from leashd.agents.runtimes.tmux_session import (
     _perm_dialog_subject,
     _tool_identity_key,
     _unanswered_tool_calls,
+    _without_queued_input,
     _without_side_panel,
     encode_project_dir,
     find_session_jsonl,
@@ -9298,6 +9299,146 @@ def test_a_selector_counts_only_while_it_holds_the_bottom_of_the_pane(cfg, page)
 
     assert cs.dedicated_selector_present(page) is True
     assert cs.dedicated_selector_present(_idle_composer_under(page)) is False
+
+
+_QUEUED_FOLLOWUP = (
+    "❯ you can check what I can see using chrome "
+    "https://leadline.nodenova.co.uk/automations/01a0c8ca\n"
+    "  ctrl+x ctrl+s to send now"
+)
+_QUEUED_TWO_FOLLOWUPS = (
+    "❯ first queued message\n❯ second queued message\n  ctrl+x ctrl+s to send now"
+)
+_QUEUED_PASTE = (
+    "❯ first paragraph of the follow-up\n"
+    "\n"
+    "  indented second paragraph\n"
+    "  line three ❯ 1. Yes\n"
+    "  ctrl+x ctrl+s to send now"
+)
+
+
+def _queued_under(dialog: str, queued: str) -> str:
+    return f"{dialog}\n\n\n{queued}"
+
+
+@pytest.mark.parametrize(
+    "queued",
+    [_QUEUED_FOLLOWUP, _QUEUED_TWO_FOLLOWUPS, _QUEUED_PASTE],
+    ids=["one", "two", "paste"],
+)
+def test_a_dialog_with_queued_input_under_it_is_still_the_live_dialog(cfg, queued):
+    """Layouts captured from claude 2.1.278 probe panes. Input typed while claude
+    is busy is drawn under the prompt, and its prompt glyph read as the composer,
+    so the approved `ssh` call's dialog in the leadline chat was never pressed."""
+    cs = _session(TmuxSessionManager(cfg))
+    subject = _perm_dialog_subject("Bash", _RM_CALL)
+    screen = _queued_under(_RM_DIALOG, queued)
+
+    assert cs.perm_selector_present(screen) is True
+    assert cs.dedicated_selector_present(screen) is True
+    assert cs.perm_dialog_is_about(screen, subject) is True
+    assert cs.perm_selector_signature(screen) == cs.perm_selector_signature(_RM_DIALOG)
+    assert cs.perm_dialog_box(screen) == cs.perm_dialog_box(_RM_DIALOG)
+
+
+def test_a_send_now_hint_quoted_in_a_reply_is_not_queued_input():
+    rows = [
+        "⏺ The footer under the dialog read:",
+        "  ctrl+x ctrl+s to send now",
+        "",
+        "❯ ",
+    ]
+
+    assert _without_queued_input(rows) == rows
+
+
+def test_queued_input_scrolled_to_the_top_of_the_pane_is_cut():
+    rows = [
+        "  wrapped tail of an earlier queued message",
+        "❯ second queued message",
+        "",
+        "  ctrl+x ctrl+s to send now",
+    ]
+
+    assert _without_queued_input(rows) == [
+        "  wrapped tail of an earlier queued message"
+    ]
+
+
+def test_a_question_with_queued_input_under_it_is_still_a_selector(cfg):
+    cs = _session(TmuxSessionManager(cfg))
+
+    assert cs.dedicated_selector_present(
+        _queued_under(_QUESTION_PAGE, _QUEUED_FOLLOWUP)
+    )
+
+
+def test_queued_input_above_a_busy_composer_is_no_dialog(cfg):
+    cs = _session(TmuxSessionManager(cfg))
+    screen = (
+        "❯ Run this exact bash command and nothing else: sleep 12\n"
+        "  ⎿  $ sleep 12\n"
+        "\n"
+        "✢ Mustering… (4s · ↓ 179 tokens · thought for 1s)\n"
+        f"{_QUEUED_FOLLOWUP}\n"
+        f"{_PROBE_RULE}\n"
+        "❯ Press up to edit queued messages\n"
+        f"{_PROBE_RULE}\n"
+        "  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt · ← for agents"
+    )
+
+    assert cs.dedicated_selector_present(screen) is False
+    assert cs._composer_accepts_input(screen) is True
+    assert cs.is_idle_at_composer(screen) is False
+
+
+async def test_the_approved_call_under_queued_input_is_pressed(
+    cfg, no_real_sleep, monkeypatch
+):
+    cs = _session(TmuxSessionManager(cfg))
+    screen = _queued_under(_RM_DIALOG, _QUEUED_FOLLOWUP)
+    pane = _TimedPane([screen] * 3 + [_IDLE_MID_TURN])
+    _pane_clock(monkeypatch, pane)
+    cs.attach(object(), pane)
+    subject = _perm_dialog_subject("Bash", _RM_CALL)
+
+    answered = await cs.answer_perm_selector(allow=True, subject=subject, call="rm")
+
+    assert answered is True
+    assert pane.sent == [("Enter", False)]
+
+
+async def test_a_followup_never_escapes_a_dialog_with_queued_input(
+    cfg, no_real_sleep, monkeypatch
+):
+    """The 11:36 "Are you stuck?" in the leadline chat: the stray-dialog
+    Escape answered "No" to an `ssh` call approved 14 minutes earlier."""
+    monkeypatch.setattr(
+        "leashd.agents.runtimes.tmux_session._STRAY_DIALOG_WAIT_S", 0.01
+    )
+    cs = _session(TmuxSessionManager(cfg))
+    pane = _FakePane([_queued_under(_RM_DIALOG, _QUEUED_FOLLOWUP)])
+    cs.attach(object(), pane)
+
+    assert await cs._dismiss_stray_dialog() is False
+    assert pane.sent == []
+
+
+async def test_a_followup_never_escapes_a_permission_prompt_it_cannot_place(
+    cfg, no_real_sleep, monkeypatch
+):
+    monkeypatch.setattr(
+        "leashd.agents.runtimes.tmux_session._STRAY_DIALOG_WAIT_S", 0.01
+    )
+    cs = _session(TmuxSessionManager(cfg))
+    screen = f"{_RM_DIALOG}\n\n❯ a row claude has not drawn under a dialog before"
+    pane = _FakePane([screen])
+    cs.attach(object(), pane)
+
+    assert cs.dedicated_selector_present(screen) is False
+    assert await cs._dismiss_stray_dialog() is False
+    assert ("Escape", False) not in pane.sent
 
 
 _PROBE_RULE = "─" * 160

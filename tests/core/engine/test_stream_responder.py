@@ -985,3 +985,174 @@ class TestTransientRetryLeavesNoDuplicate:
             m for m in connector.sent_messages if m.get("message_id") not in withdrawn
         ]
         assert len(surviving) == 1
+
+
+_WAIT = "⏳ Waiting for your approval — tap Approve/Reject (or /stop to abort)."
+
+
+class TestStatusLine:
+    """The line a runtime shows while it waits on the human. It sits under the
+    streamed reply while the wait lasts and is gone once it is resolved, from
+    the chat and from the reply stored for the turn."""
+
+    @staticmethod
+    def _responder():
+        from leashd.core.engine import _StreamingResponder
+        from tests.conftest import MockConnector
+
+        connector = MockConnector(support_streaming=True)
+        return connector, _StreamingResponder(connector, "chat1", throttle_seconds=0)
+
+    async def test_status_is_shown_under_the_streamed_text(self):
+        from leashd.core.engine import _STREAMING_CURSOR
+
+        connector, responder = self._responder()
+        await responder.on_chunk("Checking the site.")
+        await responder.on_status(_WAIT)
+
+        assert connector.edited_messages[-1]["text"] == (
+            f"Checking the site.\n\n{_WAIT}{_STREAMING_CURSOR}"
+        )
+        assert responder.buffer == "Checking the site."
+
+    async def test_clearing_the_status_takes_the_line_down(self):
+        from leashd.core.engine import _STREAMING_CURSOR
+
+        connector, responder = self._responder()
+        await responder.on_chunk("Checking the site.")
+        await responder.on_status(_WAIT)
+        await responder.on_status(None)
+
+        assert connector.edited_messages[-1]["text"] == (
+            f"Checking the site.{_STREAMING_CURSOR}"
+        )
+
+    async def test_resolved_wait_leaves_nothing_in_the_final_reply(self):
+        connector, responder = self._responder()
+        await responder.on_chunk("Checking the site.")
+        await responder.on_status(_WAIT)
+        await responder.on_status(None)
+        await responder.on_chunk(" It is up.")
+
+        assert await responder.finalize("Checking the site. It is up.") is True
+
+        assert _rendered_chat(connector) == ["Checking the site. It is up."]
+        assert "Waiting" not in responder.buffer
+
+    async def test_status_before_any_text_opens_a_message_then_goes_away(self):
+        from leashd.core.engine import _STREAMING_CURSOR
+
+        connector, responder = self._responder()
+        await responder.on_status(_WAIT)
+        assert _rendered_chat(connector) == [f"{_WAIT}{_STREAMING_CURSOR}"]
+
+        await responder.on_status(None)
+        assert _rendered_chat(connector) == []
+        assert responder.all_message_ids == []
+
+        await responder.on_chunk("Done.")
+        assert await responder.finalize("Done.") is True
+        assert _rendered_chat(connector) == ["Done."]
+
+    async def test_status_survives_a_throttled_chunk(self):
+        from leashd.core.engine import _STREAMING_CURSOR, _StreamingResponder
+        from tests.conftest import MockConnector
+
+        connector = MockConnector(support_streaming=True)
+        responder = _StreamingResponder(connector, "chat1", throttle_seconds=60)
+        await responder.on_chunk("Checking.")
+        await responder.on_status(_WAIT)
+
+        assert _rendered_chat(connector) == [f"Checking.\n\n{_WAIT}{_STREAMING_CURSOR}"]
+
+    async def test_status_on_an_off_screen_turn_is_not_rendered(self):
+        connector, responder = self._responder()
+        await responder.on_chunk("Checking.")
+        await responder.suspend()
+        sent_before = len(connector.sent_messages)
+
+        await responder.on_status(_WAIT)
+        await responder.on_status(None)
+
+        assert len(connector.sent_messages) == sent_before
+        assert responder.buffer == "Checking."
+
+    async def test_activity_indicator_keeps_the_status_visible(self):
+        from leashd.agents.base import ToolActivity
+
+        connector, responder = self._responder()
+        await responder.on_chunk("Checking.")
+        await responder.on_status(_WAIT)
+        await responder.on_activity(
+            ToolActivity(tool_name="Bash", description="curl example.com")
+        )
+
+        assert _rendered_chat(connector)[0] == f"Checking.\n\n{_WAIT}"
+
+    async def test_snapshot_for_a_reconnecting_client_includes_the_status(self):
+        _, responder = self._responder()
+        await responder.on_chunk("Checking.")
+        await responder.on_status(_WAIT)
+
+        snapshot = responder.snapshot()
+        assert snapshot is not None
+        assert snapshot["text"] == f"Checking.\n\n{_WAIT}"
+
+
+class ApprovalWaitingAgent(BaseAgent):
+    """Streams, waits on an approval behind a status line, then answers."""
+
+    async def execute(
+        self, prompt, session, *, on_text_chunk=None, on_status=None, **kwargs
+    ):
+        assert on_text_chunk is not None
+        assert on_status is not None
+        await on_text_chunk("Fetching the page.")
+        await on_status(_WAIT)
+        await on_status(None)
+        await on_text_chunk("\n\nThe page is up.")
+        return AgentResponse(
+            content="Fetching the page.\n\nThe page is up.", session_id="s1"
+        )
+
+    async def cancel(self, session_id):
+        pass
+
+    async def shutdown(self):
+        pass
+
+
+class TestResolvedApprovalLeavesNoTrace:
+    async def test_chat_and_stored_reply_carry_no_wait_or_resume_line(
+        self, config, policy_engine, audit_logger, tmp_path
+    ):
+        from leashd.storage.sqlite import SqliteSessionStore
+        from tests.conftest import MockConnector
+
+        store = SqliteSessionStore(tmp_path / "status.db")
+        await store.setup()
+        connector = MockConnector(support_streaming=True)
+        engine = Engine(
+            connector=connector,
+            agent=ApprovalWaitingAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+            store=store,
+        )
+
+        await engine.handle_message("u1", "is the page up?", "chat1")
+
+        assert _rendered_chat(connector) == ["Fetching the page.\n\nThe page is up."]
+        assert any(
+            _WAIT in m["text"]
+            for m in connector.sent_messages + connector.edited_messages
+        )
+        stored = [
+            m["content"]
+            for m in await store.get_messages("u1", "chat1")
+            if m["role"] == "assistant"
+        ]
+        assert stored == ["Fetching the page.\n\nThe page is up."]
+        await store.teardown()

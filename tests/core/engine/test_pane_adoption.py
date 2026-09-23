@@ -47,7 +47,7 @@ class AdoptingAgent(FakeAgent):
         return self._panes
 
     async def reattach_turn(
-        self, session, *, on_text_chunk=None, on_tool_activity=None
+        self, session, *, on_text_chunk=None, on_tool_activity=None, on_status=None
     ):
         self.reattached.append(session.session_id)
         if on_text_chunk is not None:
