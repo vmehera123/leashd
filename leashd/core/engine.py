@@ -33,7 +33,6 @@ from leashd.core.chat_sessions import (
 )
 from leashd.core.config import build_directory_names, ensure_leashd_dir
 from leashd.core.events import (
-    COMMAND_TEST,
     COMMAND_WEB,
     CONFIG_RELOADED,
     ENGINE_STARTED,
@@ -61,7 +60,6 @@ from leashd.core.message_logger import MessageLogger
 from leashd.core.runtime_settings import (
     VALID_EFFORTS,
     RuntimeSettings,
-    classify_model,
     resolve_settings,
 )
 from leashd.core.safety.audit import AuditLogger
@@ -96,8 +94,7 @@ def _parse_task_flags(
     Recognised:
       ``--effort low|medium|high|max``   — runtime override
       ``--model <name>``                 — runtime override
-      ``--phases plan,implement,...``    — per-task v3 phase override
-                                           (consumed by TaskV3Orchestrator)
+      ``--phases implement,verify,...``  — per-task phase override
 
     Flags must appear before the task description and each takes a single
     value. Unknown flags or malformed values stop parsing and are treated
@@ -109,7 +106,7 @@ def _parse_task_flags(
     pipeline (the verify phase being the one users explicitly try to skip
     in benchmark runs), so we surface the typo to the user instead.
     """
-    from leashd.core.task_profile import _ALL_ACTIONS
+    from leashd.core.task_profile import TASK_PHASES
 
     override = RuntimeSettings()
     task_overrides: dict[str, Any] | None = None
@@ -125,22 +122,16 @@ def _parse_task_flags(
                 break
             override = override.model_copy(update={"effort": value})
         elif flag == "--model":
-            kind = classify_model(value)
-            if kind == "codex":
-                override = override.model_copy(update={"codex_model": value})
-            else:
-                # Default unknown / claude-ish values to claude_model so a
-                # plain "opus" works without the user specifying a runtime.
-                override = override.model_copy(update={"claude_model": value})
+            override = override.model_copy(update={"claude_model": value})
         elif flag == "--phases":
             phases = [p.strip() for p in value.split(",") if p.strip()]
             if not phases:
                 break
-            unknown = [p for p in phases if p not in _ALL_ACTIONS]
+            unknown = [p for p in phases if p not in TASK_PHASES]
             if unknown:
                 raise ValueError(
                     f"--phases: unknown phase(s) {unknown!r}. "
-                    f"Valid: {sorted(_ALL_ACTIONS)}"
+                    f"Valid: {', '.join(TASK_PHASES)}"
                 )
             task_overrides = {**(task_overrides or {}), "enabled_actions": phases}
         else:
@@ -161,6 +152,7 @@ _FOLLOWUP_UNREAD_NOTICE = (
     "Send it again if it still applies."
 )
 _BROWSER_SHUTDOWN_POLLS = 10
+_SCREEN_SETTLE_SECONDS = 0.6
 _BROWSER_SHUTDOWN_POLL_SECONDS = 0.3
 
 
@@ -1606,10 +1598,11 @@ class Engine:
                 if is_task:
                     env_hint = "LEASHD_TASK_MAX_TURNS"
                 else:
-                    env_hint = {
-                        "web": "LEASHD_WEB_MAX_TURNS",
-                        "test": "LEASHD_TEST_MAX_TURNS",
-                    }.get(session.mode, "LEASHD_MAX_TURNS")
+                    env_hint = (
+                        "LEASHD_WEB_MAX_TURNS"
+                        if session.mode == "web"
+                        else "LEASHD_MAX_TURNS"
+                    )
                 await self.connector.send_message(
                     chat_id,
                     f"\u26a0\ufe0f Agent reached the turn limit ({effective_limit} turns). "
@@ -1862,7 +1855,6 @@ class Engine:
             chat_id=chat_id,
             effort=settings.effort,
             claude_model=settings.claude_model,
-            codex_model=settings.codex_model,
         )
         agent_task = asyncio.create_task(
             self.agent.execute(
@@ -2081,26 +2073,6 @@ class Engine:
                 return ""
             return "Switched to plan mode. I'll create a plan before implementing."
 
-        if command == "test":
-            event = Event(
-                name=COMMAND_TEST,
-                data={
-                    "session": session,
-                    "chat_id": chat_id,
-                    "args": args,
-                    "gatekeeper": self._gatekeeper,
-                    "prompt": "",
-                },
-            )
-            await self.event_bus.emit(event)
-            prompt = event.data.get("prompt", "")
-            if prompt:
-                await self._send_transient(
-                    chat_id, "Test mode activated. Running test workflow..."
-                )
-                await self.handle_message(user_id, prompt, chat_id)
-            return ""
-
         if command == "web":
             if not args.strip():
                 return (
@@ -2136,8 +2108,8 @@ class Engine:
                 return f"⚠️ {exc}"
             if not task_text:
                 return (
-                    "Usage: /task [--effort low|medium|high|max] "
-                    "[--model <name>] [--phases plan,implement,review] "
+                    "Usage: /task [--effort low|medium|high|xhigh|max] "
+                    "[--model <name>] [--phases implement,verify,review] "
                     "<description of the task>"
                 )
             cancel_chat = getattr(self.agent, "cancel_chat", None)
@@ -2340,7 +2312,7 @@ class Engine:
             return self._handle_plugin_command(args)
 
         if command == "screen":
-            return await self._handle_screen_command(session)
+            return await self._handle_screen_command(session, args, chat_id)
 
         if command == "file":
             return await self._handle_file_command(session, chat_id, args)
@@ -2446,14 +2418,41 @@ class Engine:
                 "\U0001f4ce Could not send:\n" + "\n".join(f"• {e}" for e in errors),
             )
 
-    async def _handle_screen_command(self, session: Session) -> str:
+    async def _handle_screen_command(
+        self, session: Session, args: str, chat_id: str
+    ) -> str:
         capture = getattr(self.agent, "capture_screen", None)
         if capture is None:
             return "/screen is only available on the tmux runtime."
+        stuck_prompt_id = getattr(self.agent, "stuck_prompt_id", None)
+        verb, _, prompt_id = args.strip().partition(" ")
+        header = ""
+        if verb == "reject" and stuck_prompt_id is not None:
+            if self.agent.reject_stuck_prompt(session, prompt_id.strip()):  # type: ignore[attr-defined]
+                header = "❌ Rejected the prompt. Nothing ran.\n\n"
+                await asyncio.sleep(_SCREEN_SETTLE_SECONDS)
+            else:
+                header = "That prompt is no longer waiting. The screen now:\n\n"
         snapshot = await capture(session)
         if not snapshot:
             return "No active claude terminal for this chat yet — send a message first."
-        return f"🖥 claude terminal\n\n{snapshot}"
+        text = f"{header}🖥 claude terminal\n\n{snapshot}"
+        if stuck_prompt_id is None or self.connector is None:
+            return text
+        buttons = [[InlineButton(text="🔄 Refresh", callback_data="/screen")]]
+        stuck = stuck_prompt_id(session)
+        if stuck is not None:
+            buttons.insert(
+                0,
+                [
+                    InlineButton(
+                        text="❌ Reject prompt", callback_data=f"/screen reject {stuck}"
+                    )
+                ],
+            )
+        await self.connector.send_message(chat_id, text, buttons=buttons)
+        self._bury_chat_stream_tail(chat_id)
+        return ""
 
     async def _forward_native_command(
         self, session: Session, command: str, args: str, chat_id: str
@@ -2857,6 +2856,11 @@ class Engine:
             await self._send_transient(
                 chat_id, f"▸ {slot_label(target.index)} · {target.directory}"
             )
+            if chat_id not in self._active_responders:
+                session = await self.session_manager.get_or_create(
+                    user_id, target.chat_id, target.working_directory
+                )
+                await self._replay_chat_session_transcript(session)
             return ""
 
         await self._attach_chat_session(target, user_id, leaving=chat_id)

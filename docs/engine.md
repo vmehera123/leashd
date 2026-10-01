@@ -11,7 +11,7 @@ sequenceDiagram
     participant MW as MiddlewareChain
     participant Engine
     participant IC as InteractionCoordinator
-    participant Agent as ClaudeCodeAgent
+    participant Agent as TmuxAgent
     participant GK as ToolGatekeeper
 
     User->>Conn: Send message
@@ -127,8 +127,7 @@ The engine handles twelve commands via `handle_command()`:
 | `/edit [text]` | Sets `session.mode = "edit"`, enables auto-approve for Write and Edit. With text, starts agent immediately. |
 | `/default` | Sets `session.mode = "default"`, disables auto-approve |
 | `/git <subcommand>` | Routes to `GitCommandHandler` for git operations with inline action buttons |
-| `/test [flags]` | Emits `COMMAND_TEST` event, activating `TestRunnerPlugin`'s 9-phase test workflow |
-| `/task <description>` | Sets `session.mode = "task"`, emits `TASK_SUBMITTED` event. TaskOrchestrator drives multi-phase workflow. |
+| `/task <description>` | Emits `TASK_SUBMITTED`. `TaskOrchestrator` runs implement → verify (→ review) in `auto` mode. |
 | `/cancel` | Cancels the active task in the current chat. Emits `MESSAGE_IN` with text="/cancel". |
 | `/tasks` | Lists tasks for the current chat — active first, then recent completed/failed. |
 | `/file <path>…` | Resolves paths through `core/file_delivery.py` (sandbox + credential gate + size ceiling) and uploads the survivors via `connector.send_file`. Globs expand; agents trigger the same path with a `[[leashd:file <path>]]` marker. |

@@ -4,8 +4,8 @@ The plan-review decision logic (plan-mode write blocking, ``ExitPlanMode``
 guards, plan-content discovery, auto-plan-review vs. human-review routing) is
 used by two callers that drive the agent very differently:
 
-* the engine's ``can_use_tool`` callback (``claude-cli`` / ``claude-code`` /
-  ``codex`` — runtimes that gate tools through the engine), and
+* the engine's ``can_use_tool`` callback, for agents that gate tools through
+  the engine (embedders passing their own ``BaseAgent`` to ``build_engine``), and
 * the ``tmux`` runtime's ``PreToolUse`` HTTP hook bridge
   (``TmuxSessionManager.on_pre_tool``), where Claude Code runs in a live pane
   and approvals come back over an HTTP hook instead of the callback.

@@ -78,11 +78,11 @@ class TestWebRecipe:
         assert "SCAN" in LINKEDIN_COMMENTING.task_instruction
 
     def test_linkedin_task_instruction_has_stop_step(self):
-        assert "STOP" in LINKEDIN_COMMENTING.task_instruction
+        assert "wait for their next message" in LINKEDIN_COMMENTING.task_instruction
 
     def test_linkedin_task_instruction_has_efficiency_guidance(self):
-        assert "EFFICIENCY" in LINKEDIN_COMMENTING.task_instruction
-        assert "max 3 snapshots" in LINKEDIN_COMMENTING.task_instruction
+        assert "fresh element refs" in LINKEDIN_COMMENTING.task_instruction
+        assert "hasn't changed" in LINKEDIN_COMMENTING.task_instruction
 
     def test_builtin_recipes_contains_linkedin(self):
         assert "linkedin_comment" in BUILTIN_RECIPES
@@ -294,7 +294,7 @@ class TestBuildWebInstruction:
         config = WebConfig(recipe_name="linkedin_comment")
         instruction = build_web_instruction(config, LINKEDIN_COMMENTING)
         assert "verify: true" in instruction
-        assert "Do NOT snapshot between sequential actions" in instruction
+        assert "Skip it between actions on an unchanged page" in instruction
 
     def test_context_persistence_section_fresh(self):
         config = WebConfig()
@@ -1170,7 +1170,10 @@ class TestWebRecipeTaskInstruction:
         assert "linkedin-comment skill" not in LINKEDIN_COMMENTING.task_instruction
 
     def test_linkedin_task_instruction_prohibits_js_for_typing(self):
-        assert "NEVER use browser_evaluate" in LINKEDIN_COMMENTING.task_instruction
+        assert (
+            "Don't set editor text with browser_evaluate"
+            in LINKEDIN_COMMENTING.task_instruction
+        )
 
 
 class TestPluginLoadsPlaybook:
@@ -1666,5 +1669,5 @@ class TestCheckpointFieldsInPrompt:
         assert "contenteditable" in _LINKEDIN_TASK_TEMPLATE
 
     def test_task_template_has_submit_button_guidance(self):
-        assert "NOT the main feed" in _LINKEDIN_TASK_TEMPLATE
+        assert "not the main feed" in _LINKEDIN_TASK_TEMPLATE
         assert "find role button name Post click" in _LINKEDIN_TASK_TEMPLATE

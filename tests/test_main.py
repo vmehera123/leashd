@@ -8,11 +8,20 @@ import pytest
 from leashd.exceptions import ConnectorError
 from leashd.main import (
     _install_reload_handler,
-    _maybe_start_tmux_hook_server,
     _run_cli,
+    _start_tmux_hook_server,
     run,
 )
 from leashd.main import _main as main
+
+
+@pytest.fixture(autouse=True)
+def _no_real_tmux():
+    with (
+        patch("leashd.main._tmux_session_manager", return_value=None),
+        patch("leashd.main._start_tmux_hook_server", new=AsyncMock(return_value=None)),
+    ):
+        yield
 
 
 @pytest.fixture
@@ -335,23 +344,17 @@ class TestWebMode:
 class TestTmuxHookServer:
     """GAP 3: Telegram-only / CLI-only host their own loopback hook receiver."""
 
-    async def test_maybe_start_skips_non_tmux(self):
+    async def test_start_hook_server(self):
         cfg = MagicMock()
-        cfg.agent_runtime = "claude-cli"
-        assert await _maybe_start_tmux_hook_server(cfg) is None
-
-    async def test_maybe_start_starts_for_tmux(self):
-        cfg = MagicMock()
-        cfg.agent_runtime = "tmux"
         fake_server = MagicMock()
         fake_server.start = AsyncMock()
         with (
-            patch("leashd.main._maybe_tmux_session_manager", return_value=object()),
+            patch("leashd.main._tmux_session_manager", return_value=object()),
             patch(
                 "leashd.web.tmux_server.TmuxHookServer", return_value=fake_server
             ) as ctor,
         ):
-            server = await _maybe_start_tmux_hook_server(cfg)
+            server = await _start_tmux_hook_server(cfg)
         assert server is fake_server
         ctor.assert_called_once()
         fake_server.start.assert_awaited_once()
@@ -364,7 +367,7 @@ class TestTmuxHookServer:
         with (
             patch("leashd.main.build_engine", return_value=mock_engine),
             patch(
-                "leashd.main._maybe_start_tmux_hook_server",
+                "leashd.main._start_tmux_hook_server",
                 new=AsyncMock(return_value=fake_server),
             ),
             patch("builtins.input", side_effect=EOFError),
@@ -440,7 +443,7 @@ class TestDaemonOptsIntoTmuxReap:
     async def test_run_cli_opts_in(self, mock_engine, mock_config):
         with (
             patch("leashd.main.build_engine", return_value=mock_engine) as build,
-            patch("leashd.main._maybe_start_tmux_hook_server", return_value=None),
+            patch("leashd.main._start_tmux_hook_server", return_value=None),
             patch("builtins.input", side_effect=EOFError),
         ):
             await _run_cli(mock_config)

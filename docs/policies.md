@@ -35,7 +35,7 @@ rules:
 > `settings` is not currently consumed. The effective human-response window for approvals,
 > `AskUserQuestion` and plan reviews is `LEASHD_APPROVAL_TIMEOUT_SECONDS` /
 > `LEASHD_INTERACTION_TIMEOUT_SECONDS` (config). **Default is no expiry** — leashd waits for
-> the human indefinitely (identical on the `claude-cli` and `tmux` runtimes); set either to a
+> the human indefinitely; set either to a
 > positive integer to auto-deny after that many seconds. The per-policy timeouts shown below
 > describe intended profile behavior, not the enforced value.
 

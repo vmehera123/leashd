@@ -66,6 +66,7 @@ _MAX_MESSAGE_LENGTH = 4000  # Telegram limit is 4096; leave buffer
 _MAX_CAPTION_LENGTH = 1024  # Bot API caption ceiling
 _MAX_UPLOAD_BYTES = 50 * 1000 * 1000  # Bot API sendDocument ceiling
 _MAX_PHOTO_BYTES = 10 * 1000 * 1000  # Bot API sendPhoto ceiling
+_STOP_TIMEOUT_SECONDS = 8.0
 _PHOTO_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".webp"})
 _MARKDOWN_SUFFIXES = frozenset({".md", ".markdown", ".mdx"})
 _PREVIEW_SUFFIXES = _MARKDOWN_SUFFIXES | {".txt", ".text"}
@@ -86,6 +87,7 @@ _DIR_PREFIX = "dir:"
 _WS_PREFIX = "ws:"
 _INTERRUPT_PREFIX = "interrupt:"
 _SESSION_PREFIX = "sess:"
+_SCREEN_PREFIX = "/screen"
 _BACKGROUND_PREVIEW_CHARS = 280
 _DEFERRED_SUMMARY_CHARS = 120
 _DELETED_ID_MEMORY = 256
@@ -631,7 +633,6 @@ class TelegramConnector(BaseConnector):
                     "clear",
                     "dir",
                     "git",
-                    "test",
                     "workspace",
                     "ws",
                     "task",
@@ -678,13 +679,18 @@ class TelegramConnector(BaseConnector):
         if self._app is None:
             return
         try:
-            async with asyncio.timeout(8):  # type: ignore[attr-defined]
-                await self._app.updater.stop()  # type: ignore[union-attr]
-                await self._app.stop()
-                await self._app.shutdown()
-        except TimeoutError:
+            await asyncio.wait_for(
+                self._shutdown_app(self._app), timeout=_STOP_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError:
             logger.warning("telegram_connector_stop_timeout")
         logger.info("telegram_connector_stopped")
+
+    @staticmethod
+    async def _shutdown_app(app: Application) -> None:  # type: ignore[type-arg]
+        await app.updater.stop()  # type: ignore[union-attr]
+        await app.stop()
+        await app.shutdown()
 
     async def send_message(
         self,
@@ -1688,6 +1694,10 @@ class TelegramConnector(BaseConnector):
             await self._handle_session_callback(query, data)
             return
 
+        if data.startswith(_SCREEN_PREFIX):
+            await self._handle_screen_callback(query, data)
+            return
+
         if data.startswith(_INTERACTION_PREFIX):
             await self._handle_interaction_callback(query, data)
             return
@@ -2013,6 +2023,28 @@ class TelegramConnector(BaseConnector):
                 )
         except Exception:
             logger.exception("telegram_session_callback_error", chat_id=chat_id)
+
+    async def _handle_screen_callback(self, query: CallbackQuery, data: str) -> None:
+        """Route ``/screen`` taps (Refresh, Reject prompt) to the command, which
+        posts a fresh snapshot, so the tapped one is retired."""
+        if not self._command_handler or not isinstance(query.message, Message):
+            return
+        user_id = str(query.from_user.id) if query.from_user else ""
+        if not user_id:
+            return
+        telegram_chat_id = str(query.message.chat_id)
+        chat_id = self._router.inbound(telegram_chat_id)
+        args = data[len(_SCREEN_PREFIX) :].strip()
+        try:
+            result = await self._command_handler(user_id, "screen", args, chat_id, [])
+            if result:
+                await query.edit_message_text(result)
+            else:
+                await self.delete_message(
+                    telegram_chat_id, str(query.message.message_id)
+                )
+        except Exception:
+            logger.exception("telegram_screen_callback_error", chat_id=chat_id)
 
     async def _on_error(
         self, update: object, context: ContextTypes.DEFAULT_TYPE

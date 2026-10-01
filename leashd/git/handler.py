@@ -428,7 +428,7 @@ class GitCommandHandler:
 
         try:
             await asyncio.wait_for(pending.event.wait(), timeout=120)
-        except TimeoutError:
+        except asyncio.TimeoutError:
             self._pending.pop(chat_id, None)
             return "\u23f0 Commit message timed out."
 

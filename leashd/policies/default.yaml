@@ -74,7 +74,7 @@ rules:
       - "\\.gnupg/"
       - "authorized_keys"
       - "\\.pem\\b"
-      - "\\.key\\b"
+      - "\\.key\\b(?![,(\\]])"
       - "\\.p12\\b"
       - "\\.pfx\\b"
       - "\\.keystore\\b"
@@ -85,7 +85,7 @@ rules:
       - "\\.git-credentials\\b"
       - "credentials\\b"
       - "secret\\."
-      - "secrets\\."
+      - "secrets\\.(?!(token_\\w+|choice|randbelow|randbits|compare_digest|SystemRandom)\\()"
       - "token\\.json\\b"
     action: require_approval
     description: "Shell access to a credential path"
@@ -146,6 +146,13 @@ rules:
     action: allow
     description: "Read-only codebase memory graph queries"
 
+  - name: agent-browser-help
+    tool: Bash
+    command_patterns:
+      - "^agent-browser\\s+[a-z][a-z-]*\\s+--help\\s*(\\|\\s*(jq|head|tail|wc|grep|rg|sort|uniq|column|cat|cut|tr)\\b[^|]*)*$"
+    action: allow
+    description: "agent-browser subcommand help text"
+
   - name: agent-browser-privileged
     tool: Bash
     command_patterns:
@@ -176,6 +183,13 @@ rules:
       - "^(?:curl|wget) (?:127\\.0\\.0\\.1|localhost|0\\.0\\.0\\.0|::1)(?:,(?:127\\.0\\.0\\.1|localhost|0\\.0\\.0\\.0|::1))*$"
     action: allow
     description: "Read-only request to a loopback address"
+
+  - name: public-read
+    tool: Bash
+    command_patterns:
+      - "^(?:curl|wget)\\+public [a-z0-9.,-]+$"
+    action: allow
+    description: "Anonymous read-only request to a public host"
 
   # `sql-write` is ordered ahead of this and takes the writing forms.
   # `sqlite3 db < script.sql` carries no visible statement, so it matches
@@ -257,7 +271,8 @@ rules:
   - name: git-mutations
     tool: Bash
     command_patterns:
-      - "^git\\s+(-[a-zA-Z]\\s+\\S+\\s+|--[a-z-]+(=\\S+)?\\s+)*?(push|reset|rebase|merge|cherry-pick|rm)\\b"
+      - "^git\\s+(-[a-zA-Z]\\s+\\S+\\s+|--[a-z-]+(=\\S+)?\\s+)*?(push|reset|rebase|merge|cherry-pick)\\b"
+      - "^git\\s+(-[a-zA-Z]\\s+\\S+\\s+|--[a-z-]+(=\\S+)?\\s+)*?rm\\b(?=[^|;&\\n]*\\s(--force\\b|-[a-zA-Z]*f))"
     action: require_approval
     description: "Git mutation"
 

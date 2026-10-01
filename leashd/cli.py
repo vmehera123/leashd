@@ -40,7 +40,7 @@ from leashd.config_store import (
     set_directory_setting,
     set_workspace_settings,
 )
-from leashd.core.runtime_settings import VALID_EFFORTS, classify_model
+from leashd.core.runtime_settings import VALID_EFFORTS
 
 
 def _notify_daemon_reload() -> None:
@@ -111,6 +111,12 @@ def _handle_config() -> None:
         _print_yaml_only_config(yaml_data)
 
 
+def _config_default(field: str) -> Any:
+    from leashd.core.config import LeashdConfig
+
+    return LeashdConfig.model_fields[field].default
+
+
 def _try_resolve_config() -> LeashdConfig | None:
     """Attempt to build LeashdConfig. Returns None on failure."""
     try:
@@ -170,9 +176,6 @@ def _print_resolved_config(config: LeashdConfig, yaml_data: dict[str, Any]) -> N
     effort_hint = _source_hint("effort", yaml_data)
     print(f"\nThinking effort: {config.effort or 'default'}{effort_hint}")
 
-    runtime_hint = _source_hint("agent_runtime", yaml_data)
-    print(f"Agent runtime: {config.agent_runtime}{runtime_hint}")
-
     turns_hint = _source_hint("max_turns", yaml_data)
     print(f"Max turns: {config.max_turns}{turns_hint}")
 
@@ -214,11 +217,8 @@ def _print_yaml_only_config(yaml_data: dict[str, Any]) -> None:
     else:
         print("\nTelegram: not configured")
 
-    effort = yaml_data.get("effort", "xhigh")
+    effort = yaml_data.get("effort", _config_default("effort"))
     print(f"\nThinking effort: {effort}")
-
-    runtime = yaml_data.get("agent_runtime", "tmux")
-    print(f"Agent runtime: {runtime}")
 
     if yaml_data.get("task_orchestrator"):
         print("\nTask orchestrator: ENABLED")
@@ -315,19 +315,19 @@ def _handle_browser_show() -> None:
     data = load_global_config()
     browser = get_browser_config(data)
 
-    backend = browser.get("backend", "playwright")
+    backend = browser.get("backend", _config_default("browser_backend"))
     print(f"Browser backend: {backend}")
 
-    headless = browser.get("headless", False)
+    headless = browser.get("headless", _config_default("browser_headless"))
     print(f"Headless: {'on' if headless else 'off'}")
 
-    auto_approve = browser.get("auto_approve", False)
+    auto_approve = browser.get("auto_approve", _config_default("browser_auto_approve"))
     print(f"Auto-approve browsing: {'on' if auto_approve else 'off'}")
 
     user_data_dir = browser.get("user_data_dir")
     if user_data_dir:
         print(f"Browser profile: {user_data_dir}")
-        print("  (used for /web command; /test always uses a fresh profile)")
+        print("  (used for /web; /task always uses a fresh profile)")
     else:
         print("Browser profile: not configured (using temporary profile)")
         print("  Run 'leashd browser set-profile <path>' to persist login sessions.")
@@ -341,7 +341,7 @@ def _handle_browser_auto_approve(state: str | None) -> None:
     browser = get_browser_config(data)
 
     if state is None:
-        current = browser.get("auto_approve", False)
+        current = browser.get("auto_approve", _config_default("browser_auto_approve"))
         print(f"Auto-approve browsing: {'on' if current else 'off'}")
         return
 
@@ -528,6 +528,16 @@ def _handle_browser_set_backend(backend: str) -> None:
             file=sys.stderr,
         )
         sys.exit(1)
+
+    if backend == "playwright":
+        from leashd.plugins.builtin.browser_tools import (
+            PLAYWRIGHT_MCP_HINT,
+            playwright_mcp_available,
+        )
+
+        if not playwright_mcp_available():
+            print(f"Error: {PLAYWRIGHT_MCP_HINT}", file=sys.stderr)
+            sys.exit(1)
 
     data = load_global_config()
     browser = data.get("browser", {})
@@ -793,7 +803,7 @@ def _handle_effort(args: argparse.Namespace) -> None:
 def _handle_effort_show() -> None:
     """Display resolved effort defaults across all scopes."""
     data = load_global_config()
-    global_level = data.get("effort", "xhigh")
+    global_level = data.get("effort", _config_default("effort"))
     print(f"Thinking effort (global): {global_level}")
 
     dir_settings = get_all_directory_settings()
@@ -886,140 +896,86 @@ def _handle_model(args: argparse.Namespace) -> None:
         _handle_model_clear(args)
 
 
-def _classify_model_for_scope(value: str, runtime_hint: str | None) -> str:
-    """Infer whether a model value targets claude_model or codex_model.
-
-    Honours ``--runtime claude|codex`` when the caller supplies it; otherwise
-    uses the shared prefix heuristic in ``runtime_settings.classify_model``.
-    Falls back to ``claude_model`` for unclassifiable values and emits a
-    warning so users can disambiguate with ``--runtime``.
-    """
-    if runtime_hint:
-        if runtime_hint in {"claude", "claude-cli", "claude-code"}:
-            return "claude_model"
-        if runtime_hint == "codex":
-            return "codex_model"
-        print(
-            f"Error: unknown --runtime '{runtime_hint}' "
-            "(use claude, claude-cli, claude-code, or codex).",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    kind = classify_model(value)
-    if kind == "codex":
-        return "codex_model"
-    if kind is None:
-        print(
-            f"Note: could not infer runtime family for '{value}'; "
-            "defaulting to claude_model. Pass --runtime codex to override.",
-            file=sys.stderr,
-        )
-    return "claude_model"
-
-
-def _model_label(field: str) -> str:
-    return "claude_model" if field == "claude_model" else "codex_model"
-
-
 def _handle_model_show() -> None:
     """Display resolved model defaults across all scopes."""
     data = load_global_config()
-    claude_model = data.get("claude_model")
-    codex_model = data.get("codex_model")
-    print(f"claude_model (global): {claude_model or '—'}")
-    print(f"codex_model  (global): {codex_model or '—'}")
+    print(f"claude_model (global): {data.get('claude_model') or '—'}")
 
-    dir_settings = get_all_directory_settings()
     dir_rows = [
-        (path, entry)
-        for path, entry in sorted(dir_settings.items())
-        if entry.get("claude_model") or entry.get("codex_model")
+        (path, entry["claude_model"])
+        for path, entry in sorted(get_all_directory_settings().items())
+        if entry.get("claude_model")
     ]
     if dir_rows:
         print("\nPer-directory overrides:")
-        for path, entry in dir_rows:
-            parts = []
-            if entry.get("claude_model"):
-                parts.append(f"claude_model={entry['claude_model']}")
-            if entry.get("codex_model"):
-                parts.append(f"codex_model={entry['codex_model']}")
-            print(f"  {path}: {', '.join(parts)}")
+        for path, model in dir_rows:
+            print(f"  {path}: claude_model={model}")
 
-    ws_rows: list[tuple[str, dict[str, Any]]] = []
-    for name in sorted(get_workspaces()):
-        settings = get_workspace_settings(name)
-        if settings.get("claude_model") or settings.get("codex_model"):
-            ws_rows.append((name, settings))
+    ws_models = {
+        name: get_workspace_settings(name).get("claude_model")
+        for name in sorted(get_workspaces())
+    }
+    ws_rows = [(name, model) for name, model in ws_models.items() if model]
     if ws_rows:
         print("\nPer-workspace overrides:")
-        for name, settings in ws_rows:
-            parts = []
-            if settings.get("claude_model"):
-                parts.append(f"claude_model={settings['claude_model']}")
-            if settings.get("codex_model"):
-                parts.append(f"codex_model={settings['codex_model']}")
-            print(f"  {name}: {', '.join(parts)}")
+        for name, model in ws_rows:
+            print(f"  {name}: claude_model={model}")
 
 
 def _handle_model_set(value: str, args: argparse.Namespace) -> None:
     """Set a model value at global / directory / workspace scope."""
     scope, scope_value = _scope_from_args(args)
-    runtime_hint = getattr(args, "runtime", None)
-    field = _classify_model_for_scope(value, runtime_hint)
 
     if scope == "dir":
         assert scope_value is not None  # noqa: S101
-        kwargs: dict[str, Any] = {field: value}
-        set_directory_setting(scope_value, **kwargs)
-        print(f"\u2713 Set {_model_label(field)}={value} for directory {scope_value}")
+        set_directory_setting(scope_value, claude_model=value)
+        print(f"\u2713 Set claude_model={value} for directory {scope_value}")
     elif scope == "workspace":
         assert scope_value is not None  # noqa: S101
-        kwargs = {field: value}
-        if not set_workspace_settings(scope_value, **kwargs):
+        if not set_workspace_settings(scope_value, claude_model=value):
             print(f"Error: workspace '{scope_value}' does not exist.", file=sys.stderr)
             sys.exit(1)
-        print(f"\u2713 Set {_model_label(field)}={value} for workspace {scope_value}")
+        print(f"\u2713 Set claude_model={value} for workspace {scope_value}")
     else:
         data = load_global_config()
-        data[field] = value
+        data["claude_model"] = value
         save_global_config(data)
         inject_global_config_as_env(force=True)
-        print(f"\u2713 Set {_model_label(field)} to {value}")
+        print(f"\u2713 Set claude_model to {value}")
     _notify_daemon_reload()
 
 
 def _handle_model_clear(args: argparse.Namespace) -> None:
     """Clear a model override at a specific scope."""
     scope, scope_value = _scope_from_args(args)
-    runtime_hint = getattr(args, "runtime", None)
-    field = "codex_model" if runtime_hint == "codex" else "claude_model"
+    field = "claude_model"
 
     if scope == "global":
         data = load_global_config()
         if data.pop(field, None) is None:
-            print(f"No global {_model_label(field)} set.", file=sys.stderr)
+            print(f"No global {field} set.", file=sys.stderr)
             sys.exit(1)
         save_global_config(data)
         inject_global_config_as_env(force=True)
-        print(f"\u2713 Cleared global {_model_label(field)}")
+        print(f"\u2713 Cleared global {field}")
     elif scope == "dir":
         assert scope_value is not None  # noqa: S101
         if not clear_directory_setting(scope_value, field=field):
             print(
-                f"No {_model_label(field)} override for {scope_value}.",
+                f"No {field} override for {scope_value}.",
                 file=sys.stderr,
             )
             sys.exit(1)
-        print(f"\u2713 Cleared directory {_model_label(field)} for {scope_value}")
+        print(f"\u2713 Cleared directory {field} for {scope_value}")
     else:
         assert scope_value is not None  # noqa: S101
         if not clear_workspace_settings(scope_value, field=field):
             print(
-                f"No {_model_label(field)} override for workspace {scope_value}.",
+                f"No {field} override for workspace {scope_value}.",
                 file=sys.stderr,
             )
             sys.exit(1)
-        print(f"\u2713 Cleared workspace {_model_label(field)} for {scope_value}")
+        print(f"\u2713 Cleared workspace {field} for {scope_value}")
     _notify_daemon_reload()
 
 
@@ -1035,8 +991,8 @@ def _handle_turns(args: argparse.Namespace) -> None:
 def _handle_turns_show() -> None:
     """Display current max turns setting."""
     data = load_global_config()
-    value = data.get("max_turns", 250)
-    task_value = data.get("task_max_turns", 300)
+    value = data.get("max_turns", _config_default("max_turns"))
+    task_value = data.get("task_max_turns", _config_default("task_max_turns"))
     print(f"Max turns: {value}")
     print(f"Task max turns: {task_value}")
 
@@ -1109,71 +1065,6 @@ def _handle_tool_calls_set(value: int) -> None:
     label = "unlimited" if value == -1 else str(value)
     print(f"✓ Max tool calls set to {label}")
     _notify_daemon_reload()
-
-
-def _handle_runtime(args: argparse.Namespace) -> None:
-    """Route runtime subcommands."""
-    sub = getattr(args, "runtime_command", None)
-    if sub is None or sub == "show":
-        _handle_runtime_show()
-    elif sub == "set":
-        _handle_runtime_set(args.name)
-    elif sub == "list":
-        _handle_runtime_list()
-
-
-def _handle_runtime_show() -> None:
-    """Display current agent runtime."""
-    data = load_global_config()
-    runtime = data.get("agent_runtime", "tmux")
-    print(f"Agent runtime: {runtime}")
-
-
-def _handle_runtime_set(name: str) -> None:
-    """Set the agent runtime."""
-    from leashd.agents.registry import (
-        get_available_runtime_names,
-        missing_runtime_dependency,
-    )
-
-    available = get_available_runtime_names()
-    if name not in available:
-        print(
-            f"Error: unknown runtime '{name}'. Available: {', '.join(available)}",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    hint = missing_runtime_dependency(name)
-    if hint:
-        print(f"Warning: {hint}", file=sys.stderr)
-
-    data = load_global_config()
-    data["agent_runtime"] = name
-    save_global_config(data)
-    inject_global_config_as_env(force=True)
-    print(f"\u2713 Agent runtime set to {name}")
-    print("  Restart the daemon for changes to take effect.")
-    _notify_daemon_reload()
-
-
-def _handle_runtime_list() -> None:
-    """List available agent runtimes."""
-    from leashd.agents.registry import list_runtimes, missing_runtime_dependency
-
-    runtimes = list_runtimes()
-    data = load_global_config()
-    current = data.get("agent_runtime", "tmux")
-    print("Available runtimes:")
-    for rt in runtimes:
-        marker = " (active)" if rt["name"] == current else ""
-        stability = f" [{rt['stability']}]" if rt.get("stability") else ""
-        missing = (
-            " (dependency not installed)"
-            if missing_runtime_dependency(rt["name"])
-            else ""
-        )
-        print(f"  {rt['name']}{stability}{marker}{missing}")
 
 
 _BROWSER_SHUTDOWN_POLLS = 10
@@ -1981,40 +1872,23 @@ def main() -> None:
     effort_clear.add_argument("--workspace", help="Workspace whose override to clear")
 
     model_parser = subparsers.add_parser(
-        "model", help="Manage default model (claude_model / codex_model)"
+        "model", help="Manage the default Claude model"
     )
     model_sub = model_parser.add_subparsers(dest="model_command")
     model_sub.add_parser(
         "show",
         help="Show current model defaults and per-scope overrides (default)",
     )
-    model_set = model_sub.add_parser(
-        "set",
-        help="Set claude_model or codex_model (runtime inferred from value)",
-    )
+    model_set = model_sub.add_parser("set", help="Set claude_model")
     model_set.add_argument(
         "value",
-        help="Model alias or full name (e.g. opus, claude-opus-4-7, gpt-5.2)",
+        help="Model alias or full name (e.g. opus, claude-opus-5-5)",
     )
     model_set.add_argument("--dir", help="Apply to a specific directory")
     model_set.add_argument("--workspace", help="Apply to a specific workspace")
-    model_set.add_argument(
-        "--runtime",
-        choices=["claude", "claude-cli", "claude-code", "codex"],
-        help="Disambiguate which model field to set when the value is ambiguous",
-    )
-    model_clear = model_sub.add_parser(
-        "clear",
-        help="Remove a model override (defaults to claude_model; pass "
-        "--runtime codex to clear codex_model)",
-    )
+    model_clear = model_sub.add_parser("clear", help="Remove a claude_model override")
     model_clear.add_argument("--dir", help="Directory whose override to clear")
     model_clear.add_argument("--workspace", help="Workspace whose override to clear")
-    model_clear.add_argument(
-        "--runtime",
-        choices=["claude", "claude-cli", "claude-code", "codex"],
-        help="Target runtime family (defaults to claude)",
-    )
 
     turns_parser = subparsers.add_parser("turns", help="Manage max turns per request")
     turns_sub = turns_parser.add_subparsers(dest="turns_command")
@@ -2029,13 +1903,6 @@ def main() -> None:
     tc_sub.add_parser("show", help="Show current max tool calls (default)")
     tc_set = tc_sub.add_parser("set", help="Set max tool calls per execution")
     tc_set.add_argument("value", type=int, help="Max tool calls (-1 for unlimited)")
-
-    runtime_parser = subparsers.add_parser("runtime", help="Manage agent runtime")
-    runtime_sub = runtime_parser.add_subparsers(dest="runtime_command")
-    runtime_sub.add_parser("show", help="Show current runtime (default)")
-    runtime_sub.add_parser("list", help="List available runtimes")
-    runtime_set = runtime_sub.add_parser("set", help="Set agent runtime")
-    runtime_set.add_argument("name", help="Runtime name (e.g. claude-code, codex)")
 
     workflow_parser = subparsers.add_parser(
         "workflow", help="Manage web workflow playbooks"
@@ -2142,8 +2009,8 @@ def main() -> None:
         "--phases",
         default=None,
         help=(
-            "Comma-separated v3 phase override (e.g. 'plan,implement,review' "
-            "to skip verify in benchmark runs). Layered on top of project "
+            "Comma-separated phases from implement,verify,review (e.g. "
+            "'implement' to skip verify in benchmark runs). Overrides project "
             "`.leashd/task-config.yaml` and the daemon-wide profile."
         ),
     )
@@ -2200,8 +2067,6 @@ def main() -> None:
         _handle_turns(args)
     elif args.command == "tool-calls":
         _handle_tool_calls(args)
-    elif args.command == "runtime":
-        _handle_runtime(args)
     elif args.command == "workflow":
         _handle_workflow(args)
     elif args.command == "skill":

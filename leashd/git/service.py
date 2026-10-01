@@ -410,7 +410,7 @@ class GitService:
             stdout = stdout_bytes.decode("utf-8", errors="replace")
             stderr = stderr_bytes.decode("utf-8", errors="replace")
             return proc.returncode or 0, stdout, stderr
-        except TimeoutError:
+        except asyncio.TimeoutError:
             logger.warning("git_exec_timeout", command=cmd, timeout=timeout)
             with contextlib.suppress(ProcessLookupError):
                 proc.kill()

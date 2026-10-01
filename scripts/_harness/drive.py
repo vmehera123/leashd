@@ -7,6 +7,8 @@ Usage:
   python drive.py msg "<text>"          inject a plain message
   python drive.py cmd "<command> args"  inject a slash command (e.g. "task ...")
   python drive.py tap <message_id> <callback_data>
+  python drive.py photo <path> ["<caption>"]      inject an inbound photo
+  python drive.py document <path> <mime> ["<caption>"]   inject an inbound document
   python drive.py watch <seconds> <start_iso>   poll until the turn completes
   python drive.py calls [since]         dump recorded calls
   python drive.py buttons <message_id>
@@ -53,7 +55,6 @@ WATCH_EVENTS = (
     "agent_execute_started",
     "agent_execute_completed",
     "session_phase_begun",
-    "task_v3_phase_changed",
     "task_phase_changed",
     "tmux_turn_no_progress",
     "tmux_turn_timeout",
@@ -194,6 +195,16 @@ if __name__ == "__main__":
                 {"command": parts[0], "args": parts[1] if len(parts) > 1 else ""},
             )
         )
+    elif cmd == "photo":
+        payload = {"path": os.path.abspath(sys.argv[2])}
+        if len(sys.argv) > 3:
+            payload["caption"] = sys.argv[3]
+        print(_post("/control/inject_photo", payload))
+    elif cmd == "document":
+        payload = {"path": os.path.abspath(sys.argv[2]), "mime_type": sys.argv[3]}
+        if len(sys.argv) > 4:
+            payload["caption"] = sys.argv[4]
+        print(_post("/control/inject_document", payload))
     elif cmd == "tap":
         print(
             _post("/control/tap", {"message_id": int(sys.argv[2]), "data": sys.argv[3]})

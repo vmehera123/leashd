@@ -663,6 +663,65 @@ def s21() -> None:
         )
 
 
+@scenario("s24", "terminating the one on screen, then picking #1, shows #1's answer")
+def s24() -> None:
+    """The reported incident: #1 answered while the chat was on #3, #3 was
+    terminated with #2 still open, and tapping #1 in the roster that followed
+    showed nothing.
+
+    The terminate lands on #1 without a banner because the roster is about to
+    ask where to go, so #1 is already on screen when it is tapped — and that
+    tap answered with a bare header, never the answer #1 gave while away.
+    """
+    setup(on=1, slots=3)
+    before = reply_count(slot(1))
+    since_iso = now_iso()
+    start = call_count()
+    msg(STEPPED.format(topic="naming things is hard"))
+    wait_streaming(start)
+    cmd("session", "3")
+    wait_foreground(slot(3))
+    wait_turn_done(since_iso, slot(1))
+    reply = _opening(wait_new_reply(slot(1), before))
+    check(len(reply) > 40, f"#1 answered while the chat was away ({reply!r})")
+
+    killed = call_count()
+    cmd("session", "kill 3")
+    wait_for(lambda: all(r["index"] != 3 for r in sessions()["slots"]), 30, "#3 to go")
+    roster = wait_for(
+        lambda: next(
+            (m for m, t in buttoned(killed) if "Conversations in this chat" in t),
+            None,
+        ),
+        20,
+        "the roster offered after the terminate",
+    )
+    check(sessions()["foreground"] == slot(1), "the terminate lands the chat on #1")
+    check(not _posted(killed, reply), "and leaves the choice to the roster")
+
+    tapped = call_count()
+    tap(roster, "sess:sw:1")
+    wait_for(
+        lambda: _posted(tapped, reply),
+        30,
+        "#1's answer after choosing it from the roster",
+    )
+    check(True, "choosing #1 puts its answer back")
+
+    again = call_count()
+    tap(roster, "sess:sw:1")
+    wait_for(
+        lambda: [t for t in texts(again) if t.startswith("▸ #1")],
+        20,
+        "the header for the second tap",
+    )
+    time.sleep(3)
+    check(
+        not _posted(again, reply),
+        "choosing it again while the answer is still in view does not repeat it",
+    )
+
+
 @scenario("s5", "leaving and returning while the answer is still being written")
 def s5() -> None:
     """Two outcomes, both asserted — whether the turn is still going on return
@@ -1433,6 +1492,7 @@ ORDER = [
     "s20",
     "s23",
     "s21",
+    "s24",
     "s17",
     "s6",
     "s7",

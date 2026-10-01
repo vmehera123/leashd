@@ -15,6 +15,7 @@ from leashd.core.safety.analyzer import (
     command_units,
     docker_exec_command,
     network_read_scope,
+    public_read_scope,
     shell_match_texts,
     split_chain_segments,
     strip_benign_prefixes,
@@ -25,6 +26,8 @@ logger = structlog.get_logger()
 _AWK_RE = re.compile(r"^[gm]?awk\b")
 
 _NETWORK_READ_RE = re.compile(r"^(?:curl|wget)\b")
+
+_PUBLIC_READ_MARKER_RE = re.compile(r"^(?:curl|wget)\+public\b")
 
 _AWK_UNSAFE_PROGRAM_RE = re.compile(
     r"\bsystem\s*\(|\bgetline\b|\bprintf?\b[^;{}()]*[>|]"
@@ -228,6 +231,7 @@ class PolicyEngine:
         candidates = shell_match_texts(normalized)
         skeleton, payloads = candidates[0], candidates[1:]
         inner = docker_exec_command(normalized)
+        public: str | None = None
         if inner is not None:
             allow_texts = PolicyEngine._bash_match_texts(inner)[0]
         elif payloads and SQL_CLIENT_RE.match(skeleton):
@@ -237,9 +241,16 @@ class PolicyEngine:
         ):
             allow_texts = []
         elif _NETWORK_READ_RE.match(skeleton):
-            allow_texts = [network_read_scope(normalized) or skeleton]
+            public = public_read_scope(normalized)
+            allow_texts = [
+                public or network_read_scope(normalized) or skeleton,
+            ]
         else:
             allow_texts = [skeleton]
+        if public is None:
+            allow_texts = [
+                text for text in allow_texts if not _PUBLIC_READ_MARKER_RE.match(text)
+            ]
         gate_texts = list(candidates)
         if raw != normalized and (">" in raw or "<" in raw):
             gate_texts += shell_match_texts(raw)

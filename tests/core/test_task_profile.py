@@ -1,191 +1,126 @@
-"""Tests for TaskProfile — declarative conductor behavior contracts."""
+"""Tests for TaskProfile — which phases a /task runs."""
 
 from __future__ import annotations
 
 import json
 import textwrap
-from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
 from leashd.core.task_profile import (
+    DEFAULT_PHASES,
     STANDALONE,
     TaskProfile,
-    _profile_from_dict,
     load_project_task_config,
     merge_profiles,
+    profile_from_dict,
     resolve_profile,
 )
 
 
-class TestTaskProfileDefaults:
-    def test_standalone_enables_all_actions(self):
-        assert "plan" in STANDALONE.enabled_actions
-        assert "verify" in STANDALONE.enabled_actions
-        assert "pr" in STANDALONE.enabled_actions
-        assert "complete" in STANDALONE.enabled_actions
+class TestPipeline:
+    def test_standalone_runs_default_phases(self):
+        assert STANDALONE.pipeline() == list(DEFAULT_PHASES)
+        assert STANDALONE.pipeline() == ["implement", "verify"]
 
-    def test_standalone_no_initial_action(self):
-        assert STANDALONE.initial_action is None
+    def test_explicit_phases_keep_canonical_order(self):
+        profile = TaskProfile(phases=frozenset({"review", "implement"}))
+        assert profile.pipeline() == ["implement", "review"]
 
-    def test_standalone_no_docker(self):
-        assert STANDALONE.docker_compose_available is False
+    def test_review_is_opt_in(self):
+        profile = TaskProfile(phases=frozenset({"implement", "verify", "review"}))
+        assert profile.pipeline() == ["implement", "verify", "review"]
 
     def test_frozen(self):
         with pytest.raises(ValidationError):
-            STANDALONE.initial_action = "plan"  # type: ignore[misc]
+            STANDALONE.phases = frozenset({"implement"})  # type: ignore[misc]
 
-    def test_custom_profile_with_restricted_actions(self):
-        profile = TaskProfile(
-            enabled_actions=frozenset(
-                {"plan", "implement", "test", "fix", "review", "complete", "escalate"}
-            ),
-            initial_action="plan",
-            docker_compose_available=True,
-        )
-        assert "plan" in profile.enabled_actions
-        assert profile.initial_action == "plan"
-        assert profile.docker_compose_available is True
-
-
-class TestIsActionEnabled:
-    def test_enabled_action(self):
-        assert STANDALONE.is_action_enabled("plan") is True
-
-    def test_disabled_action(self):
-        profile = TaskProfile(
-            enabled_actions=frozenset({"plan", "implement", "complete"})
-        )
-        assert profile.is_action_enabled("verify") is False
-
-    def test_complete_always_queryable(self):
-        assert STANDALONE.is_action_enabled("complete") is True
-
-
-class TestResolveProfile:
-    def test_resolve_standalone(self):
-        assert resolve_profile("standalone") is STANDALONE
-
-    def test_resolve_with_whitespace(self):
-        assert resolve_profile("  standalone  ") is STANDALONE
-
-    def test_resolve_unknown_returns_standalone(self):
-        assert resolve_profile("unknown") is STANDALONE
-
-    def test_resolve_json_object(self):
-        data = json.dumps(
-            {
-                "enabled_actions": ["plan", "implement", "complete"],
-                "initial_action": "plan",
-            }
-        )
-        profile = resolve_profile(data)
-        assert profile.initial_action == "plan"
-        assert "plan" in profile.enabled_actions
-        assert "verify" not in profile.enabled_actions
-
-    def test_resolve_json_with_disabled_actions(self):
-        data = json.dumps({"disabled_actions": ["verify", "pr"]})
-        profile = resolve_profile(data)
-        assert "verify" not in profile.enabled_actions
-        assert "pr" not in profile.enabled_actions
-        assert "implement" in profile.enabled_actions
-
-    def test_resolve_invalid_json_returns_standalone(self):
-        profile = resolve_profile("{invalid json}")
-        assert profile == STANDALONE
+    def test_instruction_for(self):
+        profile = TaskProfile(instructions={"verify": "  run make e2e  ", "review": ""})
+        assert profile.instruction_for("verify") == "run make e2e"
+        assert profile.instruction_for("review") is None
+        assert profile.instruction_for("implement") is None
 
 
 class TestProfileFromDict:
-    def test_enabled_actions_only_valid(self):
-        profile = _profile_from_dict(
-            {"enabled_actions": ["plan", "implement", "invalid_action"]}
-        )
-        assert "plan" in profile.enabled_actions
-        assert "invalid_action" not in profile.enabled_actions
+    def test_enabled_actions(self):
+        profile = profile_from_dict({"enabled_actions": ["implement", "review"]})
+        assert profile.pipeline() == ["implement", "review"]
+
+    def test_unknown_phases_dropped(self):
+        profile = profile_from_dict({"enabled_actions": ["plan", "pr"]})
+        assert profile.phases is None
+        assert profile.pipeline() == list(DEFAULT_PHASES)
 
     def test_disabled_actions(self):
-        profile = _profile_from_dict({"disabled_actions": ["verify"]})
-        assert "verify" not in profile.enabled_actions
-        assert "plan" in profile.enabled_actions
-
-    def test_invalid_initial_action_becomes_none(self):
-        profile = _profile_from_dict({"initial_action": "bogus"})
-        assert profile.initial_action is None
+        profile = profile_from_dict({"disabled_actions": ["verify"]})
+        assert profile.pipeline() == ["implement"]
 
     def test_action_instructions(self):
-        profile = _profile_from_dict({"action_instructions": {"test": "Use pytest -x"}})
-        assert profile.action_instructions["test"] == "Use pytest -x"
+        profile = profile_from_dict({"action_instructions": {"verify": "use make e2e"}})
+        assert profile.instruction_for("verify") == "use make e2e"
 
 
-class TestMergeProfiles:
-    def test_enabled_actions_intersection(self):
-        a = TaskProfile(
-            enabled_actions=frozenset({"plan", "implement", "test", "complete"})
-        )
-        b = TaskProfile(
-            enabled_actions=frozenset({"implement", "test", "verify", "complete"})
-        )
-        merged = merge_profiles(a, b)
-        assert merged.enabled_actions == frozenset({"implement", "test", "complete"})
+class TestResolveProfile:
+    def test_standalone(self):
+        assert resolve_profile("standalone") is STANDALONE
 
-    def test_override_initial_action_wins(self):
-        a = TaskProfile(initial_action="plan")
-        b = TaskProfile(initial_action="implement")
-        assert merge_profiles(a, b).initial_action == "implement"
+    def test_json(self):
+        profile = resolve_profile(json.dumps({"enabled_actions": ["implement"]}))
+        assert profile.pipeline() == ["implement"]
 
-    def test_base_initial_action_if_override_is_none(self):
-        a = TaskProfile(initial_action="plan")
-        b = TaskProfile(initial_action=None)
-        assert merge_profiles(a, b).initial_action == "plan"
+    def test_bad_json_falls_back(self):
+        assert resolve_profile("{not json") is STANDALONE
 
-    def test_action_instructions_merged(self):
-        a = TaskProfile(action_instructions={"test": "pytest"})
-        b = TaskProfile(action_instructions={"test": "npm test", "implement": "TDD"})
-        merged = merge_profiles(a, b)
-        assert merged.action_instructions["test"] == "npm test"  # override wins
-        assert merged.action_instructions["implement"] == "TDD"
-
-    def test_docker_compose_or(self):
-        a = TaskProfile(docker_compose_available=False)
-        b = TaskProfile(docker_compose_available=True)
-        assert merge_profiles(a, b).docker_compose_available is True
+    def test_unknown_name_falls_back(self):
+        assert resolve_profile("platform") is STANDALONE
 
 
-class TestLoadProjectTaskConfig:
-    def test_returns_none_when_no_file(self, tmp_path: Path):
+class TestProjectConfig:
+    def test_missing_file(self, tmp_path):
         assert load_project_task_config(tmp_path) is None
 
-    def test_loads_valid_yaml(self, tmp_path: Path):
-        config_dir = tmp_path / ".leashd"
-        config_dir.mkdir()
-        config_file = config_dir / "task-config.yaml"
-        config_file.write_text(
-            textwrap.dedent("""\
-            initial_action: plan
-            disabled_actions: [verify, pr]
-            action_instructions:
-              test: "Run pytest -x"
-            """)
+    def test_loads_yaml(self, tmp_path):
+        cfg = tmp_path / ".leashd" / "task-config.yaml"
+        cfg.parent.mkdir()
+        cfg.write_text(
+            textwrap.dedent(
+                """\
+                enabled_actions: [implement, verify, review]
+                action_instructions:
+                  review: focus on migrations
+                """
+            )
         )
         profile = load_project_task_config(tmp_path)
         assert profile is not None
-        assert profile.initial_action == "plan"
-        assert "verify" not in profile.enabled_actions
-        assert "pr" not in profile.enabled_actions
-        assert profile.action_instructions["test"] == "Run pytest -x"
+        assert profile.pipeline() == ["implement", "verify", "review"]
+        assert profile.instruction_for("review") == "focus on migrations"
 
-    def test_returns_none_on_invalid_yaml(self, tmp_path: Path):
-        config_dir = tmp_path / ".leashd"
-        config_dir.mkdir()
-        config_file = config_dir / "task-config.yaml"
-        config_file.write_text("not: [valid: yaml: {{")
+    def test_invalid_yaml_returns_none(self, tmp_path):
+        cfg = tmp_path / ".leashd" / "task-config.yaml"
+        cfg.parent.mkdir()
+        cfg.write_text("- just\n- a list\n")
         assert load_project_task_config(tmp_path) is None
 
-    def test_returns_none_on_non_dict_yaml(self, tmp_path: Path):
-        config_dir = tmp_path / ".leashd"
-        config_dir.mkdir()
-        config_file = config_dir / "task-config.yaml"
-        config_file.write_text("- just a list\n- of items\n")
-        assert load_project_task_config(tmp_path) is None
+
+class TestMergeProfiles:
+    def test_override_phases_win(self):
+        base = TaskProfile(phases=frozenset({"implement"}))
+        override = TaskProfile(phases=frozenset({"implement", "verify", "review"}))
+        assert merge_profiles(base, override).pipeline() == [
+            "implement",
+            "verify",
+            "review",
+        ]
+
+    def test_unset_override_keeps_base(self):
+        base = TaskProfile(phases=frozenset({"implement"}))
+        assert merge_profiles(base, TaskProfile()).pipeline() == ["implement"]
+
+    def test_instructions_merge(self):
+        base = TaskProfile(instructions={"implement": "a", "verify": "b"})
+        override = TaskProfile(instructions={"verify": "c"})
+        merged = merge_profiles(base, override)
+        assert merged.instructions == {"implement": "a", "verify": "c"}

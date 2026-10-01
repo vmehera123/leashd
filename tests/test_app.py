@@ -425,14 +425,15 @@ class TestTmuxReapGating:
             _patched_build_engine(config=config, reap_orphan_tmux=True)
         reap.assert_not_called()
 
-    def test_reaps_when_runtime_is_not_tmux(self, tmp_path):
-        """A runtime switched away from tmux leaves panes nothing will adopt."""
-        config = LeashdConfig(approved_directories=[tmp_path], agent_runtime="codex")
-        with patch(
-            "leashd.agents.runtimes.tmux_session.TmuxSessionManager.kill_owned_sessions"
-        ) as reap:
-            _patched_build_engine(config=config, reap_orphan_tmux=True)
-        reap.assert_called_once()
+    def test_removed_runtime_falls_back_to_tmux(self, tmp_path):
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            config = LeashdConfig(
+                approved_directories=[tmp_path], agent_runtime="codex"
+            )
+        assert config.agent_runtime == "tmux"
+        assert any(e["event"] == "agent_runtime_unavailable" for e in logs)
 
     def test_socket_dir_never_defaults_to_real_home(self, tmp_path):
         """conftest pins the socket dir so no test can reach the live daemon."""

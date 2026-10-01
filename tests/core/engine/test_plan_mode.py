@@ -2645,7 +2645,7 @@ class TestPlanApprovalBehavior:
 
                     b_result = await can_use_tool(
                         "Bash",
-                        {"command": "curl http://example.com"},
+                        {"command": "curl http://203.0.113.5"},
                         None,
                     )
                     bash_results.append(b_result)

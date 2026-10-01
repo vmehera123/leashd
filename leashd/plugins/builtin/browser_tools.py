@@ -7,7 +7,7 @@ The ``agent-browser`` command tables below track the CLI's subcommand surface
     Observation only — auto-allowed by the shipped policies.
 ``mutation``
     Drives the page or the browser session — policy-gated, and auto-approved
-    inside ``/test`` and the ``/task`` verify phase.
+    inside the ``/task`` verify phase.
 ``credential``
     Reaches auth material (cookies, storage, saved logins, clipboard, state
     files). Gated like a mutation but never auto-approved on a caller's
@@ -27,6 +27,7 @@ default (``require_approval``), so a future CLI release fails closed.
 from __future__ import annotations
 
 import re
+import shutil
 from typing import TYPE_CHECKING, Literal
 
 import structlog
@@ -41,6 +42,16 @@ if TYPE_CHECKING:
     from leashd.plugins.base import PluginContext
 
 logger = structlog.get_logger()
+
+PLAYWRIGHT_MCP_HINT = (
+    "The playwright browser backend runs @playwright/mcp through npx, which "
+    "was not found. Install Node.js, then run `npx playwright install chromium`."
+)
+
+
+def playwright_mcp_available() -> bool:
+    return shutil.which("npx") is not None
+
 
 BROWSER_READONLY_TOOLS: frozenset[str] = frozenset(
     {

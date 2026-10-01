@@ -99,6 +99,26 @@ def test_pre_tool_returns_decision(client_tsm):
     assert hso["permissionDecisionReason"] == "echo:Bash"
 
 
+def test_pre_tool_passthrough_reaches_claude_undecided():
+    from leashd.agents.runtimes.tmux_session import _hook_passthrough
+
+    tsm = StubTSM()
+
+    async def _passthrough(body, *, pane_token=None):
+        return _hook_passthrough()
+
+    tsm.on_pre_tool = _passthrough  # type: ignore[method-assign]
+    app = FastAPI()
+    app.include_router(create_tmux_hook_router(tsm))
+    r = TestClient(app).post(
+        "/internal/tmux/hook/PreToolUse",
+        json={"tool_name": "Agent", "tool_input": {}},
+        headers={"X-Leashd-Token": "good-secret"},
+    )
+    assert r.status_code == 200
+    assert r.json() == {"hookSpecificOutput": {"hookEventName": "PreToolUse"}}
+
+
 def test_lifecycle_event_is_dispatched(client_tsm):
     client, tsm = client_tsm
     r = client.post(
@@ -280,7 +300,6 @@ def test_double_prompt_deduped_through_router():
 
         app = FastAPI()
         app.include_router(create_tmux_hook_router(tsm))
-        client = TestClient(app)
         body = {
             "session_id": "u1",
             "cwd": "/work",
@@ -288,8 +307,11 @@ def test_double_prompt_deduped_through_router():
             "tool_input": {"command": "cp a $(date +%s) && ls"},
         }
         h = {"X-Leashd-Token": "good-secret"}
-        r1 = client.post("/internal/tmux/hook/PreToolUse", json=body, headers=h)
-        r2 = client.post("/internal/tmux/hook/PermissionRequest", json=body, headers=h)
+        with TestClient(app) as client:
+            r1 = client.post("/internal/tmux/hook/PreToolUse", json=body, headers=h)
+            r2 = client.post(
+                "/internal/tmux/hook/PermissionRequest", json=body, headers=h
+            )
         assert r1.json()["hookSpecificOutput"]["permissionDecision"] == "allow"
         assert r2.json()["hookSpecificOutput"]["decision"]["behavior"] == "allow"
         # The fix: ONE gatekeeper evaluation for the duplicated hook pair

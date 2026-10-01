@@ -828,11 +828,11 @@ class TestUpdateConfigSections:
         assert data["effort"] == "high"
         assert data["agent_runtime"] == "claude-code"
 
-    def test_merges_agent_runtime(self, fake_config_dir):
+    def test_ignores_removed_agent_runtime(self, fake_config_dir):
         save_global_config({"effort": "medium"})
         update_config_sections({"agent": {"runtime": "codex"}})
         data = load_global_config()
-        assert data["agent_runtime"] == "codex"
+        assert "agent_runtime" not in data
         assert data["effort"] == "medium"
 
     def test_merges_agent_default_mode(self, fake_config_dir):
@@ -898,25 +898,6 @@ class TestUpdateConfigSections:
         update_config_sections({"agent": {"effort": "high"}})
         data = load_global_config()
         assert data["effort"] == "high"
-
-
-class TestUpdateConfigSectionsCodexModel:
-    def test_set_codex_model_in_agent_section(self, fake_config_dir):
-        update_config_sections({"agent": {"codex_model": "gpt-5-codex"}})
-        data = load_global_config()
-        assert data["codex_model"] == "gpt-5-codex"
-
-    def test_clear_codex_model_with_none_removes_key(self, fake_config_dir):
-        save_global_config({"codex_model": "old-codex"})
-        update_config_sections({"agent": {"codex_model": None}})
-        data = load_global_config()
-        assert "codex_model" not in data
-
-    def test_clear_codex_model_with_empty_string_removes_key(self, fake_config_dir):
-        save_global_config({"codex_model": "old-codex"})
-        update_config_sections({"agent": {"codex_model": ""}})
-        data = load_global_config()
-        assert "codex_model" not in data
 
 
 class TestClearDirectorySetting:
@@ -993,11 +974,6 @@ class TestSetWorkspaceSettingsAdvanced:
         assert set_workspace_settings("does-not-exist", effort="low") is False
         # And the workspaces file is unchanged.
         assert load_workspaces_config().get("workspaces", {}) == {}
-
-    def test_codex_model_persisted(self, fake_config_dir, tmp_path):
-        name = self._seed_workspace(tmp_path)
-        assert set_workspace_settings(name, codex_model="gpt-5-codex") is True
-        assert get_workspace_settings(name) == {"codex_model": "gpt-5-codex"}
 
 
 class TestClearWorkspaceSettings:

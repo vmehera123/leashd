@@ -4,8 +4,11 @@ import json
 from pathlib import Path
 from typing import Any, Literal
 
+import structlog
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = structlog.get_logger()
 
 
 def build_directory_names(directories: list[Path]) -> dict[str, Path]:
@@ -61,10 +64,9 @@ class LeashdConfig(BaseSettings):
     approved_directories: list[Path]
 
     agent_runtime: str = "tmux"
-    max_turns: int = 250
+    max_turns: int = 120
     max_tool_calls: int = -1  # -1 = unlimited
     web_max_turns: int = 300
-    test_max_turns: int = 200
     task_max_turns: int = 300
     max_concurrent_agents: int = 5
     agent_timeout_seconds: int = 10800  # 3 hours; 0 = disabled (no wall-clock
@@ -76,18 +78,10 @@ class LeashdConfig(BaseSettings):
     disallowed_tools: list[str] = []
     mcp_servers: dict[str, Any] = {}
     codebase_memory_enabled: bool = True
-    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = "xhigh"
+    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = "medium"
 
-    # Claude agent settings (apply when agent_runtime="claude-cli" or "claude-code")
     claude_model: str | None = None
 
-    # Codex agent settings (only apply when agent_runtime="codex")
-    codex_model: str | None = None
-    codex_sandbox: str | None = None
-    codex_approval: str | None = None
-    codex_search: bool = False
-
-    # tmux runtime settings (only apply when agent_runtime="tmux").
     # Runs a real interactive `claude` TUI in a tmux pane; tool approvals
     # flow back through leashd's safety pipeline via Claude Code HTTP hooks,
     # so this runtime requires web_enabled=true (the hook receiver mounts on
@@ -102,7 +96,7 @@ class LeashdConfig(BaseSettings):
     # 0 disables the age check.
     tmux_hook_timeout_seconds: int = 25  # optional larger floor only; the
     # effective PreToolUse hook timeout is effectively-infinite when the human
-    # wait is unbounded (the default — parity with claude-cli), else sized to
+    # wait is unbounded (the default), else sized to
     # OUTLIVE an explicit finite window (see _pre_tool_hook_timeout)
     tmux_terminal_cols: int = 160
     tmux_terminal_rows: int = 48
@@ -137,10 +131,9 @@ class LeashdConfig(BaseSettings):
 
     policy_files: list[Path] = []
     approval_timeout_seconds: int | None = None
-    # None = wait for the human indefinitely (parity with the claude-cli
-    # runtime); set a positive int to auto-deny after N seconds. Applies to
-    # claude-cli AND tmux identically (the tmux PreToolUse hook is sized to
-    # outlive it). `interaction_timeout_seconds` is an optional override for
+    # None = wait for the human indefinitely; set a positive int to auto-deny
+    # after N seconds (the tmux PreToolUse hook is sized to outlive it).
+    # `interaction_timeout_seconds` is an optional override for
     # the AskUserQuestion + plan-review window; None inherits
     # approval_timeout_seconds, so an effective None = no expiry everywhere.
     interaction_timeout_seconds: int | None = None
@@ -171,7 +164,7 @@ class LeashdConfig(BaseSettings):
     browser_backend: Literal["playwright", "agent-browser"] = "agent-browser"
     browser_user_data_dir: str | None = None
     browser_headless: bool = True
-    browser_auto_approve: bool = False
+    browser_auto_approve: bool = True
 
     # Security-guidance plugin (Claude Code marketplace plugin).
     # OFF by default — opt-in. When on, leashd installs and enables
@@ -189,18 +182,9 @@ class LeashdConfig(BaseSettings):
     task_phase_timeout_seconds: int = 0  # 0 = disabled (default); when >0, the
     # per-phase wall-clock cap the task orchestrator enforces around a phase.
     task_profile: str = "standalone"
-    # Per-phase retry caps — all default to 1.
-    task_plan_max_retries: int = 1
     task_implement_max_retries: int = 1
     task_verify_max_retries: int = 1
     task_review_max_loopbacks: int = 1
-    # Inject the multi-phase ``/test`` workflow as the verify-phase system
-    # prompt (smoke → unit → backend → agentic E2E with browser tools).
-    # OFF by default — the workflow demands infrastructure (dev server,
-    # agent-browser) that isn't available in sandboxed/CI environments,
-    # and the agent escalates when phases can't run. Opt in for full-fat
-    # local dev environments that have the tooling.
-    task_v3_verify_test_mode: bool = False
 
     streaming_enabled: bool = True
     streaming_throttle_seconds: float = 0.15
@@ -210,6 +194,26 @@ class LeashdConfig(BaseSettings):
     log_dir: Path | None = Path(".leashd/logs")
     log_max_bytes: int = 10_485_760
     log_backup_count: int = 5
+
+    @field_validator("agent_runtime", mode="before")
+    @classmethod
+    def fall_back_from_unknown_runtime(cls, v: object) -> str:
+        from leashd.agents.registry import DEFAULT_RUNTIME, get_available_runtime_names
+
+        if v in (None, ""):
+            return DEFAULT_RUNTIME
+        available = get_available_runtime_names()
+        if v not in available:
+            logger.warning(
+                "agent_runtime_unavailable",
+                requested=v,
+                fallback=DEFAULT_RUNTIME,
+                available=available,
+                hint="leashd 2.0 removed the claude-cli, claude-code and codex "
+                "runtimes",
+            )
+            return DEFAULT_RUNTIME
+        return str(v)
 
     @field_validator("approved_directories", mode="before")
     @classmethod
@@ -261,10 +265,9 @@ class LeashdConfig(BaseSettings):
         """Return the turn limit for the given session mode.
 
         ``is_task=True`` applies the autonomous-task ceiling regardless of
-        mode, since task phases reuse mode names (plan/auto/test) that
-        also occur in interactive sessions with tighter limits.
+        mode, since task phases reuse the ``auto`` mode that interactive
+        sessions run under with a tighter limit.
         """
         if is_task:
             return self.task_max_turns
-        limits = {"web": self.web_max_turns, "test": self.test_max_turns}
-        return limits.get(mode, self.max_turns)
+        return self.web_max_turns if mode == "web" else self.max_turns

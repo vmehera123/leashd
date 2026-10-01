@@ -19,7 +19,11 @@ import structlog
 from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse
 
-from leashd.agents.runtimes.tmux_session import _hook_decision, _permreq_decision
+from leashd.agents.runtimes.tmux_session import (
+    STATUS_LINE_EVENT,
+    _hook_decision,
+    _permreq_decision,
+)
 
 if TYPE_CHECKING:
     from leashd.agents.runtimes.tmux_session import TmuxSessionManager
@@ -85,6 +89,10 @@ def create_tmux_hook_router(tsm: TmuxSessionManager) -> APIRouter:
                 logger.error("tmux_permreq_hook_error", exc_info=True)
                 decision = _permreq_decision("deny")
             return JSONResponse(content=decision)
+
+        if event == STATUS_LINE_EVENT:
+            tsm.on_status_line(body, pane_token=pane_token)
+            return JSONResponse(content={})
 
         # Async lifecycle hooks (Stop, SessionStart, SessionEnd, …).
         try:

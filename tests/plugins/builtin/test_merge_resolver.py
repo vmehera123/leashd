@@ -414,10 +414,9 @@ class TestBuildMergeInstruction:
             working_directory="/tmp",
         )
         instruction = build_merge_instruction(config)
-        assert "PHASE 1" in instruction
-        assert "PHASE 2" in instruction
-        assert "PHASE 3" in instruction
-        assert "PHASE 4" in instruction
+        assert "RESOLVE:" in instruction
+        assert "VERIFY:" in instruction
+        assert "COMPLETE:" in instruction
 
     def test_lists_conflicted_files(self):
         config = MergeConfig(
@@ -439,7 +438,7 @@ class TestBuildMergeInstruction:
         )
         instruction = build_merge_instruction(config)
         assert "Never silently discard" in instruction
-        assert "Do NOT commit" in instruction
+        assert "Don't commit" in instruction
 
 
 # ── Formatter ────────────────────────────────────────────────────────

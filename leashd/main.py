@@ -76,16 +76,13 @@ async def _create_message_store(config: LeashdConfig) -> MessageStore | None:
     return store
 
 
-def _maybe_tmux_session_manager(config: LeashdConfig) -> Any:
+def _tmux_session_manager(config: LeashdConfig) -> Any:
     """Construct the shared TmuxSessionManager singleton for the WebUI app.
 
-    Only when the tmux runtime is active — the same singleton instance is
-    later resolved by ``build_engine`` (to bind the safety pipeline) and by
-    ``TmuxAgent`` (to drive panes), so the hook receiver and the runtime
-    share one manager.
+    The same singleton instance is later resolved by ``build_engine`` (to
+    bind the safety pipeline) and by ``TmuxAgent`` (to drive panes), so the
+    hook receiver and the runtime share one manager.
     """
-    if config.agent_runtime != "tmux":
-        return None
     from leashd.agents.runtimes.tmux_session import (
         get_or_create_tmux_session_manager,
     )
@@ -93,18 +90,15 @@ def _maybe_tmux_session_manager(config: LeashdConfig) -> Any:
     return get_or_create_tmux_session_manager(config)
 
 
-async def _maybe_start_tmux_hook_server(config: LeashdConfig) -> Any:
+async def _start_tmux_hook_server(config: LeashdConfig) -> Any:
     """Start a loopback-only Claude Code hook receiver when needed.
 
     WebUI / multi mode already mount the hook router on the WebUI app, so a
     standalone receiver is only needed for Telegram-only / CLI-only — there
     the tmux runtime would otherwise have no endpoint for its safety hooks.
-    Returns the running ``TmuxHookServer`` (caller must ``stop()`` it) or
-    ``None`` when the runtime isn't tmux.
+    Returns the running ``TmuxHookServer``; the caller must ``stop()`` it.
     """
-    tsm = _maybe_tmux_session_manager(config)
-    if tsm is None:
-        return None
+    tsm = _tmux_session_manager(config)
     from leashd.web.tmux_server import TmuxHookServer
 
     server = TmuxHookServer(config, tsm)
@@ -119,7 +113,7 @@ async def _run_cli(config: LeashdConfig) -> None:
     # unroutable and triggers the orphan reap against the very panes being
     # adopted.
     await engine.startup()
-    hook_server = await _maybe_start_tmux_hook_server(config)
+    hook_server = await _start_tmux_hook_server(config)
 
     logger.info(
         "cli_starting",
@@ -165,7 +159,7 @@ async def _run_telegram(config: LeashdConfig) -> None:
     engine = build_engine(config, connector=connector, reap_orphan_tmux=True)
     # Adopt before the hook receiver opens — see _run_cli.
     await engine.startup()
-    hook_server = await _maybe_start_tmux_hook_server(config)
+    hook_server = await _start_tmux_hook_server(config)
     try:
         await connector.start()
     except Exception:
@@ -250,7 +244,7 @@ async def _run_web(config: LeashdConfig) -> None:
     from leashd.connectors.web import WebConnector
 
     message_store = await _create_message_store(config)
-    tmux_sm = _maybe_tmux_session_manager(config)
+    tmux_sm = _tmux_session_manager(config)
     connector = WebConnector(
         config, message_store=message_store, tmux_session_manager=tmux_sm
     )
@@ -299,7 +293,7 @@ async def _run_multi(config: LeashdConfig) -> None:
     from leashd.connectors.web import WebConnector
 
     message_store = await _create_message_store(config)
-    tmux_sm = _maybe_tmux_session_manager(config)
+    tmux_sm = _tmux_session_manager(config)
     telegram_connector = TelegramConnector(
         config.telegram_bot_token,  # type: ignore[arg-type]
         api_base_url=config.telegram_api_base_url,

@@ -6,6 +6,8 @@ import asyncio
 import contextlib
 import json
 import shutil
+import sys
+import unicodedata
 from unittest.mock import MagicMock
 
 import pytest
@@ -20,8 +22,10 @@ from leashd.agents.runtimes.tmux_session import (
     TmuxSessionManager,
     TmuxTurn,
     TypingStep,
+    _detect_native_dialog,
     _hook_decision,
     _hook_is_decisive,
+    _hook_passthrough,
     _hook_to_permreq,
     _is_box_rule,
     _perm_dialog_subject,
@@ -39,6 +43,10 @@ from leashd.agents.types import PermissionAllow, PermissionDeny
 from leashd.core.config import LeashdConfig
 from leashd.core.interactions import PlanReviewDecision
 from leashd.exceptions import AgentError
+
+_NEEDS_FULL_MATCH = pytest.mark.skipif(
+    sys.version_info < (3, 13), reason="PurePath.full_match is Python 3.13+"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -381,6 +389,7 @@ class _AllowStubGatekeeper:
         return self._blanket, set(self._per_tool)
 
 
+@_NEEDS_FULL_MATCH
 def test_credential_deny_rules_mirror_analyzer_floor():
     """T-8: the native deny globs must cover every credential file the
     analyzer flags (_CREDENTIAL_PATTERNS) that actually lives directly in
@@ -441,6 +450,7 @@ REMOTE_COMMANDS_MENTIONING_CREDENTIALS = [
 ]
 
 
+@_NEEDS_FULL_MATCH
 def test_native_deny_floor_ignores_remote_and_mentioned_credential_paths():
     """Regression for the 2026-09-03 neomi-demo incident: the agent connected
     to the remote host fine, then every remote command that merely *mentioned*
@@ -550,8 +560,8 @@ def test_credential_files_policy_rule_covers_nested_paths_for_read_and_edit():
 
 
 def test_managed_settings_carry_credential_deny_floor(cfg):
-    """T-8: both the tmux and the claude-cli auto-floor managed settings inject
-    a native permissions.deny floor for credential reads/writes."""
+    """T-8: managed settings inject a native permissions.deny floor for
+    credential reads/writes."""
     tsm = TmuxSessionManager(cfg)
     deny = json.loads(tsm.write_managed_settings("s1").read_text())["permissions"][
         "deny"
@@ -563,10 +573,6 @@ def test_managed_settings_carry_credential_deny_floor(cfg):
     # and Read(path) only, and warns at startup for every Write rule it will
     # never consult. Edit already covers Write/NotebookEdit/MultiEdit.
     assert not any(r.startswith("Write(") for r in deny)
-    cli_deny = json.loads(tsm.write_auto_floor_settings("s2").read_text())[
-        "permissions"
-    ]["deny"]
-    assert "Read(~/.env)" in cli_deny
 
 
 def test_pre_tool_hook_timeout_outlives_human_window(cfg):
@@ -1659,24 +1665,18 @@ def _parity_session(tmp_path):
     )
 
 
-def test_build_agent_cli_args_runtime_parity(cfg, tmp_path):
-    """tmux (interactive) and claude_cli (headless) must agree on every
-    agent/model/instruction flag, except the two documented interactive
-    differences (no --max-turns; Task/Agent suppressed)."""
+def test_build_agent_cli_args_flags(cfg, tmp_path):
     from leashd.agents.runtimes._helpers import build_agent_cli_args
 
-    sess = _parity_session(tmp_path)
-    common = {
-        "config": cfg,
-        "session": sess,
-        "settings": None,
-        "perm_mode": "acceptEdits",
-        "model": "claude-x",
-        "append_system_prompt": "SYS",
-        "resume_token": None,
-    }
-    headless = build_agent_cli_args(**common, interactive=False)
-    interactive = build_agent_cli_args(**common, interactive=True)
+    args = build_agent_cli_args(
+        config=cfg,
+        session=_parity_session(tmp_path),
+        settings=None,
+        perm_mode="acceptEdits",
+        model="claude-x",
+        append_system_prompt="SYS",
+        resume_token=None,
+    )
 
     for flag in (
         "--model",
@@ -1686,31 +1686,15 @@ def test_build_agent_cli_args_runtime_parity(cfg, tmp_path):
         "--permission-mode",
         "--disallowedTools",
     ):
-        assert flag in headless, flag
-        assert flag in interactive, flag
-    assert (
-        headless[headless.index("--model") + 1]
-        == interactive[interactive.index("--model") + 1]
-        == "claude-x"
-    )
-    assert (
-        headless[headless.index("--setting-sources") + 1]
-        == interactive[interactive.index("--setting-sources") + 1]
-        == "project,user"
-    )
+        assert flag in args, flag
+    assert args[args.index("--model") + 1] == "claude-x"
+    assert args[args.index("--setting-sources") + 1] == "project,user"
+    assert "--max-turns" not in args
 
-    # Documented interactive-inherent differences.
-    assert "--max-turns" in headless
-    assert "--max-turns" not in interactive
-
-    di = interactive[interactive.index("--disallowedTools") + 1].split(",")
-    assert "Task" in di  # the "plan agent" fan-out, killed
-    assert "Agent" in di
-    assert any(t.startswith("mcp__playwright__") for t in di)  # agent-browser parity
-    dh = headless[headless.index("--disallowedTools") + 1].split(",")
-    assert "Task" not in dh  # headless never fans out
-    assert "Agent" not in dh
-    assert any(t.startswith("mcp__playwright__") for t in dh)
+    disallowed = args[args.index("--disallowedTools") + 1].split(",")
+    assert "Task" not in disallowed
+    assert "Agent" not in disallowed
+    assert any(t.startswith("mcp__playwright__") for t in disallowed)
 
 
 def test_build_agent_cli_args_web_mode_disallows_webfetch(cfg, tmp_path):
@@ -1745,7 +1729,6 @@ def test_build_agent_cli_args_web_mode_disallows_webfetch(cfg, tmp_path):
         model="claude-x",
         append_system_prompt="SYS",
         resume_token=None,
-        interactive=True,
     )
     disallowed = args[args.index("--disallowedTools") + 1].split(",")
     assert "WebFetch" in disallowed
@@ -1771,7 +1754,6 @@ def test_build_agent_cli_args_web_mode_disallows_webfetch(cfg, tmp_path):
         model="claude-x",
         append_system_prompt="SYS",
         resume_token=None,
-        interactive=True,
     )
     disallowed = args[args.index("--disallowedTools") + 1].split(",")
     assert "WebFetch" not in disallowed
@@ -1797,15 +1779,10 @@ def test_build_agent_cli_args_resume_renders_the_system_prompt_fresh(cfg, tmp_pa
     from leashd.agents.runtimes._helpers import build_agent_cli_args
 
     common = _flag_args(cfg, tmp_path)
-    for interactive in (True, False):
-        resumed = build_agent_cli_args(
-            **common, resume_token="uuid-1", interactive=interactive
-        )
-        assert resumed[resumed.index("--system-prompt-snapshot") + 1] == "off"
-        fresh = build_agent_cli_args(
-            **common, resume_token=None, interactive=interactive
-        )
-        assert "--system-prompt-snapshot" not in fresh
+    resumed = build_agent_cli_args(**common, resume_token="uuid-1")
+    assert resumed[resumed.index("--system-prompt-snapshot") + 1] == "off"
+    fresh = build_agent_cli_args(**common, resume_token=None)
+    assert "--system-prompt-snapshot" not in fresh
     old_cli = build_agent_cli_args(
         **common, resume_token="uuid-1", cli_version=(2, 1, 265)
     )
@@ -1813,16 +1790,12 @@ def test_build_agent_cli_args_resume_renders_the_system_prompt_fresh(cfg, tmp_pa
     assert "--system-prompt-snapshot" not in old_cli
 
 
-def test_build_agent_cli_args_passes_xhigh_through(cfg, tmp_path):
-    """``xhigh`` is its own rung since 2.1.111; mapping it to ``max`` ran every
-    default session one rung hotter than configured."""
+def test_build_agent_cli_args_passes_effort_through(cfg, tmp_path):
     from leashd.agents.runtimes._helpers import build_agent_cli_args
 
     common = _flag_args(cfg, tmp_path)
-    current = build_agent_cli_args(**common, resume_token=None, cli_version=(2, 1, 270))
-    assert current[current.index("--effort") + 1] == "xhigh"
-    old_cli = build_agent_cli_args(**common, resume_token=None, cli_version=(2, 1, 110))
-    assert old_cli[old_cli.index("--effort") + 1] == "high"
+    args = build_agent_cli_args(**common, resume_token=None, cli_version=(2, 1, 270))
+    assert args[args.index("--effort") + 1] == cfg.effort
 
 
 def test_build_claude_command_gates_flags_on_the_preflighted_cli(cfg, tmp_path):
@@ -1864,8 +1837,7 @@ def test_build_claude_command_has_parity_flags(cfg, tmp_path):
     for flag in ("--effort", "--setting-sources", "--model", "--disallowedTools"):
         assert flag in cmd, flag
     assert "--max-turns" not in cmd
-    assert "Task" in cmd
-    assert "Agent" in cmd
+    assert "mcp__playwright__" in cmd
     assert sysprompt_path is not None
     assert "--append-system-prompt-file" in cmd
     assert "--append-system-prompt SYS" not in cmd
@@ -1930,8 +1902,7 @@ def test_build_claude_command_hoists_tool_lists_into_settings(cfg, tmp_path):
     assert "playwright" not in cmd
     deny = json.loads(settings_path.read_text())["permissions"]["deny"]
     assert "Read(**/.env)" in deny, "pre-existing entries must survive"
-    assert "Task" in deny
-    assert "Agent" in deny
+    assert any(t.startswith("mcp__playwright__") for t in deny)
 
 
 def test_build_claude_command_keeps_tool_lists_when_settings_unreadable(cfg, tmp_path):
@@ -1956,8 +1927,7 @@ def test_build_claude_command_keeps_tool_lists_when_settings_unreadable(cfg, tmp
     )
 
     assert "--disallowedTools" in cmd
-    assert "Task" in cmd
-    assert "Agent" in cmd
+    assert "mcp__playwright__" in cmd
 
 
 def test_build_claude_command_spills_mcp_config_to_file(cfg, tmp_path):
@@ -3075,22 +3045,6 @@ def test_write_managed_settings_includes_permission_request(cfg):
     assert data["hooks"]["Stop"][0]["hooks"][0]["async"] is True
 
 
-def test_write_auto_floor_settings_only_sync_hooks(cfg):
-    tsm = TmuxSessionManager(cfg)
-    path = tsm.write_auto_floor_settings("s1")
-    assert path.name == "s1.cli.settings.json"
-    data = json.loads(path.read_text())
-    assert set(data["hooks"]) == {"PreToolUse", "PermissionRequest"}
-    pre = data["hooks"]["PreToolUse"][0]["hooks"][0]
-    assert pre["url"].endswith("/internal/tmux/hook/PreToolUse")
-    # Auto-floor PreToolUse is hard-deny/defer only (never awaits a human) →
-    # fast bounded timeout; PermissionRequest re-enters the full pipeline →
-    # human-gated → effectively-infinite under the no-expiry default.
-    assert pre["timeout"] == max(cfg.tmux_hook_timeout_seconds, 60)
-    pr = data["hooks"]["PermissionRequest"][0]["hooks"][0]
-    assert pr["timeout"] == _HOOK_NO_EXPIRY_SECONDS
-
-
 async def test_on_pre_tool_auto_defers_safe_tool(cfg):
     tsm = TmuxSessionManager(cfg)
     cs = _session(tsm, mode="auto")
@@ -3107,7 +3061,7 @@ async def test_on_pre_tool_auto_defers_safe_tool(cfg):
             "permission_mode": "auto",
         }
     )
-    assert out["hookSpecificOutput"]["permissionDecision"] == "defer"
+    assert out == _hook_passthrough()
     assert gk.floor_calls
     assert not gk.check_calls
 
@@ -3167,7 +3121,7 @@ async def test_on_pre_tool_file_edit_defers_in_edit_mode(cfg):
             "permission_mode": "acceptEdits",
         }
     )
-    assert out["hookSpecificOutput"]["permissionDecision"] == "defer"
+    assert out == _hook_passthrough()
     assert gk.floor_calls
     assert not gk.check_calls
 
@@ -3187,7 +3141,7 @@ async def test_on_pre_tool_file_edit_defers_in_default_mode(cfg):
             "permission_mode": "default",
         }
     )
-    assert out["hookSpecificOutput"]["permissionDecision"] == "defer"
+    assert out == _hook_passthrough()
     assert gk.floor_calls
     assert not gk.check_calls
 
@@ -3439,37 +3393,6 @@ async def test_on_permission_request_enter_plan_mode_denies(cfg):
     assert out["hookSpecificOutput"]["decision"]["behavior"] == "deny"
 
 
-def test_register_unregister_cli_session(cfg):
-    tsm = TmuxSessionManager(cfg)
-    sp = tsm.write_auto_floor_settings("clis1")
-    tsm.register_cli_session(
-        session_id="clis1",
-        chat_id="web:c1",
-        user_id="u1",
-        working_directory="/work",
-        mode="auto",
-        task_run_id=None,
-        plan_origin=None,
-        last_prompt="do x",
-        settings_path=sp,
-    )
-    token = json.loads(sp.read_text())["hooks"]["PreToolUse"][0]["hooks"][0]["headers"][
-        "X-Leashd-Pane"
-    ]
-    assert tsm._by_pane_token[token] == "clis1"
-    cs = tsm._bind_uuid("claude-uuid-1", pane_token=token)
-    assert cs is not None
-    assert cs.session_id == "clis1"
-    assert cs.last_prompt == "do x"
-    assert sp.exists()
-
-    tsm.unregister_cli_session("clis1")
-    assert "clis1" not in tsm._sessions
-    assert token not in tsm._by_pane_token
-    assert tsm._bind_uuid("claude-uuid-2", pane_token=token) is None
-    assert not sp.exists()
-
-
 # ---------------------------------------------------------------------------
 # PreToolUse/PermissionRequest double-prompt dedupe + native-selector drive
 #
@@ -3641,7 +3564,7 @@ async def test_permission_request_not_deduped_for_native_auto_defer(cfg):
         "permission_mode": "auto",
     }
     pre = await tsm.on_pre_tool(dict(body))
-    assert pre["hookSpecificOutput"]["permissionDecision"] == "defer"
+    assert pre == _hook_passthrough()
     permreq = await tsm.on_permission_request(dict(body))
     # Full pipeline ran in PermissionRequest (the native-auto escalation
     # contract) — NOT a deduped deny.
@@ -3863,7 +3786,9 @@ def _pane_clock(monkeypatch, pane):
 
     import leashd.agents.runtimes.tmux_session as ts
 
-    monkeypatch.setattr(ts, "time", SimpleNamespace(monotonic=lambda: pane.now))
+    monkeypatch.setattr(
+        ts, "time", SimpleNamespace(monotonic=lambda: pane.now, time=lambda: pane.now)
+    )
 
 
 _IDLE_AFTER_DENY = "⏺ Read(crp-desktop-t1.png)\n  ⎿  read\n ⏵⏵ auto mode on"
@@ -4093,7 +4018,11 @@ async def test_perm_subject_matches_a_bash_command_truncated_by_the_pane(cfg):
     )
 
     assert subject == PermDialogSubject(
-        ("set -a && source .env &&",), False, "Bash command", command
+        ("set -a && source .env &&",),
+        False,
+        "Bash command",
+        command,
+        tail="".join(command.split())[-48:],
     )
     assert cs.perm_dialog_is_about(truncated, subject) is True
     assert cs.perm_dialog_is_about(_WRITES_OWN_DIALOG, subject) is False
@@ -4225,6 +4154,54 @@ def test_the_side_panel_is_cut_at_its_gutter():
     assert _without_side_panel(_tall_bash_dialog()) == _tall_bash_dialog()
     assert _without_side_panel(_IDLE_MID_TURN) == _IDLE_MID_TURN
     assert _without_side_panel("") == ""
+
+
+def _tmux_capture_row(text: str, cols: int) -> str:
+    wide = sum(unicodedata.east_asian_width(ch) in ("W", "F") for ch in text)
+    return f"{text:<{cols - wide}}"
+
+
+def test_a_reply_with_wide_characters_does_not_keep_the_panel():
+    """The 2026-09-26 phantom question. A reply listing "✅ Yes / ❌ No" sat
+    beside a /diff panel showing a test fixture's "Esc to cancel". tmux
+    captures each emoji as one character in two cells, so that row's panel
+    text landed two indices left, no column read blank, the panel was kept,
+    and the reply's numbered list was bridged as a dialog six times."""
+    reply = [
+        "⏺ I'd suggest:",
+        "  1. Buttons on /screen whenever a prompt is showing: ✅ Yes / ❌ No",
+        "  2. Stale-tap guard. Each button carries a fingerprint",
+        "  3. Auto-release. If a prompt sits for N minutes, press Escape",
+        "",
+        "",
+        _LEFT_RULE,
+        "❯ ",
+        _LEFT_RULE,
+        "  ⏵⏵ auto mode on (shift+tab to cycle)",
+    ]
+    panel = [
+        _PANEL_RULE,
+        "+your `~/.claude/settings.json` default stays as it was.",
+        '  13 +        " ❯ 1. Yes\\n"',
+        '  14 +        "   2. No\\n"',
+        '  15 +        " Esc to cancel · Tab to amend"',
+        _PANEL_RULE,
+        "  16 +    )",
+        "  17 +",
+    ]
+    screen = "\n".join(
+        f"{_tmux_capture_row(row, _LEFT_COLS)} {side}".rstrip()
+        for row, side in zip(
+            reply, panel + [""] * (len(reply) - len(panel)), strict=True
+        )
+    )
+
+    cut = _without_side_panel(screen)
+
+    assert "Esc to cancel" in screen
+    assert "Esc to cancel" not in cut
+    assert "✅ Yes / ❌ No" in cut
+    assert _detect_native_dialog(cut) is None
 
 
 async def test_a_side_panel_rule_under_the_command_no_longer_hides_it(
@@ -4784,6 +4761,181 @@ async def test_perm_subject_falls_back_to_the_description_when_the_head_scrolls_
     assert cs.perm_dialog_is_about(scrolled, subject) is True
 
 
+_UNDESCRIBED_HEREDOC = (
+    "cd /Users/me/projects/leadline/specs/demo; uv run python - <<'EOF'\n"
+    "from pathlib import Path\n"
+    + "\n".join(f"s = s.replace('old_{n}', 'new_{n}')" for n in range(40))
+    + "\np.write_text(s)\nEOF\n"
+    'uv run tss reset 2>&1 | tail -2; uv run python -c "\n'
+    "for r in fidelity.all_checks(conn, Path('../source')):\n"
+    "  print('##', r['contract'].key, 'unexplained', r['unexplained'])\n"
+    "  for d in s['count_diffs'][:6]: print('      DIFF', d)\n"
+    '"'
+)
+
+
+def _scrolled_undescribed_dialog(command: str) -> str:
+    body = [f"   │ {ln}" for ln in command.splitlines()[-12:]]
+    body[2] += " " * 40 + "No changes this session"
+    return (
+        "\n".join(body) + "\n"
+        "   Run shell command\n"
+        "\n"
+        " Ask rule Bash(*.key*) overrides auto mode for this command.\n"
+        " /permissions to let auto mode decide\n"
+        "\n"
+        " Do you want to proceed?\n"
+        " ❯ 1. Yes\n"
+        "   2. Yes, and don’t ask again for: uv run *\n"
+        "   3. No\n"
+        "\n"
+        " Esc to cancel · Tab to amend"
+    )
+
+
+async def test_an_undescribed_command_taller_than_the_pane_is_named_by_its_tail(
+    cfg, no_real_sleep, monkeypatch
+):
+    """The leadline wedge. An 86-line heredoc with no description scrolled its
+    head and the box header off the pane, and claude's generic "Run shell
+    command" was all that was left of a description, so the approved drive
+    matched nothing and never pressed Yes. The command's end, painted just
+    above the question, still names the box."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    subject = _perm_dialog_subject("Bash", {"command": _UNDESCRIBED_HEREDOC})
+    assert subject is not None
+    dialog = _scrolled_undescribed_dialog(_UNDESCRIBED_HEREDOC)
+    assert "cd /Users/me" not in dialog
+    assert "Bash command" not in dialog
+
+    pane = _TimedPane([_IDLE_MID_TURN] * 2 + [dialog] * 3 + [_IDLE_MID_TURN])
+    _pane_clock(monkeypatch, pane)
+    cs.attach(object(), pane)
+
+    assert cs.perm_dialog_is_about(dialog, subject) is True
+    answered = await cs.answer_perm_selector(allow=True, timeout=8.0, subject=subject)
+
+    assert answered is True
+    assert pane.sent == [("Enter", False)]
+
+
+def test_a_stuck_prompt_is_rejected_only_while_it_is_the_one_shown(cfg):
+    """A tap carries the fingerprint of the dialog it was shown for. By the
+    time it lands another dialog may be up, and rejecting that one would
+    answer a prompt the user never saw."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    pane = _FakePane([_tall_bash_dialog()])
+    cs.attach(object(), pane)
+
+    shown = tsm.stuck_permission_id(cs)
+    assert shown is not None
+
+    pane._screens = [_PROBE_BASH_DIALOG]
+    assert tsm.reject_stuck_permission(cs, shown, source="chat") is False
+    assert pane.sent == []
+
+    pane._screens = [_tall_bash_dialog()]
+    assert tsm.reject_stuck_permission(cs, shown, source="chat") is True
+    assert pane.sent == [("Escape", False)]
+
+
+def test_a_prompt_a_hook_is_still_deciding_is_not_stuck(cfg):
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    cs.attach(object(), _FakePane([_tall_bash_dialog()]))
+    cs.permission_hooks_inflight = 1
+
+    assert tsm.stuck_permission_id(cs) is None
+    assert tsm.reject_stuck_permission(cs, None, source="timeout") is False
+
+
+def test_an_idle_composer_has_no_stuck_prompt(cfg):
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    cs.attach(object(), _FakePane([_IDLE_MID_TURN]))
+
+    assert tsm.stuck_permission_id(cs) is None
+
+
+_PANEL_MARKED_DIALOG = [
+    "──────────────────────────────────────────────────────────────────────────────────────────",
+    " Bash command",
+    "",
+    "   │ cd /private/tmp/leashd_fix_probe/p2/missing-dir-for-probexxxxxxx; sed -i '' 's/",
+    '   │ "additional stations": "additional",/    "additional stations": "additional",\\n',
+    '   │  "total weekday": "total weekday count",\\n    "weekday count": "total weekday',
+    '   │ count",/\' tss/schedule5.py; uv run tss reset 2>&1 | tail -1; uv run python -c "',
+    "   │ from pathlib import Path",
+    "   │ from tss import db, fidelity",
+    "   │ conn=db.connect('tss.db')",
+    "   │ for r in fidelity.all_checks(conn, Path('../source')):",
+    "   │   print('##', r['contract'].key, 'unexplained', r['unexplained'], [(s['sheet'],",
+    "   │ s['cells'], s['carried'], s['queued'], s['source_slots'], s['register_slots']) for",
+    "   │ s in r['sheets']])",
+    "   │   for s in r['sheets']:",
+    "   │     for m in s['missing'][:8]: print('      MISSING', m)",
+    '   │ "; sqlite3 tss.db "select code, count(*) from queue_items group by code order by 2',
+    '   │ desc"; sqlite3 tss.db "select count(*) from versions where kind=\'right\'"',
+    "   Run shell command",
+    "",
+    " Ask rule Bash(*.key*) overrides auto mode for this command.",
+    " /permissions to let auto mode decide",
+    "",
+    " Do you want to proceed?",
+    " ❯ 1. Yes",
+    "   2. Yes, and don’t ask again for: cd *",
+    "   3. No",
+    "",
+    " Esc to cancel · Tab to amend",
+]
+_PANEL_MARKED_COMMAND = (
+    'cd /private/tmp/leashd_fix_probe/p2/missing-dir-for-probexxxxxxx; sed -i \'\' \'s/    "additional stations": "additional",/    "additional stations": "additional",\\n    "total weekday": "total weekday count",\\n    "weekday count": "total weekday count",/\' tss/schedule5.py; uv run tss reset 2>&1 | tail -1; uv run python -c "\n'
+    "from pathlib import Path\n"
+    "from tss import db, fidelity\n"
+    "conn=db.connect('tss.db')\n"
+    "for r in fidelity.all_checks(conn, Path('../source')):\n"
+    "  print('##', r['contract'].key, 'unexplained', r['unexplained'], [(s['sheet'], s['cells'], s['carried'], s['queued'], s['source_slots'], s['register_slots']) for s in r['sheets']])\n"
+    "  for s in r['sheets']:\n"
+    "    for m in s['missing'][:8]: print('      MISSING', m)\n"
+    '"; sqlite3 tss.db "select code, count(*) from queue_items group by code order by 2 desc"; sqlite3 tss.db "select count(*) from versions where kind=\'right\'"'
+)
+
+
+@pytest.mark.parametrize("marked_row", range(len(_PANEL_MARKED_DIALOG)))
+def test_a_sparse_side_panel_mark_does_not_disown_the_dialog(cfg, marked_row):
+    """The leadline 10s stall, from claude 2.1.283's real render. A sparse
+    side panel paints only a "✕" and "No changes this session", too little
+    to be cut away, so the mark stays on whichever dialog row shares its
+    screen row. On the command's first row it made the command read as
+    another call's, and the approved drive waited out its window."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    cs.attach(object(), _FakePane([""]))
+    subject = _perm_dialog_subject("Bash", {"command": _PANEL_MARKED_COMMAND})
+    assert subject is not None
+    rows = [row.ljust(90) for row in _PANEL_MARKED_DIALOG]
+    rows[0] += " " * 58 + "✕"
+    rows[marked_row] += " " * 16 + "No changes this session"
+
+    assert cs.perm_dialog_is_about("\n".join(rows), subject) is True
+
+
+async def test_a_stranger_command_tail_does_not_claim_a_scrolled_dialog(cfg):
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    cs.attach(object(), _FakePane([""]))
+    subject = _perm_dialog_subject("Bash", {"command": _UNDESCRIBED_HEREDOC})
+    assert subject is not None
+    stranger = _UNDESCRIBED_HEREDOC.replace("'      DIFF', d", "'      MISSING', m")
+
+    assert (
+        cs.perm_dialog_is_about(_scrolled_undescribed_dialog(stranger), subject)
+        is False
+    )
+
+
 async def test_an_allow_keeps_looking_past_the_appearance_window(
     cfg, no_real_sleep, monkeypatch
 ):
@@ -5138,7 +5290,7 @@ async def test_ungated_auto_tool_never_touches_the_pane(cfg, no_real_sleep):
         with contextlib.suppress(Exception):
             await asyncio.wait_for(t, timeout=2)
 
-    assert pre["hookSpecificOutput"]["permissionDecision"] == "defer"
+    assert pre == _hook_passthrough()
     assert pane.sent == []
 
 
@@ -8907,6 +9059,253 @@ def test_cursor_block_stops_at_differently_indented_body_text():
     ]
 
 
+_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max", "ultracode"]
+_EFFORT_SCALE_COL = 49
+_EFFORT_LABELS_ROW = (
+    " " * _EFFORT_SCALE_COL
+    + "low     medium     high     xhigh      max       ultracode"
+)
+_EFFORT_SESSION_HINT = (
+    "   ←/→ to adjust · Enter to confirm · s for this session only · Esc to cancel"
+)
+
+
+def _effort_slider(level: str, *, hint: str = _EFFORT_SESSION_HINT) -> str:
+    """claude 2.1.281's ``/effort`` panel, with the marker over ``level``."""
+    import re
+
+    label = re.search(rf"(?<!\S){level}(?!\S)", _EFFORT_LABELS_ROW)
+    assert label is not None
+    marker = label.start() + (len(level) - 1) // 2
+    track = "".join(
+        "▲" if col == marker else "┆" if col == 92 else "─"
+        for col in range(_EFFORT_SCALE_COL, _EFFORT_SCALE_COL + 62)
+    )
+    return "\n".join(
+        [
+            "▔" * 160,
+            "   Effort",
+            "",
+            " " * _EFFORT_SCALE_COL + "Faster" + " " * 49 + "Smarter",
+            " " * _EFFORT_SCALE_COL + track,
+            _EFFORT_LABELS_ROW,
+            " " * 94 + "xhigh + workflows",
+            "",
+            hint,
+        ]
+    )
+
+
+_REPLY_ABOVE_EFFORT_SLIDER = (
+    "  To ship:\n"
+    "  1. Push. The deploy migrates to 0021.\n"
+    "  2. Check that the next Claude run records its cost.\n"
+    "  3. Confirm the Gmail Sent folder name for info@. The default is [Gmail]/Sent Mail;\n"
+    "     older UK accounts use [Google Mail]/Sent Mail.\n"
+    '  4. Tick "Also read emails from people" on Check Tender Emails.\n'
+    "  5. Send one test reply to ourselves.\n"
+    "\n"
+    '  The spec\'s Status, "Start here" and "Step 4 as built" sections are updated.\n'
+    "\n"
+    "✻ Worked for 1h 22m 52s · done 12:56 AM\n" + _effort_slider("xhigh")
+)
+
+
+def test_effort_slider_under_a_numbered_reply_is_bridged_as_the_slider():
+    """The reported bug. ``/effort`` sent from chat opened claude's slider
+    under a reply that ended on a numbered "To ship" list, and leashd bridged
+    that list as the dialog's options, below the question "To ship:". A tap
+    would have typed its digit into the slider and pressed Enter, saving the
+    unchanged level as the user's default."""
+    from leashd.agents.runtimes.tmux_session import _detect_native_dialog
+
+    match = _detect_native_dialog(_REPLY_ABOVE_EFFORT_SLIDER)
+    assert match is not None
+    assert match.name == "slider_dialog"
+    assert match.slider is True
+    assert match.question == "Effort (this session only)"
+    assert [o["label"] for o in match.options] == _EFFORT_LEVELS
+    assert match.selected_row_index == _EFFORT_LEVELS.index("xhigh")
+
+
+def test_numbered_rows_above_a_rule_are_transcript():
+    from leashd.agents.runtimes.tmux_session import _selector_block_options
+
+    assert _selector_block_options(_REPLY_ABOVE_EFFORT_SLIDER) == []
+
+
+def test_numbered_reply_above_the_idle_composer_is_not_a_dialog():
+    """The composer's rules stand between a reply and the footer's hint."""
+    from leashd.agents.runtimes.tmux_session import _detect_native_dialog
+
+    screen = (
+        "  To ship:\n"
+        "  1. Push.\n"
+        "  2. Check the cost.\n"
+        f"{_COMPOSER_RULE}\n"
+        "❯ \n"
+        f"{_COMPOSER_RULE}\n"
+        "  Esc to cancel · ⏵⏵ auto mode on (shift+tab to cycle)"
+    )
+    assert _detect_native_dialog(screen) is None
+
+
+@pytest.mark.parametrize("level", _EFFORT_LEVELS)
+def test_slider_position_is_the_label_under_the_marker(level):
+    from leashd.agents.runtimes.tmux_session import _read_slider
+
+    slider = _read_slider(_effort_slider(level))
+    assert slider is not None
+    assert slider.labels == _EFFORT_LEVELS
+    assert slider.position == _EFFORT_LEVELS.index(level)
+    assert slider.title == "Effort"
+
+
+def test_model_picker_effort_row_is_not_a_slider():
+    """claude 2.1.281's ``/model`` picker carries an effort row that also says
+    ``←/→ to adjust``. It is still the numbered picker."""
+    from leashd.agents.runtimes.tmux_session import _detect_native_dialog, _read_slider
+
+    screen = (
+        "▔" * 160 + "\n"
+        "   Select model\n"
+        "     1. Default (recommended)  Opus 5.5 with 1M context\n"
+        "   ❯ 2. Opus ✔                 Opus 5.5\n"
+        "   ● High effort ←/→ to adjust\n"
+        "   Enter to set as default · s to use this session only · Esc to cancel"
+    )
+    assert _read_slider(screen) is None
+    match = _detect_native_dialog(screen)
+    assert match is not None
+    assert match.numbered is True
+    assert match.slider is False
+
+
+def test_a_centred_slider_is_not_cut_as_a_side_panel():
+    """On a pane with little transcript the column left of the slider's track
+    is blank on every row, and the track is an indented rule starting right
+    after it: the shape of the /diff panel's gutter."""
+    screen = _effort_slider("high")
+    assert _without_side_panel(screen) == screen
+
+
+def test_scale_without_a_confirm_hint_is_not_a_slider():
+    from leashd.agents.runtimes.tmux_session import _read_slider
+
+    assert _read_slider(_effort_slider("high", hint="   ←/→ to adjust")) is None
+
+
+def _slider_match():
+    from leashd.agents.runtimes.tmux_session import _detect_native_dialog
+
+    match = _detect_native_dialog(_effort_slider("xhigh"))
+    assert match is not None
+    return match
+
+
+def _tap(label):
+    from leashd.agents.types import PermissionAllow
+
+    class _StubInteractions:
+        async def handle_question(self, chat_id, tool_input, *, user_id, session_id):
+            question = tool_input["questions"][0]["question"]
+            return PermissionAllow(
+                updated_input={**tool_input, "answers": {question: label}}
+            )
+
+    return _StubInteractions()
+
+
+async def test_bridge_slider_moves_to_the_level_and_keeps_it_to_the_session(
+    cfg, no_real_sleep
+):
+    """Enter on the slider saves the level as the default in the user's own
+    ``~/.claude/settings.json``; ``s`` sets it for this session and writes
+    nothing."""
+    from leashd.agents.runtimes.tmux_session import TmuxSessionManager
+
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    idle = _idle_composer_under("  ⎿  Set effort level to medium (this session only)")
+    cs.attach(
+        object(),
+        _FakePane(
+            [
+                _effort_slider("xhigh"),
+                _effort_slider("xhigh"),
+                _effort_slider("high"),
+                _effort_slider("medium"),
+                idle,
+            ]
+        ),
+    )
+    tsm._interactions = _tap("medium")  # type: ignore[assignment]
+
+    await tsm._bridge_native_dialog(cs, _slider_match())
+
+    assert cs._pane.sent == [("Left", False), ("Left", False), ("s", True)]
+
+
+async def test_bridge_slider_confirms_with_enter_when_there_is_no_session_choice(
+    cfg, no_real_sleep
+):
+    from leashd.agents.runtimes.tmux_session import TmuxSessionManager
+
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    hint = "   ←/→ to adjust · Enter to confirm · Esc to cancel"
+    cs.attach(
+        object(),
+        _FakePane(
+            [
+                _effort_slider("xhigh", hint=hint),
+                _effort_slider("xhigh", hint=hint),
+                _effort_slider("max", hint=hint),
+                _idle_composer_under("  ⎿  Set effort level to max"),
+            ]
+        ),
+    )
+    tsm._interactions = _tap("max")  # type: ignore[assignment]
+
+    await tsm._bridge_native_dialog(cs, _slider_match())
+
+    assert cs._pane.sent == [("Right", False), ("Enter", False)]
+
+
+async def test_bridge_slider_presses_nothing_once_the_slider_is_gone(
+    cfg, no_real_sleep
+):
+    from leashd.agents.runtimes.tmux_session import TmuxSessionManager
+
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    cs.attach(object(), _FakePane([_idle_composer_under("⏺ done")]))
+    tsm._interactions = _tap("low")  # type: ignore[assignment]
+
+    await tsm._bridge_native_dialog(cs, _slider_match())
+
+    assert cs._pane.sent == []
+
+
+async def test_bridge_slider_that_never_moves_is_escaped_not_committed(
+    cfg, no_real_sleep
+):
+    """A marker that ignores the arrows must not commit whatever level it sits
+    on: Escape leaves the effort as it was."""
+    from leashd.agents.runtimes.tmux_session import TmuxSessionManager
+
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    cs.attach(object(), _FakePane([_effort_slider("xhigh")]))
+    tsm._interactions = _tap("low")  # type: ignore[assignment]
+
+    await tsm._bridge_native_dialog(cs, _slider_match())
+
+    assert ("s", True) not in cs._pane.sent
+    assert ("Enter", False) not in cs._pane.sent
+    assert ("Escape", False) in cs._pane.sent
+
+
 async def test_bridge_cursor_dialog_arrows_and_presses_enter(cfg, no_real_sleep):
     """A cursor-only dialog has no digits: typing the row number types a
     stray character into the dialog and leaves it open. It must be arrowed
@@ -9545,7 +9944,11 @@ def test_a_hooked_call_is_in_flight_until_it_is_done_or_too_old(cfg, monkeypatch
     import leashd.agents.runtimes.tmux_session as ts
 
     clock = {"now": 100.0}
-    monkeypatch.setattr(ts, "time", SimpleNamespace(monotonic=lambda: clock["now"]))
+    monkeypatch.setattr(
+        ts,
+        "time",
+        SimpleNamespace(monotonic=lambda: clock["now"], time=lambda: clock["now"]),
+    )
     cs = _session(TmuxSessionManager(cfg))
     assert cs.tool_in_flight() is False
 

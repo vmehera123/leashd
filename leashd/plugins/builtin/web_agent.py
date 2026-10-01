@@ -66,55 +66,55 @@ _LINKEDIN_AUTH_TEMPLATE = (
     "Navigate to LinkedIn. If not logged in, use AskUserQuestion to tell "
     "the user to log in manually in the headed browser window. Verify "
     "login by checking {snap_tool} for the feed or profile elements. "
-    "Do NOT proceed until authenticated."
+    "Wait for the login to complete before continuing."
 )
 
 _LINKEDIN_TASK_TEMPLATE = (
     "STEP 1 — SCAN: After navigating to search results about the specified topic, "
-    "take ONE {snap_tool} to read visible posts. Present a numbered list via "
-    "AskUserQuestion. Set the `question` field to the FULL post list:\n"
+    "take one {snap_tool} to read visible posts. Present a numbered list via "
+    "AskUserQuestion, with the whole post list in the `question` field:\n"
     "  [1] Author Name — brief post summary\n"
     "  [2] Author Name — brief post summary\n"
     "  ...\n"
     "Which post would you like me to comment on? (number / skip / stop)\n"
-    "Option labels must be ONLY the action words (e.g. '1', '2', 'skip', 'stop') — "
-    "no descriptions or markdown on options. All context the user needs goes in the "
-    "`question` field above the buttons.\n\n"
+    "Option labels are just the action words ('1', '2', 'skip', 'stop'), with no "
+    "descriptions or markdown, because chat buttons truncate long labels. All "
+    "context goes in the `question` field above the buttons.\n\n"
     "STEP 2 — COMMENT on the user-selected post:\n"
     "1. Scroll to the post if needed ({eval_tool})\n"
     "2. Click the Comment button ({click_tool})\n"
     "3. Draft a comment (follow the COMMENT DRAFTING GUIDE in the playbook)\n"
-    "4. Present draft to user via AskUserQuestion. Set the `question` field to the "
-    "FULL context: post author, a short excerpt of their post, then your COMPLETE "
-    "draft comment text. Example:\n"
+    "4. Present the draft via AskUserQuestion. The `question` field carries the "
+    "post author, a short excerpt of their post, then your complete draft. "
+    "Example:\n"
     "  Post by [Author]: [first 100 chars of their post]...\n\n"
     "  My draft comment:\n"
     "  [full draft text here]\n"
-    "Option labels must be ONLY: 'approve', 'edit', 'skip' — no descriptions or "
-    "markdown on options. All content goes in the `question` field.\n"
-    "5. Before typing, clear the editor (Select All + Delete) to remove any residual "
-    "text. Then type the approved comment using ONLY native keyboard input ({type_tool}) "
-    "in a SINGLE call "
-    "(for agent-browser, prefer 'fill' over 'type' — it clears first and handles "
-    "contenteditable editors reliably; also re-snapshot if the element ref changed "
-    "since clicking Comment, as Quill re-renders cause ref instability). "
-    "NEVER use {eval_tool} or JavaScript to set text in contenteditable editors "
-    "— it bypasses the editor's state management and leaves Submit buttons disabled\n"
-    "5.5. Take ONE verification snapshot to confirm the typed text matches your "
+    "Option labels are 'approve', 'edit' and 'skip', and all content goes in the "
+    "`question` field.\n"
+    "5. Type the approved comment with native keyboard input ({type_tool}) in a "
+    "single call. With agent-browser, use 'fill': it clears the field first and "
+    "handles contenteditable editors reliably, and re-snapshot first if the element "
+    "ref changed since clicking Comment, because the Quill editor re-renders. With "
+    "other backends, clear the editor (Select All + Delete) before typing. Don't set "
+    "editor text with {eval_tool} or JavaScript: it bypasses the editor's state "
+    "management and leaves the Submit button disabled\n"
+    "5.5. Take a verification snapshot to confirm the typed text matches your "
     "approved draft. If it doesn't match, clear the field (Select All + Delete) "
     "and re-type once\n"
-    "6. Click the Submit/Post button near the comment editor — NOT the main feed "
-    "Post button. For agent-browser: use 'find role button name Post click' to locate "
+    "6. Click the Post button inside the comment box, not the main feed Post "
+    "button. For agent-browser: use 'find role button name Post click' to locate "
     "it natively ({click_tool})\n"
-    "7. Take ONE verification snapshot\n\n"
-    "STEP 3 — STOP and inform user the comment was posted. Wait for user's next "
-    "message.\n"
+    "7. Take a verification snapshot\n\n"
+    "STEP 3 — Tell the user the comment was posted, then wait for their next "
+    "message before touching another post.\n"
     "If user says 'continue' → go back to STEP 1 (scan for more posts or scroll "
     "down).\n"
     "If user says nothing or 'stop' → end the session.\n\n"
-    "EFFICIENCY: max 3 snapshots total per comment cycle (scan, optional retry, "
-    "post-submit verify). Do NOT snapshot between sequential actions "
-    "(click → type → click)."
+    "Snapshots: take one when you need fresh element refs or to confirm a "
+    "result (the scan, after typing, since the editor re-renders and changes "
+    "refs, and after submitting). Skip them between actions on a page that "
+    "hasn't changed (click → type → click)."
 )
 
 
@@ -238,9 +238,8 @@ def build_web_instruction(
         )
         if not resume:
             browser_desc += (
-                "\n\nIMPORTANT: Before your first browser action, run "
-                "`agent-browser close` to ensure any stale browser session is "
-                "cleaned up. Then proceed with `agent-browser open <url>`."
+                "\n\nStart with `agent-browser close` to clear any stale browser "
+                "session, then `agent-browser open <url>`."
             )
         browser_desc += (
             "\n\nONE BROWSER, MANY TABS: the browser is a single long-lived "
@@ -402,9 +401,10 @@ def build_web_instruction(
         f"- Read batches in parallel across tabs — `{tools.new_tab_tool} <url>` "
         f"up to {MAX_BROWSER_TABS} at a time, collect from each, then close "
         "them before opening the next batch",
-        f"- Use {tools.snap_tool} only when the playbook specifies verify: true "
-        "or when you need to discover page state for the first time. Do NOT "
-        "snapshot between sequential actions (e.g. click → type → click)",
+        f"- Use {tools.snap_tool} when the page state is unknown or has changed "
+        "(element refs go stale after navigation or re-rendering), or when the "
+        "playbook step says verify: true. Skip it between actions on an "
+        "unchanged page (e.g. click → type → click)",
         "- If a page fails to load, retry once, then report the error via "
         "AskUserQuestion",
         "- If the platform rate-limits or blocks actions, stop and inform the "
@@ -415,7 +415,6 @@ def build_web_instruction(
         f"- When saving screenshots, always use .leashd/ as the target directory "
         f"(e.g. `{tools.screenshot_tool} .leashd/screenshot.png`). "
         "Never save image files in the project root or other directories",
-        "- Keep interactions professional and appropriate for the platform",
     ]
 
     # When the playbook provides pre-built scripts, prohibit DOM exploration

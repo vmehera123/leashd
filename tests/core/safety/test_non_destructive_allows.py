@@ -160,7 +160,7 @@ class TestReadOnlyRulesDoNotLaunder:
         assert verdict(engine, command) == PolicyDecision.DENY
 
     def test_a_pipeline_is_judged_by_its_stages(self, engine):
-        assert verdict(engine, "curl -s https://api.example.com/x | jq .") == (
+        assert verdict(engine, "curl -s -u me:pw https://api.example.com/x | jq .") == (
             PolicyDecision.REQUIRE_APPROVAL
         )
         classification = engine.classify_compound(

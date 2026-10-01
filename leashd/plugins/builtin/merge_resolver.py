@@ -54,50 +54,31 @@ def build_merge_instruction(config: MergeConfig) -> str:
     )
 
     sections.append(
-        "PHASE 1 — ANALYSIS:\n"
-        "- Read each conflicted file to understand the full context\n"
-        f"- Run `git log --oneline {config.target_branch}..{config.source_branch}` "
-        "to see what the source branch changed\n"
-        f"- Run `git log --oneline {config.source_branch}..{config.target_branch}` "
-        "to see what the target branch changed\n"
-        "- Understand the intent of both sides before resolving"
+        "RESOLVE:\n"
+        "Resolve every conflict so both branches' intent survives. "
+        f"`git log --oneline {config.target_branch}..{config.source_branch}` and "
+        f"`git log --oneline {config.source_branch}..{config.target_branch}` show "
+        "what each side changed. Resolve on your own when the two sides don't "
+        "compete (e.g. one side added code the other didn't touch). When both "
+        "changed the same logic differently, show both versions with "
+        "AskUserQuestion and let the user choose or combine them."
     )
 
     sections.append(
-        "PHASE 2 — RESOLUTION:\n"
-        "For each conflicted file:\n"
-        "1. Read the file and locate conflict markers "
-        "(`<<<<<<<`, `=======`, `>>>>>>>`)\n"
-        "2. Analyze both sides: what each branch changed and why\n"
-        "3. If the resolution is clear (e.g., one side added new code, the other "
-        "didn't touch that area), resolve automatically\n"
-        "4. If uncertain (e.g., both sides modified the same logic differently), "
-        "use AskUserQuestion to present both versions and ask the user which to "
-        "keep or how to combine\n"
-        "5. Edit the file to remove conflict markers with the chosen resolution"
-    )
-
-    sections.append(
-        "PHASE 3 — VERIFY:\n"
+        "VERIFY:\n"
         "- Run `git diff` to review all resolutions\n"
         "- Run any test commands if a test framework is detected\n"
         "- If tests fail, revisit the resolution"
     )
 
     sections.append(
-        "PHASE 4 — COMPLETE:\n"
+        "COMPLETE:\n"
         "- Stage all resolved files with `git add`\n"
         "- Report a summary of resolutions (auto-resolved vs user-decided)\n"
-        "- Do NOT commit — leave that to the user via `/git commit`"
+        "- Don't commit; the user commits with `/git commit`"
     )
 
-    sections.append(
-        "RULES:\n"
-        "- Never silently discard changes from either side\n"
-        "- Always preserve both sides' intent\n"
-        "- When in doubt, ask the user\n"
-        "- Show the user what you changed"
-    )
+    sections.append("RULES:\n- Never silently discard changes from either side")
 
     return "\n\n".join(sections)
 

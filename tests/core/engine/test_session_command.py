@@ -411,6 +411,29 @@ class TestSwitch:
         assert "Conversations in this chat" not in text
         assert text.startswith("▸ #1")
 
+    async def test_choosing_the_one_on_screen_brings_back_a_buried_reply(
+        self, engine, connector
+    ):
+        await engine.handle_message("u1", "how are things", "chat1")
+        await engine.handle_command("u1", "session", "", "chat1")
+
+        await engine.handle_command("u1", "session", "1", "chat1")
+
+        assert _last(connector)["text"] == "Echo: how are things"
+
+    async def test_choosing_the_one_on_screen_does_not_repeat_a_reply_in_view(
+        self, engine, connector
+    ):
+        await engine.handle_message("u1", "how are things", "chat1")
+
+        await engine.handle_command("u1", "session", "1", "chat1")
+
+        replays = [
+            m for m in connector.sent_messages if m["text"] == "Echo: how are things"
+        ]
+        assert len(replays) == 1
+        assert _last(connector)["text"].startswith("▸ #1")
+
     async def test_held_prompts_are_released_after_the_landing_banner(
         self, engine, connector
     ):
@@ -820,6 +843,65 @@ class TestTerminate:
         assert not any(
             m["text"].startswith("▸ #1") for m in connector.sent_messages[-3:]
         )
+
+    async def test_choosing_the_landing_from_the_roster_shows_its_reply(
+        self, engine, connector
+    ):
+        """The kill lands on #1 without a banner, so tapping #1 in the roster
+        is already on screen — and answered with a bare header, leaving the
+        reply #1 gave while the chat was away nowhere in the chat."""
+        await engine.handle_command("u1", "session", "new", "chat1")
+        await engine.handle_command("u1", "session", "new", "chat1")
+        await engine.handle_message("u1", "how are things", "chat1")
+        await engine.handle_command("u1", "session", "kill 3", "chat1:s3")
+
+        await engine.handle_command("u1", "session", "1", "chat1")
+
+        assert _last(connector)["text"] == "Echo: how are things"
+
+    async def test_the_landing_reply_is_shown_once_however_often_it_is_chosen(
+        self, engine, connector
+    ):
+        await engine.handle_command("u1", "session", "new", "chat1")
+        await engine.handle_command("u1", "session", "new", "chat1")
+        await engine.handle_message("u1", "how are things", "chat1")
+        await engine.handle_command("u1", "session", "kill 3", "chat1:s3")
+        connector.sent_messages.clear()
+
+        for _ in range(3):
+            await engine.handle_command("u1", "session", "1", "chat1")
+
+        replays = [
+            m for m in connector.sent_messages if m["text"] == "Echo: how are things"
+        ]
+        assert len(replays) == 1
+
+    async def test_killing_the_foreground_with_one_left_shows_its_reply(
+        self, engine, connector
+    ):
+        await engine.handle_command("u1", "session", "new", "chat1")
+        await engine.handle_message("u1", "how are things", "chat1")
+
+        await engine.handle_command("u1", "session", "kill 2", "chat1:s2")
+
+        assert _last(connector)["text"] == "Echo: how are things"
+
+    async def test_choosing_the_landing_mid_turn_does_not_replay_under_the_stream(
+        self, engine, connector
+    ):
+        from leashd.core.engine import _StreamingResponder
+
+        await engine.handle_command("u1", "session", "new", "chat1")
+        await engine.handle_command("u1", "session", "new", "chat1")
+        await engine.handle_message("u1", "how are things", "chat1")
+        await engine.handle_command("u1", "session", "kill 3", "chat1:s3")
+        engine.active_responders["chat1"] = _StreamingResponder(
+            connector, "chat1", throttle_seconds=0
+        )
+
+        await engine.handle_command("u1", "session", "1", "chat1")
+
+        assert _last(connector)["text"].startswith("▸ #1")
 
     async def test_the_roster_after_a_kill_no_longer_lists_it(self, engine, connector):
         await engine.handle_command("u1", "session", "new", "chat1")

@@ -136,7 +136,6 @@ const SLASH_COMMANDS = [
   { command: "/edit", description: "Auto-approve file writes" },
   { command: "/auto", description: "Native auto mode — safe actions run, risky escalate" },
   { command: "/default", description: "Return to default mode" },
-  { command: "/test", description: "Activate test workflow" },
   { command: "/web", description: "Web automation" },
   { command: "/task", description: "Submit autonomous task" },
   { command: "/file", description: "Send a file from the working directory" },
@@ -2965,11 +2964,9 @@ const SettingsManager = {
   },
 
   _renderAgentSection(agent) {
-    const effort = agent.effort || "xhigh";
-    const runtime = agent.runtime || "claude-code";
+    const effort = agent.effort || "medium";
     const mode = agent.default_mode || "auto";
     const claudeModel = agent.claude_model || "";
-    const codexModel = agent.codex_model || "";
 
     return `<div class="settings-section">
       <h3>Agent (Global)</h3>
@@ -2982,27 +2979,11 @@ const SettingsManager = {
         </div>
       </div>
       <div class="setting-row">
-        <div><div class="setting-label">Runtime</div></div>
-        <select class="select-control" data-setting="agent.runtime">
-          <option value="tmux" ${runtime === 'tmux' ? 'selected' : ''}>tmux — interactive claude TUI (default)</option>
-          <option value="claude-cli" ${runtime === 'claude-cli' ? 'selected' : ''}>Claude CLI</option>
-          <option value="claude-code" ${runtime === 'claude-code' ? 'selected' : ''}>Claude Code (SDK)</option>
-          <option value="codex" ${runtime === 'codex' ? 'selected' : ''}>Codex</option>
-        </select>
-      </div>
-      <div class="setting-row">
         <div><div class="setting-label">Claude model</div>
-          <div class="setting-sublabel">Alias (opus / sonnet) or full name. Used by claude-cli, claude-code, and tmux runtimes.</div></div>
+          <div class="setting-sublabel">Alias (opus / sonnet) or full name.</div></div>
         <input type="text" class="text-input" data-setting="agent.claude_model"
-          placeholder="opus, sonnet, claude-opus-4-7, …"
+          placeholder="opus, sonnet, claude-opus-5-5, …"
           value="${escapeHtml(claudeModel)}">
-      </div>
-      <div class="setting-row">
-        <div><div class="setting-label">Codex model</div>
-          <div class="setting-sublabel">Used by the codex runtime (e.g. gpt-5.2).</div></div>
-        <input type="text" class="text-input" data-setting="agent.codex_model"
-          placeholder="gpt-5.2"
-          value="${escapeHtml(codexModel)}">
       </div>
       <div class="setting-row">
         <div><div class="setting-label">Default Mode</div></div>
@@ -3061,7 +3042,6 @@ const SettingsManager = {
   _renderScopedRow(scope, key, label, entry) {
     const effort = entry.effort || "";
     const claudeModel = entry.claude_model || "";
-    const codexModel = entry.codex_model || "";
     const efforts = ["", "low", "medium", "high", "xhigh", "max"];
     return `<div class="setting-row" data-scoped-row="${scope}" data-scoped-key="${escapeHtml(key)}" style="flex-wrap:wrap; gap:6px; border-bottom:1px solid var(--border-subtle); padding-bottom:8px;">
       <div style="flex-basis:100%;"><div class="setting-label">${escapeHtml(label)}</div></div>
@@ -3070,8 +3050,6 @@ const SettingsManager = {
       </select>
       <input type="text" class="text-input" data-scoped-field="claude_model"
         placeholder="claude model" value="${escapeHtml(claudeModel)}" style="flex:2 1 140px;">
-      <input type="text" class="text-input" data-scoped-field="codex_model"
-        placeholder="codex model" value="${escapeHtml(codexModel)}" style="flex:2 1 140px;">
       <button type="button" class="btn-secondary" data-scoped-save>Save</button>
       <button type="button" class="btn-danger" data-scoped-clear>Clear all</button>
     </div>`;
@@ -3089,7 +3067,6 @@ const SettingsManager = {
       const body = {
         effort: row.querySelector('[data-scoped-field="effort"]').value || null,
         claude_model: row.querySelector('[data-scoped-field="claude_model"]').value || null,
-        codex_model: row.querySelector('[data-scoped-field="codex_model"]').value || null,
         replace: true,
       };
       body[scope === "dir" ? "path" : "name"] = key;
@@ -3295,16 +3272,12 @@ const SettingsManager = {
       const active = effortSeg.querySelector("button.active");
       if (active) agent.effort = active.dataset.value;
     }
-    const runtimeSel = settingsBody.querySelector('[data-setting="agent.runtime"]');
-    if (runtimeSel) agent.runtime = runtimeSel.value;
     const modeSel = settingsBody.querySelector('[data-setting="agent.default_mode"]');
     if (modeSel) agent.default_mode = modeSel.value;
     const tcInput = settingsBody.querySelector('[data-setting="agent.max_tool_calls"]');
     if (tcInput) agent.max_tool_calls = parseInt(tcInput.value, 10);
     const claudeInput = settingsBody.querySelector('[data-setting="agent.claude_model"]');
     if (claudeInput) agent.claude_model = claudeInput.value.trim();
-    const codexInput = settingsBody.querySelector('[data-setting="agent.codex_model"]');
-    if (codexInput) agent.codex_model = codexInput.value.trim();
     if (Object.keys(agent).length) updates.agent = agent;
 
     // Collect browser settings

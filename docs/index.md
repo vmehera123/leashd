@@ -35,25 +35,20 @@ flowchart LR
 | [Policies](policies.md) | YAML policy format, rule matching algorithm, built-in presets |
 | [Events](events.md) | EventBus, all event types, payload schemas |
 | [Plugins](plugins.md) | Plugin protocol, lifecycle hooks, AuditPlugin example, Claude Code plugins |
-| [Agents](agents.md) | BaseAgent protocol, ClaudeCodeAgent, session resume |
+| [Agents](agents.md) | BaseAgent protocol, the tmux runtime, session resume |
 | [WebUI](webui.md) | Browser-based interface — setup, WebSocket protocol, authentication |
 | [Connectors](connectors.md) | BaseConnector ABC, handler registration, building a connector |
 | [Middleware](middleware.md) | MiddlewareChain, auth, rate limiting |
 | [Storage](storage.md) | SessionStore protocol, memory and SQLite backends |
 | [Browser Testing](browser-testing.md) | Playwright MCP setup, browser tool policies, test agents |
 | [Interactions](interactions.md) | Question flow, plan review flow, asyncio bridge |
-| [Testing Setup](testing-setup.md) | Three-tier setup guide for e2e testing with /test and Playwright |
-| [Autonomous Mode](autonomous-mode.md) | AI approval, AI plan review, test-and-retry loop, task orchestrator, autonomous policy |
-| [Agentic Task Orchestrator](task-orchestrator-v2.md) | v2 conductor-driven task orchestrator — dynamic action loop, working memory, context management |
-| [Autonomous Setup Guide](autonomous-setup-guide.md) | Step-by-step guide to configure a fully autonomous coding agent |
+| [Autonomous Mode](autonomous-mode.md) | `/task` pipeline, approvals inside a task, per-project config |
 
 ## Quick Start
 
 ```bash
 # Install
 pip install leashd        # or: uv tool install leashd
-# claude-code (SDK) runtime only:
-pip install 'leashd[claude-agent-sdk]'
 # or from source:
 git clone <repo-url> && cd leashd && uv sync
 

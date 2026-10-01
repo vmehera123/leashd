@@ -1,17 +1,17 @@
-"""Tests for the agent registry."""
+"""Tests for the agent runtime registry."""
 
 import pytest
+from structlog.testing import capture_logs
 
 from leashd.agents.registry import (
     _REGISTRY,
+    _STABILITY,
     get_agent,
     get_available_runtime_names,
     list_runtimes,
-    missing_runtime_dependency,
     register_agent,
 )
-from leashd.agents.runtimes.claude_code import ClaudeCodeAgent
-from leashd.agents.runtimes.codex import CodexAgent
+from leashd.agents.runtimes.tmux import TmuxAgent
 from leashd.core.config import LeashdConfig
 from leashd.exceptions import ConfigError
 
@@ -21,77 +21,48 @@ def config(tmp_path):
     return LeashdConfig(approved_directories=[tmp_path])
 
 
-class TestGetAgent:
-    def test_claude_code(self, config):
-        agent = get_agent("claude-code", config)
-        assert isinstance(agent, ClaudeCodeAgent)
+@pytest.fixture
+def custom_runtime():
+    sentinel = object()
+    register_agent("custom", lambda _cfg: sentinel, stability="beta")
+    yield sentinel
+    _REGISTRY.pop("custom", None)
+    _STABILITY.pop("custom", None)
 
-    def test_codex(self, config):
-        agent = get_agent("codex", config)
-        assert isinstance(agent, CodexAgent)
+
+class TestGetAgent:
+    def test_tmux_is_registered(self, config):
+        assert isinstance(get_agent("tmux", config), TmuxAgent)
 
     def test_unknown_raises_config_error(self, config):
-        with pytest.raises(ConfigError, match="Unknown agent runtime: 'nope'"):
+        with pytest.raises(ConfigError, match=r"Unknown agent runtime: 'nope'.*tmux"):
             get_agent("nope", config)
 
-    def test_unknown_lists_available(self, config):
-        with pytest.raises(ConfigError, match="Available:"):
-            get_agent("nope", config)
+    def test_custom_runtime(self, config, custom_runtime):
+        assert get_agent("custom", config) is custom_runtime
 
 
-class TestRegisterAgent:
-    def test_register_custom_factory(self, config):
-        sentinel = object()
-        register_agent("test-agent", lambda _cfg: sentinel)
-        try:
-            assert get_agent("test-agent", config) is sentinel
-        finally:
-            _REGISTRY.pop("test-agent", None)
+class TestListing:
+    def test_only_tmux_ships(self):
+        assert get_available_runtime_names() == ["tmux"]
+        assert list_runtimes() == [{"name": "tmux", "stability": "stable"}]
+
+    def test_custom_runtime_is_listed(self, custom_runtime):
+        assert "custom" in get_available_runtime_names()
+        assert {"name": "custom", "stability": "beta"} in list_runtimes()
 
 
-class TestGetAvailableRuntimeNames:
-    def test_returns_sorted_names(self):
-        names = get_available_runtime_names()
-        assert names == ["claude-cli", "claude-code", "codex", "tmux"]
+class TestConfigSelection:
+    def test_registered_runtime_is_selectable(self, tmp_path, custom_runtime):
+        with capture_logs() as logs:
+            cfg = LeashdConfig(approved_directories=[tmp_path], agent_runtime="custom")
+        assert cfg.agent_runtime == "custom"
+        assert not [e for e in logs if e["event"] == "agent_runtime_unavailable"]
 
-    def test_returns_list(self):
-        assert isinstance(get_available_runtime_names(), list)
-
-
-class TestMissingRuntimeDependency:
-    def test_none_when_sdk_installed(self):
-        assert missing_runtime_dependency("claude-code") is None
-
-    def test_none_for_runtime_without_optional_import(self):
-        assert missing_runtime_dependency("tmux") is None
-
-    def test_hint_when_sdk_absent(self, monkeypatch):
-        monkeypatch.setattr(
-            "importlib.util.find_spec",
-            lambda name, *a, **kw: None if name == "claude_agent_sdk" else object(),
-        )
-        hint = missing_runtime_dependency("claude-code")
-        assert hint is not None
-        assert "leashd[claude-agent-sdk]" in hint
-
-    def test_get_agent_raises_config_error_when_sdk_absent(self, config, monkeypatch):
-        monkeypatch.setattr(
-            "importlib.util.find_spec",
-            lambda name, *a, **kw: None if name == "claude_agent_sdk" else object(),
-        )
-        with pytest.raises(ConfigError, match=r"leashd\[claude-agent-sdk\]"):
-            get_agent("claude-code", config)
-
-
-class TestListRuntimes:
-    def test_returns_metadata(self):
-        runtimes = list_runtimes()
-        for rt in runtimes:
-            assert "name" in rt
-            assert "stability" in rt
-
-    def test_stability_values(self):
-        runtimes = {rt["name"]: rt["stability"] for rt in list_runtimes()}
-        assert runtimes["claude-code"] == "stable"
-        assert runtimes["codex"] == "beta"
-        assert runtimes["tmux"] == "stable"
+    def test_unknown_runtime_falls_back_to_tmux(self, tmp_path):
+        with capture_logs() as logs:
+            cfg = LeashdConfig(approved_directories=[tmp_path], agent_runtime="codex")
+        assert cfg.agent_runtime == "tmux"
+        [event] = [e for e in logs if e["event"] == "agent_runtime_unavailable"]
+        assert event["requested"] == "codex"
+        assert event["fallback"] == "tmux"

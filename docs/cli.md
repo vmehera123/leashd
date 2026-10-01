@@ -26,9 +26,7 @@ leashd is controlled entirely from the command line. The `leashd` command manage
 | `leashd browser headless [on\|off]` | Show or toggle headless mode |
 | `leashd browser set-profile <path>` | Set browser profile directory for `/web` |
 | `leashd browser clear-profile` | Clear browser profile (use temporary) |
-| `leashd runtime show` | Show current agent runtime |
-| `leashd runtime set <name>` | Switch runtime (`claude-cli`, `claude-code`, `codex`) |
-| `leashd runtime list` | List available runtimes with stability |
+| `leashd model show / set <model> / clear` | Default Claude model, globally or per `--dir` / `--workspace` |
 | `leashd turns show` | Display current max turns setting |
 | `leashd turns set <N>` | Set max turns to N (positive integer) |
 | `leashd plugin list` | List installed Claude Code plugins |
@@ -114,7 +112,7 @@ See [WebUI](webui.md) for the full user guide.
 
 ## Browser Configuration
 
-Manage browser backend, headless mode, and profile for `/web` and `/test` sessions.
+Manage browser backend, headless mode, and profile for `/web` and `/task` verify sessions.
 
 ### Viewing Settings
 
@@ -131,7 +129,7 @@ leashd browser set-backend playwright       # Playwright MCP
 leashd browser set-backend agent-browser    # agent-browser CLI (default)
 ```
 
-- **`playwright`** — uses Playwright MCP server via `.mcp.json`. Provides 28 browser tools through the Claude Agent SDK.
+- **`playwright`** — uses Playwright MCP server via `.mcp.json`. Provides 28 browser tools to the `claude` session.
 - **`agent-browser`** — uses the agent-browser CLI skill instead. Installs the skill automatically on switch; Playwright MCP is disabled. This is the default.
 
 ### Headless Mode
@@ -154,40 +152,22 @@ leashd browser set-profile ~/Library/Application\ Support/Google/Chrome/  # reus
 leashd browser clear-profile    # revert to temporary profiles
 ```
 
-Sets `LEASHD_BROWSER_USER_DATA_DIR` in `~/.leashd/config.yaml`. The directory is created automatically on first use. When set, `/web` sessions retain cookies, logins, and local storage across invocations. `/test` always uses a temporary profile for isolation.
+Sets `LEASHD_BROWSER_USER_DATA_DIR` in `~/.leashd/config.yaml`. The directory is created automatically on first use. When set, `/web` sessions retain cookies, logins, and local storage across invocations. `/task` always uses a temporary profile for isolation.
 
 **Source:** `cli.py`
 
-## Runtime Selection
+## Model
 
-Manage which agent runtime powers your sessions. The agent is created once at daemon startup, so a restart is required after switching.
-
-### Viewing Current Runtime
+leashd runs the tmux runtime only (2.0 removed `leashd runtime`). Pick the Claude model it launches:
 
 ```bash
-leashd runtime show
+leashd model show                       # global + per-scope overrides
+leashd model set opus                   # alias or full id, e.g. claude-opus-5-5
+leashd model set sonnet --dir ~/api     # per-directory override
+leashd model clear --workspace my-saas  # drop a workspace override
 ```
 
-### Switching Runtime
-
-```bash
-leashd runtime set codex          # switch to codex
-leashd runtime set claude-code    # switch to claude-code (SDK)
-leashd runtime set claude-cli     # switch to claude-cli (native subprocess)
-leashd runtime set tmux           # switch to tmux (interactive claude TUI, default)
-```
-
-Persists the choice in `~/.leashd/config.yaml` under the `agent_runtime` key. A daemon restart (`leashd restart`) is required for the change to take effect.
-
-### Listing Available Runtimes
-
-```bash
-leashd runtime list
-```
-
-Shows all registered runtimes with their stability level and marks the active one.
-
-**Source:** `cli.py`, `agents/registry.py`
+**Source:** `cli.py`
 
 ## Max Turns
 
@@ -256,7 +236,7 @@ leashd plugin enable my-plugin
 leashd plugin disable my-plugin
 ```
 
-Disabled plugins remain installed but are not loaded by the Claude Agent SDK.
+Disabled plugins remain installed but are not passed to `claude` (`--plugin-dir`).
 
 **Source:** `cli.py`, `cc_plugins.py`
 

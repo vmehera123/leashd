@@ -36,17 +36,17 @@ Each layer overrides the one before it: `~/.leashd/config.yaml` → `.env` → e
 
 | Variable | Type | Default | Description |
 |---|---|---|---|
-| `LEASHD_RUNTIME` | `str` | `"claude-cli"` | Active agent runtime: `"claude-cli"`, `"claude-code"`, or `"codex"`. Also configurable via `leashd runtime set <name>`. |
-| `LEASHD_MAX_TURNS` | `int` | `250` | Maximum agent turns per message (default for all modes). Also configurable via `leashd turns set <N>`. |
+| `LEASHD_MAX_TURNS` | `int` | `120` | Maximum agent turns per message (default for all modes). Also configurable via `leashd turns set <N>`. |
 | `LEASHD_WEB_MAX_TURNS` | `int` | `300` | Maximum agent turns in `/web` mode. Falls back to `LEASHD_MAX_TURNS` if not set. |
-| `LEASHD_TEST_MAX_TURNS` | `int` | `200` | Maximum agent turns in `/test` mode. Falls back to `LEASHD_MAX_TURNS` if not set. |
+| `LEASHD_TASK_MAX_TURNS` | `int` | `300` | Maximum agent turns per `/task` phase. |
+| `LEASHD_CLAUDE_MODEL` | `str \| None` | `None` | Claude model alias or full id. Unset launches the CLI's `opus` alias. Also `leashd model set`. |
 | `LEASHD_MAX_CONCURRENT_AGENTS` | `int` | `5` | Maximum parallel agent subprocesses. Prevents resource exhaustion from concurrent sessions. |
 | `LEASHD_AGENT_TIMEOUT_SECONDS` | `int` | `10800` | Wall-clock ceiling for a single agent turn, in seconds (3 hours). Set to `0` to disable it entirely — the turn then runs until it finishes, `/stop`/`/cancel`, or a runtime liveness abort. Paused while a human approval or question is pending. |
 | `LEASHD_SYSTEM_PROMPT` | `str \| None` | `None` | Additional system prompt appended to the agent |
 | `LEASHD_ALLOWED_TOOLS` | `list[str]` | `[]` | Whitelist of tools the agent can use (empty = all) |
 | `LEASHD_DISALLOWED_TOOLS` | `list[str]` | `[]` | Blacklist of tools the agent cannot use |
 | `LEASHD_MCP_SERVERS` | `dict` | `{}` | JSON dict of MCP server configurations |
-| `LEASHD_EFFORT` | `Literal["low", "medium", "high", "xhigh", "max"] \| None` | `"xhigh"` | Thinking depth for the agent. `xhigh` sits between `high` and `max`; Claude runtimes pass it through (a Claude Code CLI older than 2.1.111, such as the SDK runtime's bundled one, gets `high`), Codex maps both `xhigh` and `max` to its own `xhigh` |
+| `LEASHD_EFFORT` | `Literal["low", "medium", "high", "xhigh", "max"] \| None` | `"medium"` | Thinking depth, passed to `claude --effort`. |
 
 ### Safety Settings
 
@@ -99,10 +99,10 @@ Each layer overrides the one before it: `~/.leashd/config.yaml` → `.env` → e
 
 | Variable | Type | Default | Description |
 |---|---|---|---|
-| `LEASHD_BROWSER_BACKEND` | `Literal["playwright", "agent-browser"]` | `"playwright"` | Browser automation backend. `playwright` uses Playwright MCP; `agent-browser` uses the agent-browser CLI skill. |
-| `LEASHD_BROWSER_HEADLESS` | `bool` | `false` | Run Playwright browser in headless mode (no visible window). Useful for CI or remote sessions. Only applies to `playwright` backend. |
-| `LEASHD_BROWSER_AUTO_APPROVE` | `bool` | `false` | Approve agent-browser browsing (open, click, fill, eval, tabs…) in every conversation without asking — the same grant `/test` uses. Cookies, auth, storage, state, clipboard, `connect` and installs still ask, and so does anything a browsing command pipes into. Set with `leashd browser auto-approve on`. |
-| `LEASHD_BROWSER_USER_DATA_DIR` | `str \| None` | `None` | Chrome user data directory for persistent `/web` sessions. When set, `/web` injects `--user-data-dir` into Playwright MCP args at runtime. `/test` always uses a temporary profile. |
+| `LEASHD_BROWSER_BACKEND` | `Literal["playwright", "agent-browser"]` | `"agent-browser"` | Browser automation backend. `agent-browser` uses the agent-browser CLI skill; `playwright` runs Playwright MCP through `npx` and needs Node.js. |
+| `LEASHD_BROWSER_HEADLESS` | `bool` | `true` | Run the browser without a visible window. |
+| `LEASHD_BROWSER_AUTO_APPROVE` | `bool` | `true` | Approve agent-browser browsing (open, click, fill, eval, tabs…) in every conversation without asking. Cookies, auth, storage, state, clipboard, `connect` and installs still ask, and so does anything a browsing command pipes into. Turn off with `leashd browser auto-approve off`. |
+| `LEASHD_BROWSER_USER_DATA_DIR` | `str \| None` | `None` | Chrome user data directory for persistent `/web` sessions. `/task` always uses a temporary profile. |
 
 ### Streaming
 
@@ -198,9 +198,8 @@ LEASHD_APPROVED_DIRECTORIES=/path/to/your/project
 LEASHD_APPROVED_DIRECTORIES=/path/to/your/project
 
 # Agent
-LEASHD_MAX_TURNS=250
+LEASHD_MAX_TURNS=120
 LEASHD_WEB_MAX_TURNS=300
-LEASHD_TEST_MAX_TURNS=200
 LEASHD_AGENT_TIMEOUT_SECONDS=10800
 LEASHD_SYSTEM_PROMPT="Focus on writing tests first."
 LEASHD_DEFAULT_MODE=default
@@ -245,22 +244,20 @@ LEASHD_LOG_BACKUP_COUNT=5
 
 ## Scoped settings (effort and model)
 
-`effort` and model selection (`claude_model` / `codex_model`) can be overridden at four scopes. Higher-precedence scopes win:
+`effort` and `claude_model` can be overridden at four scopes. Higher-precedence scopes win:
 
 ```
 task override  >  workspace.settings  >  directory_settings[<path>]  >  global
 ```
 
-Any field may be unset at any scope — the resolver walks down the chain until a value is found and falls back to the global default (`effort="medium"`, `claude_model`/`codex_model` → runtime default).
+Any field may be unset at any scope — the resolver walks down the chain until a value is found and falls back to the global default (`effort="medium"`, `claude_model` → the CLI's `opus` alias).
 
 ### CLI
 
 ```bash
 # Global defaults
 leashd effort set high
-leashd model set opus                  # claude_model inferred from alias
-leashd model set gpt-5.2               # codex_model inferred from gpt- prefix
-leashd model set foo --runtime codex   # force codex_model when value is ambiguous
+leashd model set opus                  # alias or full id
 
 # Per-directory
 leashd effort set high --dir /path/to/repo
@@ -275,7 +272,6 @@ leashd effort show                     # table: global + dir + workspace overrid
 leashd model  show                     # same for models
 leashd effort clear --dir /path
 leashd model  clear --workspace my-saas
-leashd model  clear --runtime codex    # clears codex_model at the chosen scope
 ```
 
 ### Per-task
@@ -290,13 +286,12 @@ The resulting `RuntimeSettings` is persisted on `TaskRun.settings_override` so i
 
 ### Storage
 
-- Global: top-level `effort:`, `claude_model:`, `codex_model:` in `~/.leashd/config.yaml`.
+- Global: top-level `effort:` and `claude_model:` in `~/.leashd/config.yaml`.
 - Per-directory: `directory_settings:` map in `~/.leashd/config.yaml`, keyed by absolute path.
 - Per-workspace: `settings:` block under each workspace in `~/.leashd/workspaces.yaml`.
 - Per-task: `settings_override` column in the SQLite `task_runs` table.
 
-### Runtime notes
+### Model notes
 
-- `claude-cli` and `claude-code` runtimes both accept model aliases (`opus`, `sonnet`, `haiku`) or full names (`claude-opus-4-7`).
-- The `codex` runtime uses `codex_model` (e.g. `gpt-5.2`); its `model_reasoning_effort` is derived from `effort` via the mapping `low|medium|high → low|medium|high`, `max → xhigh`.
-- Setting `claude_model` while the active runtime is Codex (or vice versa) is a no-op — the wrong field is ignored, so you can switch runtimes freely without clearing overrides.
+- `claude_model` takes an alias (`opus`, `sonnet`, `haiku`) or a full id (`claude-opus-5-5`). The alias resolves to whatever the installed CLI treats as newest, so the CLI build decides the generation when nothing is pinned.
+- Leftover `codex_model` keys are ignored.

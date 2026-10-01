@@ -6,8 +6,8 @@ Plugins extend leashd with observability, custom logic, and integration hooks. T
 
 leashd has two distinct plugin systems:
 
-- **leashd plugins** — EventBus subscribers managed via `PluginRegistry`. They hook into leashd's internal event lifecycle (tool gating, message routing, test workflows, etc.). This is what this document covers.
-- **Claude Code plugins** — SDK-level extension packages with `.claude-plugin/plugin.json` manifests. They provide skills, agents, hooks, MCP servers, and LSP servers to the Claude Agent SDK. Managed via the `leashd plugin` CLI and `/plugin` chat command. See [CLI Reference — Plugin Management](cli.md#plugin-management) for details.
+- **leashd plugins** — EventBus subscribers managed via `PluginRegistry`. They hook into leashd's internal event lifecycle (tool gating, message routing, task orchestration, etc.). This is what this document covers.
+- **Claude Code plugins** — extension packages with `.claude-plugin/plugin.json` manifests. They provide skills, agents, hooks, MCP servers, and LSP servers to the `claude` session (passed as `--plugin-dir`). Managed via the `leashd plugin` CLI and `/plugin` chat command. See [CLI Reference — Plugin Management](cli.md#plugin-management) for details.
 
 ## Plugin Protocol
 
@@ -205,18 +205,6 @@ On `--resume`, the checkpoint JSON is loaded and injected into the prompt as `PR
 
 Persistence uses atomic writes (temp file + rename) matching the `config_store.py` pattern.
 
-## Built-In: `TestRunnerPlugin`
-
-`TestRunnerPlugin` (`plugins/builtin/test_runner.py`) activates the 9-phase test workflow via the `/test` command.
-
-| Aspect | Detail |
-|---|---|
-| Subscribes to | `COMMAND_TEST` |
-| Emits | `TEST_STARTED` |
-| Auto-approves | All 28 browser tools, test bash commands (`pytest`, `jest`, `vitest`, etc.), Write/Edit for test files |
-
-The plugin intercepts `/test` commands with structured flags (`--url`, `--framework`, `--dir`, `--no-e2e`, `--no-unit`, `--no-backend`), sets the session to test mode, and instructs the agent to run a multi-phase test workflow including discovery, generation, execution, and healing.
-
 ## Built-In: `MergeResolverPlugin`
 
 `MergeResolverPlugin` (`plugins/builtin/merge_resolver.py`) handles `/git merge` conflict resolution.
@@ -229,17 +217,9 @@ The plugin intercepts `/test` commands with structured flags (`--url`, `--framew
 
 When a merge results in conflicts, the plugin sets the session to merge mode and instructs the agent to resolve conflicts file by file, then presents auto-resolve/abort buttons to the user.
 
-## Built-In: `TestConfigLoaderPlugin`
+## Project test config
 
-`TestConfigLoaderPlugin` (`plugins/builtin/test_config_loader.py`) loads per-project test configuration from `.leashd/test.yaml`.
-
-| Aspect | Detail |
-|---|---|
-| Config file | `.leashd/test.yaml` in the project working directory |
-| Merge behavior | CLI flags override config file values |
-| Supported fields | URL, server command, framework, credentials, preconditions |
-
-The plugin provides project-specific defaults for the `/test` workflow, so teams can commit shared test configuration without passing flags every time.
+`plugins/builtin/test_config_loader.py` reads `.leashd/test.yaml` (URL, server command, framework, credentials, preconditions, focus areas, API specs) and the `/task` verify prompt includes it, so teams can commit how their app is started and checked.
 
 ## Built-In: `TaskOrchestrator`
 

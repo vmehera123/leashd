@@ -634,7 +634,7 @@ class TestBundledLinkedInPlaybook:
         )
         type_step = next(s for s in comment_phase.steps if s.action == "type")
         assert type_step.script is None
-        assert "NEVER" in type_step.notes
+        assert "Don't use JavaScript" in type_step.notes
 
     def test_comment_phase_has_wait_step(self, linkedin_playbook):
         comment_phase = next(

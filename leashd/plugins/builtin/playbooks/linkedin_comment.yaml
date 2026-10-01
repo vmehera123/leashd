@@ -25,7 +25,7 @@ phases:
         expected_state: "Feed page loads with posts visible, or login page appears"
       - action: verify
         description: "Check if authenticated by looking for feed content"
-        target: "browser_snapshot"
+        tool_hint: browser_snapshot
         expected_state: "Feed posts visible, profile avatar in top nav"
         fallback: "If login page shown, use AskUserQuestion to tell user to log in manually in the headed browser"
 
@@ -33,13 +33,13 @@ phases:
     description: "Navigate directly to search results using URL pattern"
     steps:
       - action: navigate
-        description: "Go directly to content search results — do NOT use the search box"
+        description: "Go directly to content search results — skip the search box"
         target: "https://www.linkedin.com/search/results/content/?keywords={topic}&origin=GLOBAL_SEARCH_HEADER"
         expected_state: "Search results page with posts related to the topic"
         notes: "This direct URL skips the search box interaction entirely, saving significant time"
       - action: verify
         description: "Confirm search results loaded"
-        target: "browser_snapshot"
+        tool_hint: browser_snapshot
         expected_state: "Multiple post cards visible in search results"
         fallback: "If no results, try broader search terms"
 
@@ -47,7 +47,7 @@ phases:
     description: "Scan visible posts and let user choose which one to comment on"
     steps:
       - action: snapshot
-        description: "Take ONE browser_snapshot to read all visible posts"
+        description: "Take one browser_snapshot to read all visible posts"
         tool_hint: browser_snapshot
         expected_state: "Multiple posts visible with author names and content"
         verify: true
@@ -74,7 +74,7 @@ phases:
         description: "Present a numbered list to user via AskUserQuestion with post author, brief summary, and relevance. Ask which post to comment on (number / skip to scroll / stop)"
         tool_hint: AskUserQuestion
         verify: false
-        notes: "Put the full numbered post list in the 'question' field of AskUserQuestion — that is the body text visible above the buttons. Option labels must be only the action words ('1', '2', 'skip', 'stop'). Do NOT put post summaries in option descriptions or markdown previews."
+        notes: "Put the full numbered post list in the 'question' field of AskUserQuestion — that is the body text visible above the buttons. Option labels must be only the action words ('1', '2', 'skip', 'stop'), because chat buttons truncate long labels; post summaries stay out of option descriptions and markdown previews."
       - action: select
         description: "After user picks a post number, proceed to comment_on_post phase for that specific post. If user says 'skip', scroll down and repeat scan. If user says 'stop', end the workflow."
         verify: false
@@ -114,12 +114,12 @@ phases:
         description: "Draft a thoughtful comment following the COMMENT DRAFTING GUIDE. Present draft to user via AskUserQuestion (approve / edit / skip)"
         tool_hint: AskUserQuestion
         verify: false
-        notes: "In the 'question' field include: post author, a short excerpt of their post, and your FULL draft comment text. Option labels must be only 'approve', 'edit', 'skip'. Do NOT put the draft or post summary in option descriptions or markdown previews — all detail goes in the 'question' field above the buttons."
+        notes: "In the 'question' field include: post author, a short excerpt of their post, and your complete draft comment text. Option labels are 'approve', 'edit' and 'skip'; the draft and post summary go in the 'question' field above the buttons, not in option descriptions or markdown previews."
       - action: type
         description: "Type the approved comment into the comment editor"
         tool_hint: browser_type
         verify: false
-        notes: "Before typing, ensure the editor is empty: click the editor to focus, then Select All (Ctrl+A / Cmd+A) and Delete to clear any residual text from prior attempts. Then type the FULL approved comment in a SINGLE browser_type / agent-browser type call. Do NOT type paragraph by paragraph. NEVER use JavaScript (browser_evaluate, innerHTML, execCommand) to set text in contenteditable editors — it bypasses the editor's internal state (e.g. Quill) and leaves Submit buttons disabled."
+        notes: "Before typing, ensure the editor is empty: click the editor to focus, then Select All (Ctrl+A / Cmd+A) and Delete to clear any residual text from prior attempts. Then type the whole approved comment in a single browser_type / agent-browser type call rather than paragraph by paragraph. Don't use JavaScript (browser_evaluate, innerHTML, execCommand) to set text in contenteditable editors — it bypasses the editor's internal state (e.g. Quill) and leaves Submit buttons disabled."
         backends:
           agent-browser:
             tool_hint: "agent-browser fill"
@@ -128,7 +128,7 @@ phases:
               atomically, handling contenteditable editors (like Quill) reliably. No need to
               manually Select All + Delete. If the element ref changed since clicking Comment
               (Quill re-renders cause ref instability), take a fresh snapshot to get the current
-              ref before filling. Type the FULL approved comment in ONE call. NEVER use
+              ref before filling. Type the whole approved comment in one call. Don't use
               `agent-browser eval` or JavaScript to set text — it bypasses the editor's internal
               state and leaves Submit buttons disabled.
       - action: wait
@@ -146,7 +146,7 @@ phases:
         tool_hint: browser_snapshot
         verify: true
         expected_state: "Comment editor contains the full approved comment, no duplicated or truncated text"
-        notes: "Compare visible text against your approved draft. If mismatched (duplicated paragraphs, missing text), clear the field completely (click editor -> Ctrl+A -> Delete) and re-type the full comment in ONE browser_type call. Only proceed to submit once text matches."
+        notes: "Compare visible text against your approved draft. If mismatched (duplicated paragraphs, missing text), clear the field completely (click editor -> Ctrl+A -> Delete) and re-type the full comment in one browser_type call. Only proceed to submit once text matches."
         backends:
           agent-browser:
             tool_hint: "agent-browser snapshot -i"
@@ -172,9 +172,9 @@ phases:
               2. If ambiguous, `agent-browser find text "Post" near @eN click` where @eN
                  is the comment editor ref from the last snapshot
               3. Fallback: `agent-browser press Control+Enter`
-              The Post button is inside the comment box area, NOT the main feed Post button.
+              The Post button is inside the comment box area, not the main feed Post button.
             fallback: "`agent-browser press Control+Enter`"
       - action: stop
-        description: "Inform the user the comment was posted and STOP. Wait for user to say 'continue' for more posts or give next instruction. Do NOT autonomously proceed to another post."
+        description: "Tell the user the comment was posted, then wait for them to say 'continue' or give the next instruction before moving to another post."
         tool_hint: AskUserQuestion
         verify: false

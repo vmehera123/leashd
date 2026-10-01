@@ -20,15 +20,18 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import hashlib
 import importlib.util
 import json
 import os
 import random
 import re
 import secrets
+import shlex
 import shutil
 import subprocess
 import time
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple
@@ -87,6 +90,7 @@ _ASYNC_HOOK_EVENTS = (
     "Notification",
 )
 
+STATUS_LINE_EVENT = "StatusLine"
 _SYNTHETIC_MODEL = "<synthetic>"
 _INTERRUPT_RECORD_PREFIX = "[Request interrupted by user"
 
@@ -745,6 +749,11 @@ _NATIVE_DIALOG_OPTION_RE = re.compile(r"^\s*(❯)?\s*(\d+)\.\s+(.+?)\s*$")
 _NATIVE_DIALOG_CURSOR_RE = re.compile(r"^(\s+)❯\s+(\S.*?)\s*$")
 
 _SESSION_SCOPED_CONFIRM_MARKER = "s to use this session only"
+_SLIDER_ADJUST_HINT = "←/→ to adjust"
+_SLIDER_SESSION_ONLY_HINT = "s for this session only"
+_SLIDER_MARKER = "▲"
+_SLIDER_TRACK_CHARS = "─━╌┆│" + _SLIDER_MARKER
+_SLIDER_LABEL_RE = re.compile(r"\S+(?: \S+)*")
 _MODEL_SWITCH_CONFIRM_MARKER = "No, go back"
 _MODEL_SWITCH_YES_PREFIX = "Yes,"
 
@@ -761,9 +770,12 @@ _PERM_SELECTOR_REPRESS_AFTER_S = 2.0
 _PERM_DIALOG_INPUT_GUARD_S = 0.2
 _PERM_SUBJECT_HEAD_CHARS = 24
 _PERM_SUBJECT_MIN_CHARS = 8
+_PERM_SUBJECT_TAIL_CHARS = 48
+_STUCK_PERMISSION_ID_CHARS = 10
 _PERM_BOX_RULE_CHARS = "─╌▔▁_=*-·"
 _PERM_BOX_RULE_MIN_CHARS = 8
 _COLUMN_GAP_RE = re.compile(r"\s{2,}")
+_PANEL_MARK_GAP_RE = re.compile(r" {3,}(?=\S)")
 _CD_PREFIX_RE = re.compile(r"^cd\s+(?:\"[^\"]*\"|'[^']*'|[^\s;&|]+)\s*&&\s*")
 _PERM_DRIVE_MAX_TURNS = 4
 _PERM_UNMATCHED_SETTLE_S = 2.0
@@ -833,14 +845,33 @@ def _without_side_panel(screen: str) -> str:
     are nothing but a rule are left out of the blank-column test, because the
     idle composer's rules cross the whole width in both layouts. A screen
     with no proven gutter comes back unchanged.
+
+    The panel is never wider than the conversation, so no gutter is looked
+    for left of the middle. The ``/effort`` slider is centred, and its indented
+    track over an empty column read as a panel rule on a sparse screen: the
+    cut kept the slider's title and dropped its scale.
+
+    Columns are screen cells, not characters. tmux captures a double-width
+    character (✅, ❌, CJK) as one character, so every character after it on
+    that row sits one index left of its cell. A reply listing "✅ Yes / ❌ No"
+    moved its row's text two places into the gutter, no column read blank,
+    the panel stayed, and a test fixture's "Esc to cancel" in the diff made
+    the reply's numbered list a dialog.
     """
     rows = screen.split("\n")
-    width = max((len(r) for r in rows), default=0)
-    written = [r for r in rows if r.strip(_PERM_BOX_RULE_CHARS + " ")]
+    grids = [_screen_cells(r) for r in rows]
+    width = max((len(g) for g in grids), default=0)
+    written = [
+        g
+        for r, g in zip(rows, grids, strict=True)
+        if r.strip(_PERM_BOX_RULE_CHARS + " ")
+    ]
     blank_columns = {
         col
-        for col in range(_SIDE_PANEL_MIN_LEFT_COLS, width - _SIDE_PANEL_MIN_COLS)
-        if all(len(r) <= col or r[col] == " " for r in written)
+        for col in range(
+            max(_SIDE_PANEL_MIN_LEFT_COLS, width // 2), width - _SIDE_PANEL_MIN_COLS
+        )
+        if all(len(g) <= col or g[col] == " " for g in written)
     }
     rule_edges = set()
     for row in rows:
@@ -852,9 +883,18 @@ def _without_side_panel(screen: str) -> str:
     gutter = min(blank_columns & rule_edges, default=None)
     if gutter is None:
         return screen
-    if sum(1 for r in rows if r[gutter + 1 :].strip()) < _SIDE_PANEL_MIN_ROWS:
+    if sum(1 for g in grids if "".join(g[gutter + 1 :]).strip()) < _SIDE_PANEL_MIN_ROWS:
         return screen
-    return "\n".join(r[:gutter].rstrip() for r in rows)
+    return "\n".join("".join(g[:gutter]).rstrip() for g in grids)
+
+
+def _screen_cells(row: str) -> list[str]:
+    cells: list[str] = []
+    for ch in row:
+        cells.append(ch)
+        if unicodedata.east_asian_width(ch) in ("W", "F"):
+            cells.append("")
+    return cells
 
 
 def _is_box_rule(line: str) -> bool:
@@ -959,6 +999,13 @@ class PermDialogSubject:
     stranger's; a text shown whole makes it this call's; only a box showing
     neither falls back to the heads, so a render nobody has captured cannot
     veto a drive's own dialog.
+
+    ``tail`` is the last stretch of a Bash command, spaces removed. A call
+    with no description gets claude's generic "Run shell command", so once a
+    command taller than the pane takes its head and the box header off the
+    top, the command's end — painted just above the question — is the only
+    text of this call left on screen. Without it an 86-line heredoc that
+    leashd had already approved matched nothing and wedged the pane.
     """
 
     needles: tuple[str, ...]
@@ -966,6 +1013,7 @@ class PermDialogSubject:
     box_header: str = ""
     command: str = ""
     description: str = ""
+    tail: str = ""
 
 
 def _squeezed(text: str) -> str:
@@ -983,18 +1031,40 @@ def _shown_on_rows(
     does one claude cut short with an ellipsis. They are read twice, as
     captured and cut at the first column gap, because a screen that kept the
     fullscreen side panel carries the panel's text on the same rows, and a
-    command can hold a run of spaces of its own.
+    command can hold a run of spaces of its own. A third reading drops what
+    a sparse panel paints past the middle of the screen (its ``✕``, "No
+    changes this session"), which :func:`_without_side_panel` leaves in place;
+    on the command's first row it made the command read as another call's.
+    That reading can only name a box, never disown one, because it may cut a
+    command's own spaced-out text.
 
     ``anchored`` reads the text from the first row only, where sharing its
     first ``_PERM_SUBJECT_MIN_CHARS`` characters is enough to be another
     text; otherwise the text may start on any row and must share a head.
     """
-    cells = [row.strip().removeprefix("│").strip() for row in rows]
+    cells = _row_cells(rows)
     first_column = [_COLUMN_GAP_RE.split(cell, maxsplit=1)[0] for cell in cells]
+    unmarked = _row_cells(_without_panel_marks(rows))
     return _either_reading(
         _shown_in_cells(text, cells, anchored),
         _shown_in_cells(text, first_column, anchored),
+        _shown_in_cells(text, unmarked, anchored) or None,
     )
+
+
+def _row_cells(rows: list[str]) -> list[str]:
+    return [row.strip().removeprefix("│").strip() for row in rows]
+
+
+def _without_panel_marks(rows: list[str]) -> list[str]:
+    middle = max((len(row) for row in rows), default=0) // 2
+    unmarked = []
+    for row in rows:
+        gap = next(
+            (m for m in _PANEL_MARK_GAP_RE.finditer(row) if m.end() >= middle), None
+        )
+        unmarked.append(row[: gap.start()] if gap else row)
+    return unmarked
 
 
 def _either_reading(*readings: bool | None) -> bool | None:
@@ -1009,7 +1079,12 @@ def _command_shown(subject: PermDialogSubject, box: list[str]) -> bool | None:
     if not subject.command or not subject.box_header:
         return None
     header = next(
-        (i for i, row in enumerate(box) if row.strip() == subject.box_header), None
+        (
+            i
+            for i, row in enumerate(_without_panel_marks(box))
+            if row.strip() == subject.box_header
+        ),
+        None,
     )
     if header is None:
         return None
@@ -1019,6 +1094,16 @@ def _command_shown(subject: PermDialogSubject, box: list[str]) -> bool | None:
     renders = {subject.command, _CD_PREFIX_RE.sub("", subject.command)}
     return _either_reading(
         *(_shown_on_rows(text, below, anchored=True) for text in renders if text)
+    )
+
+
+def _tail_shown(tail: str, rows: list[str]) -> bool:
+    cells = _row_cells(rows)
+    first_column = [_COLUMN_GAP_RE.split(cell, maxsplit=1)[0] for cell in cells]
+    unmarked = _row_cells(_without_panel_marks(rows))
+    return any(
+        tail in "".join(_squeezed(cell) for cell in reading)
+        for reading in (cells, first_column, unmarked)
     )
 
 
@@ -1057,6 +1142,12 @@ def _perm_dialog_subject(
     """
     if tool_name == "Bash":
         command = str(tool_input.get("command") or "")
+        squeezed = _squeezed(command)
+        tail = (
+            squeezed[-_PERM_SUBJECT_TAIL_CHARS:]
+            if len(squeezed) >= _PERM_SUBJECT_HEAD_CHARS
+            else ""
+        )
         first = next((ln for ln in command.splitlines() if ln.strip()), "")
         command, description = (
             text if len(text) >= _PERM_SUBJECT_MIN_CHARS else ""
@@ -1070,7 +1161,9 @@ def _perm_dialog_subject(
         )
         if not needles:
             return None
-        return PermDialogSubject(needles, False, "Bash command", command, description)
+        return PermDialogSubject(
+            needles, False, "Bash command", command, description, tail
+        )
     if tool_name in FILE_EDIT_TOOLS:
         path = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
         needle = PurePosixPath(str(path)).name[:_PERM_SUBJECT_HEAD_CHARS]
@@ -1150,7 +1243,9 @@ class NativeDialogMatch:
     numbered list (``/model``), whose row digit commits it from anywhere, and
     a cursor-only list (``/chrome``), which has no digits and only moves under
     the arrow keys. Driving the second as if it were the first types a stray
-    digit into the dialog and leaves it open.
+    digit into the dialog and leaves it open. ``slider`` marks a third shape,
+    a horizontal scale (``/effort``) moved with ←/→, whose options are its
+    level labels.
     """
 
     __slots__ = (
@@ -1161,6 +1256,7 @@ class NativeDialogMatch:
         "options",
         "question",
         "selected_row_index",
+        "slider",
     )
 
     def __init__(
@@ -1173,6 +1269,7 @@ class NativeDialogMatch:
         fingerprint: str,
         selected_row_index: int,
         numbered: bool = True,
+        slider: bool = False,
     ) -> None:
         self.name = name
         self.question = question
@@ -1181,6 +1278,7 @@ class NativeDialogMatch:
         self.fingerprint = fingerprint
         self.selected_row_index = selected_row_index
         self.numbered = numbered
+        self.slider = slider
 
 
 def _native_dialog_should_skip(screen: str) -> bool:
@@ -1230,8 +1328,9 @@ _SELECTOR_CONFIRM_HINTS = (
 def _selector_block_options(screen: str) -> list[tuple[int, bool, str]]:
     """Numbered rows that actually form a rendered selector, else empty.
 
-    A claude selector is a contiguous run of rows numbered from 1, with its
-    keyboard hint on a line BELOW them. A numbered list in the agent's own
+    A claude selector is the bottom-most contiguous run of two or more rows
+    numbered from 1, with its keyboard hint BELOW them and no rule between
+    (:func:`_hint_closes_block`). A numbered list in the agent's own
     prose satisfies none of that once it is checked, which is the whole point:
     ``_parse_numbered_options`` alone matched any "1." in any message and made
     a normal reply look like a dialog.
@@ -1251,8 +1350,6 @@ def _selector_block_options(screen: str) -> list[tuple[int, bool, str]]:
     if not numbered:
         return []
 
-    # Take the LAST contiguous run — a dialog is the bottom-most thing drawn,
-    # anything above it is transcript.
     run: list[tuple[int, int, bool, str]] = [numbered[-1]]
     for prev in reversed(numbered[:-1]):
         head = run[0]
@@ -1261,14 +1358,27 @@ def _selector_block_options(screen: str) -> list[tuple[int, bool, str]]:
             run.insert(0, prev)
         else:
             break
-    # A real selector offers a choice: one row is prose, not a dialog.
     if len(run) < 2 or run[0][1] != 1:
         return []
-    if not any(
-        hint in "\n".join(lines[run[-1][0] + 1 :]) for hint in _SELECTOR_CONFIRM_HINTS
-    ):
+    if not _hint_closes_block(lines, run[-1][0]):
         return []
     return [(num, hl, label) for _, num, hl, label in run]
+
+
+def _hint_closes_block(lines: list[str], last: int) -> bool:
+    """Is the block ending at row ``last`` closed by a selector's keyboard hint?
+
+    The hint must come before any rule. A rule under the rows opens the box of
+    whatever claude drew next, so rows above it are transcript: the ``/effort``
+    slider is a box of its own with ``Enter to confirm`` in it, and the numbered
+    "To ship" list in the reply above it was bridged as that dialog's options.
+    """
+    for line in lines[last + 1 :]:
+        if _is_box_rule(line):
+            return False
+        if any(hint in line for hint in _SELECTOR_CONFIRM_HINTS):
+            return True
+    return False
 
 
 def _dialog_title(screen: str, first_label: str) -> str | None:
@@ -1353,9 +1463,7 @@ def _cursor_block_options(screen: str) -> list[tuple[int, bool, str]]:
         last = j
     if len(rows) < 2:
         return []
-    if not any(
-        hint in "\n".join(lines[last + 1 :]) for hint in _SELECTOR_CONFIRM_HINTS
-    ):
+    if not _hint_closes_block(lines, last):
         return []
     return [(n + 1, hl, text) for n, (hl, text) in enumerate(rows)]
 
@@ -1370,6 +1478,63 @@ def _dialog_block_options(screen: str) -> tuple[list[tuple[int, bool, str]], boo
     if rows:
         return rows, True
     return _cursor_block_options(screen), False
+
+
+class _Slider(NamedTuple):
+    labels: list[str]
+    position: int
+    title: str | None
+
+
+def _read_slider(screen: str) -> _Slider | None:
+    """Claude's slider dialog: its level labels, the one it is set to, its title.
+
+    ``/effort`` (2.1.281) opens a scale, not a list, so neither option parser
+    sees anything in it::
+
+        ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+           Effort
+                 Faster                                  Smarter
+                 ────────────────────▲──────────────────┆──────
+                 low     medium     high     xhigh      max       ultracode
+           ←/→ to adjust · Enter to confirm · s for this session only · Esc to cancel
+
+    The scale is read upward from its hint row and never across a rule, the
+    marker selects the label whose centre is nearest to it, and the title is
+    the first row under the rule that opens the box. The ``/model`` picker's
+    own effort row says ``←/→ to adjust`` too, but not on a row with a confirm
+    hint, so it is not taken for a slider.
+    """
+    lines = screen.splitlines()
+    hint = next(
+        (i for i in range(len(lines) - 1, -1, -1) if _SLIDER_ADJUST_HINT in lines[i]),
+        None,
+    )
+    if hint is None or not any(h in lines[hint] for h in _SELECTOR_CONFIRM_HINTS):
+        return None
+    for track in range(hint - 1, -1, -1):
+        line = lines[track]
+        if _is_box_rule(line):
+            return None
+        column = line.find(_SLIDER_MARKER)
+        if column < 0 or line.strip(" " + _SLIDER_TRACK_CHARS):
+            continue
+        labels_row = next((ln for ln in lines[track + 1 : hint] if ln.strip()), "")
+        spans = list(_SLIDER_LABEL_RE.finditer(labels_row))
+        if len(spans) < 2:
+            return None
+        position = min(
+            range(len(spans)),
+            key=lambda k: abs((spans[k].start() + spans[k].end() - 1) / 2 - column),
+        )
+        top = next((i for i in range(track, -1, -1) if _is_box_rule(lines[i])), None)
+        title = (
+            None
+            if top is None
+            else next((ln.strip() for ln in lines[top + 1 : track] if ln.strip()), None)
+        )
+        return _Slider([span.group() for span in spans], position, title)
+    return None
 
 
 def _detect_native_dialog(screen: str) -> NativeDialogMatch | None:
@@ -1430,6 +1595,24 @@ def _detect_native_dialog(screen: str) -> NativeDialogMatch | None:
             selected_row_index=selected,
         )
 
+    slider = _read_slider(screen)
+    if slider is not None:
+        title = slider.title or "Pick a level"
+        return NativeDialogMatch(
+            name="slider_dialog",
+            question=(
+                f"{title} (this session only)"
+                if _SLIDER_SESSION_ONLY_HINT in screen
+                else title
+            ),
+            header="Claude",
+            options=[{"label": label} for label in slider.labels],
+            fingerprint=f"slider:{title}:{'|'.join(slider.labels)}",
+            selected_row_index=slider.position,
+            numbered=False,
+            slider=True,
+        )
+
     # Generic fallback: any pane state with a numbered-option list and a
     # known confirm-keyboard hint we don't already handle.
     #
@@ -1477,9 +1660,14 @@ def _detect_native_dialog(screen: str) -> NativeDialogMatch | None:
     return None
 
 
-def _dialog_offers_option(screen: str, label: str, *, numbered: bool) -> bool:
+def _dialog_offers_option(screen: str, match: NativeDialogMatch, label: str) -> bool:
+    if match.slider:
+        slider = _read_slider(screen)
+        return slider is not None and label in slider.labels
     rows = (
-        _parse_numbered_options(screen) if numbered else _cursor_block_options(screen)
+        _parse_numbered_options(screen)
+        if match.numbered
+        else _cursor_block_options(screen)
     )
     return any(row_label == label for _, _, row_label in rows)
 
@@ -1509,6 +1697,70 @@ class PolicyBlock:
     inline: bool = False
 
 
+class TurnUsage:
+    """What a pane spent since the previous reply.
+
+    ``native_cost_usd`` is claude's own figure: the rise in the session total
+    its statusLine reports, subagents included. It is ``None`` when the pane
+    never reported one, and the reply then carries no cost rather than a
+    guess.
+
+    The token counts come from the pane's transcript. Claude writes one record
+    per content block, each repeating the request's ``message.usage``, so a
+    request counts once per ``message.id``.
+    """
+
+    def __init__(self) -> None:
+        self.requests = 0
+        self.input_tokens = 0
+        self.cache_write_tokens = 0
+        self.cache_read_tokens = 0
+        self.output_tokens = 0
+        self.native_cost_usd: float | None = None
+
+    @property
+    def cost_usd(self) -> float:
+        return self.native_cost_usd or 0.0
+
+    def add(self, usage: dict[str, Any]) -> None:
+        self.requests += 1
+        self.input_tokens += _usage_int(usage, "input_tokens")
+        self.cache_write_tokens += _usage_int(usage, "cache_creation_input_tokens")
+        self.cache_read_tokens += _usage_int(usage, "cache_read_input_tokens")
+        self.output_tokens += _usage_int(usage, "output_tokens")
+
+    def log_fields(self) -> dict[str, Any]:
+        return {
+            "cost_reported": self.native_cost_usd is not None,
+            "api_requests": self.requests,
+            "input_tokens": self.input_tokens,
+            "cache_write_tokens": self.cache_write_tokens,
+            "cache_read_tokens": self.cache_read_tokens,
+            "output_tokens": self.output_tokens,
+        }
+
+
+def _usage_int(usage: dict[str, Any], key: str) -> int:
+    value = usage.get(key)
+    return value if isinstance(value, int) and value > 0 else 0
+
+
+def _billable_usage(obj: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
+    message = obj.get("message")
+    if not isinstance(message, dict):
+        return None
+    message_id = message.get("id")
+    usage = message.get("usage")
+    if (
+        not isinstance(message_id, str)
+        or not message_id
+        or message.get("model") == _SYNTHETIC_MODEL
+        or not isinstance(usage, dict)
+    ):
+        return None
+    return message_id, usage
+
+
 class TmuxTurn:
     """Mutable state for a single in-flight agent turn within a live pane.
 
@@ -1532,6 +1784,7 @@ class TmuxTurn:
         self.text_parts: list[str] = []
         self.tools_used: list[str] = []
         self.cost_usd: float = 0.0
+        self.usage = TurnUsage()
         self.num_turns: int = 0
         self.is_error: bool = False
         self.api_error: str | None = None
@@ -1597,9 +1850,12 @@ class TmuxTurn:
 
     def mark_activity(self) -> None:
         """Record observed progress so the no-human watchdog does not abort a
-        turn that is genuinely advancing (parity intent with claude-cli, whose
-        NDJSON stream keeps its turn alive)."""
+        turn that is genuinely advancing."""
         self.last_activity = time.monotonic()
+
+    def settle_usage(self, usage: TurnUsage) -> None:
+        self.usage = usage
+        self.cost_usd = usage.cost_usd
 
     def claim_hook_activity(self, key: str) -> bool:
         """One ToolActivity per physical tool call across the two redundant
@@ -1844,9 +2100,6 @@ class TmuxClaudeSession:
         self.mode = mode
         self.task_run_id = task_run_id
         self.plan_origin = plan_origin
-        # Task v4: when True, the auto-floor PreToolUse hook defers to
-        # Claude's native classifier even inside an orchestrated task
-        # (see `evaluate` ~line 1206 below).
         self.native_auto_allowed = native_auto_allowed
         # True iff the pane was spawned with ``--permission-mode auto`` — i.e.
         # the resolved model supports the native classifier AND the
@@ -1923,6 +2176,13 @@ class TmuxClaudeSession:
         self.regate_active = False
         self.hooked_calls: dict[str, tuple[str, dict[str, Any]]] = {}
         self._hooked_at: dict[str, float] = {}
+        self.billed_message_ids: set[str] = set()
+        self.unreported_usage = TurnUsage()
+        self.native_cost_session: str | None = None
+        self.native_cost_total: float | None = None
+        self.native_cost_reported = 0.0
+        self.native_cost_at = 0.0
+        self.last_request_at = 0.0
         # The policy deny that ended this turn, if the turn ended on one. Set
         # by every tool decision (a deny records, anything else clears), so it
         # survives only while the block really is the LAST thing that happened
@@ -2828,6 +3088,8 @@ class TmuxClaudeSession:
             if False in shown:
                 return False
             if True in shown:
+                return True
+            if subject.tail and _tail_shown(subject.tail, region):
                 return True
         haystack = " ".join(" ".join(region).split())
         return any(needle in haystack for needle in subject.needles)
@@ -3922,6 +4184,62 @@ class TmuxClaudeSession:
             self.hooked_calls.pop(key, None)
             self._hooked_at.pop(key, None)
 
+    def bill(self, obj: dict[str, Any]) -> None:
+        billable = _billable_usage(obj)
+        if billable is None:
+            return
+        message_id, usage = billable
+        if message_id in self.billed_message_ids:
+            return
+        self.billed_message_ids.add(message_id)
+        self.last_request_at = time.monotonic()
+        self.unreported_usage.add(usage)
+
+    def note_native_cost(self, claude_uuid: str, total: float) -> None:
+        """Record the session total claude's statusLine reported.
+
+        The total restarts with each claude session, so a new session id, or a
+        total lower than the last one, starts a new baseline at the value first
+        seen. Claude draws its statusLine at startup before any request runs,
+        so that first value is only what a resumed session had already spent.
+        """
+        if claude_uuid != self.native_cost_session or (
+            self.native_cost_total is not None and total < self.native_cost_total
+        ):
+            self.native_cost_session = claude_uuid
+            self.native_cost_reported = total
+        self.native_cost_total = total
+        self.native_cost_at = time.monotonic()
+
+    async def settle_native_cost(self, timeout: float) -> None:
+        """Wait briefly for claude to redraw its statusLine after the turn's
+        last request, so that request's cost is on this reply and not the
+        next one."""
+        if self.native_cost_total is None:
+            return
+        deadline = time.monotonic() + timeout
+        while self.native_cost_at < self.last_request_at:
+            if time.monotonic() >= deadline:
+                return
+            await asyncio.sleep(0.1)
+
+    def take_usage(self) -> TurnUsage:
+        """Hand over everything this pane spent since the last reply.
+
+        Spend is kept per pane, not per turn: a background subagent finishes
+        after the turn that launched it has replied, and claude then answers
+        its result in a request of its own that no leashd turn is waiting on.
+        That spend lands on the next reply instead of being dropped.
+        """
+        usage = self.unreported_usage
+        self.unreported_usage = TurnUsage()
+        if self.native_cost_total is not None:
+            usage.native_cost_usd = max(
+                self.native_cost_total - self.native_cost_reported, 0.0
+            )
+            self.native_cost_reported = self.native_cost_total
+        return usage
+
     def tool_in_flight(self) -> bool:
         """Has a call this pane's hook saw started and not finished recently?
 
@@ -4146,9 +4464,8 @@ class TmuxSessionManager:
         marketplace (if absent) and installs the plugin into the user scope so
         leashd's managed ``enabledPlugins`` can activate it (install ≠ enable).
         Best-effort and attempt-once per daemon: a failure is logged and never
-        blocks a session — the plugin simply stays inactive. Runtime-agnostic;
-        called once at engine build for whichever runtime is active, so the
-        headless ``claude-cli`` default benefits without the tmux preflight.
+        blocks a session — the plugin simply stays inactive. Called once at
+        engine build.
         """
         if self._security_guidance_installed:
             return
@@ -4201,8 +4518,7 @@ class TmuxSessionManager:
         """Is a human interaction or approval awaiting a reply for this chat?
 
         Lets the turn wait (``TmuxAgent.execute``) not count time blocked on a
-        human, mirroring claude-cli pausing its turn deadline during the
-        interaction — true no-expiry parity.
+        human, so an unbounded human wait never times the turn out.
         """
         return (
             self._interactions.has_pending(chat_id) if self._interactions else False
@@ -4379,11 +4695,6 @@ class TmuxSessionManager:
         """Write this session's adoption record. Best-effort, never raises."""
         write_manifest(self._socket_dir, self._manifest_for(cs))
 
-    def persist_all_manifests(self) -> None:
-        for cs in list(self._sessions.values()):
-            if cs.tmux_name.startswith(TMUX_NAME_PREFIX):
-                self.persist_manifest(cs)
-
     def _hook_headers(self, pane_token: str | None) -> dict[str, str]:
         headers = {"X-Leashd-Token": self._secret}
         if pane_token:
@@ -4406,8 +4717,7 @@ class TmuxSessionManager:
         that outlived the answer did not). So the hook MUST outlive the
         longest human wait it gates.
 
-        The human wait is unbounded by default (no expiry — parity with
-        claude-cli). Claude Code has no infinite hook value and no heartbeat,
+        The human wait is unbounded by default (no expiry). Claude Code has no infinite hook value and no heartbeat,
         so use an *effectively-infinite* timeout: only a human reply, ``/stop``
         / ``/cancel`` (pane teardown kills ``claude``) or daemon shutdown ends
         the wait. When the operator sets an explicit *finite* window, size the
@@ -4422,33 +4732,20 @@ class TmuxSessionManager:
         return max(eff + 60, self._config.tmux_hook_timeout_seconds)
 
     def _sync_hook_block(
-        self,
-        event: str,
-        *,
-        pane_token: str | None = None,
-        human_gated: bool = True,
+        self, event: str, *, pane_token: str | None = None
     ) -> dict[str, Any]:
         """A synchronous HTTP hook block (blocks the tool until leashd answers).
 
-        ``human_gated`` hooks (the live-pane ``PreToolUse`` and every
-        ``PermissionRequest``) can await a human, so they use the
-        effectively-infinite / outlive-the-window timeout. The claude-cli
-        auto-floor ``PreToolUse`` only hard-denies or defers — it never awaits
-        a human (claude-cli's human channel is the stdio permission-prompt
-        tool) — so it uses a fast bounded timeout and a wedged receiver fails
-        fast in headless auto mode.
+        Both ``PreToolUse`` and ``PermissionRequest`` can await a human, so they
+        use the effectively-infinite / outlive-the-window timeout.
         """
-        if human_gated:
-            timeout = self._pre_tool_hook_timeout()
-        else:
-            timeout = max(self._config.tmux_hook_timeout_seconds, 60)
         return {
             "matcher": ".*",
             "hooks": [
                 {
                     "type": "http",
                     "url": self._hook_url(event),
-                    "timeout": timeout,
+                    "timeout": self._pre_tool_hook_timeout(),
                     "headers": self._hook_headers(pane_token),
                 }
             ],
@@ -4490,6 +4787,31 @@ class TmuxSessionManager:
         policy = getattr(self._gatekeeper, "_policy_engine", None)
         return native_ask_rules(getattr(policy, "rules", []) or [])
 
+    def _status_line_block(
+        self, session_id: str, headers: dict[str, str]
+    ) -> dict[str, Any]:
+        """Forward claude's statusLine payload to leashd and draw nothing.
+
+        The payload is the only live place claude reports its own running cost.
+        Hooks are HTTP, but a statusLine is a shell command, so curl posts it.
+        The secret is read from a private file, never put in argv. Without curl
+        the post fails silently and leashd falls back to its token estimate.
+        """
+        header_file = self._socket_dir / f"{session_id}.statusline-headers"
+        fd = os.open(header_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as handle:
+            handle.write("".join(f"{k}: {v}\n" for k, v in headers.items()))
+        command = " ".join(
+            [
+                "curl -sf -m 2 -o /dev/null",
+                f"-H @{shlex.quote(str(header_file))}",
+                "-H 'Content-Type: application/json'",
+                "--data-binary @-",
+                shlex.quote(self._hook_url(STATUS_LINE_EVENT)),
+            ]
+        )
+        return {"type": "command", "command": command, "padding": 0}
+
     def write_managed_settings(
         self,
         session_id: str,
@@ -4511,8 +4833,8 @@ class TmuxSessionManager:
         ``on_permission_request`` DEDUPES against the in-flight ``PreToolUse``
         decision for that exact tool identity instead of running a second
         independent human/AI approval. It only re-enters the full pipeline
-        when ``PreToolUse`` returned a non-final ``defer`` (native-auto
-        pass-through) or never ran at all.
+        when ``PreToolUse`` passed the call through undecided (native auto)
+        or never ran at all.
 
         Every hook block also carries this pane's identity token
         (``X-Leashd-Pane``), which is how the receiver routes a hook back to
@@ -4562,116 +4884,16 @@ class TmuxSessionManager:
                     count=len(ask),
                     rules=ask_names,
                 )
-        payload: dict[str, Any] = {"hooks": hooks, "permissions": permissions}
-        enabled = self._security_enabled_plugins()
-        if enabled:
-            payload["enabledPlugins"] = enabled
-        path.write_text(json.dumps(payload, indent=2))
-        return path
-
-    def write_auto_floor_settings(self, session_id: str) -> Path:
-        """Managed settings carrying ONLY the auto-mode hard-deny + raise hooks.
-
-        Used by the headless ``claude-cli`` runtime in ``auto`` mode: Claude's
-        native auto classifier auto-allows safe tools *without* ever invoking
-        the stdio ``--permission-prompt-tool``, so the hard-deny floor would go
-        unenforced for those. This synchronous ``PreToolUse`` hook closes that
-        gap (hard-deny → ``deny``, else → ``defer``) and ``PermissionRequest``
-        re-enters the full pipeline when the classifier escalates. No async
-        lifecycle hooks — ``claude-cli`` has its own NDJSON stream.
-
-        Carries the same ``X-Leashd-Pane`` identity token as the tmux settings
-        file, so concurrent headless ``auto`` runs in one directory resolve to
-        their own safety context too.
-        """
-        self._socket_dir.mkdir(parents=True, exist_ok=True)
-        pane_token = self._mint_pane_token(session_id)
-        hooks: dict[str, Any] = {
-            "PreToolUse": [
-                self._sync_hook_block(
-                    "PreToolUse", pane_token=pane_token, human_gated=False
-                )
-            ],
-            "PermissionRequest": [
-                self._sync_hook_block("PermissionRequest", pane_token=pane_token)
-            ],
-        }
-        path = self._socket_dir / f"{session_id}.cli.settings.json"
         payload: dict[str, Any] = {
             "hooks": hooks,
-            "permissions": {"deny": _credential_deny_rules()},
+            "permissions": permissions,
+            "statusLine": self._status_line_block(session_id, headers),
         }
         enabled = self._security_enabled_plugins()
         if enabled:
             payload["enabledPlugins"] = enabled
         path.write_text(json.dumps(payload, indent=2))
         return path
-
-    def write_plugin_settings(self, session_id: str) -> Path | None:
-        """Managed settings carrying ONLY ``enabledPlugins`` (no hooks).
-
-        Used by the headless ``claude-cli`` runtime in non-``auto`` modes,
-        which otherwise write no managed ``--settings`` file: this activates
-        the security-guidance plugin without touching the user's real
-        ``~/.claude/settings.json``. Returns ``None`` when the plugin is
-        disabled (the caller then skips ``--settings`` entirely).
-        """
-        enabled = self._security_enabled_plugins()
-        if not enabled:
-            return None
-        self._socket_dir.mkdir(parents=True, exist_ok=True)
-        path = self._socket_dir / f"{session_id}.plugins.settings.json"
-        path.write_text(json.dumps({"enabledPlugins": enabled}, indent=2))
-        return path
-
-    def register_cli_session(
-        self,
-        *,
-        session_id: str,
-        chat_id: str,
-        user_id: str,
-        working_directory: str,
-        mode: str,
-        task_run_id: str | None,
-        plan_origin: str | None,
-        last_prompt: str,
-        settings_path: Path,
-        native_auto_allowed: bool = False,
-    ) -> None:
-        """Register a pane-less ``claude-cli`` session so the auto-mode HTTP
-        hooks resolve to its safety context via :meth:`_bind_uuid`, keyed on
-        the identity token in the settings file this run was given."""
-        cs = TmuxClaudeSession(
-            session_id=session_id,
-            chat_id=chat_id,
-            user_id=user_id,
-            working_directory=working_directory,
-            mode=mode,
-            task_run_id=task_run_id,
-            plan_origin=plan_origin,
-            tmux_name=f"cli_{session_id}",
-            settings_path=settings_path,
-            native_auto_allowed=native_auto_allowed,
-            typing=_typing_profile_from_config(self._config),
-        )
-        cs.last_prompt = last_prompt
-        self._sessions[session_id] = cs
-        cs.pane_token = self._adopt_pane_token(session_id)
-
-    def unregister_cli_session(self, session_id: str) -> None:
-        """Drop a registered ``claude-cli`` session and its settings file."""
-        cs = self._sessions.pop(session_id, None)
-        for uuid_key, sid in list(self._by_uuid.items()):
-            if sid == session_id:
-                del self._by_uuid[uuid_key]
-        self._drop_pane_tokens(session_id)
-        self._pending_pane_tokens.pop(session_id, None)
-        if cs is not None:
-            with contextlib.suppress(Exception):
-                cs.settings_path.unlink(missing_ok=True)
-            if cs.append_system_prompt_path is not None:
-                with contextlib.suppress(Exception):
-                    cs.append_system_prompt_path.unlink(missing_ok=True)
 
     # -- session lifecycle ---------------------------------------------------
 
@@ -4687,9 +4909,8 @@ class TmuxSessionManager:
         Kills the tmux pane so the interactive ``claude`` process cannot keep
         running its agent loop / queued tool calls, then forgets the session
         so the next turn re-spawns and resumes via the saved
-        ``agent_resume_token``. This is the runtime-agnostic ``cancel``
-        contract — the equivalent of the ``claude-cli`` runtime terminating
-        its subprocess. Sending Escape/C-c alone does not stop an in-flight
+        ``agent_resume_token``. This is the ``BaseAgent.cancel`` contract.
+        Sending Escape/C-c alone does not stop an in-flight
         interactive agent, so /stop, /cancel and the interrupt "send now"
         path must tear the pane down.
         """
@@ -4967,7 +5188,6 @@ class TmuxSessionManager:
             model=model,
             append_system_prompt=append_system_prompt,
             resume_token=resume_uuid,
-            interactive=True,
             config=self._config,
             cli_version=self._claude_version,
         )
@@ -5274,8 +5494,8 @@ class TmuxSessionManager:
         the drive can tell its own dialog from the one the NEXT call paints
         into the pane it is still watching (:class:`PermDialogSubject`).
 
-        Only a DECISIVE envelope drives the pane. ``defer`` (native-auto
-        pass-through) and ``ask`` are not leashd decisions at all — Claude's
+        Only a DECISIVE envelope drives the pane. A pass-through (native
+        auto) and ``ask`` are not leashd decisions at all — Claude's
         own permission mode owns the call and re-raises it through
         PermissionRequest, which drives the selector there with the real
         verdict. Treating a non-decision as ``allow != decision`` → deny made
@@ -5477,10 +5697,10 @@ class TmuxSessionManager:
             elif out.get("hookSpecificOutput", {}).get("permissionDecision") == "deny":
                 cs.forget_hooked_call(tool_use_id, tool_name, tool_input)
 
-        # Always publish the outcome (even a non-final `defer`) so a waiting
+        # Always publish the outcome (even a pass-through) so a waiting
         # PermissionRequest unblocks immediately; the dedupe path in
         # on_permission_request inspects decisiveness and falls through to the
-        # full pipeline for a `defer`/`ask` (the native-auto escalation
+        # full pipeline for a pass-through/`ask` (the native-auto escalation
         # contract) instead of waiting out the race-guard poll.
         if fut is not None and not fut.done():
             fut.set_result(out)
@@ -5572,9 +5792,7 @@ class TmuxSessionManager:
                     native_ask_rules=cs.native_ask_rules,
                 )
                 if gated is None:
-                    return _hook_decision(
-                        "defer", "leashd: deferring to Claude permission mode"
-                    )
+                    return _hook_passthrough()
                 return _permission_to_hook(gated)
             # Not a gated interaction tool — run the normal safety pipeline.
             # Log before the call: the gatekeeper logs `policy_evaluated`
@@ -5625,6 +5843,47 @@ class TmuxSessionManager:
         # dedup in _hook_to_permreq strips the reason, so nothing reached the
         # model and the pane hung.)
         return _permission_to_hook(decision)
+
+    def stuck_permission_id(self, cs: TmuxClaudeSession) -> str | None:
+        """A short fingerprint of the permission dialog on screen, when nobody
+        is answering it.
+
+        None while a hook, a drive or a human prompt still owns the dialog:
+        the approval card is where that one gets answered.
+        """
+        screen = cs.capture()
+        box = cs.perm_dialog_box(screen)
+        if box is None or cs._composer_accepts_input(screen):
+            return None
+        if not self._permission_dialog_orphaned(cs):
+            return None
+        return hashlib.sha256(box.encode()).hexdigest()[:_STUCK_PERMISSION_ID_CHARS]
+
+    def reject_stuck_permission(
+        self, cs: TmuxClaudeSession, permission_id: str | None, *, source: str
+    ) -> bool:
+        """Answer "No" to a permission dialog nobody is answering.
+
+        Rejecting is the only answer given without the gate: the dialog could
+        not be tied to a tool call, so no policy can vouch for "Yes", and a
+        "No" runs nothing. ``permission_id`` binds a tap to the dialog it was
+        shown for; a different dialog on screen by then is left alone.
+        """
+        current = self.stuck_permission_id(cs)
+        if current is None or (permission_id is not None and permission_id != current):
+            return False
+        try:
+            cs.send_keys("Escape", literal=False)
+        except AgentError:
+            return False
+        logger.warning(
+            "tmux_stuck_permission_rejected",
+            session_id=cs.session_id,
+            chat_id=cs.chat_id,
+            tmux_name=cs.tmux_name,
+            source=source,
+        )
+        return True
 
     def spawn_orphaned_permission_regate(
         self, cs: TmuxClaudeSession
@@ -5848,7 +6107,7 @@ class TmuxSessionManager:
             except asyncio.CancelledError:
                 # Future cancelled (session torn down mid-wait). Fail closed.
                 return _permreq_decision("deny")
-            except TimeoutError:
+            except asyncio.TimeoutError:
                 # PreToolUse never resolved within its (effectively-infinite)
                 # window — fail closed rather than re-prompt.
                 return _permreq_decision("deny")
@@ -5938,6 +6197,23 @@ class TmuxSessionManager:
         if target_mode == "edit" and self._gatekeeper is not None:
             self._gatekeeper.enable_tool_auto_approve(cs.chat_id, "Write")
             self._gatekeeper.enable_tool_auto_approve(cs.chat_id, "Edit")
+
+    def on_status_line(self, body: dict[str, Any], *, pane_token: str | None) -> None:
+        """Take claude's own running cost from its statusLine payload.
+
+        Resolved by pane token alone: the statusLine redraws every few hundred
+        milliseconds, and binding a uuid is a lifecycle decision it must not
+        drive.
+        """
+        session_id = self._by_pane_token.get(pane_token or "")
+        cs = self._sessions.get(session_id) if session_id else None
+        cost = body.get("cost")
+        claude_uuid = body.get("session_id")
+        if cs is None or not isinstance(cost, dict) or not isinstance(claude_uuid, str):
+            return
+        total = cost.get("total_cost_usd")
+        if isinstance(total, (int, float)) and not isinstance(total, bool):
+            cs.note_native_cost(claude_uuid, float(total))
 
     async def on_lifecycle(
         self, event: str, body: dict[str, Any], *, pane_token: str | None = None
@@ -6314,7 +6590,7 @@ class TmuxSessionManager:
         row_digit = str(chosen_idx + 1)
         try:
             screen = cs.capture()
-            if not _dialog_offers_option(screen, chosen_label, numbered=match.numbered):
+            if not _dialog_offers_option(screen, match, chosen_label):
                 logger.warning(
                     "tmux_native_dialog_gone_before_drive",
                     session_id=cs.session_id,
@@ -6326,7 +6602,9 @@ class TmuxSessionManager:
                 return
             session_scoped = _SESSION_SCOPED_CONFIRM_MARKER in screen
             on_target = True
-            if session_scoped:
+            if match.slider:
+                on_target = await self._set_slider(cs, chosen_idx)
+            elif session_scoped:
                 on_target = await self._navigate_dialog_highlight(cs, chosen_idx)
                 if on_target:
                     await asyncio.sleep(_DIALOG_NAV_STEP_DELAY_S)
@@ -6352,7 +6630,11 @@ class TmuxSessionManager:
                 if _MODEL_SWITCH_CONFIRM_MARKER in screen:
                     self._accept_model_switch_confirm(cs, screen)
                     continue
-                if session_scoped and on_target:
+                if match.slider:
+                    if not on_target:
+                        break
+                    on_target = await self._set_slider(cs, chosen_idx)
+                elif session_scoped and on_target:
                     on_target = await self._navigate_dialog_highlight(cs, chosen_idx)
                     if on_target:
                         cs.send_keys("s", literal=True)
@@ -6360,7 +6642,7 @@ class TmuxSessionManager:
                     cs.send_keys("Enter", literal=False)
                 elif not on_target:
                     break
-            if not confirmed and not match.numbered and on_target:
+            if not confirmed and not match.numbered and not match.slider and on_target:
                 confirmed = await self._dismiss_open_dialog(cs)
             if not confirmed:
                 await asyncio.sleep(_DIALOG_DRIVE_CONFIRM_POLL_S)
@@ -6452,6 +6734,37 @@ class TmuxSessionManager:
         cs.send_keys(str(yes_number), literal=True)
 
     @staticmethod
+    async def _set_slider(cs: TmuxClaudeSession, chosen_idx: int) -> bool:
+        """Move the slider's marker onto ``chosen_idx`` one verified arrow at a
+        time, then commit it. False when the slider is gone or the budget runs
+        out, with nothing committed.
+
+        ``s`` commits where the slider offers it. Its Enter saves the level as
+        the default in the user's own ``~/.claude/settings.json``, which leashd
+        never writes and which every terminal session of theirs then inherits.
+        """
+        for _ in range(_DIALOG_NAV_MAX_STEPS):
+            screen = cs.capture()
+            slider = _read_slider(screen)
+            if slider is None:
+                return False
+            if slider.position == chosen_idx:
+                session_only = _SLIDER_SESSION_ONLY_HINT in screen
+                cs.send_keys("s" if session_only else "Enter", literal=session_only)
+                return True
+            cs.send_keys(
+                "Right" if chosen_idx > slider.position else "Left", literal=False
+            )
+            await asyncio.sleep(_DIALOG_NAV_STEP_DELAY_S)
+        logger.warning(
+            "tmux_native_dialog_nav_exhausted",
+            session_id=cs.session_id,
+            tmux_name=cs.tmux_name,
+            chosen_idx=chosen_idx,
+        )
+        return False
+
+    @staticmethod
     async def _navigate_dialog_highlight(
         cs: TmuxClaudeSession, chosen_idx: int, *, numbered: bool = True
     ) -> bool:
@@ -6506,6 +6819,7 @@ class TmuxSessionManager:
             model = message.get("model")
             if isinstance(model, str) and model and model != _SYNTHETIC_MODEL:
                 cs.last_model = model
+            cs.bill(obj)
             content = message.get("content", [])
             if isinstance(content, list):
                 await self._process_blocks(turn, content)
@@ -7026,7 +7340,7 @@ def _tool_identity_key(
 def _hook_is_decisive(hook_out: dict[str, Any]) -> bool:
     """True iff a PreToolUse envelope is a FINAL allow/deny.
 
-    ``defer`` (native-auto pass-through) and ``ask`` are not final — Claude's
+    A pass-through (no decision, native auto) and ``ask`` are not final — Claude's
     classifier will raise the real call via PermissionRequest, which must run
     the full pipeline there, so such a non-decision must NOT be deduped into
     a PermissionRequest answer (that would break native-auto)."""
@@ -7106,6 +7420,16 @@ def _deny_without_ending_the_turn(
         "command": _blocked_bash_command(reason),
     }
     return out
+
+
+def _hook_passthrough() -> dict[str, Any]:
+    """No PreToolUse decision: Claude's own permission mode decides the call.
+
+    Not ``"defer"``, which Claude records as a deferred tool use to resume
+    later. A background subagent that gets one ends on the spot, before its
+    tool runs and without handing its report back.
+    """
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse"}}
 
 
 def _hook_decision(decision: str, reason: str) -> dict[str, Any]:

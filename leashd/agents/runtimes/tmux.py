@@ -1,15 +1,11 @@
 """tmux agent runtime — drives a real interactive ``claude`` TUI.
 
-A globally-selectable runtime (``leashd runtime set tmux``). Unlike the
-headless ``claude-cli``/``claude-code`` runtimes, this runs a *real
-interactive* ``claude`` process in a tmux pane so Plan mode, Shift+Tab
-cycling, ``/mcp``, ``/agents`` and slash commands all work. Tool approvals
-flow back through leashd's existing safety pipeline via Claude Code HTTP
-hooks (``--permission-prompt-tool`` does not fire in interactive mode). The
-hook receiver mounts on the WebUI app in WebUI / multi mode, or on a
-loopback-only standalone server in Telegram-only / CLI-only mode, so this
-runtime works through both the Web UI and Telegram exactly like
-``claude-cli`` — no ``LEASHD_WEB_ENABLED`` required.
+leashd's only runtime. It runs a *real interactive* ``claude`` process in a
+tmux pane so Plan mode, Shift+Tab cycling, ``/mcp``, ``/agents`` and slash
+commands all work. Tool approvals flow back through leashd's safety pipeline
+via Claude Code HTTP hooks. The hook receiver mounts on the WebUI app in
+WebUI / multi mode, or on a loopback-only standalone server in Telegram-only
+/ CLI-only mode, so no ``LEASHD_WEB_ENABLED`` is required.
 
 ``BaseAgent.execute()`` is request→response while the pane is long-lived:
 the first call spawns the session, later calls send-keys the prompt into
@@ -78,11 +74,13 @@ LIVENESS_POLL_INTERVAL = 5.0
 # still painted behind working output. The ⏺ bullet claude blinks beside a
 # tool call it is still waiting on does not count as a change.
 UNATTENDED_DIALOG_STALL_S = 45.0
+UNATTENDED_DIALOG_REJECT_S = 600.0
 
 BLOCKED_ON_HUMAN_LOG_INTERVAL_S = 60.0
 
 FINAL_TEXT_GRACE_SECONDS = 2.0
 FINAL_TEXT_POLL_INTERVAL = 0.1
+NATIVE_COST_SETTLE_SECONDS = 1.5
 
 # Backstop on the plan-adjustment re-prompt loop. Each revision is gated
 # upstream by a human reject, so this only guards against an unforeseen state
@@ -93,6 +91,11 @@ NATIVE_COMMAND_RENDER_POLL = 0.4
 NATIVE_COMMAND_RENDER_TIMEOUT = 4.0
 NATIVE_COMMAND_IDLE_TIMEOUT = 6.0
 PANE_SNAPSHOT_MAX_LINES = 40
+EFFORT_SCOPE_NOTE = (
+    "\n\nℹ️ A level set here lasts for this session only. leashd starts every "
+    "new session at its configured effort: see `leashd effort show`, change it "
+    "with `leashd effort set <level>`."
+)
 
 
 def _format_pane_snapshot(
@@ -200,8 +203,17 @@ def _unattended_dialog_notice() -> str:
     """
     return (
         "⏳ The agent is waiting on a permission prompt in its terminal that "
-        "leashd could not match to a tool call. Check /screen, or /stop to abort."
+        "leashd could not match to a tool call. Open /screen to see it and "
+        "reject it, or /stop to abort. leashd rejects it itself in "
+        f"{int(UNATTENDED_DIALOG_REJECT_S // 60)} minutes."
     )
+
+
+_STUCK_PROMPT_TIMED_OUT_NOTE = (
+    "⏹ Nobody answered the permission prompt for "
+    f"{int(UNATTENDED_DIALOG_REJECT_S // 60)} minutes, so leashd rejected it. "
+    "Nothing ran."
+)
 
 
 _INTERRUPTED_NOTE = (
@@ -363,10 +375,6 @@ class TmuxAgent(BaseAgent):
     def _build_append_system_prompt(
         self, session: Session, *, native_auto: bool = False
     ) -> str | None:
-        # Shared with claude_cli so the agent's instructions are byte-identical
-        # across runtimes (the reuse-pane in-band re-delivery depends on this).
-        # ``native_auto`` is decided by the caller — spawn derives it from the
-        # resolved model + perm_mode; reuse derives it from ``cs.native_auto_active``.
         return build_append_system_prompt(
             self._config, session, native_auto=native_auto
         )
@@ -674,8 +682,6 @@ class TmuxAgent(BaseAgent):
                     log_event="tmux_policy_block_notice_failed",
                 )
 
-        # Resume that produced no turns → stale session id; clear it so the
-        # next execute() spawns fresh (mirrors claude_cli behaviour).
         if resume_uuid and turn.num_turns == 0:
             logger.info("tmux_resume_zero_turns", session_id=session.session_id)
             session.agent_resume_token = None
@@ -694,6 +700,8 @@ class TmuxAgent(BaseAgent):
                 if turn.result_seen:
                     break
 
+        await cs.settle_native_cost(NATIVE_COST_SETTLE_SECONDS)
+        turn.settle_usage(cs.take_usage())
         content = await _reply_content(turn, on_text_chunk)
         turn.mark_reply_taken()
         is_error = turn.is_error or turn.api_error is not None
@@ -702,7 +710,8 @@ class TmuxAgent(BaseAgent):
             session_id=session.session_id,
             duration_ms=turn.duration_ms,
             num_turns=turn.num_turns,
-            cost_usd=turn.cost_usd,
+            cost_usd=round(turn.cost_usd, 6),
+            **turn.usage.log_fields(),
             tools_used_count=len(turn.tools_used),
             is_error=is_error,
             error_kind=turn.api_error,
@@ -739,7 +748,7 @@ class TmuxAgent(BaseAgent):
         ``AgentResponse`` on an abort/timeout, or
         ``None`` on clean completion so ``execute`` can finalize — or, for a
         rejected plan, re-prompt with the adjustment feedback. A pending human
-        pauses the deadline (parity with claude-cli)."""
+        pauses the deadline."""
         started = time.monotonic()
         notified_blocked = False
         blocked_since: float | None = None
@@ -786,7 +795,7 @@ class TmuxAgent(BaseAgent):
                     turn.stop_event.wait(), timeout=LIVENESS_POLL_INTERVAL
                 )
                 break
-            except TimeoutError:
+            except asyncio.TimeoutError:
                 pass
 
             if turn.stop_event.is_set():
@@ -813,9 +822,6 @@ class TmuxAgent(BaseAgent):
                     **_death_report(cs),
                 )
 
-            # 3. Human pending → never expire (parity with claude-cli pausing
-            #    its turn deadline during the interaction). Pane death is
-            #    already handled above, so this only re-waits + notifies once.
             if self._tsm.has_pending_human(session.chat_id):
                 if blocked_since is None:
                     blocked_since = time.monotonic()
@@ -899,6 +905,24 @@ class TmuxAgent(BaseAgent):
                             f"\n\n{_unattended_dialog_notice()}\n",
                             log_event="tmux_unattended_notice_failed",
                         )
+
+            if (
+                regate_unmatched
+                and unattended_since is not None
+                and time.monotonic() - unattended_since > UNATTENDED_DIALOG_REJECT_S
+                and self._tsm.reject_stuck_permission(cs, None, source="timeout")
+            ):
+                unattended_screen = None
+                unattended_since = None
+                notified_unattended = False
+                regate_unmatched = False
+                turn.mark_activity()
+                if on_text_chunk is not None:
+                    await safe_callback(
+                        on_text_chunk,
+                        f"\n\n{_STUCK_PROMPT_TIMED_OUT_NOTE}\n",
+                        log_event="tmux_stuck_prompt_notice_failed",
+                    )
 
             if cs.tool_in_flight():
                 turn.mark_activity()
@@ -1200,8 +1224,11 @@ class TmuxAgent(BaseAgent):
         if not snapshot:
             return "(claude terminal is blank — check /screen in a moment)"
         reply = f"🖥 claude ▸ {command_text}\n\n{_crop_to_command_view(snapshot, command_text)}"
-        if command_text.split()[0] == "/model":
+        command = command_text.split()[0]
+        if command == "/model":
             reply += self._model_pin_note(cs)
+        elif command == "/effort":
+            reply += EFFORT_SCOPE_NOTE
         return reply
 
     def _model_pin_note(self, cs: TmuxClaudeSession) -> str:
@@ -1239,6 +1266,18 @@ class TmuxAgent(BaseAgent):
         if cs is None or cs.pane_is_dead():
             return None
         return _format_pane_snapshot(cs.capture())
+
+    def stuck_prompt_id(self, session: Session) -> str | None:
+        cs = self._tsm.get(session.session_id)
+        if cs is None or cs.pane_is_dead():
+            return None
+        return self._tsm.stuck_permission_id(cs)
+
+    def reject_stuck_prompt(self, session: Session, prompt_id: str) -> bool:
+        cs = self._tsm.get(session.session_id)
+        if cs is None or cs.pane_is_dead():
+            return False
+        return self._tsm.reject_stuck_permission(cs, prompt_id, source="chat")
 
     async def cancel(self, session_id: str) -> None:
         cs = self._tsm.get(session_id)
@@ -1340,6 +1379,8 @@ class TmuxAgent(BaseAgent):
             return early
         if cs.claude_uuid:
             session.agent_resume_token = cs.claude_uuid
+        await cs.settle_native_cost(NATIVE_COST_SETTLE_SECONDS)
+        turn.settle_usage(cs.take_usage())
         content = await _reply_content(turn, on_text_chunk)
         turn.mark_reply_taken()
         is_error = turn.is_error or turn.api_error is not None
@@ -1348,7 +1389,8 @@ class TmuxAgent(BaseAgent):
             session_id=session.session_id,
             duration_ms=turn.duration_ms,
             num_turns=turn.num_turns,
-            cost_usd=turn.cost_usd,
+            cost_usd=round(turn.cost_usd, 6),
+            **turn.usage.log_fields(),
             tools_used_count=len(turn.tools_used),
             is_error=is_error,
             error_kind=turn.api_error,

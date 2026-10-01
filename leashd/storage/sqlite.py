@@ -8,7 +8,7 @@ import aiosqlite
 import structlog
 
 from leashd.core.chat_sessions import SLOT_SEPARATOR
-from leashd.core.session import Session
+from leashd.core.session import SESSION_MODES, Session
 from leashd.exceptions import StorageError
 
 logger = structlog.get_logger()
@@ -303,7 +303,9 @@ class SqliteSessionStore:
                 row["is_foreground"] if "is_foreground" in keys else False
             ),
             workspace_name=row["workspace_name"],
-            mode=row["mode"] if "mode" in keys else "default",
+            mode=row["mode"]
+            if "mode" in keys and row["mode"] in SESSION_MODES
+            else "default",
             mode_instruction=row["mode_instruction"]
             if "mode_instruction" in keys
             else None,

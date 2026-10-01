@@ -7,10 +7,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from leashd.agents.runtimes.tmux import TmuxAgent
+from leashd.agents.runtimes.tmux import EFFORT_SCOPE_NOTE, TmuxAgent
 from leashd.agents.runtimes.tmux_session import (
     PolicyBlock,
     TmuxTurn,
+    TurnUsage,
     reset_tmux_session_manager,
 )
 from leashd.core.config import LeashdConfig
@@ -145,6 +146,14 @@ class FakeCS:
     def pane_is_dead(self):
         return False
 
+    async def settle_native_cost(self, timeout):
+        return None
+
+    def take_usage(self):
+        usage = TurnUsage()
+        usage.native_cost_usd = self.turn.cost_usd if self.turn is not None else 0.0
+        return usage
+
     def begin_turn(self, *, on_text_chunk, on_tool_activity):
         self.turn = TmuxTurn(
             on_text_chunk=on_text_chunk,
@@ -203,6 +212,11 @@ class FakeTSM:
         self.terminated: str | None = None
         self.regates: list = []
         self.regate_result = False
+        self.rejected: list = []
+
+    def reject_stuck_permission(self, cs, permission_id, *, source):
+        self.rejected.append((permission_id, source))
+        return True
 
     async def regate_orphaned_permission(self, cs):
         self.regates.append(cs)
@@ -352,7 +366,6 @@ async def test_execute_auto_task_phase_uses_accept_edits(tmp_path):
     [
         ("default", "default"),
         ("edit", "acceptEdits"),
-        ("test", "acceptEdits"),
     ],
 )
 async def test_execute_execution_modes_keep_real_perm_mode(
@@ -680,6 +693,41 @@ async def test_execute_reports_a_dialog_nobody_will_answer(tmp_path, monkeypatch
     assert "could not match to a tool call" in notices[0]
     assert "Send any message" not in notices[0]
     assert cs in tsm.regates
+    assert resp.is_error is False
+
+
+async def test_a_dialog_nobody_answers_is_rejected_after_the_timeout(
+    tmp_path, monkeypatch
+):
+    """The leadline pane sat 45 minutes on a prompt leashd had approved but
+    could not press. Once the re-gate cannot place it and the timeout passes,
+    leashd answers No itself, which runs nothing, and says so."""
+    import leashd.agents.runtimes.tmux as tmux_mod
+
+    monkeypatch.setattr(tmux_mod, "UNATTENDED_DIALOG_STALL_S", 0.0)
+    monkeypatch.setattr(tmux_mod, "UNATTENDED_DIALOG_REJECT_S", 0.0)
+    monkeypatch.setattr(tmux_mod, "LIVENESS_POLL_INTERVAL", 0.01)
+    cs = FakeCS(text="rejected")
+    cs._complete_on_enter = False
+    cs.screen = " Do you want to proceed?\n ❯ 1. Yes\n   2. No"
+    cs.dedicated_selector = True
+    tsm = FakeTSM(cs)
+    cfg = _cfg(tmp_path)
+    cfg.agent_timeout_seconds = 0
+    agent = _agent(cfg, tsm)
+    chunks: list[str] = []
+
+    async def _on_text(text):
+        chunks.append(text)
+        if "rejected it" in text:
+            assert cs.turn is not None
+            cs.turn.text_parts.append(cs._text)
+            cs.turn.complete()
+
+    resp = await agent.execute("research", _session(tmp_path), on_text_chunk=_on_text)
+
+    assert tsm.rejected == [(None, "timeout")]
+    assert any("Nothing ran" in c for c in chunks)
     assert resp.is_error is False
 
 
@@ -1888,6 +1936,22 @@ async def test_run_native_command_spawns_types_and_snapshots(tmp_path, monkeypat
     assert ("/model", True) in cs.sent
     assert out.startswith("🖥 claude ▸ /model")
     assert "Select model" in out
+
+
+async def test_run_native_command_effort_says_the_level_is_session_only(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr("leashd.agents.runtimes.tmux.NATIVE_COMMAND_RENDER_POLL", 0.0)
+    cs = FakeCS()
+    cs._idle_at_composer = True
+    cs._complete_on_enter = False
+    cs.capture = lambda: "\n  ⎿  Set effort level to high (this session only)\n"
+    agent = _agent(_cfg(tmp_path), FakeTSM(cs))
+
+    out = await agent.run_native_command(_session(tmp_path), "/effort high")
+
+    assert ("/effort high", True) in cs.sent
+    assert out.endswith(EFFORT_SCOPE_NOTE)
 
 
 async def test_run_native_command_refuses_mid_turn(tmp_path):

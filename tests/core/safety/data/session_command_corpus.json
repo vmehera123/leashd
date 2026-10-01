@@ -2108,7 +2108,7 @@
  {
   "command": "curl -sL \"https://api.example.com/alpha/bravo/cobalt/delta/ember\" | python3 -c \"import json\nprint(json.dumps({'ok': True}))\"",
   "verdict": "require_approval",
-  "category": "network-bash",
+  "category": "unmatched",
   "before": "require_approval"
  },
  {
@@ -2120,13 +2120,13 @@
  {
   "command": "curl -s \"https://api.example.com/api/alpha?cobalt=ai-bravo&sort=delta&ember=-1&falcon=20\" | python3 -c \"import json\nprint(json.dumps({'ok': True}))\"; echo \"=== word word ===\"; curl -s https://api.example.com/garnet/harbor/indigo | python3 -c \"import json\nprint(json.dumps({'ok': True}))\"",
   "verdict": "require_approval",
-  "category": "network-bash",
+  "category": "unmatched",
   "before": "require_approval"
  },
  {
   "command": "curl -sL \"https://api.example.com/alpha/bravo/cobalt\" | python3 -c \"import json\nprint(json.dumps({'ok': True}))\" 2>/dev/null\necho \"--- word ---\"\ncurl -sL \"https://api.example.com/alpha/bravo/delta\" | python3 -c \"import json\nprint(json.dumps({'ok': True}))\" 2>/dev/null",
   "verdict": "require_approval",
-  "category": "network-bash",
+  "category": "unmatched",
   "before": "require_approval"
  },
  {
@@ -2162,7 +2162,7 @@
  {
   "command": "cd ~/projects/alpha/bravo && uv run python -c \"import json; print(json.dumps({'ok': True}))\" 2>&1 | tail -2; curl -sL https://www.example.com/cobalt/delta/ | grep -oE 'https://api.example.com' | sort -u",
   "verdict": "require_approval",
-  "category": "network-bash",
+  "category": "unmatched",
   "before": "require_approval"
  },
  {
@@ -2186,7 +2186,7 @@
  {
   "command": "cd /tmp && curl -s \"https://api.example.com/api/v1/alpha\" -o /tmp/or_alpha.json && python3 - <<'EOF'\nimport json\nprint(json.dumps({\"ok\": True}))\nEOF",
   "verdict": "require_approval",
-  "category": "network-bash",
+  "category": "unmatched",
   "before": "require_approval"
  },
  {
@@ -2204,7 +2204,7 @@
  {
   "command": "cd /tmp && V=~/.local/alpha/claude/bravo && echo \"--- 2.1.267 word ---\" && (printf '' | env -u CLAUDECODE -u VAR1 $V/2 --opt cobalt -p 2>&1 | head -2); echo \"--- word word word word ---\"; for v in 2 2 2; do printf \"%s: \" $v; env -u CLAUDECODE $V/$v --help 2>/dev/null | grep -c \"word-word-word\"; done; echo \"--- word word ---\"; curl -s -m 20 https://api.example.com/delta/ember/falcon/garnet.md -o /tmp/scratch/cc_harbor.md; S=/tmp/scratch/cc_harbor.md; wc -l $S; grep -n \"^## 2\\.1\\.2[5-7][0-9]\" $S | head -30; echo \"--- word / word / word word / word 5 / word word ---\"; grep -n -i \"word-word-word\\|word word word word word word\\|word\\|word word.*\\(word\\|word\\|word\\)\\|word\" $S | head -30",
   "verdict": "require_approval",
-  "category": "network-bash",
+  "category": "unmatched",
   "before": "require_approval"
  },
  {
@@ -2252,7 +2252,7 @@
  {
   "command": "curl -s \"https://api.example.com/alpha/bravo/cobalt/delta/ember/falcon?recursive=1\" | python3 -c \"import json\nprint(json.dumps({'ok': True}))\" | head -60",
   "verdict": "require_approval",
-  "category": "network-bash",
+  "category": "unmatched",
   "before": "require_approval"
  },
  {
@@ -2282,7 +2282,7 @@
  {
   "command": "curl -s \"https://api.example.com/alpha/bravo/cobalt\" | python3 -c \"import json\nprint(json.dumps({'ok': True}))\"",
   "verdict": "require_approval",
-  "category": "network-bash",
+  "category": "unmatched",
   "before": "require_approval"
  },
  {
@@ -2306,7 +2306,7 @@
  {
   "command": "curl -sS \"https://api.example.com/api/alpha/bravo/cobalt?q=delta:%ember%falcon%garnet%harbor%22&indigo=5&sort=juniper_kestrel+lumen\" | python3 -c \"import json; print(json.dumps({'ok': True}))\" 2>&1 | head -20",
   "verdict": "require_approval",
-  "category": "network-bash",
+  "category": "unmatched",
   "before": "require_approval"
  },
  {
@@ -2360,7 +2360,7 @@
  {
   "command": "curl -s \"https://api.example.com/alpha/bravo/cobalt/delta.html\" | python3 -c \"import json\nprint(json.dumps({'ok': True}))\" 2>/dev/null | head -60",
   "verdict": "require_approval",
-  "category": "network-bash",
+  "category": "unmatched",
   "before": "require_approval"
  },
  {
@@ -2396,7 +2396,7 @@
  {
   "command": "curl -s \"https://api.example.com/api/v1/alpha\" -o /tmp/or_alpha.json 2>/dev/null; python3 - <<'EOF'\nimport json\nprint(json.dumps({\"ok\": True}))\nEOF",
   "verdict": "require_approval",
-  "category": "network-bash",
+  "category": "unmatched",
   "before": "require_approval"
  },
  {
@@ -2426,7 +2426,7 @@
  {
   "command": "curl -sL \"https://api.example.com/alpha/bravo?q=cobalt:delta-ai-ember/delta+falcon+uv+garnet+in:harbor+indigo:pr&juniper_kestrel=20\" | python3 -c \"import json\nprint(json.dumps({'ok': True}))\"\necho \"=== word ===\"\ncurl -sL \"https://api.example.com/alpha/bravo?q=cobalt:delta-ai-ember/delta+falcon+in:harbor+indigo:pr+lumen:maple&juniper_kestrel=30&sort=nimbus&pebble=onyx\" | python3 -c \"import json\nprint(json.dumps({'ok': True}))\"",
   "verdict": "require_approval",
-  "category": "network-bash",
+  "category": "unmatched",
   "before": "require_approval"
  },
  {
@@ -2461,8 +2461,8 @@
  },
  {
   "command": "curl -sL \"https://api.example.com/alpha/bravo/cobalt/delta/ember\" | head -100",
-  "verdict": "require_approval",
-  "category": "network-bash",
+  "verdict": "allow",
+  "category": "public-read",
   "before": "require_approval"
  },
  {
@@ -2630,7 +2630,7 @@
  {
   "command": "cd /tmp/scratch && echo \"=== word75 word word ===\" && curl -sL \"https://api.example.com/alpha/bravo/cobalt/delta/ember/falcon\" | python3 -c \"import json\nprint(json.dumps({'ok': True}))\" ; echo; echo \"=== word word word word word word word ===\" && curl -sL \"https://api.example.com/garnet/delta?q=harbor:bravo/indigo-juniper+kestrel_on_lumen_maple+in:nimbus&onyx_pebble=30\" | python3 -c \"import json\nprint(json.dumps({'ok': True}))\"",
   "verdict": "require_approval",
-  "category": "network-bash",
+  "category": "unmatched",
   "before": "require_approval"
  },
  {
@@ -2659,8 +2659,8 @@
  },
  {
   "command": "curl -sS -o /tmp/alpha.txt -w 'http=%{http_code} type=%{content_type} size=%{size_download}\\n' \"https://api.example.com/api/bravo/cobalt/delta?q=ember:%falcon+garnet+harbor+indigo%22&juniper=3\"; head -c 400 /tmp/alpha.txt",
-  "verdict": "require_approval",
-  "category": "network-bash",
+  "verdict": "allow",
+  "category": "public-read",
   "before": "require_approval"
  },
  {
@@ -2731,14 +2731,14 @@
  },
  {
   "command": "curl -sL \"https://api.example.com/alpha/bravo/cobalt/delta.md\" | sed -n '1,20p'",
-  "verdict": "require_approval",
-  "category": "network-bash",
+  "verdict": "allow",
+  "category": "public-read",
   "before": "require_approval"
  },
  {
   "command": "echo \"=== docs/alpha_bravo-cobalt_delta.md ===\"; curl -s https://api.example.com/ember/alpha/falcon/garnet/harbor.md\necho; echo \"=== indigo/volume/volume (word) ===\"; curl -s https://api.example.com/ember/alpha/falcon/indigo/cobalt/cobalt | head -40",
-  "verdict": "require_approval",
-  "category": "network-bash",
+  "verdict": "allow",
+  "category": "read-only-bash",
   "before": "require_approval"
  },
  {
@@ -3337,8 +3337,8 @@
  },
  {
   "command": "echo \"=== word word_word.word: word word ===\"\ncurl -s \"https://api.example.com/alpha/bravo/cobalt/delta/bravo/ember/falcon/garnet.py\" | grep -n \"word \\|word\\.\" | head -60",
-  "verdict": "require_approval",
-  "category": "network-bash",
+  "verdict": "allow",
+  "category": "read-only-bash",
   "before": "require_approval"
  },
  {
@@ -3499,8 +3499,8 @@
  },
  {
   "command": "echo \"=== word word (word word word.word) ===\"\ncurl -s \"https://api.example.com/alpha/bravo/cobalt/delta/bravo/ember/falcon.py\" | sed -n 'p' | head -100",
-  "verdict": "require_approval",
-  "category": "network-bash",
+  "verdict": "allow",
+  "category": "read-only-bash",
   "before": "require_approval"
  },
  {
@@ -3950,7 +3950,7 @@
  {
   "command": "gh alpha bravo/cobalt/delta-py/ember/falcon-garnet/delta-harbor-indigo --opt '.[].word' 2>&1|head; echo \"=== word word ===\"; curl -sL \"https://api.example.com/cobalt/juniper/kestrel/lumen/maple/nimbus.txt\" 2>&1 | head -60",
   "verdict": "require_approval",
-  "category": "network-bash",
+  "category": "unmatched",
   "before": "require_approval"
  },
  {
@@ -4003,8 +4003,8 @@
  },
  {
   "command": "curl -s https://api.example.com/alpha/bravo/cobalt/delta.md | sed -n '1,20p'",
-  "verdict": "require_approval",
-  "category": "network-bash",
+  "verdict": "allow",
+  "category": "public-read",
   "before": "require_approval"
  },
  {

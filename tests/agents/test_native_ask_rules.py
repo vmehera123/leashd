@@ -255,7 +255,7 @@ class TestAgainstRealPolicy:
         bash_rules = [r for r in rules if r.startswith("Bash(")]
         gated_commands = [
             # the two calls from the 2026-08-30 incident
-            'curl -sS -A "bidlens/1.0" -r 0-0 -D - -o /dev/null '
+            'curl -sS -A "bidlens/1.0" -r 0-0 -D - -o /dev/null -u "$CH_KEY:" '
             '"https://download.companieshouse.gov.uk/BasicCompanyDataAsOneFile.zip"',
             'curl -sS "https://find-and-update.company-information.service.gov.uk/'
             'company/03782379" -o page.html',
@@ -270,7 +270,7 @@ class TestAgainstRealPolicy:
             "git rebase main",
             "git merge develop",
             "git cherry-pick abc123",
-            "git rm stale.py",
+            "git rm -f stale.py",
             # no-force-push / destructive-bash
             "git push --force-with-lease origin main",
             "git push -f origin main",

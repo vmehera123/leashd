@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import patch
 
 from leashd.agents.runtimes._helpers import (
     _is_uv_project,
     api_error_hint,
     build_agent_browser_env,
+    build_agent_cli_args,
+    build_append_system_prompt,
+    describe_tool,
+    read_local_mcp_servers,
 )
 
 
@@ -145,7 +150,7 @@ class TestBuildAgentBrowserEnv:
 
         ``auto`` is listed deliberately — ``/web`` runs under it too, so only
         ``web_active`` may unlock the profile."""
-        for mode in ("default", "auto", "task", "test"):
+        for mode in ("default", "auto", "edit", "plan"):
             env = build_agent_browser_env(
                 self._config(browser_user_data_dir=str(tmp_path)),
                 self._session(mode=mode),
@@ -158,3 +163,164 @@ class TestBuildAgentBrowserEnv:
             self._session(mode="auto", web_active=True, browser_fresh=True),
         )
         assert "AGENT_BROWSER_PROFILE" not in env
+
+
+def _cli_config(**kwargs):
+    from leashd.core.config import LeashdConfig
+
+    return LeashdConfig(**{"approved_directories": ["/tmp"], **kwargs})
+
+
+def _cli_session(**kwargs):
+    from leashd.core.session import Session
+
+    defaults = {
+        "session_id": "s1",
+        "chat_id": "c1",
+        "user_id": "u1",
+        "working_directory": "/tmp",
+    }
+    return Session(**{**defaults, **kwargs})
+
+
+def _cli_args(config, session, **kwargs):
+    params = {
+        "settings": None,
+        "perm_mode": "default",
+        "model": None,
+        "append_system_prompt": None,
+        "resume_token": None,
+        **kwargs,
+    }
+    with (
+        patch("leashd.skills.has_installed_skills", return_value=False),
+        patch("leashd.cc_plugins.get_enabled_plugin_paths", return_value=[]),
+    ):
+        return build_agent_cli_args(config=config, session=session, **params)
+
+
+def _flag(args: list[str], name: str) -> str | None:
+    return args[args.index(name) + 1] if name in args else None
+
+
+class TestBuildAgentCliArgs:
+    def test_workspace_siblings_become_add_dirs(self):
+        session = _cli_session(
+            working_directory="/repo/api",
+            workspace_directories=["/repo/api", "/repo/web"],
+        )
+        args = _cli_args(_cli_config(), session)
+        assert args.count("--add-dir") == 1
+        assert _flag(args, "--add-dir") == "/repo/web"
+
+    def test_settings_effort_wins_over_config(self):
+        from leashd.core.runtime_settings import RuntimeSettings
+
+        args = _cli_args(
+            _cli_config(effort="medium"),
+            _cli_session(),
+            settings=RuntimeSettings(effort="high"),
+            model="opus",
+        )
+        assert _flag(args, "--effort") == "high"
+        assert _flag(args, "--model") == "opus"
+
+    def test_agent_browser_blocks_playwright_mcp(self):
+        args = _cli_args(_cli_config(browser_backend="agent-browser"), _cli_session())
+        disallowed = (_flag(args, "--disallowedTools") or "").split(",")
+        assert "mcp__playwright__browser_navigate" in disallowed
+
+    def test_web_session_blocks_claude_own_web_tools(self):
+        args = _cli_args(
+            _cli_config(browser_backend="playwright"),
+            _cli_session(web_active=True),
+        )
+        disallowed = (_flag(args, "--disallowedTools") or "").split(",")
+        assert {"WebFetch", "WebSearch"} <= set(disallowed)
+
+    def test_installed_skills_allow_the_skill_tool(self):
+        with (
+            patch("leashd.skills.has_installed_skills", return_value=True),
+            patch("leashd.cc_plugins.get_enabled_plugin_paths", return_value=["/p"]),
+        ):
+            args = build_agent_cli_args(
+                config=_cli_config(),
+                session=_cli_session(),
+                settings=None,
+                perm_mode="auto",
+                model=None,
+                append_system_prompt=None,
+                resume_token=None,
+            )
+        assert _flag(args, "--allowedTools") == "Skill"
+        assert _flag(args, "--plugin-dir") == "/p"
+        assert _flag(args, "--permission-mode") == "auto"
+
+    def test_local_mcp_merges_without_playwright_under_agent_browser(self, tmp_path):
+        (tmp_path / ".mcp.json").write_text(
+            json.dumps({"mcpServers": {"db": {"command": "db-mcp"}, "playwright": {}}})
+        )
+        args = _cli_args(
+            _cli_config(browser_backend="agent-browser"),
+            _cli_session(working_directory=str(tmp_path)),
+        )
+        servers = json.loads(_flag(args, "--mcp-config") or "{}")["mcpServers"]
+        assert servers == {"db": {"command": "db-mcp"}}
+
+    def test_resume_renders_prompt_fresh_on_current_cli(self):
+        args = _cli_args(_cli_config(), _cli_session(), resume_token="abc")
+        assert _flag(args, "--resume") == "abc"
+        assert _flag(args, "--system-prompt-snapshot") == "off"
+
+    def test_resume_on_old_cli_skips_snapshot_flag(self):
+        args = _cli_args(
+            _cli_config(), _cli_session(), resume_token="abc", cli_version=(2, 1, 200)
+        )
+        assert "--system-prompt-snapshot" not in args
+
+
+class TestReadLocalMcpServers:
+    def test_missing_file_is_empty(self, tmp_path):
+        assert read_local_mcp_servers(str(tmp_path)) == {}
+
+    def test_malformed_file_is_empty(self, tmp_path):
+        (tmp_path / ".mcp.json").write_text("{not json")
+        assert read_local_mcp_servers(str(tmp_path)) == {}
+
+
+class TestWorkspacePrompt:
+    def test_workspace_context_lists_every_repo(self):
+        session = _cli_session(
+            working_directory="/repo/api",
+            workspace_name="saas",
+            workspace_directories=["/repo/api", "/repo/web"],
+        )
+        prompt = build_append_system_prompt(_cli_config(), session) or ""
+        assert "Workspace 'saas'" in prompt
+        assert "api: /repo/api (primary, cwd)" in prompt
+        assert "web: /repo/web" in prompt
+
+
+class TestDescribeTool:
+    def test_labels(self):
+        cases = [
+            ("Grep", {"pattern": "foo"}, "/foo/"),
+            ("WebFetch", {"url": "https://x.dev"}, "https://x.dev"),
+            ("WebSearch", {"query": "leashd"}, "leashd"),
+            ("TaskUpdate", {"taskId": "3", "status": "done"}, "#3 → done"),
+            ("TaskUpdate", {"taskId": "3"}, "#3"),
+            ("TaskGet", {"taskId": "4"}, "#4"),
+            ("TaskList", {}, "all tasks"),
+            ("ExitPlanMode", {}, "Presenting plan for review"),
+            ("Skill", {"skill": "code-review"}, "code-review"),
+            (
+                "Agent",
+                {"subagent_type": "Explore", "description": "map"},
+                "Explore: map",
+            ),
+            ("Agent", {"description": "map"}, "map"),
+            ("mcp__x__y", {"n": 1, "q": "first string"}, "first string"),
+            ("mcp__x__y", {"n": 1}, ""),
+        ]
+        for name, tool_input, expected in cases:
+            assert describe_tool(name, tool_input) == expected, name

@@ -8,7 +8,6 @@ from leashd.core.config import LeashdConfig
 from leashd.core.runtime_settings import (
     VALID_EFFORTS,
     RuntimeSettings,
-    classify_model,
     resolve_scope_sources,
     resolve_settings,
 )
@@ -25,35 +24,28 @@ class TestRuntimeSettings:
         s = RuntimeSettings()
         assert s.effort is None
         assert s.claude_model is None
-        assert s.codex_model is None
         assert s.is_empty()
 
     def test_merge_over_keeps_base_when_field_is_none(self) -> None:
         base = RuntimeSettings(effort="low", claude_model="opus")
-        overlay = RuntimeSettings(effort="high")  # codex_model / claude_model omitted
+        overlay = RuntimeSettings(effort="high")
         merged = overlay.merge_over(base)
         assert merged.effort == "high"
         assert merged.claude_model == "opus"
-        assert merged.codex_model is None
 
     def test_merge_over_fully_overrides_when_all_set(self) -> None:
         base = RuntimeSettings(effort="low", claude_model="opus")
-        overlay = RuntimeSettings(
-            effort="max", claude_model="sonnet", codex_model="gpt-5.2"
-        )
+        overlay = RuntimeSettings(effort="max", claude_model="sonnet")
         merged = overlay.merge_over(base)
         assert merged.effort == "max"
         assert merged.claude_model == "sonnet"
-        assert merged.codex_model == "gpt-5.2"
 
 
 class TestResolveSettings:
     def test_global_only(self, base_config) -> None:
         settings = resolve_settings(global_cfg=base_config)
-        # Default global effort is "xhigh" per LeashdConfig.
-        assert settings.effort == "xhigh"
+        assert settings.effort == "medium"
         assert settings.claude_model is None
-        assert settings.codex_model is None
 
     def test_dir_overrides_global(self, base_config) -> None:
         directory_settings = {
@@ -119,7 +111,7 @@ class TestResolveSettings:
             directory="/path/to/project",
             directory_settings=directory_settings,
         )
-        assert settings.effort == "xhigh"  # global default
+        assert settings.effort == "medium"
 
     def test_invalid_effort_in_dir_entry_is_dropped(self, base_config) -> None:
         directory_settings = {"/path": {"effort": "nonsense"}}
@@ -128,7 +120,7 @@ class TestResolveSettings:
             directory="/path",
             directory_settings=directory_settings,
         )
-        assert settings.effort == "xhigh"  # falls back to global
+        assert settings.effort == "medium"
 
 
 class TestResolveScopeSources:
@@ -149,28 +141,6 @@ class TestResolveScopeSources:
         assert sources["effort"] == "workspace"
         # claude_model only set at dir scope.
         assert sources["claude_model"] == "directory"
-
-
-class TestClassifyModel:
-    @pytest.mark.parametrize(
-        ("value", "expected"),
-        [
-            ("opus", "claude"),
-            ("sonnet", "claude"),
-            ("fable", "claude"),
-            ("claude-fable-5-1", "claude"),
-            ("claude-opus-4-7", "claude"),
-            ("haiku", "claude"),
-            ("gpt-5.2", "codex"),
-            ("gpt-4", "codex"),
-            ("o1-mini", "codex"),
-            ("o3", "codex"),
-            ("codex-a", "codex"),
-            ("foo-model", None),
-        ],
-    )
-    def test_classification(self, value: str, expected: str | None) -> None:
-        assert classify_model(value) == expected
 
 
 class TestEffortLevels:

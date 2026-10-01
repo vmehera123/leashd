@@ -99,7 +99,7 @@ class TestGatekeeperWithPolicy:
 
     async def test_require_approval_without_coordinator_denied(self, policy_gatekeeper):
         result = await policy_gatekeeper.check(
-            "Bash", {"command": "curl https://example.com"}, "s1", "c1"
+            "Bash", {"command": "curl http://203.0.113.5"}, "s1", "c1"
         )
         assert result.behavior == "deny"
         assert "approval" in result.message.lower()
@@ -130,7 +130,7 @@ class TestGatekeeperApproval:
 
         task = asyncio.create_task(approve())
         result = await approval_gatekeeper.check(
-            "Bash", {"command": "curl https://example.com"}, "s1", "c1"
+            "Bash", {"command": "curl http://203.0.113.5"}, "s1", "c1"
         )
         await task
         assert result.behavior == "allow"
@@ -147,7 +147,7 @@ class TestGatekeeperApproval:
 
         task = asyncio.create_task(deny())
         result = await approval_gatekeeper.check(
-            "Bash", {"command": "curl https://example.com"}, "s1", "c1"
+            "Bash", {"command": "curl http://203.0.113.5"}, "s1", "c1"
         )
         await task
         assert result.behavior == "deny"
@@ -276,7 +276,7 @@ class TestGatekeeperEdgeCases:
             await approval_coordinator.resolve_approval(req["approval_id"], False)
 
         task = asyncio.create_task(deny())
-        await gk.check("Bash", {"command": "curl https://example.com"}, "s1", "c1")
+        await gk.check("Bash", {"command": "curl http://203.0.113.5"}, "s1", "c1")
         await task
         assert any(e.data["tool_name"] == "Bash" for e in events)
 
@@ -315,7 +315,7 @@ class TestGatekeeperEdgeCases:
             await approval_coordinator.resolve_approval(req["approval_id"], True)
 
         task = asyncio.create_task(approve())
-        await gk.check("Bash", {"command": "curl https://example.com"}, "s1", "c1")
+        await gk.check("Bash", {"command": "curl http://203.0.113.5"}, "s1", "c1")
         await task
         approval_events = [e for e in events if e.data.get("via") == "approval"]
         assert len(approval_events) == 1
@@ -346,7 +346,7 @@ class TestGatekeeperEdgeCases:
             await approval_coordinator.resolve_approval(req["approval_id"], True)
 
         task = asyncio.create_task(approve())
-        await gk.check("Bash", {"command": "curl https://example.com"}, "s1", "c1")
+        await gk.check("Bash", {"command": "curl http://203.0.113.5"}, "s1", "c1")
         await task
         mock_audit.log_approval.assert_called_once()
         call_args = mock_audit.log_approval.call_args
@@ -392,7 +392,7 @@ class TestGatekeeperAutoApprove:
         gk.enable_auto_approve("c1")
 
         result = await gk.check(
-            "Bash", {"command": "curl https://example.com"}, "s1", "c1"
+            "Bash", {"command": "curl http://203.0.113.5"}, "s1", "c1"
         )
 
         assert result.behavior == "allow"
@@ -416,7 +416,7 @@ class TestGatekeeperAutoApprove:
 
         task = asyncio.create_task(approve())
         result = await gk.check(
-            "Bash", {"command": "curl https://example.com"}, "s1", "c2"
+            "Bash", {"command": "curl http://203.0.113.5"}, "s1", "c2"
         )
         await task
         assert result.behavior == "allow"
@@ -509,7 +509,7 @@ class TestGatekeeperAutoApprove:
 
         task = asyncio.create_task(approve())
         result2 = await gk.check(
-            "Bash", {"command": "curl https://example.com"}, "s1", "c1"
+            "Bash", {"command": "curl http://203.0.113.5"}, "s1", "c1"
         )
         await task
         assert result2.behavior == "allow"
@@ -531,7 +531,7 @@ class TestGatekeeperAutoApprove:
 
         task = asyncio.create_task(approve())
         result = await gk.check(
-            "Bash", {"command": "curl https://example.com"}, "s1", "c1"
+            "Bash", {"command": "curl http://203.0.113.5"}, "s1", "c1"
         )
         await task
         assert result.behavior == "allow"
@@ -925,7 +925,7 @@ class TestGatekeeperSafetyInvariants:
             approval_coordinator=mock_coord,
         )
         with pytest.raises(RuntimeError, match="approval crash"):
-            await gk.check("Bash", {"command": "curl https://example.com"}, "s1", "c1")
+            await gk.check("Bash", {"command": "curl http://203.0.113.5"}, "s1", "c1")
 
     async def test_deny_always_wins_first_match(
         self, sandbox, mock_audit, event_bus, tmp_path
@@ -986,7 +986,7 @@ class TestGatekeeperRejectionReason:
 
         task = asyncio.create_task(reject_with_text())
         result = await rejection_gatekeeper.check(
-            "Bash", {"command": "curl https://example.com"}, "s1", "c1"
+            "Bash", {"command": "curl http://203.0.113.5"}, "s1", "c1"
         )
         await task
         assert result.behavior == "deny"
@@ -1007,7 +1007,7 @@ class TestGatekeeperRejectionReason:
 
         task = asyncio.create_task(deny_via_button())
         result = await rejection_gatekeeper.check(
-            "Bash", {"command": "curl https://example.com"}, "s1", "c1"
+            "Bash", {"command": "curl http://203.0.113.5"}, "s1", "c1"
         )
         await task
         assert result.behavior == "deny"
@@ -1028,7 +1028,7 @@ class TestGatekeeperRejectionReason:
 
         task = asyncio.create_task(reject_with_text())
         await rejection_gatekeeper.check(
-            "Bash", {"command": "curl https://example.com"}, "s1", "c1"
+            "Bash", {"command": "curl http://203.0.113.5"}, "s1", "c1"
         )
         await task
         mock_audit.log_approval.assert_called_once()
@@ -1051,7 +1051,7 @@ class TestGatekeeperRejectionReason:
 
         task = asyncio.create_task(approve())
         await rejection_gatekeeper.check(
-            "Bash", {"command": "curl https://example.com"}, "s1", "c1"
+            "Bash", {"command": "curl http://203.0.113.5"}, "s1", "c1"
         )
         await task
         mock_audit.log_approval.assert_called_once()
@@ -1548,7 +1548,7 @@ class TestGatekeeperAutonomousAutoAllow:
     ):
         result = await gatekeeper.check(
             "Bash",
-            {"command": "curl https://example.com"},
+            {"command": "curl http://203.0.113.5"},
             "s1",
             "c1",
             session_mode="auto",
@@ -1564,7 +1564,7 @@ class TestGatekeeperAutonomousAutoAllow:
         # no approval coordinator wired that fails closed (deny), NOT auto-allow.
         result = await gatekeeper.check(
             "Bash",
-            {"command": "curl https://example.com"},
+            {"command": "curl http://203.0.113.5"},
             "s1",
             "c1",
             session_mode="default",
@@ -1710,7 +1710,7 @@ class TestGatekeeperStateManagement:
             await gk._approval_coordinator.resolve_approval(req["approval_id"], True)
 
         task = asyncio.create_task(approve_c2())
-        r2 = await gk.check("Bash", {"command": "curl https://b.example"}, "s1", "c2")
+        r2 = await gk.check("Bash", {"command": "curl http://203.0.113.6"}, "s1", "c2")
         await task
         assert r2.behavior == "allow"
         assert len(mock_connector.approval_requests) == 1
@@ -1846,7 +1846,7 @@ class TestAutoGated:
         self, policy_gatekeeper
     ):
         result = await policy_gatekeeper.check_auto_gated(
-            "Bash", {"command": "curl https://example.com"}, "s1", "c1"
+            "Bash", {"command": "curl http://203.0.113.5"}, "s1", "c1"
         )
         assert result is not None
         assert result.behavior == "deny"
@@ -1904,7 +1904,7 @@ class TestAutoGatedNativeAsk:
     async def test_require_approval_defers_when_natively_asked(self, policy_gatekeeper):
         result = await policy_gatekeeper.check_auto_gated(
             "Bash",
-            {"command": "curl https://example.com"},
+            {"command": "curl http://203.0.113.5"},
             "s1",
             "c1",
             native_ask_rules={"network-bash"},
@@ -1918,7 +1918,7 @@ class TestAutoGatedNativeAsk:
         no worse than before the fix, and never a silent pass-through."""
         result = await policy_gatekeeper.check_auto_gated(
             "Bash",
-            {"command": "curl https://example.com"},
+            {"command": "curl http://203.0.113.5"},
             "s1",
             "c1",
             native_ask_rules={"git-mutations"},
@@ -1932,7 +1932,7 @@ class TestAutoGatedNativeAsk:
         for ask in (None, set(), frozenset()):
             result = await policy_gatekeeper.check_auto_gated(
                 "Bash",
-                {"command": "curl https://example.com"},
+                {"command": "curl http://203.0.113.5"},
                 "s1",
                 "c1",
                 native_ask_rules=ask,
@@ -2012,7 +2012,7 @@ class TestAutoGatedNativeAsk:
         human answers, never whether the call was recorded."""
         await policy_gatekeeper.check_auto_gated(
             "Bash",
-            {"command": "curl https://example.com"},
+            {"command": "curl http://203.0.113.5"},
             "s1",
             "c1",
             native_ask_rules={"network-bash"},

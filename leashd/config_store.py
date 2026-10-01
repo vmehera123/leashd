@@ -8,6 +8,7 @@ from typing import Any
 import structlog
 import yaml
 
+from leashd.core.runtime_settings import SETTING_FIELDS
 from leashd.exceptions import ConfigError
 
 logger = structlog.get_logger()
@@ -145,10 +146,6 @@ def inject_global_config_as_env(*, force: bool = False) -> None:
     claude_model = data.get("claude_model")
     if claude_model and (force or "LEASHD_CLAUDE_MODEL" not in os.environ):
         os.environ["LEASHD_CLAUDE_MODEL"] = str(claude_model)
-
-    codex_model = data.get("codex_model")
-    if codex_model and (force or "LEASHD_CODEX_MODEL" not in os.environ):
-        os.environ["LEASHD_CODEX_MODEL"] = str(codex_model)
 
     agent_runtime = data.get("agent_runtime")
     if agent_runtime and (force or "LEASHD_AGENT_RUNTIME" not in os.environ):
@@ -469,7 +466,6 @@ def merge_workspace_dirs(
 _CONFIG_SECTION_MAP: dict[str, dict[str, str]] = {
     "agent": {
         "effort": "effort",
-        "runtime": "agent_runtime",
         "default_mode": "default_mode",
     },
     "browser": {
@@ -493,8 +489,6 @@ def update_config_sections(updates: dict[str, Any]) -> None:
             for key, value in agent.items():
                 if key == "effort":
                     data["effort"] = value
-                elif key == "runtime":
-                    data["agent_runtime"] = value
                 elif key == "default_mode":
                     data["default_mode"] = value
                 elif key == "max_turns":
@@ -506,11 +500,6 @@ def update_config_sections(updates: dict[str, Any]) -> None:
                         data["claude_model"] = value
                     else:
                         data.pop("claude_model", None)
-                elif key == "codex_model":
-                    if value:
-                        data["codex_model"] = value
-                    else:
-                        data.pop("codex_model", None)
 
     if "browser" in updates:
         browser_update = updates["browser"]
@@ -639,7 +628,7 @@ def set_cc_plugin_enabled(name: str, *, enabled: bool) -> bool:
     return True
 
 
-_VALID_SETTING_FIELDS = frozenset({"effort", "claude_model", "codex_model"})
+_VALID_SETTING_FIELDS = frozenset(SETTING_FIELDS)
 
 
 def _normalize_dir_key(path: str | Path) -> str:
@@ -651,7 +640,7 @@ def get_all_directory_settings() -> dict[str, dict[str, Any]]:
     """Return the full ``directory_settings`` map from the global config.
 
     Keys are absolute paths; values are the raw override dicts
-    (``{"effort": ..., "claude_model": ..., "codex_model": ...}``).
+    (``{"effort": ..., "claude_model": ...}``).
     Missing / malformed entries yield an empty map.
     """
     data = load_global_config()
@@ -679,7 +668,6 @@ def set_directory_setting(
     *,
     effort: str | None = None,
     claude_model: str | None = None,
-    codex_model: str | None = None,
     replace: bool = False,
 ) -> None:
     """Upsert a directory override.
@@ -700,8 +688,6 @@ def set_directory_setting(
         entry["effort"] = effort
     if claude_model is not None:
         entry["claude_model"] = claude_model
-    if codex_model is not None:
-        entry["codex_model"] = codex_model
 
     entry = {k: v for k, v in entry.items() if k in _VALID_SETTING_FIELDS and v}
     if entry:
@@ -769,7 +755,6 @@ def set_workspace_settings(
     *,
     effort: str | None = None,
     claude_model: str | None = None,
-    codex_model: str | None = None,
     replace: bool = False,
 ) -> bool:
     """Upsert the ``settings`` block for an existing workspace.
@@ -793,8 +778,6 @@ def set_workspace_settings(
         existing["effort"] = effort
     if claude_model is not None:
         existing["claude_model"] = claude_model
-    if codex_model is not None:
-        existing["codex_model"] = codex_model
 
     existing = {k: v for k, v in existing.items() if k in _VALID_SETTING_FIELDS and v}
     if existing:

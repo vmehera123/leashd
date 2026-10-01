@@ -117,8 +117,6 @@ class ApprovalCoordinator:
         classification: Classification,
         timeout: int | None = None,
     ) -> ApprovalResult:
-        # Preserve an explicit timeout (incl. 0); only fall back when unset so
-        # config None propagates as "no expiry" (parity with claude-cli).
         timeout = (
             timeout if timeout is not None else self.config.approval_timeout_seconds
         )
@@ -184,7 +182,7 @@ class ApprovalCoordinator:
                 rejection_reason=reason,
             )
             return ApprovalResult(approved=approved, reason=reason)
-        except TimeoutError:
+        except asyncio.TimeoutError:
             logger.warning(
                 "approval_timeout",
                 approval_id=approval_id,

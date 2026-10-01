@@ -1,6 +1,6 @@
 ---
 name: architecture
-description: How leashd's core components fit together — build_engine wiring, the Engine message loop, the three-layer safety pipeline (gatekeeper/sandbox/policy/approval), pluggable agent runtimes, the EventBus plugin system, config layering, and two-tier storage. Use when onboarding, planning a change that spans subsystems, or deciding where new code belongs.
+description: How leashd's core components fit together — build_engine wiring, the Engine message loop, the three-layer safety pipeline (gatekeeper/sandbox/policy/approval), the tmux agent runtime, the EventBus plugin system, config layering, and two-tier storage. Use when onboarding, planning a change that spans subsystems, or deciding where new code belongs.
 allowed-tools:
   - Read
   - Grep
@@ -12,7 +12,7 @@ allowed-tools:
 
 Safety-first agentic coding daemon. Shape: **connectors → Engine → middleware → agent runtime**, with every tool call the agent makes intercepted by a **three-layer safety pipeline**, and an **EventBus** decoupling plugins. This skill is the mental model plus a file map.
 
-> **Specs drift.** `specs/app/` has deeper numbered references, but they lag the code — `00-quick-reference.md` still lists deleted modules (`task_orchestrator.py`, `auto_approver.py`, …). Treat specs and `README.md` as starting points; **verify every claim against source before relying on it.**
+> **Specs drift.** `specs/app/` has deeper numbered references, but they lag the code — `00-quick-reference.md` can still describe deleted modules (`auto_approver.py`, `task_v4.py`, …). Treat specs and `README.md` as starting points; **verify every claim against source before relying on it.**
 
 ## Request flow (one user message)
 
@@ -40,12 +40,12 @@ connector (web / telegram) → MultiConnector (chat_id routing)
 | ↳ policy | `core/safety/policy.py` + `policies/*.yaml` | allow / deny / require_approval; compound-bash split, deny-wins |
 | ↳ approval | `core/safety/approvals.py` (`ApprovalCoordinator`) | human buttons or AI auto-approve |
 | ↳ audit | `core/safety/audit.py` → `.leashd/audit.jsonl` | append-only decisions |
-| Agent runtimes | `agents/registry.py` + `agents/runtimes/` | `tmux` (default), `claude-cli`, `claude-code`, `codex` |
+| Agent runtime | `agents/registry.py` + `agents/runtimes/tmux.py` / `tmux_session.py` | only `tmux` is registered since 2.0; new runtimes `register_agent()`; `build_engine(agent=)` takes any `BaseAgent` |
 | Connectors | `connectors/{web,telegram,multi}.py` | `MultiConnector` routes by `chat_id` |
 | Multi-conversation | `core/chat_sessions.py` + `connectors/telegram_sessions.py` | `/session` — N conversations in one chat, addressed `<chat>:s<n>` |
 | Middleware | `middleware/{auth,rate_limit}.py` | run before the agent |
 | Plugins / events | `core/events.py` (`EventBus`) + `plugins/registry.py` | pub/sub; `create_builtin_plugins()` registers builtins |
-| Autonomous / task | `plugins/builtin/task_v4.py`, `autonomous_loop.py` | `/task` pipeline and post-task retry |
+| Autonomous / task | `plugins/builtin/task_orchestrator.py`, `_task_prompts.py` | `/task`: implement → verify → opt-in review |
 | Config | `core/config.py` (`LeashdConfig`), `config_store.py` | env prefix `LEASHD_` |
 | Storage | `storage/{sqlite,memory}.py` | two-tier, see below |
 | Web UI / hooks | `web/` (`app.py`, `routes.py`, `ws_handler.py`, `tmux_hooks.py`) | FastAPI; also hosts the tmux hook receiver |
@@ -58,7 +58,7 @@ Every tool call is intercepted **before it runs**:
 2. **Policy** — first-matching YAML rule → `allow` / `deny` / `require_approval`. Compound bash (`&&`, `||`, `;`) is split and evaluated segment-by-segment; **deny wins**.
 3. **Approval** — `require_approval` → human buttons (interactive) or AI auto-approve (autonomous). Hard-denies (credentials, `rm -rf`, `sudo`, force-push) **can never be overridden** by any approver.
 
-This holds for **all** runtimes. For `tmux`, interception happens via Claude Code PreToolUse hooks rather than in-process — see the **`tmux-runtime`** skill.
+In the `tmux` runtime interception happens via Claude Code PreToolUse hooks rather than in-process — see the **`tmux-runtime`** skill.
 
 ## Config layering
 
@@ -74,11 +74,11 @@ This holds for **all** runtimes. For `tmux`, interception happens via Claude Cod
 
 ## Plugins & events
 
-Subsystems decouple via `EventBus` pub/sub (events like `tool.allowed`, `approval.requested`, `task.submitted`). Plugins implement `LeashdPlugin` (lifecycle `initialize → start → stop`) and are registered in `create_builtin_plugins()`. Builtins: audit, browser-tools, test-runner, web-agent, web-interaction-logger, merge-resolver, plus conditional `AutonomousLoop` and `TaskV4Orchestrator`.
+Subsystems decouple via `EventBus` pub/sub (events like `tool.allowed`, `approval.requested`, `task.submitted`). Plugins implement `LeashdPlugin` (lifecycle `initialize → start → stop`) and are registered in `create_builtin_plugins()`. Builtins: audit, browser-tools, web-agent, web-interaction-logger, merge-resolver, plus the conditional `TaskOrchestrator`.
 
-## Removed in the 1.0 refactor (don't trust stale docs)
+## Removed (don't trust stale docs)
 
-`task_orchestrator.py` (v1/v2 + the "conductor"), `auto_approver.py`, `auto_plan_reviewer.py`, `agentic_orchestrator.py`, `_cli_evaluator.py`, and `core/context_manager.py` were deleted. `README.md`, `docs/`, and `specs/app/00-quick-reference.md` still mention them. **Source of truth: `plugins/registry.py` + `plugins/builtin/`.**
+1.0 deleted the v1/v2 orchestrator + "conductor", `auto_approver.py`, `auto_plan_reviewer.py`, `agentic_orchestrator.py`, `_cli_evaluator.py` and `core/context_manager.py`. 2.0 deleted the `claude-cli`, `claude-code` (Agent SDK) and `codex` runtimes (the registry stays, with `tmux` alone registered), `task_v3.py`/`task_v4.py` (merged into `task_orchestrator.py`) and the `/test` runner. `specs/app/` may still mention them. **Source of truth: `plugins/registry.py` + `plugins/builtin/`.**
 
 ## Verify, then change
 

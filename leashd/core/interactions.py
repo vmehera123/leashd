@@ -80,11 +80,10 @@ class InteractionCoordinator:
     def _effective_timeout(self) -> int | None:
         """Resolve the shared human-response window.
 
-        ``None`` = **no expiry** — wait for the human as long as it takes
-        (parity with claude-cli, which pauses its turn deadline during the
-        interaction). ``interaction_timeout_seconds`` overrides; unset → inherit
-        ``approval_timeout_seconds`` (itself ``None`` by default). A positive
-        int auto-denies after N seconds (identical on claude-cli and tmux).
+        ``None`` = **no expiry** — wait for the human as long as it takes; the
+        turn deadline is paused meanwhile. ``interaction_timeout_seconds``
+        overrides; unset → inherit ``approval_timeout_seconds`` (itself
+        ``None`` by default). A positive int auto-denies after N seconds.
         """
         timeout = self.config.interaction_timeout_seconds
         if timeout is None:
@@ -178,7 +177,7 @@ class InteractionCoordinator:
                         interaction_id=interaction_id,
                     )
                     return PermissionDeny(message="No answer received")
-            except TimeoutError:
+            except asyncio.TimeoutError:
                 logger.warning(
                     "interaction_timeout",
                     interaction_id=interaction_id,
@@ -237,7 +236,7 @@ class InteractionCoordinator:
                 await pending.event.wait()
             else:
                 await asyncio.wait_for(pending.event.wait(), timeout=review_timeout)
-        except TimeoutError:
+        except asyncio.TimeoutError:
             logger.warning(
                 "interaction_timeout",
                 interaction_id=interaction_id,

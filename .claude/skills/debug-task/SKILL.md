@@ -26,7 +26,7 @@ allowed-tools:
 
 `$ARGUMENTS` is the task_id — full 16-char hex or first 8 chars from `/tasks` output.
 
-> Tasks may have run under v2 (LLM-driven think-act-observe, phases include `explore/plan/retry`) or v3 (linear `plan → implement → verify → review`). Check `phase_pipeline` in Step 1 to tell which.
+> Current tasks run the linear `implement → verify → [review]` pipeline (`plugins/builtin/task_orchestrator.py`). Older rows in `task_runs` may carry v2/v3/v4 phases (`explore`, `plan`, `retry`, `pr`, …); check `phase_pipeline` in Step 1 to tell which.
 
 ## Quick diagnosis (run all 5 steps)
 
@@ -442,9 +442,8 @@ print(test_output[-500:])
 | 5 | **Phase stuck** | Non-terminal phase, no `session.completed` event in logs | Agent session didn't complete — check for `request_failed` or hanging agent |
 | 6 | **Missing working directory** | `error_message` mentions directory | Working directory deleted or inaccessible after task started |
 | 7 | **Session mode mismatch** | Session `task_run_id` differs from task `run_id` | Another task was submitted to same chat, or session was reset mid-task |
-| 8 | **Pipeline mismatch** | Keywords like "explore"/"critical" in task but missing from pipeline | `_build_phase_pipeline` didn't detect keywords — check regex patterns in `task_orchestrator.py` |
-| 9 | **PR phase skipped** | `phase_pipeline` has no `pr`, jumps to `completed` | `auto_pr` is disabled (default) — expected unless `LEASHD_AUTO_PR=true` |
-| 10 | **Unexpected cancellation** | `phase=cancelled`, `error_message=User cancelled` | User sent `/cancel`, `/stop`, or `/clear` during execution |
+| 8 | **Unexpected pipeline** | `phase_pipeline` is missing `review` or has one you didn't ask for | The pipeline comes from the task profile: defaults, then `.leashd/task-config.yaml`, then `/task --phases` (merged in `TaskOrchestrator._register_task_profile`) |
+| 9 | **Unexpected cancellation** | `phase=cancelled`, `error_message=User cancelled` | User sent `/cancel`, `/stop`, or `/clear` during execution |
 
 ## List all tasks (fallback when no task_id provided)
 

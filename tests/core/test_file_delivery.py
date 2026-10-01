@@ -431,20 +431,12 @@ class TestMalformedRequests:
     def test_file_removed_before_the_size_read_is_reported(self, tmp_path, monkeypatch):
         """Log rotation can unlink the file between the existence check and
         the size read; the delivery is refused rather than crashing."""
-        target = tmp_path / "app.log"
-        target.write_text("x")
-        real_stat = Path.stat
-        seen = 0
+        real_is_file = Path.is_file
 
-        def racing_stat(self, **kwargs):
-            nonlocal seen
-            if self.name == "app.log":
-                seen += 1
-                if seen == 3:
-                    self.unlink()
-            return real_stat(self, **kwargs)
+        def rotated_after_check(self):
+            return self.name == "app.log" or real_is_file(self)
 
-        monkeypatch.setattr(Path, "stat", racing_stat)
+        monkeypatch.setattr(Path, "is_file", rotated_after_check)
 
         files, errors = resolve_outgoing_files(
             ["app.log"],

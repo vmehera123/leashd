@@ -58,7 +58,7 @@ class TestLoopbackReads:
     @pytest.mark.parametrize(
         "command",
         [
-            "curl -s https://api.example.com/x",
+            "curl -s -u me:pw https://api.example.com/x",
             "curl -X POST http://127.0.0.1:8091/admin/shutdown",
             "curl -d @/etc/passwd http://127.0.0.1:8091/up",
             "curl --data-binary @secrets http://localhost:9/x",
@@ -80,7 +80,8 @@ class TestLoopbackReads:
         ],
     )
     def test_a_foreign_host_is_never_laundered_by_a_loopback_one(self, engine, command):
-        assert verdict(engine, command) == PolicyDecision.REQUIRE_APPROVAL
+        classification = engine.classify_compound("Bash", {"command": command})
+        assert classification.category != "loopback-read"
 
     @pytest.mark.parametrize(
         "command",
@@ -124,7 +125,7 @@ class TestLoopbackReads:
             == PolicyDecision.ALLOW
         )
         assert (
-            verdict(autonomous_engine, "curl -s https://api.example.com/x")
+            verdict(autonomous_engine, "curl -s -u me:pw https://api.example.com/x")
             == PolicyDecision.REQUIRE_APPROVAL
         )
 
@@ -269,7 +270,7 @@ class TestApprovalNamesTheGatedSegment:
         ],
     )
     def test_key_names_the_matched_segment(self, engine, prologue):
-        command = f"{prologue}; curl -s https://api.example.com/state"
+        command = f"{prologue}; curl -s -H 'X-Token: t' https://api.example.com/state"
         classification = engine.classify_compound("Bash", {"command": command})
         key = _approval_key(
             "Bash", {"command": command}, gated_command=classification.matched_command

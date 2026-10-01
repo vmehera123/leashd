@@ -1498,7 +1498,7 @@ class TestEffort:
 
         _handle_effort_show()
         captured = capsys.readouterr()
-        assert "xhigh" in captured.out
+        assert "medium" in captured.out
 
     def test_effort_show_custom(self, fake_config_dir, capsys):
         from leashd.cli import _handle_effort_show
@@ -1560,20 +1560,6 @@ class TestModelCli:
         data = load_global_config()
         assert data["claude_model"] == "opus"
         assert "claude_model" in capsys.readouterr().out
-
-    def test_model_set_inferred_codex(self, fake_config_dir, capsys):
-        from argparse import Namespace
-
-        from leashd.cli import _handle_model_set
-        from leashd.config_store import load_global_config
-
-        with patch("leashd.cli._notify_daemon_reload"):
-            _handle_model_set(
-                "gpt-5.2", Namespace(dir=None, workspace=None, runtime=None)
-            )
-        data = load_global_config()
-        assert data["codex_model"] == "gpt-5.2"
-        assert "codex_model" in capsys.readouterr().out
 
     def test_model_set_per_directory(self, fake_config_dir, tmp_path):
         from argparse import Namespace
@@ -1640,62 +1626,6 @@ class TestToolCalls:
         with pytest.raises(SystemExit) as exc_info:
             _handle_tool_calls_set(-5)
         assert exc_info.value.code == 1
-
-
-class TestRuntime:
-    def test_runtime_show_default(self, fake_config_dir, capsys):
-        from leashd.cli import _handle_runtime_show
-
-        _handle_runtime_show()
-        captured = capsys.readouterr()
-        assert "tmux" in captured.out
-
-    def test_runtime_show_configured(self, fake_config_dir, capsys):
-        from leashd.cli import _handle_runtime_show
-
-        save_global_config({"agent_runtime": "codex"})
-        _handle_runtime_show()
-        captured = capsys.readouterr()
-        assert "codex" in captured.out
-
-    def test_runtime_set_valid(self, fake_config_dir, capsys):
-        from leashd.cli import _handle_runtime_set
-
-        with patch("leashd.cli._notify_daemon_reload"):
-            _handle_runtime_set("codex")
-        captured = capsys.readouterr()
-        assert "\u2713" in captured.out
-        assert "codex" in captured.out
-        from leashd.config_store import load_global_config
-
-        data = load_global_config()
-        assert data["agent_runtime"] == "codex"
-
-    def test_runtime_set_invalid(self, fake_config_dir):
-        from leashd.cli import _handle_runtime_set
-
-        with pytest.raises(SystemExit) as exc_info:
-            _handle_runtime_set("nope")
-        assert exc_info.value.code == 1
-
-    def test_runtime_list(self, fake_config_dir, capsys):
-        from leashd.cli import _handle_runtime_list
-
-        _handle_runtime_list()
-        captured = capsys.readouterr()
-        assert "claude-code" in captured.out
-        assert "codex" in captured.out
-        assert "(active)" in captured.out
-
-    def test_runtime_bare_defaults_to_show(self, fake_config_dir, capsys):
-        import argparse
-
-        from leashd.cli import _handle_runtime
-
-        args = argparse.Namespace(runtime_command=None)
-        _handle_runtime(args)
-        captured = capsys.readouterr()
-        assert "tmux" in captured.out
 
 
 class TestSkillCli:
@@ -1845,11 +1775,32 @@ class TestBrowserSetBackend:
     def test_set_playwright(self, fake_config_dir, capsys):
         from leashd.cli import _handle_browser_set_backend
 
-        with patch("leashd.skills.remove_agent_browser_skill"):
+        with (
+            patch("leashd.skills.remove_agent_browser_skill"),
+            patch(
+                "leashd.plugins.builtin.browser_tools.shutil.which",
+                return_value="/usr/bin/npx",
+            ),
+        ):
             _handle_browser_set_backend("playwright")
         captured = capsys.readouterr()
         assert "playwright" in captured.out
         assert "\u2713" in captured.out
+
+    def test_set_playwright_without_npx_exits(self, fake_config_dir, capsys):
+        from leashd.cli import _handle_browser_set_backend
+        from leashd.config_store import get_browser_config
+
+        with (
+            patch(
+                "leashd.plugins.builtin.browser_tools.shutil.which", return_value=None
+            ),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            _handle_browser_set_backend("playwright")
+        assert exc_info.value.code == 1
+        assert "npx" in capsys.readouterr().err
+        assert get_browser_config().get("backend") != "playwright"
 
     def test_invalid_backend_exits(self, fake_config_dir):
         from leashd.cli import _handle_browser_set_backend
@@ -1911,7 +1862,7 @@ class TestBrowserAutoApprove:
 
         _handle_browser_auto_approve(None)
 
-        assert "Auto-approve browsing: off" in capsys.readouterr().out
+        assert "Auto-approve browsing: on" in capsys.readouterr().out
 
     def test_browser_show_includes_it(self, fake_config_dir, capsys):
         from leashd.cli import _handle_browser_show

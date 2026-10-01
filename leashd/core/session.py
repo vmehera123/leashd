@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, get_args
 
 import structlog
 from pydantic import BaseModel, Field
@@ -13,6 +13,10 @@ if TYPE_CHECKING:
     from leashd.storage.base import SessionStore
 
 logger = structlog.get_logger()
+
+SessionMode = Literal["default", "plan", "auto", "edit", "merge", "web"]
+
+SESSION_MODES: frozenset[str] = frozenset(get_args(SessionMode))
 
 
 # Intentionally mutable — SessionManager updates fields in-place for simplicity.
@@ -35,9 +39,7 @@ class Session(BaseModel):
     last_used: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     total_cost: float = 0.0
     message_count: int = 0
-    mode: Literal["default", "plan", "auto", "edit", "test", "merge", "task", "web"] = (
-        "default"
-    )
+    mode: SessionMode = "default"
     mode_instruction: str | None = None
     plan_origin: Literal["user", "auto", "task", "edit"] | None = None
     is_active: bool = True
@@ -51,10 +53,6 @@ class Session(BaseModel):
     browser_fresh: bool = False
     browser_backend: str | None = None
     web_active: bool = False
-    # Task v4: orchestrator opts a phase into Claude's native ``auto``
-    # permission policy. Honored by the claude-cli and tmux runtimes
-    # (PreToolUse hook bridge required); ignored by claude-code SDK and
-    # codex runtimes. Defaults False so v2/v3 paths are unaffected.
     native_auto_allowed: bool = False
 
 
@@ -229,7 +227,7 @@ class SessionManager:
         *,
         phase: str,
         task_run_id: str,
-        mode: Literal["plan", "auto", "test", "default"],
+        mode: Literal["plan", "auto", "default"],
         mode_instruction: str | None = None,
         settings_override: dict[str, Any] | None = None,
         native_auto_allowed: bool = False,

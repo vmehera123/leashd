@@ -18,8 +18,7 @@ unchanged by that swap.
 
 Claude Code writes the JSONL one record per *completed* assistant message
 (between tool calls), not per token — so this source is inherently
-block-granular and cannot match ``claude-cli``'s real-time ``text_delta``
-stream. The poll interval is the one lever that narrows the perceived gap:
+block-granular, never a per-token ``text_delta`` stream. The poll interval is the one lever that narrows the perceived gap:
 it bounds how long a finished block waits before it reaches the connector.
 """
 

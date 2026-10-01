@@ -13,9 +13,10 @@ from leashd.core.config import LeashdConfig, build_directory_names, ensure_leash
 class TestLeashdConfig:
     def test_default_values(self, tmp_path):
         config = LeashdConfig(approved_directories=[tmp_path])
-        assert config.max_turns == 250
+        assert config.max_turns == 120
+        assert config.effort == "medium"
+        assert config.browser_auto_approve is True
         assert config.web_max_turns == 300
-        assert config.test_max_turns == 200
         assert config.task_max_turns == 300
         assert config.max_concurrent_agents == 5
         assert config.agent_timeout_seconds == 10800
@@ -292,10 +293,6 @@ class TestEffectiveMaxTurns:
         config = LeashdConfig(approved_directories=[tmp_path], web_max_turns=400)
         assert config.effective_max_turns("web") == 400
 
-    def test_test_mode_returns_test_max_turns(self, tmp_path):
-        config = LeashdConfig(approved_directories=[tmp_path], test_max_turns=250)
-        assert config.effective_max_turns("test") == 250
-
     def test_unknown_mode_falls_back_to_max_turns(self, tmp_path):
         config = LeashdConfig(approved_directories=[tmp_path], max_turns=75)
         assert config.effective_max_turns("merge") == 75
@@ -313,27 +310,17 @@ class TestEffectiveMaxTurns:
         assert config.effective_max_turns("web") == 500
         assert config.effective_max_turns("default") == 100
 
-    def test_test_max_turns_custom_value(self, tmp_path):
-        config = LeashdConfig(
-            approved_directories=[tmp_path], test_max_turns=350, max_turns=100
-        )
-        assert config.effective_max_turns("test") == 350
-        assert config.effective_max_turns("default") == 100
-
     def test_is_task_overrides_mode(self, tmp_path):
         config = LeashdConfig(
             approved_directories=[tmp_path],
             max_turns=100,
             web_max_turns=400,
-            test_max_turns=200,
             task_max_turns=300,
         )
         assert config.effective_max_turns("plan", is_task=True) == 300
         assert config.effective_max_turns("auto", is_task=True) == 300
-        assert config.effective_max_turns("test", is_task=True) == 300
         assert config.effective_max_turns("web", is_task=True) == 300
         assert config.effective_max_turns("plan", is_task=False) == 100
-        assert config.effective_max_turns("test", is_task=False) == 200
 
 
 class TestEnsureleashdDir:
@@ -373,9 +360,9 @@ class TestEnsureleashdDir:
 
 
 class TestEffortConfig:
-    def test_effort_default_xhigh(self, tmp_path):
+    def test_effort_default_medium(self, tmp_path):
         config = LeashdConfig(approved_directories=[tmp_path])
-        assert config.effort == "xhigh"
+        assert config.effort == "medium"
 
     def test_effort_custom_values(self, tmp_path):
         for level in ("low", "medium", "high", "xhigh", "max"):

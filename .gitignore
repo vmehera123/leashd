@@ -18,7 +18,8 @@ htmlcov/
 
 # IDE
 .claude/*
-!.claude/commands/
+!.claude/settings.json
+!.claude/rules/
 !.claude/skills/
 .claude/skills/docx/
 

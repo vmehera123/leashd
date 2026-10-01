@@ -5,6 +5,8 @@ import signal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, create_autospec, patch
 
+import pytest
+
 from leashd.core.config import LeashdConfig
 from leashd.core.engine import Engine, PathConfig
 from leashd.core.events import EventBus
@@ -99,7 +101,7 @@ class TestHandleCommand:
 
         result = await eng.handle_command("user1", "status", "", "chat1")
 
-        assert "Auto-approve: Edit, Write" in result
+        assert "Auto-approve: agent-browser browsing, Edit, Write" in result
 
     async def test_status_shows_blanket_auto_approve(
         self, config, audit_logger, policy_engine, mock_connector
@@ -486,184 +488,6 @@ class TestHandleCommand:
         await eng.handle_message("user1", "still here", "chat1")
         session = eng.session_manager.get("user1", "chat1")
         assert session.working_directory == str(d2.resolve())
-
-
-class TestTestCommand:
-    async def _make_engine_with_plugin(
-        self, config, audit_logger, policy_engine, mock_connector
-    ):
-        from leashd.plugins.base import PluginContext
-        from leashd.plugins.builtin.test_runner import TestRunnerPlugin
-
-        agent = FakeAgent()
-        bus = EventBus()
-        plugin = TestRunnerPlugin()
-
-        eng = Engine(
-            connector=mock_connector,
-            agent=agent,
-            config=config,
-            session_manager=SessionManager(),
-            policy_engine=policy_engine,
-            audit=audit_logger,
-            event_bus=bus,
-        )
-
-        ctx = PluginContext(event_bus=bus, config=config)
-        await plugin.initialize(ctx)
-
-        return eng, agent
-
-    async def test_test_command_sets_mode(
-        self, config, audit_logger, policy_engine, mock_connector
-    ):
-        eng, _ = await self._make_engine_with_plugin(
-            config, audit_logger, policy_engine, mock_connector
-        )
-
-        await eng.handle_command("user1", "test", "verify login", "chat1")
-
-        session = eng.session_manager.get("user1", "chat1")
-        assert session.mode == "test"
-        assert session.mode_instruction is not None
-
-    async def test_test_command_auto_approves_browser_tools(
-        self, config, audit_logger, policy_engine, mock_connector
-    ):
-        from leashd.plugins.builtin.browser_tools import BROWSER_MUTATION_TOOLS
-
-        eng, _ = await self._make_engine_with_plugin(
-            config, audit_logger, policy_engine, mock_connector
-        )
-
-        await eng.handle_command("user1", "test", "", "chat1")
-
-        auto_tools = eng._gatekeeper._auto_approved_tools.get("chat1", set())
-        for tool in BROWSER_MUTATION_TOOLS:
-            assert tool in auto_tools
-
-    async def test_test_command_routes_args_to_agent(
-        self, config, audit_logger, policy_engine, mock_connector
-    ):
-        eng, _ = await self._make_engine_with_plugin(
-            config, audit_logger, policy_engine, mock_connector
-        )
-
-        await eng.handle_command("user1", "test", "verify login", "chat1")
-
-        assert len(mock_connector.sent_messages) == 2
-        assert "Test mode activated" in mock_connector.sent_messages[0]["text"]
-        assert "verify login" in mock_connector.sent_messages[1]["text"]
-
-    async def test_test_command_routes_default_prompt(
-        self, config, audit_logger, policy_engine, mock_connector
-    ):
-        eng, _ = await self._make_engine_with_plugin(
-            config, audit_logger, policy_engine, mock_connector
-        )
-
-        await eng.handle_command("user1", "test", "", "chat1")
-
-        assert len(mock_connector.sent_messages) == 2
-        assert "Test mode activated" in mock_connector.sent_messages[0]["text"]
-        assert "comprehensive tests" in mock_connector.sent_messages[1]["text"].lower()
-
-    async def test_test_command_returns_empty(
-        self, config, audit_logger, policy_engine, mock_connector
-    ):
-        eng, _ = await self._make_engine_with_plugin(
-            config, audit_logger, policy_engine, mock_connector
-        )
-
-        result = await eng.handle_command("user1", "test", "check it", "chat1")
-
-        assert result == ""
-
-    async def test_default_command_clears_test_mode(
-        self, config, audit_logger, policy_engine, mock_connector
-    ):
-        from leashd.plugins.builtin.browser_tools import BROWSER_MUTATION_TOOLS
-
-        eng, _ = await self._make_engine_with_plugin(
-            config, audit_logger, policy_engine, mock_connector
-        )
-
-        await eng.handle_command("user1", "test", "", "chat1")
-        session = eng.session_manager.get("user1", "chat1")
-        assert session.mode == "test"
-        assert session.mode_instruction is not None
-        auto_tools = eng._gatekeeper._auto_approved_tools.get("chat1", set())
-        assert auto_tools >= BROWSER_MUTATION_TOOLS
-
-        await eng.handle_command("user1", "default", "", "chat1")
-        assert session.mode == "default"
-        assert session.mode_instruction is None
-        assert "chat1" not in eng._gatekeeper._auto_approved_tools
-
-    async def test_no_plugin_sends_no_messages(
-        self, config, audit_logger, policy_engine, mock_connector
-    ):
-        agent = FakeAgent()
-        eng = Engine(
-            connector=mock_connector,
-            agent=agent,
-            config=config,
-            session_manager=SessionManager(),
-            policy_engine=policy_engine,
-            audit=audit_logger,
-            event_bus=EventBus(),
-        )
-
-        result = await eng.handle_command("user1", "test", "verify login", "chat1")
-
-        assert result == ""
-        assert len(mock_connector.sent_messages) == 0
-
-    async def test_auto_approves_browser_readonly_tools(
-        self, config, audit_logger, policy_engine, mock_connector
-    ):
-        from leashd.plugins.builtin.browser_tools import BROWSER_READONLY_TOOLS
-
-        eng, _ = await self._make_engine_with_plugin(
-            config, audit_logger, policy_engine, mock_connector
-        )
-
-        await eng.handle_command("user1", "test", "", "chat1")
-
-        auto_tools = eng._gatekeeper._auto_approved_tools.get("chat1", set())
-        for tool in BROWSER_READONLY_TOOLS:
-            assert tool in auto_tools
-
-    async def test_auto_approves_write_edit(
-        self, config, audit_logger, policy_engine, mock_connector
-    ):
-        eng, _ = await self._make_engine_with_plugin(
-            config, audit_logger, policy_engine, mock_connector
-        )
-
-        await eng.handle_command("user1", "test", "", "chat1")
-
-        auto_tools = eng._gatekeeper._auto_approved_tools.get("chat1", set())
-        assert "Write" in auto_tools
-        assert "Edit" in auto_tools
-
-    async def test_no_plugin_no_transient_sent(
-        self, config, audit_logger, policy_engine, mock_connector
-    ):
-        agent = FakeAgent()
-        eng = Engine(
-            connector=mock_connector,
-            agent=agent,
-            config=config,
-            session_manager=SessionManager(),
-            policy_engine=policy_engine,
-            audit=audit_logger,
-            event_bus=EventBus(),
-        )
-
-        await eng.handle_command("user1", "test", "", "chat1")
-
-        assert len(mock_connector.scheduled_cleanups) == 0
 
 
 class TestDirCommand:
@@ -2423,9 +2247,9 @@ class TestTasksCommand:
     async def test_tasks_no_tasks_found(
         self, config, audit_logger, policy_engine, mock_connector
     ):
-        from leashd.plugins.builtin.task_v4 import TaskV4Orchestrator
+        from leashd.plugins.builtin.task_orchestrator import TaskOrchestrator
 
-        orch = create_autospec(TaskV4Orchestrator, instance=True)
+        orch = create_autospec(TaskOrchestrator, instance=True)
         orch.meta.name = "task_orchestrator"
         orch._store = AsyncMock()
         orch._store.load_recent_for_chat = AsyncMock(return_value=[])
@@ -2452,7 +2276,7 @@ class TestTasksCommand:
         self, config, audit_logger, policy_engine, mock_connector
     ):
         from leashd.core.task import TaskRun
-        from leashd.plugins.builtin.task_v4 import TaskV4Orchestrator
+        from leashd.plugins.builtin.task_orchestrator import TaskOrchestrator
 
         task = TaskRun(
             run_id="abcdef1234567890",
@@ -2465,7 +2289,7 @@ class TestTasksCommand:
             working_directory="/tmp",
         )
 
-        orch = create_autospec(TaskV4Orchestrator, instance=True)
+        orch = create_autospec(TaskOrchestrator, instance=True)
         orch.meta.name = "task_orchestrator"
         orch._store = AsyncMock()
         orch._store.load_recent_for_chat = AsyncMock(return_value=[task])
@@ -2611,15 +2435,14 @@ class TestTaskCommand:
         await eng.handle_command(
             "user1",
             "task",
-            "--phases plan,implement,review build it",
+            "--phases implement,review build it",
             "chat1",
         )
 
         assert len(captured_events) == 1
-        # The flag is consumed; only the description survives in `task`.
         assert captured_events[0].data["task"] == "build it"
         assert captured_events[0].data["task_overrides"] == {
-            "enabled_actions": ["plan", "implement", "review"],
+            "enabled_actions": ["implement", "review"],
         }
 
     async def test_task_phases_flag_rejects_unknown_name(
@@ -4460,6 +4283,81 @@ class TestNativeCommandPassthrough:
         result = await eng.handle_command("user1", "screen", "", "chat1")
 
         assert result == "🖥 claude terminal\n\nSCREEN"
+
+    @staticmethod
+    def _stuck_agent(stuck: str | None):
+        agent = TestNativeCommandPassthrough._native_agent()
+        agent.rejected = []
+
+        def reject_stuck_prompt(session, prompt_id):
+            agent.rejected.append(prompt_id)
+            return prompt_id == stuck
+
+        agent.stuck_prompt_id = lambda session: stuck
+        agent.reject_stuck_prompt = reject_stuck_prompt
+        return agent
+
+    async def test_screen_offers_to_reject_a_stuck_prompt(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        eng = Engine(
+            connector=mock_connector,
+            agent=self._stuck_agent("abc123"),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        result = await eng.handle_command("user1", "screen", "", "chat1")
+
+        assert result == ""
+        sent = mock_connector.sent_messages[-1]
+        assert sent["text"] == "🖥 claude terminal\n\nSCREEN"
+        payloads = [b.callback_data for row in sent["buttons"] for b in row]
+        assert payloads == ["/screen reject abc123", "/screen"]
+
+    async def test_screen_without_a_stuck_prompt_only_refreshes(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        eng = Engine(
+            connector=mock_connector,
+            agent=self._stuck_agent(None),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_command("user1", "screen", "", "chat1")
+
+        buttons = mock_connector.sent_messages[-1]["buttons"]
+        assert [b.callback_data for row in buttons for b in row] == ["/screen"]
+
+    @pytest.mark.parametrize(
+        ("tapped", "header"),
+        [
+            ("abc123", "❌ Rejected the prompt"),
+            ("old999", "That prompt is no longer waiting"),
+        ],
+    )
+    async def test_screen_reject_answers_only_the_prompt_it_was_shown_for(
+        self, config, audit_logger, policy_engine, mock_connector, tapped, header
+    ):
+        agent = self._stuck_agent("abc123")
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_command("user1", "screen", f"reject {tapped}", "chat1")
+
+        assert agent.rejected == [tapped]
+        assert mock_connector.sent_messages[-1]["text"].startswith(header)
 
     async def test_screen_command_without_runtime_support(
         self, config, audit_logger, policy_engine, mock_connector

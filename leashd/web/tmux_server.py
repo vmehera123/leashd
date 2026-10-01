@@ -6,8 +6,8 @@ The tmux runtime's safety pipeline depends on Claude Code POSTing
 ``TmuxSessionManager._hook_url``). In WebUI / multi mode that route is mounted
 on the WebUI FastAPI app. In Telegram-only or CLI-only mode there is no WebUI
 app, so this module stands up a tiny FastAPI app hosting *only* the hook
-router — bound strictly to loopback — so the runtime works identically to
-``claude-cli`` there too (no ``LEASHD_WEB_ENABLED`` required).
+router — bound strictly to loopback — so the safety hooks still have an
+endpoint there (no ``LEASHD_WEB_ENABLED`` required).
 """
 
 from __future__ import annotations

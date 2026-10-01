@@ -226,6 +226,14 @@ def build_engine(
             os.environ.setdefault("AGENT_BROWSER_PROFILE", resolved)
             prune_restore_state(Path(resolved))
         logger.info("browser_backend_configured", backend="agent-browser")
+    else:
+        from leashd.plugins.builtin.browser_tools import (
+            PLAYWRIGHT_MCP_HINT,
+            playwright_mcp_available,
+        )
+
+        if not playwright_mcp_available():
+            logger.warning("playwright_mcp_unavailable", hint=PLAYWRIGHT_MCP_HINT)
 
     if config.workspace_config_root is None:
         config.workspace_config_root = Path.home()
@@ -362,22 +370,15 @@ def build_engine(
     if builtins.task_orchestrator:
         builtins.task_orchestrator.set_engine(engine)
 
-    # tmux: reap stale leashd-owned panes from a prior daemon (always),
-    # then — only when tmux is the active runtime — bind the engine's
-    # safety pipeline into the shared TmuxSessionManager singleton (the
-    # same instance the WebUI hook receiver and the TmuxAgent resolve) so
-    # PreToolUse hooks flow through the existing gatekeeper/approval/audit
-    # path.
     from leashd.agents.runtimes.tmux_session import (
         get_or_create_tmux_session_manager,
     )
 
     tsm = get_or_create_tmux_session_manager(config)
-    # Reap leashd-owned tmux panes left by a prior daemon, regardless of the
-    # current runtime. `leashd restart` = stop + start as separate processes;
-    # a clean stop tears its own panes down, but a SIGKILL'd one (the
-    # stop_daemon 10s timeout) or a runtime switched away from tmux would
-    # otherwise leave a stale interactive `claude` serving the user.
+    # `leashd restart` = stop + start as separate processes; a clean stop
+    # tears its own panes down, but a SIGKILL'd one (the stop_daemon 10s
+    # timeout) would otherwise leave a stale interactive `claude` serving the
+    # user.
     #
     # Opt-in because it kills processes on a socket shared by every daemon on
     # the machine: the socket is resolved from config, and any in-process
@@ -389,29 +390,23 @@ def build_engine(
     # adopts what it can before killing the rest — it runs after `bind_safety`
     # below, so an adopted pane comes back with a working gate, and it is async,
     # so it can restart each pane's tailer and dialog watcher.
-    if reap_orphan_tmux and not (
-        config.agent_runtime == "tmux" and config.tmux_persist_panes
-    ):
+    if reap_orphan_tmux and not config.tmux_persist_panes:
         tsm.kill_owned_sessions()
-    # Install + register the opt-in security-guidance plugin once per daemon,
-    # runtime-agnostic (no-op unless LEASHD_SECURITY_GUIDANCE_ENABLED). The
-    # managed --settings written per session then activate it via enabledPlugins.
     tsm.ensure_security_guidance_installed()
-    if config.agent_runtime == "tmux":
-        tsm.bind_safety(
-            gatekeeper=engine._gatekeeper,
-            approval_coordinator=approval_coordinator,
-            interaction_coordinator=interaction_coordinator,
-            audit=audit,
-            event_bus=event_bus,
-            session_manager=session_manager,
+    tsm.bind_safety(
+        gatekeeper=engine._gatekeeper,
+        approval_coordinator=approval_coordinator,
+        interaction_coordinator=interaction_coordinator,
+        audit=audit,
+        event_bus=event_bus,
+        session_manager=session_manager,
+    )
+    if not config.web_enabled:
+        logger.debug(
+            "tmux_hook_receiver_standalone",
+            hint="WebUI disabled — a loopback-only hook receiver is "
+            "started for Telegram-only / CLI-only mode so the safety "
+            "pipeline still applies",
         )
-        if not config.web_enabled:
-            logger.debug(
-                "tmux_hook_receiver_standalone",
-                hint="WebUI disabled — a loopback-only hook receiver is "
-                "started for Telegram-only / CLI-only mode so the safety "
-                "pipeline still applies",
-            )
 
     return engine

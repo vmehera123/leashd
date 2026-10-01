@@ -28,8 +28,8 @@
 | Audit logger | `AuditLogger` | `core/safety/audit.py` |
 | Interaction coordinator | `InteractionCoordinator` | `core/interactions.py` |
 | Agent protocol | `BaseAgent` | `agents/base.py` |
-| Claude CLI agent | `ClaudeCliAgent` | `agents/runtimes/claude_cli.py` |
-| Claude Code agent | `ClaudeCodeAgent` | `agents/runtimes/claude_code.py` |
+| Agent runtime | `TmuxAgent` / `TmuxSessionManager` | `agents/runtimes/tmux.py`, `tmux_session.py` |
+| Task orchestrator | `TaskOrchestrator` | `plugins/builtin/task_orchestrator.py` |
 | Runtime helpers | `_helpers` | `agents/runtimes/_helpers.py` |
 | Connector protocol | `BaseConnector` | `connectors/base.py` |
 | Middleware chain | `MiddlewareChain` | `middleware/base.py` |
@@ -39,9 +39,8 @@
 | Plugin registry | `PluginRegistry` | `plugins/registry.py` |
 | Audit plugin | `AuditPlugin` | `plugins/builtin/audit_plugin.py` |
 | Browser tools plugin | `BrowserToolsPlugin` | `plugins/builtin/browser_tools.py` |
-| Test runner plugin | `TestRunnerPlugin` | `plugins/builtin/test_runner.py` |
 | Merge resolver plugin | `MergeResolverPlugin` | `plugins/builtin/merge_resolver.py` |
-| Test config loader plugin | `TestConfigLoaderPlugin` | `plugins/builtin/test_config_loader.py` |
+| Project test config (`.leashd/test.yaml`) | `load_project_test_config` | `plugins/builtin/test_config_loader.py` |
 | Git service | `GitService` | `git/service.py` |
 | Git command handler | `GitCommandHandler` | `git/handler.py` |
 | Git formatter | `GitFormatter` | `git/formatter.py` |
@@ -78,7 +77,7 @@ flowchart TB
     end
 
     subgraph Extensions["Extensions"]
-        agent["ClaudeCliAgent / ClaudeCodeAgent"]
+        agent["TmuxAgent"]
         connector["BaseConnector"]
         middleware["MiddlewareChain"]
         plugins["PluginRegistry"]

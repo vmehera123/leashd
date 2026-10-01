@@ -7,10 +7,6 @@ from leashd.plugins.builtin.test_config_loader import (
     discover_api_specs,
     load_project_test_config,
 )
-from leashd.plugins.builtin.test_runner import (
-    TestConfig,
-    merge_project_config,
-)
 
 
 class TestLoadProjectTestConfig:
@@ -102,46 +98,6 @@ class TestProjectTestConfigModel:
         c = ProjectTestConfig(url="http://localhost")
         with pytest.raises(ValidationError, match="frozen"):
             c.url = "http://other"  # type: ignore[misc]
-
-
-class TestMergeProjectConfig:
-    def test_cli_overrides_project(self):
-        cli = TestConfig(app_url="http://cli")
-        project = ProjectTestConfig(url="http://project")
-        merged = merge_project_config(cli, project)
-        assert merged.app_url == "http://cli"
-
-    def test_project_fills_gaps(self):
-        cli = TestConfig()
-        project = ProjectTestConfig(
-            url="http://project",
-            server="npm run dev",
-            framework="next.js",
-            directory="tests/e2e",
-        )
-        merged = merge_project_config(cli, project)
-        assert merged.app_url == "http://project"
-        assert merged.dev_server_command == "npm run dev"
-        assert merged.framework == "next.js"
-        assert merged.test_directory == "tests/e2e"
-
-    def test_partial_merge(self):
-        cli = TestConfig(framework="react")
-        project = ProjectTestConfig(url="http://project", framework="next.js")
-        merged = merge_project_config(cli, project)
-        assert merged.app_url == "http://project"
-        assert merged.framework == "react"  # CLI wins
-
-    def test_no_updates_returns_same(self):
-        cli = TestConfig(
-            app_url="http://cli",
-            dev_server_command="npm start",
-            framework="react",
-            test_directory="tests/",
-        )
-        project = ProjectTestConfig()
-        merged = merge_project_config(cli, project)
-        assert merged is cli  # No copy needed
 
 
 class TestDiscoverApiSpecs:

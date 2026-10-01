@@ -98,7 +98,7 @@ By default, Playwright launches a temporary browser profile that's discarded aft
 
 ### How It Works
 
-When you configure a browser profile via `leashd browser set-profile`, leashd injects the `--user-data-dir` flag into the Playwright MCP args **at runtime** for `/web` sessions only. The `/test` command always uses a temporary profile to ensure test isolation.
+When you configure a browser profile via `leashd browser set-profile`, leashd injects the `--user-data-dir` flag into the Playwright MCP args **at runtime** for `/web` sessions only. `/task` always uses a temporary profile to keep verification isolated.
 
 ### Option A — Reuse Your Existing Chrome Profile
 
@@ -147,7 +147,7 @@ Use `/web --fresh` to skip the configured profile for a single invocation. This 
 |---|---|
 | `/web` | Uses configured profile (persistent logins) |
 | `/web --fresh` | Temporary profile (no saved state) |
-| `/test` | Always temporary (test isolation) |
+| `/task` | Always temporary (verification isolation) |
 
 ## Browser Tools
 

@@ -24,6 +24,7 @@ from leashd.config_store import (
 )
 from leashd.core.config import build_directory_names
 from leashd.core.file_delivery import resolve_outgoing_files
+from leashd.core.runtime_settings import SETTING_FIELDS
 from leashd.core.safety.sandbox import SandboxEnforcer
 from leashd.daemon import signal_reload
 from leashd.web.auth import AuthResult, verify_api_key
@@ -39,7 +40,7 @@ _VALID_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 _VALID_MODES = {"default", "plan", "auto"}
 _VALID_BROWSER_BACKENDS = {"playwright", "agent-browser"}
 _VALID_CONFIG_SECTIONS = {"agent", "browser"}
-_SETTING_FIELDS = {"effort", "claude_model", "codex_model"}
+_SETTING_FIELDS = set(SETTING_FIELDS)
 
 
 def _check_auth(api_key: str, config: LeashdConfig) -> str | None:
@@ -259,13 +260,11 @@ def create_rest_router(
         return JSONResponse(
             content={
                 "agent": {
-                    "effort": raw.get("effort", "xhigh"),
-                    "runtime": raw.get("agent_runtime", "tmux"),
-                    "default_mode": raw.get("default_mode", "auto"),
-                    "max_turns": raw.get("max_turns", 250),
-                    "max_tool_calls": raw.get("max_tool_calls", -1),
+                    "effort": raw.get("effort", config.effort),
+                    "default_mode": raw.get("default_mode", config.default_mode),
+                    "max_turns": raw.get("max_turns", config.max_turns),
+                    "max_tool_calls": raw.get("max_tool_calls", config.max_tool_calls),
                     "claude_model": raw.get("claude_model") or "",
-                    "codex_model": raw.get("codex_model") or "",
                 },
                 "directory_settings": get_all_directory_settings(),
                 "workspace_settings": {
@@ -342,7 +341,6 @@ def create_rest_router(
             path,
             effort=body.get("effort"),
             claude_model=body.get("claude_model"),
-            codex_model=body.get("codex_model"),
             replace=bool(body.get("replace", False)),
         )
         if not signal_reload():
@@ -414,7 +412,6 @@ def create_rest_router(
             name,
             effort=body.get("effort"),
             claude_model=body.get("claude_model"),
-            codex_model=body.get("codex_model"),
             replace=bool(body.get("replace", False)),
         )
         if not ok:
@@ -531,14 +528,6 @@ def _validate_config_update(body: dict[str, Any]) -> str | None:
             return "agent must be an object"
         if "effort" in agent and agent["effort"] not in _VALID_EFFORTS:
             return f"effort must be one of: {', '.join(sorted(_VALID_EFFORTS))}"
-        if "runtime" in agent:
-            # Validate against the agent registry (single source of truth,
-            # shared with the CLI) so this can't drift as runtimes are added.
-            from leashd.agents.registry import get_available_runtime_names
-
-            valid_runtimes = set(get_available_runtime_names())
-            if agent["runtime"] not in valid_runtimes:
-                return f"runtime must be one of: {', '.join(sorted(valid_runtimes))}"
         if "default_mode" in agent and agent["default_mode"] not in _VALID_MODES:
             return f"default_mode must be one of: {', '.join(sorted(_VALID_MODES))}"
         if "max_turns" in agent:
@@ -549,11 +538,9 @@ def _validate_config_update(body: dict[str, Any]) -> str | None:
             mtc = agent["max_tool_calls"]
             if not isinstance(mtc, int) or (mtc != -1 and mtc < 1):
                 return "max_tool_calls must be -1 (unlimited) or a positive integer"
-        for field in ("claude_model", "codex_model"):
-            if field in agent:
-                val = agent[field]
-                if val is not None and not isinstance(val, str):
-                    return f"{field} must be a string or null"
+        val = agent.get("claude_model")
+        if val is not None and not isinstance(val, str):
+            return "claude_model must be a string or null"
 
     if "browser" in body:
         browser = body["browser"]
@@ -563,6 +550,14 @@ def _validate_config_update(body: dict[str, Any]) -> str | None:
             return (
                 f"backend must be one of: {', '.join(sorted(_VALID_BROWSER_BACKENDS))}"
             )
+        if browser.get("backend") == "playwright":
+            from leashd.plugins.builtin.browser_tools import (
+                PLAYWRIGHT_MCP_HINT,
+                playwright_mcp_available,
+            )
+
+            if not playwright_mcp_available():
+                return PLAYWRIGHT_MCP_HINT
         if "headless" in browser and not isinstance(browser["headless"], bool):
             return "browser.headless must be a boolean"
 
@@ -574,8 +569,7 @@ def _validate_settings_fields(body: dict[str, Any]) -> str | None:
     effort = body.get("effort")
     if effort is not None and effort not in _VALID_EFFORTS:
         return f"effort must be one of: {', '.join(sorted(_VALID_EFFORTS))}"
-    for field in ("claude_model", "codex_model"):
-        val = body.get(field)
-        if val is not None and not isinstance(val, str):
-            return f"{field} must be a string or null"
+    val = body.get("claude_model")
+    if val is not None and not isinstance(val, str):
+        return "claude_model must be a string or null"
     return None

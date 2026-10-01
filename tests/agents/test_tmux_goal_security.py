@@ -213,25 +213,12 @@ def test_managed_settings_include_enabled_plugins_when_on(tmp_path):
     assert managed["enabledPlugins"] == {_PLUGIN: True}
     assert "hooks" in managed  # plugin enable does not displace the hook bridge
 
-    floor = json.loads(mgr.write_auto_floor_settings("s1").read_text())
-    assert floor["enabledPlugins"] == {_PLUGIN: True}
-
-    plugin_only_path = mgr.write_plugin_settings("s1")
-    assert plugin_only_path is not None
-    plugin_only = json.loads(plugin_only_path.read_text())
-    assert plugin_only == {"enabledPlugins": {_PLUGIN: True}}
-
 
 def test_managed_settings_omit_plugins_when_off(tmp_path):
     mgr = TmuxSessionManager(_cfg(tmp_path, security_guidance_enabled=False))
 
     managed = json.loads(mgr.write_managed_settings("s1").read_text())
     assert "enabledPlugins" not in managed
-
-    floor = json.loads(mgr.write_auto_floor_settings("s1").read_text())
-    assert "enabledPlugins" not in floor
-
-    assert mgr.write_plugin_settings("s1") is None
 
 
 # --- TmuxAgent.inject_goal / is_goal_active ---------------------------------

@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from leashd.core.config import LeashdConfig
     from leashd.core.safety.audit import AuditLogger
     from leashd.plugins.base import LeashdPlugin, PluginContext
-    from leashd.plugins.builtin.task_v4 import TaskV4Orchestrator
+    from leashd.plugins.builtin.task_orchestrator import TaskOrchestrator
 
 logger = structlog.get_logger()
 
@@ -70,7 +70,7 @@ class PluginRegistry:
 class BuiltinPlugins(BaseModel):
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
     registry: PluginRegistry
-    task_orchestrator: TaskV4Orchestrator | None
+    task_orchestrator: TaskOrchestrator | None
 
 
 def create_builtin_plugins(
@@ -85,8 +85,7 @@ def create_builtin_plugins(
     from leashd.plugins.builtin.audit_plugin import AuditPlugin
     from leashd.plugins.builtin.browser_tools import BrowserToolsPlugin
     from leashd.plugins.builtin.merge_resolver import MergeResolverPlugin
-    from leashd.plugins.builtin.task_v4 import TaskV4Orchestrator
-    from leashd.plugins.builtin.test_runner import TestRunnerPlugin
+    from leashd.plugins.builtin.task_orchestrator import TaskOrchestrator
     from leashd.plugins.builtin.web_agent import WebAgentPlugin
     from leashd.plugins.builtin.web_interaction_logger import WebInteractionLogger
 
@@ -97,19 +96,18 @@ def create_builtin_plugins(
     for plugin in [
         AuditPlugin(audit),
         BrowserToolsPlugin(),
-        TestRunnerPlugin(),
         WebAgentPlugin(),
         WebInteractionLogger(),
         MergeResolverPlugin(),
     ]:
         registry.register(plugin)
 
-    task_orchestrator: TaskV4Orchestrator | None = None
+    task_orchestrator: TaskOrchestrator | None = None
     if config.task_orchestrator:
         from leashd.core.task_profile import resolve_profile
 
         profile = resolve_profile(config.task_profile)
-        task_orchestrator = TaskV4Orchestrator(
+        task_orchestrator = TaskOrchestrator(
             connector=connector,
             db_path=session_db_path,
             profile=profile,
@@ -119,7 +117,7 @@ def create_builtin_plugins(
             review_max_loopbacks=config.task_review_max_loopbacks,
         )
         logger.info(
-            "task_v4_orchestrator_enabled",
+            "task_orchestrator_enabled",
             task_profile=config.task_profile,
             phase_timeout_seconds=config.task_phase_timeout_seconds,
         )

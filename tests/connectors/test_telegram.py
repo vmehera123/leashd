@@ -225,10 +225,7 @@ class TestStop:
         mock_app.updater.stop = hang_forever
         connector._app = mock_app
 
-        with patch(
-            "leashd.connectors.telegram.asyncio.timeout",
-            return_value=asyncio.timeout(0.1),
-        ):
+        with patch("leashd.connectors.telegram._STOP_TIMEOUT_SECONDS", 0.1):
             await asyncio.wait_for(connector.stop(), timeout=2.0)
 
 
@@ -2531,6 +2528,30 @@ class TestCallbackEdgeCases:
         update = _make_callback_update("interact:int-7:#2")
         await connector._on_callback_query(update, MagicMock())
         resolver.assert_awaited_once_with("int-7", "#2")
+
+
+class TestScreenCallback:
+    @pytest.mark.parametrize(
+        ("data", "args"), [("/screen", ""), ("/screen reject abc123", "reject abc123")]
+    )
+    async def test_routes_to_screen_and_retires_the_tapped_snapshot(
+        self, connector, data, args
+    ):
+        connector._app = _make_mock_app()
+        handler = AsyncMock(return_value="")
+        connector.set_command_handler(handler)
+        connector.delete_message = AsyncMock()
+
+        update = _make_callback_update(data)
+        update.callback_query.from_user = MagicMock(id=42)
+        update.callback_query.message = MagicMock(
+            spec=Message, chat_id=99, message_id=555
+        )
+
+        await connector._on_callback_query(update, MagicMock())
+
+        handler.assert_awaited_once_with("42", "screen", args, "99", [])
+        connector.delete_message.assert_awaited_once_with("99", "555")
 
 
 class TestDirCallback:

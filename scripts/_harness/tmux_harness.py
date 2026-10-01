@@ -24,7 +24,7 @@ from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 HARNESS_DIR = Path(os.environ.get("HARNESS_DIR", "/tmp/leashd_tmux_harness"))
 REPO = Path(os.environ.get("APPROVED_DIR", str(HARNESS_DIR / "repo")))
@@ -57,6 +57,7 @@ msg_markup: dict[int, str | None] = {}
 deleted_mids: set[int] = set()
 api_errors: list[dict[str, Any]] = []
 uploads: list[dict[str, Any]] = []
+inbound_files: dict[str, dict[str, Any]] = {}
 _uid = [1]
 _mid = [1000]
 _engine: list[Any] = [None]
@@ -248,6 +249,18 @@ async def _handle(
         )
     if method in ("deleteWebhook", "setMyCommands", "deleteMyCommands"):
         return ok(True)
+    if method == "getFile":
+        stored = inbound_files.get(str(data.get("file_id", "")))
+        if stored is None:
+            return err(method, "Bad Request: invalid file_id")
+        return ok(
+            {
+                "file_id": stored["file_id"],
+                "file_unique_id": stored["file_unique_id"],
+                "file_size": len(stored["data"]),
+                "file_path": stored["file_path"],
+            }
+        )
     if method == "getMyCommands":
         return ok([])
     if method == "getUpdates":
@@ -423,9 +436,38 @@ async def bot_api(token: str, method: str, request: Request) -> dict[str, Any]:
     return await _handle(method, data, files)
 
 
-@app.post("/file/bot{token}/{path:path}")
-async def bot_file(token: str, path: str) -> dict[str, Any]:
-    return ok(True)
+@app.get("/file/bot{token}/{path:path}")
+async def bot_file(token: str, path: str) -> Response:
+    for stored in inbound_files.values():
+        if stored["file_path"] == path:
+            return Response(content=stored["data"], media_type=stored["mime_type"])
+    return Response(status_code=404)
+
+
+def _register_inbound_file(data: bytes, mime_type: str, suffix: str) -> dict[str, Any]:
+    digest = hashlib.sha256(data).hexdigest()
+    file_id = f"harness_{digest[:16]}"
+    stored = {
+        "file_id": file_id,
+        "file_unique_id": digest[:12],
+        "file_path": f"inbound/{digest[:12]}{suffix}",
+        "mime_type": mime_type,
+        "data": data,
+    }
+    inbound_files[file_id] = stored
+    return stored
+
+
+def _inbound_message(mid: int, caption: str) -> dict[str, Any]:
+    message: dict[str, Any] = {
+        "message_id": mid,
+        "date": int(time.time()),
+        "chat": {"id": int(CHAT_ID), "type": "private"},
+        "from": {"id": int(USER_ID), "is_bot": False, "first_name": "Tester"},
+    }
+    if caption:
+        message["caption"] = caption
+    return message
 
 
 def _enqueue(update: dict[str, Any]) -> int:
@@ -481,6 +523,52 @@ async def inject_command(payload: dict[str, Any]) -> dict[str, Any]:
         }
     )
     return {"update_id": uid, "message_id": mid, "text": text}
+
+
+@app.post("/control/inject_photo")
+async def inject_photo(payload: dict[str, Any]) -> dict[str, Any]:
+    data = Path(payload["path"]).expanduser().read_bytes()
+    stored = _register_inbound_file(data, "image/jpeg", ".jpg")
+    width = int(payload.get("width", 640))
+    height = int(payload.get("height", 480))
+    mid = _mid[0]
+    _mid[0] += 1
+    caption = payload.get("caption", "")
+    msg_text[mid] = caption
+    message = _inbound_message(mid, caption)
+    message["photo"] = [
+        {
+            "file_id": stored["file_id"],
+            "file_unique_id": stored["file_unique_id"],
+            "width": width,
+            "height": height,
+            "file_size": len(data),
+        }
+    ]
+    uid = _enqueue({"message": message})
+    return {"update_id": uid, "message_id": mid, "file_id": stored["file_id"]}
+
+
+@app.post("/control/inject_document")
+async def inject_document(payload: dict[str, Any]) -> dict[str, Any]:
+    path = Path(payload["path"]).expanduser()
+    data = path.read_bytes()
+    mime_type = payload.get("mime_type", "application/octet-stream")
+    stored = _register_inbound_file(data, mime_type, path.suffix)
+    mid = _mid[0]
+    _mid[0] += 1
+    caption = payload.get("caption", "")
+    msg_text[mid] = caption
+    message = _inbound_message(mid, caption)
+    message["document"] = {
+        "file_id": stored["file_id"],
+        "file_unique_id": stored["file_unique_id"],
+        "file_name": payload.get("file_name", path.name),
+        "mime_type": mime_type,
+        "file_size": len(data),
+    }
+    uid = _enqueue({"message": message})
+    return {"update_id": uid, "message_id": mid, "file_id": stored["file_id"]}
 
 
 @app.post("/control/tap")

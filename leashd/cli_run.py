@@ -143,9 +143,9 @@ def _build_task_command(prompt: str, phases: str | None) -> str:
     """Compose the `/task` slash command, prepending `--phases` if requested.
 
     `--phases` is consumed by ``leashd/core/engine.py:_parse_task_flags``
-    and forwarded as ``task_overrides.enabled_actions`` to the v3
-    orchestrator. Layered on top of project ``.leashd/task-config.yaml``
-    and the daemon-wide profile.
+    and forwarded as ``task_overrides.enabled_actions`` to the task
+    orchestrator, overriding ``.leashd/task-config.yaml`` and the
+    daemon-wide profile.
     """
     if not phases:
         return f"/task {prompt}"

@@ -467,7 +467,6 @@ class TestConfigGetEndpoint:
         with patch("leashd.web.routes.load_global_config") as mock_load:
             mock_load.return_value = {
                 "effort": "high",
-                "agent_runtime": "codex",
                 "default_mode": "plan",
                 "browser": {"backend": "agent-browser", "headless": True},
             }
@@ -475,7 +474,7 @@ class TestConfigGetEndpoint:
             assert resp.status_code == 200
             data = resp.json()
             assert data["agent"]["effort"] == "high"
-            assert data["agent"]["runtime"] == "codex"
+            assert "runtime" not in data["agent"]
             assert data["agent"]["default_mode"] == "plan"
             assert data["browser"]["backend"] == "agent-browser"
             assert data["browser"]["headless"] is True
@@ -491,8 +490,8 @@ class TestConfigGetEndpoint:
             mock_load.return_value = {}
             resp = client.get("/api/config", headers=_AUTH_HEADER)
             data = resp.json()
-            assert data["agent"]["effort"] == "xhigh"
-            assert data["agent"]["runtime"] == "tmux"
+            assert data["agent"]["effort"] == "medium"
+            assert data["agent"]["max_turns"] == 120
             assert data["browser"]["backend"] == "agent-browser"
 
 
@@ -523,38 +522,17 @@ class TestConfigPutEndpoint:
         assert data["success"] is False
         assert "effort" in data["reason"]
 
-    def test_validates_invalid_runtime(self, client):
-        resp = client.put(
-            "/api/config",
-            headers=_AUTH_HEADER,
-            json={"agent": {"runtime": "gpt4"}},
-        )
+    def test_playwright_backend_requires_npx(self, client):
+        with patch(
+            "leashd.plugins.builtin.browser_tools.shutil.which", return_value=None
+        ):
+            resp = client.put(
+                "/api/config",
+                headers=_AUTH_HEADER,
+                json={"browser": {"backend": "playwright"}},
+            )
         assert resp.status_code == 400
-        data = resp.json()
-        assert data["success"] is False
-        assert "runtime" in data["reason"]
-
-    def test_runtime_validation_is_registry_driven(self, client):
-        # GAP 1: every registered runtime (incl. tmux) is accepted via the
-        # REST API — validation derives from the agent registry, not a
-        # hardcoded list that can drift.
-        from leashd.agents.registry import get_available_runtime_names
-
-        names = get_available_runtime_names()
-        assert "tmux" in names
-        for name in names:
-            with (
-                patch("leashd.web.routes.update_config_sections") as mock_update,
-                patch("leashd.web.routes.signal_reload"),
-            ):
-                resp = client.put(
-                    "/api/config",
-                    headers={**_AUTH_HEADER, "Content-Type": "application/json"},
-                    json={"agent": {"runtime": name}},
-                )
-                assert resp.status_code == 200, name
-                assert resp.json()["success"] is True
-                mock_update.assert_called_once_with({"agent": {"runtime": name}})
+        assert "npx" in resp.json()["reason"]
 
     def test_validates_invalid_browser_backend(self, client):
         resp = client.put(
@@ -715,7 +693,6 @@ class TestPutDirectorySettings:
             "/tmp/proj",
             effort="high",
             claude_model=None,
-            codex_model=None,
             replace=False,
         )
         mock_reload.assert_called_once()
@@ -871,7 +848,6 @@ class TestPutWorkspaceSettings:
             "my-ws",
             effort="high",
             claude_model=None,
-            codex_model=None,
             replace=False,
         )
 

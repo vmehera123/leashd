@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.0.0] - 2026-09-30
+- **removed**: the `claude-cli`, `claude-code` (Agent SDK) and `codex` runtimes, `leashd runtime` and `/test`. tmux is the only runtime; an old `agent_runtime` setting falls back to it with a warning.
+- **changed**: `/task` is one pipeline, implement → verify → opt-in review, and verify drives a real browser only when the change shows up in a running app. New defaults: `max_turns` 120, effort `medium`, and agent-browser browsing runs without asking.
+- **added**: subagents run in the tmux pane, gated like any other tool call. `/effort` sets a level for this session from buttons, and `/screen` gets Refresh plus Reject for a stuck permission prompt (leashd rejects one itself after 10 minutes).
+- **fixed**: tmux turns report their real cost instead of $0, taken from Claude's statusLine and including subagents. Approved commands no longer leave the pane stuck when taller than the terminal or drawn beside `/diff`, and Python 3.10 works again.
+- **added**: fewer prompts: `curl`/`wget` reads of public sites that send no credentials, `agent-browser <command> --help` and `git rm` without `--force` run without asking, and Python code such as `secrets.token_hex()` no longer trips the credential check.
+- **changed**: leashd is marked stable (PyPI Production/Stable), and `docs/` and the `/web` and `/merge` prompts are updated for 2.0 and Opus 5.5.
+
 ## [1.9.0] - 2026-09-23
 - **added**: the agent can save its Claude Code auto-memory for the projects you approved; the rest of `~/.claude` stays outside the sandbox.
 - **fixed**: tmux turns no longer stall on an approved prompt when you sent a message just before it (the queued message hid the prompt, and your next message rejected it).

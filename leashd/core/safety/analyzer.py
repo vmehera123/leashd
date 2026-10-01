@@ -1096,6 +1096,157 @@ def network_read_scope(command: str) -> str | None:
     return f"{binary} {destination}"
 
 
+_IDENTITY_SHORT_FLAGS = {"curl": frozenset("bEnuU"), "wget": frozenset()}
+
+_IDENTITY_LONG_FLAGS = frozenset(
+    {
+        "--cookie",
+        "--cookie-jar",
+        "--user",
+        "--cert",
+        "--key",
+        "--pass",
+        "--oauth2-bearer",
+        "--aws-sigv4",
+        "--netrc",
+        "--netrc-file",
+        "--netrc-optional",
+        "--negotiate",
+        "--ntlm",
+        "--digest",
+        "--basic",
+        "--anyauth",
+        "--delegation",
+        "--location-trusted",
+        "--password",
+        "--http-user",
+        "--http-password",
+        "--load-cookies",
+        "--certificate",
+        "--private-key",
+        "--ask-password",
+        "--use-askpass",
+        "--auth-no-challenge",
+    }
+)
+
+_PUBLIC_HEADER_NAMES = frozenset(
+    {
+        "accept",
+        "accept-language",
+        "accept-encoding",
+        "user-agent",
+        "cache-control",
+        "range",
+    }
+)
+
+_PRIVATE_HOST_SUFFIXES = (".local", ".internal", ".lan", ".localhost", ".home.arpa")
+
+_PUBLIC_WRITE_DIRS = ("/tmp", "/private/tmp")  # noqa: S108
+
+
+def _is_public_header(value: str | None) -> bool:
+    if value is None:
+        return False
+    name, colon, _ = value.partition(":")
+    return bool(colon) and name.strip().lower() in _PUBLIC_HEADER_NAMES
+
+
+def _sends_identity(binary: str, tokens: list[str]) -> bool:
+    short_flags, long_flags = _NETWORK_FLAGS[binary]
+    identity_short = _IDENTITY_SHORT_FLAGS[binary]
+    remaining = iter(tokens)
+    for token in remaining:
+        if token in _SHELL_OPERATOR_TOKENS:
+            return False
+        if token.startswith("--") and len(token) > 2:
+            name, has_inline, inline = token.partition("=")
+            if name in _IDENTITY_LONG_FLAGS:
+                return True
+            if name == "--header":
+                value = inline if has_inline else next(remaining, None)
+                if not _is_public_header(value):
+                    return True
+            elif long_flags.get(name, _SWITCH) in _TAKES_VALUE and not has_inline:
+                next(remaining, None)
+            continue
+        if not token.startswith("-") or len(token) == 1:
+            continue
+        for position, letter in enumerate(token[1:], start=2):
+            if letter in identity_short:
+                return True
+            if short_flags.get(letter) in _TAKES_VALUE:
+                value = token[position:] or next(remaining, None)
+                if binary == "curl" and letter == "H" and not _is_public_header(value):
+                    return True
+                break
+    return False
+
+
+def _is_public_host(host: str) -> bool:
+    if "." not in host or ":" in host or host.endswith(_PRIVATE_HOST_SUFFIXES):
+        return False
+    return not host.replace(".", "").isdigit()
+
+
+def _is_public_write_dir(target: str) -> bool:
+    return ".." not in target.split("/") and any(
+        target == root or target.startswith(root + "/") for root in _PUBLIC_WRITE_DIRS
+    )
+
+
+def public_read_scope(command: str) -> str | None:
+    """``curl+public <host>…`` when a read reaches only public hosts anonymously.
+
+    Stricter than :func:`network_read_scope`, whose scope a human approves
+    per host: this form is allowed without asking, so it must carry nothing
+    of the user's. Any ``$`` disqualifies (a variable can smuggle a token
+    into a URL or header), as does every auth, cookie, certificate and netrc
+    flag, and a header other than content negotiation. Hosts must be public
+    DNS names, not IP literals or private suffixes, and a fetch may write
+    only under ``/tmp`` — so a ``wget`` must name its output, because without
+    ``-O`` it saves into the working directory. The policy engine drops any
+    typed command spelling the ``+public`` form, so only this function
+    produces it.
+    """
+    if "$" in command:
+        return None
+    scope = network_read_scope(command)
+    if scope is None:
+        return None
+    binary, _, rest = scope.partition(" ")
+    destination, _, outputs = rest.partition(">")
+    if not all(_is_public_host(host) for host in destination.split(",")):
+        return None
+    if outputs and not all(
+        _is_public_write_dir(target) for target in outputs.split(",")
+    ):
+        return None
+    tokens = shlex.split(command.replace("\\\n", " "))
+    if _sends_identity(binary, tokens[1:]):
+        return None
+    if binary == "wget" and not _names_wget_output(tokens[1:]):
+        return None
+    return f"{binary}+public {destination}"
+
+
+def _names_wget_output(tokens: list[str]) -> bool:
+    for token in tokens:
+        if token in _SHELL_OPERATOR_TOKENS:
+            return False
+        if token.startswith("--output-document"):
+            return True
+        if not token.startswith("-") or token.startswith("--"):
+            continue
+        for letter in token[1:]:
+            if letter == "O":
+                return True
+            if _WGET_SHORT_FLAGS.get(letter) in _TAKES_VALUE:
+                break
+    return False
+
+
 _SHELL_CREDENTIAL_RE = re.compile(
     r"\.env\b(?!\.(?:example|sample|template|dist)\b)|\.ssh/|\.aws/|\.gnupg/|"
     r"authorized_keys|\.pem\b|\.key\b|\.p12\b|\.pfx\b|\.keystore\b|"

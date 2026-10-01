@@ -2,97 +2,41 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-See @README.md for project overview. Detailed docs in @docs/index.md.
+leashd is a daemon that runs Claude Code in tmux panes and puts a Sandbox → Policy → Approval pipeline in front of every tool call, driven from a Web UI or Telegram. Product overview: `README.md`. Subsystem docs: `docs/index.md`.
 
 ## Commands
 
 ```bash
-# Install dependencies
-uv sync
-
-# Run tests (single file / specific test / all)
-uv run pytest tests/test_policy.py -v
-uv run pytest tests/test_policy.py::test_function_name -v
-uv run pytest tests/
-
-# Run tests with coverage
-uv run pytest --cov=leashd tests/
-
-# Lint + format
-uv run ruff check --fix . && uv run ruff format .
-
-# Type check
-uv run mypy leashd/
-
-# Full check (lint + format + mypy + tests) — ALWAYS run after implementation work
-make check
-
-# E2E tests (Playwright, real browser vs WebUI) — NOT included in `make check`
-uv run playwright install chromium   # one-time setup
-uv run pytest -m e2e -v
-make check-all                       # = make check + E2E
+make check          # ruff fix + format, mypy, unit tests
+make check-all      # make check + Playwright E2E (tests/e2e/)
+uv run pytest -m e2e -v                                    # E2E only; one-time: uv run playwright install chromium
 ```
 
-CLI commands are discoverable via `leashd --help` and `leashd <subcommand> --help`.
+- Always run through `uv run`, never bare `python` / `python3`.
+- pytest's `addopts` deselects `e2e`, so plain `uv run pytest` never runs the browser tests.
+- The Makefile runs mypy with `|| true`, so a green `make check` can hide type errors. Read mypy's output and fix what it reports.
+- CLI surface: `leashd --help`, `leashd <subcommand> --help`.
 
-## Specs
+## Workflow
 
-Before exploring the codebase, read the relevant spec in `specs/app/`. Start with `specs/app/00-quick-reference.md` for the file-to-class map, then consult the numbered spec for whichever subsystem you're working on. These are detailed technical references that save significant exploration time. **Always verify spec information against the actual source code** — specs can drift from the implementation, so treat them as a starting point, not the source of truth.
+- IMPORTANT: run `make check` after any implementation work and fix every issue before calling the task done. Also run the E2E tier when you touch the Web UI or browser automation.
+- After each change, add one line to `CHANGELOG.md` under the current (latest) version heading, as `- **added|fixed|changed|removed**: short description`. Never create a new version heading.
 
-## Code Exploration
+## Where the knowledge lives
 
-For structural "where does this live / what calls it / what shape is it" questions, reach for `codebase-memory-mcp` first (a SessionStart hook re-injects its tool list each session, so it isn't repeated here). The graph tells you *where*; it can lag the working tree, so **always `Read` the file to confirm against disk before you `Edit`** — that validation step is mandatory for any non-trivial change. Skip the graph and go straight to `Read`/`Grep`/`Glob` for non-code files (Markdown, YAML, config) and when you already know the path.
-
-## Skills
-
-This repo ships Claude Code skills in `.claude/skills/`. They hold architecture knowledge and procedures that aren't obvious from the code — **consult the relevant skill instead of re-deriving the same context.** Each loads automatically when relevant, or invoke it directly with `/<name>`.
-
-- **`architecture`** — read before any change that spans subsystems, or when deciding where new code belongs.
-- **`tmux-runtime`** — read before touching `tmux*.py`, streaming, or approvals, or when debugging the default runtime.
-- **`telegram-harness`** — run to verify Telegram / Web-UI behavior end-to-end against the real pipeline.
-- **`debug-leashd`** / **`debug-task`** — diagnose runtime and `/task` issues from SQLite, `audit.jsonl`, and logs.
-
-## Mandatory Post-Implementation Check
-
-**ALWAYS run `make check` after finishing any implementation work and fix ALL issues before considering the task complete.** Non-negotiable. `make check` runs ruff, mypy, and unit pytest — it does **not** run the E2E tier (`pytest -m e2e`, or `make check-all`), so run that too when you touch the WebUI, browser automation, or `data/webui/*.js`. mypy runs with `|| true` in the Makefile but you should still fix any type errors it reports.
+- `.claude/skills/`: `architecture` (wiring, subsystems, where new code belongs), `tmux-runtime`, `telegram-harness` (end-to-end verification against the real pipeline), `debug-leashd` and `debug-task` (SQLite, `audit.jsonl`, logs), and `heal-e2e`.
+- `.claude/rules/`: short path-scoped rules that load when you open tmux runtime, safety/policy, Web UI or test files.
+- `specs/app/` (gitignored, local only): numbered deep references; start with `00-quick-reference.md`. Specs, `docs/` and `README.md` can describe deleted code (the claude-cli, Agent SDK and Codex runtimes, the v1–v4 task orchestrators, `AutoApprover`, the `/test` runner), so trust `plugins/registry.py`, `agents/registry.py` and the source over them.
 
 ## Architecture
 
-Three-layer safety pipeline: **Sandbox → Policy → Approval**. All tool calls flow through `core/safety/gatekeeper.py` which orchestrates the chain.
+- `tmux` is the only agent runtime (`agents/runtimes/tmux.py`, `tmux_session.py`). It drives a real interactive `claude` TUI and routes tool calls back to the gatekeeper through Claude Code PreToolUse hooks. `agents/registry.py` is kept so a future runtime can register a factory; an unknown `agent_runtime` warns and falls back to `tmux`. Embedders can pass any `BaseAgent` to `build_engine(agent=...)`.
+- `/task` is `plugins/builtin/task_orchestrator.py` (implement → verify → opt-in review, one fresh session per phase), with prompts in `_task_prompts.py`.
 
-Bootstrap: `main.py:run()` → `cli.py:main()` → `main.py:start()` → `app.py:build_engine()`. The `app.py` wires all subsystems (config, storage, connectors, middleware, plugins, safety pipeline, engine).
+## Code conventions
 
-Engine (`core/engine.py`) is the central orchestrator — receives messages from connectors, routes through middleware, dispatches to the agent runtime, sends responses back.
-
-Agent runtimes (`agents/runtimes/`, resolved by `agents/registry.py:get_agent`): `tmux` (default), `claude-cli`, `claude-code` (SDK), `codex`. The default `tmux` runtime drives a real interactive `claude` TUI in a tmux pane and routes every tool call back through the gatekeeper via Claude Code PreToolUse hooks — so the same safety pipeline applies across all runtimes. It's the largest/most active subsystem; the **`tmux-runtime`** skill covers it.
-
-**Mind the Claude CLI version.** The `tmux` runtime is tightly coupled to the installed Claude Code CLI build: it scrapes the interactive TUI (prompt strings, dialog selectors) and depends on the PreToolUse HTTP-hook + `--settings` protocol (the runtime refuses a CLI older than 2.1.259). CLI releases reword prompts and change permission/hook behavior, so a bump can silently break dialog and approval plumbing — verify against a real tmux run when upgrading. Just as important: when no model is pinned, `runtimes/tmux.py` falls back to the **`opus` alias** (`... or self._config.claude_model or "opus"`), and that alias resolves to whatever the *installed CLI* treats as the newest Opus. So the CLI build silently decides the model generation — keep it current (an older CLI kept agents on a stale Opus) and pin the CLI deliberately rather than floating `@latest`.
-
-Autonomous and `/task` work lives in `plugins/builtin/` (`task_v4.py` is the current default orchestrator; `autonomous_loop.py` is the post-task test-and-retry loop). The v1/v2 task orchestrator + "conductor", `AutoApprover`, and `auto_plan_reviewer` were removed in the 1.0 refactor — `README.md`, `docs/`, and `specs/app/` still describe them, so trust `plugins/registry.py` and the source over those.
-
-Config layering: `~/.leashd/config.yaml` → `.env` → environment variables (highest priority). `config_store.py:inject_global_config_as_env()` bridges YAML to `os.environ` so pydantic-settings picks them up. All env vars prefixed with `LEASHD_`.
-
-Plugin system uses EventBus pub/sub (`core/events.py`) for decoupling. Plugins register in `plugins/registry.py` via `create_builtin_plugins()`. Plugin lifecycle: `initialize → start → stop`.
-
-## Code Conventions
-
-- Python 3.10+
-- **Always use `uv run`** — never `python3`, `python`, or `python3 -m`
-- Async-first: all agent/connector operations use asyncio
-- structlog for logging — keyword args only, no string interpolation
-- No `__init__.py` files — use implicit namespace packages
-- `TYPE_CHECKING` blocks to break circular imports
-- **DO NOT COMMENT CODE. Write zero comments.** This is absolute. Make the code self-explanatory through clear names and structure instead of narrating it; if something seems to need a comment to be understood, rewrite the code to be clearer. Never write comments that narrate the code, restate a line, label sections, or explain *why* — delete any such comment you encounter. The ONLY exceptions, because removing them breaks tooling: machine directives (`# type: ignore`, `# noqa`, `# pragma`), and `# TODO`/`# FIXME` markers when explicitly requested.
-- Only use `from __future__ import annotations` when necessary (e.g., forward references needed at runtime by Pydantic models)
-- Tests use `pytest-asyncio` with `asyncio_mode = "auto"`
-- Ruff for lint/format (config in `pyproject.toml`)
-
-## Changelog
-
-After each change, add an entry to `CHANGELOG.md` under the **current (latest) version heading**:
-
-```markdown
-- **category**: Short description of what changed
-```
-
-Categories: `added`, `fixed`, `changed`, `removed`. One line each. Don't create new version headings — append to the existing one.
+- IMPORTANT: write zero code comments, and delete any you find. Make the code clear through names and structure instead. The only exceptions are tool directives (`# type: ignore`, `# noqa`, `# pragma`) and `# TODO` / `# FIXME` when explicitly requested.
+- Python 3.10+ (ruff targets `py310`, although `.python-version` pins 3.13 locally). Avoid 3.11+ APIs.
+- structlog with keyword arguments only, never interpolated strings.
+- No `__init__.py` files (implicit namespace packages); the only one is `leashd/__init__.py`, which holds `__version__`.
+- Break import cycles with `TYPE_CHECKING` blocks. Add `from __future__ import annotations` only when it's needed (e.g. Pydantic forward references).

@@ -311,10 +311,22 @@ class TestSqliteSessionFieldsPersistence:
         store = SqliteSessionStore(tmp_path / "test.db")
         await store.setup()
         try:
-            session = _make_session(mode="task")
+            session = _make_session(mode="plan")
             await store.save(session)
             loaded = await store.load("u1", "c1")
-            assert loaded.mode == "task"
+            assert loaded.mode == "plan"
+        finally:
+            await store.teardown()
+
+    async def test_retired_mode_loads_as_default(self, tmp_path):
+        store = SqliteSessionStore(tmp_path / "test.db")
+        await store.setup()
+        try:
+            await store.save(_make_session(mode="plan"))
+            await store._db.execute("UPDATE sessions SET mode = 'test'")
+            await store._db.commit()
+            loaded = await store.load("u1", "c1")
+            assert loaded.mode == "default"
         finally:
             await store.teardown()
 

@@ -859,52 +859,6 @@ class TestModeSpecificTurnLimits:
         ]
         assert len(turn_msgs) == 0
 
-    async def test_test_mode_uses_test_max_turns(
-        self, tmp_path, audit_logger, policy_engine, mock_connector
-    ):
-        from leashd.core.config import LeashdConfig
-
-        config = LeashdConfig(
-            approved_directories=[tmp_path],
-            max_turns=5,
-            test_max_turns=8,
-            audit_log_path=tmp_path / "audit.jsonl",
-        )
-
-        class TestModeAgent(BaseAgent):
-            async def execute(self, prompt, session, **kwargs):
-                session.mode = "test"
-                return AgentResponse(
-                    content="partial",
-                    session_id="sid",
-                    cost=0.01,
-                    num_turns=8,
-                )
-
-            async def cancel(self, session_id):
-                pass
-
-            async def shutdown(self):
-                pass
-
-        eng = Engine(
-            connector=mock_connector,
-            agent=TestModeAgent(),
-            config=config,
-            session_manager=SessionManager(),
-            policy_engine=policy_engine,
-            audit=audit_logger,
-        )
-
-        await eng.handle_message("user1", "test", "chat1")
-
-        turn_msgs = [
-            m for m in mock_connector.sent_messages if "turn limit" in m["text"].lower()
-        ]
-        assert len(turn_msgs) == 1
-        assert "8 turns" in turn_msgs[0]["text"]
-        assert "LEASHD_TEST_MAX_TURNS" in turn_msgs[0]["text"]
-
     async def test_default_mode_shows_generic_env_hint(
         self, config, audit_logger, policy_engine, mock_connector
     ):

@@ -131,7 +131,9 @@ class TestPolicyRuleMatching:
         assert engine.evaluate(c) == PolicyDecision.REQUIRE_APPROVAL
 
     def test_curl_requires_approval(self, engine):
-        c = engine.classify("Bash", {"command": "curl https://api.example.com"})
+        c = engine.classify(
+            "Bash", {"command": "curl -u me:pw https://api.example.com"}
+        )
         assert engine.evaluate(c) == PolicyDecision.REQUIRE_APPROVAL
 
     def test_unmatched_tool_uses_default(self, engine):
@@ -785,15 +787,20 @@ class TestDevToolsRegexBoundaries:
 
 
 class TestGitRmPolicyClassification:
-    """git rm should be classified as a git mutation requiring approval."""
+    """git rm refuses to drop uncommitted work unless forced, so only the forced form asks."""
 
-    def test_git_rm_requires_approval(self, engine):
-        c = engine.classify("Bash", {"command": "git rm src/foo.py"})
-        assert engine.evaluate(c) == PolicyDecision.REQUIRE_APPROVAL
-        assert c.matched_rule.name == "git-mutations"
+    @pytest.mark.parametrize(
+        "command", ["git rm src/foo.py", "git rm -r src/", "git rm -r --cached build/"]
+    )
+    def test_unforced_git_rm_is_not_a_git_mutation(self, engine, command):
+        c = engine.classify("Bash", {"command": command})
+        assert c.matched_rule is None or c.matched_rule.name != "git-mutations"
 
-    def test_git_rm_with_flags(self, engine):
-        c = engine.classify("Bash", {"command": "git rm -r src/"})
+    @pytest.mark.parametrize(
+        "command", ["git rm -f src/foo.py", "git rm -rf src/", "git rm --force x"]
+    )
+    def test_forced_git_rm_requires_approval(self, engine, command):
+        c = engine.classify("Bash", {"command": command})
         assert engine.evaluate(c) == PolicyDecision.REQUIRE_APPROVAL
         assert c.matched_rule.name == "git-mutations"
 
@@ -804,7 +811,9 @@ class TestGitRmPolicyClassification:
         assert c.matched_rule.name == "read-only-bash"
 
     def test_git_rm_requires_approval_permissive(self, permissive_policy_engine):
-        c = permissive_policy_engine.classify("Bash", {"command": "git rm src/foo.py"})
+        c = permissive_policy_engine.classify(
+            "Bash", {"command": "git rm -f src/foo.py"}
+        )
         assert permissive_policy_engine.evaluate(c) == PolicyDecision.REQUIRE_APPROVAL
 
 

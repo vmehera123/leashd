@@ -28,8 +28,7 @@ VALID_EFFORTS: frozenset[str] = frozenset({"low", "medium", "high", "xhigh", "ma
 
 EFFORT_LEVELS: tuple[EffortLevel, ...] = ("low", "medium", "high", "xhigh", "max")
 
-_CLAUDE_MODEL_PREFIXES = ("claude-", "sonnet", "opus", "haiku", "fable")
-_CODEX_MODEL_PREFIXES = ("gpt-", "o1", "o3", "o4", "codex-")
+SETTING_FIELDS: tuple[str, ...] = ("effort", "claude_model")
 
 
 class RuntimeSettings(BaseModel):
@@ -43,7 +42,6 @@ class RuntimeSettings(BaseModel):
 
     effort: EffortLevel | None = None
     claude_model: str | None = None
-    codex_model: str | None = None
 
     def merge_over(self, base: RuntimeSettings) -> RuntimeSettings:
         """Return a new RuntimeSettings where ``self``'s non-None fields
@@ -53,17 +51,10 @@ class RuntimeSettings(BaseModel):
             claude_model=self.claude_model
             if self.claude_model is not None
             else base.claude_model,
-            codex_model=self.codex_model
-            if self.codex_model is not None
-            else base.codex_model,
         )
 
     def is_empty(self) -> bool:
-        return (
-            self.effort is None
-            and self.claude_model is None
-            and self.codex_model is None
-        )
+        return self.effort is None and self.claude_model is None
 
 
 def resolve_settings(
@@ -81,14 +72,12 @@ def resolve_settings(
         1. ``task_override``
         2. ``workspace.settings`` (if the workspace carries one)
         3. ``directory_settings[directory]``
-        4. ``global_cfg`` (effort / claude_model / codex_model)
+        4. ``global_cfg`` (effort / claude_model)
     """
-    base = RuntimeSettings(
+    result = RuntimeSettings(
         effort=global_cfg.effort,
         claude_model=getattr(global_cfg, "claude_model", None),
-        codex_model=global_cfg.codex_model,
     )
-    result = base
 
     if directory and directory_settings:
         dir_entry = _lookup_directory(directory, directory_settings)
@@ -121,46 +110,28 @@ def resolve_scope_sources(
     returns entries for fields that have a non-None resolved value.
     """
     sources: dict[str, str] = {}
-    fields = ("effort", "claude_model", "codex_model")
 
     def _pick(field: str, scope_name: str, value: Any) -> None:
         if value is not None and field not in sources:
             sources[field] = scope_name
 
     if task_override is not None:
-        for f in fields:
+        for f in SETTING_FIELDS:
             _pick(f, "task", getattr(task_override, f))
     if workspace is not None:
         ws_settings = getattr(workspace, "settings", None)
         if isinstance(ws_settings, RuntimeSettings):
-            for f in fields:
+            for f in SETTING_FIELDS:
                 _pick(f, "workspace", getattr(ws_settings, f))
     if directory and directory_settings:
         dir_entry = _lookup_directory(directory, directory_settings)
         if dir_entry:
-            for f in fields:
+            for f in SETTING_FIELDS:
                 _pick(f, "directory", dir_entry.get(f))
-    for f, g in (
-        ("effort", global_cfg.effort),
-        ("claude_model", getattr(global_cfg, "claude_model", None)),
-        ("codex_model", global_cfg.codex_model),
-    ):
-        _pick(f, "global", g)
+    _pick("effort", "global", global_cfg.effort)
+    _pick("claude_model", "global", getattr(global_cfg, "claude_model", None))
 
     return sources
-
-
-def classify_model(model: str) -> str | None:
-    """Infer which runtime family owns a model string.
-
-    Returns ``"claude"``, ``"codex"``, or ``None`` for ambiguous values.
-    """
-    lowered = model.lower()
-    if any(lowered.startswith(p) for p in _CLAUDE_MODEL_PREFIXES):
-        return "claude"
-    if any(lowered.startswith(p) for p in _CODEX_MODEL_PREFIXES):
-        return "codex"
-    return None
 
 
 def _lookup_directory(
@@ -169,7 +140,6 @@ def _lookup_directory(
     """Look up a directory override tolerating path normalisation variance."""
     if directory in directory_settings:
         return directory_settings[directory]
-    # Try resolved form (in case the caller passed a relative/unresolved path).
     try:
         resolved = str(Path(directory).expanduser().resolve())
     except OSError:
@@ -188,7 +158,6 @@ def _overlay_from_dict(data: dict[str, Any]) -> RuntimeSettings:
     return RuntimeSettings(
         effort=effort,
         claude_model=_coerce_str(data.get("claude_model")),
-        codex_model=_coerce_str(data.get("codex_model")),
     )
 
 

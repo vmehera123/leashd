@@ -39,7 +39,6 @@ flowchart LR
         engine["Engine"]
         gatekeeper["ToolGatekeeper"]
         interactions["InteractionCoordinator"]
-        testrunner["TestRunnerPlugin"]
         mergeresolver["MergeResolverPlugin"]
         githandler["GitCommandHandler"]
         orchestrator["TaskOrchestrator"]
@@ -56,7 +55,6 @@ flowchart LR
     engine -->|message.in/out, engine.*, session.completed, task.submitted, message.queued, command.test, execution.interrupted| bus
     gatekeeper -->|tool.gated, tool.allowed, tool.denied| bus
     interactions -->|interaction.*| bus
-    testrunner -->|test.started| bus
     mergeresolver -->|merge.started| bus
     githandler -->|command.merge| bus
     orchestrator -->|task.phase_changed, task.completed, task.failed, task.escalated, task.cancelled, task.resumed| bus
@@ -80,11 +78,8 @@ flowchart LR
 | `execution.interrupted` | `EXECUTION_INTERRUPTED` | `Engine` | `user_id`, `chat_id` | Agent execution interrupted by user |
 | `interaction.requested` | `INTERACTION_REQUESTED` | `InteractionCoordinator` | `chat_id`, `kind`, `interaction_id` | User interaction prompt sent |
 | `interaction.resolved` | `INTERACTION_RESOLVED` | `InteractionCoordinator` | `chat_id`, `kind`, `interaction_id` | User responded to interaction |
-| `command.test` | `COMMAND_TEST` | `Engine` | `chat_id`, `args` | `/test` command received |
-| `test.started` | `TEST_STARTED` | `TestRunnerPlugin` | `chat_id`, `config` | Test workflow started |
 | `command.merge` | `COMMAND_MERGE` | `GitCommandHandler` | `chat_id`, `branch` | `/git merge` command received |
 | `merge.started` | `MERGE_STARTED` | `MergeResolverPlugin` | `chat_id` | Merge conflict resolution started |
-| `test.completed` | `TEST_COMPLETED` | `TestRunnerPlugin` | `chat_id`, `results` | Test workflow finished |
 | `merge.completed` | `MERGE_COMPLETED` | `MergeResolverPlugin` | `chat_id` | Merge resolution finished |
 | `session.completed` | `SESSION_COMPLETED` | `Engine` | `session`, `chat_id`, `user_id`, `response_content` | Agent session completed |
 | `task.submitted` | `TASK_SUBMITTED` | `Engine` | `user_id`, `chat_id`, `session_id`, `task`, `working_directory` | `/task` command submitted |

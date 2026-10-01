@@ -1,15 +1,8 @@
-"""TaskProfile — declarative contract for the task orchestrator.
+"""TaskProfile — which phases a /task runs and any per-phase instructions.
 
-A TaskProfile tells the orchestrator which phases/actions are available and
-where to start.  Predefined profiles handle common scenarios:
-
-- **STANDALONE** (default): all actions enabled.  Used when leashd runs on
-  its own.
-- **PLATFORM**: For hosting platforms that handle Docker
-  verification and PR creation externally.  Disables verify/pr,
-  starts with plan.
-- **CI**: Minimal — no browser, no PR, fast.  For CI/CD pipelines that
-  only need implement + test.
+Profiles layer, lowest priority first: the daemon-wide ``task_profile``
+setting, the project's ``.leashd/task-config.yaml``, then a per-task
+override such as ``/task --phases implement,verify,review``.
 """
 
 from __future__ import annotations
@@ -21,145 +14,87 @@ from typing import Any, Literal
 import structlog
 from pydantic import BaseModel, ConfigDict
 
-ConductorAction = Literal[
-    "plan",
-    "implement",
-    "test",
-    "verify",
-    "fix",
-    "review",
-    "pr",
-    "complete",
-    "escalate",
-]
-
 logger = structlog.get_logger()
 
-_ALL_ACTIONS: frozenset[str] = frozenset(
-    {
-        "plan",
-        "implement",
-        "test",
-        "verify",
-        "fix",
-        "review",
-        "pr",
-        "complete",
-        "escalate",
-    }
-)
+PipelinePhase = Literal["implement", "verify", "review"]
+
+TASK_PHASES: tuple[PipelinePhase, ...] = ("implement", "verify", "review")
+
+DEFAULT_PHASES: tuple[PipelinePhase, ...] = ("implement", "verify")
 
 
 class TaskProfile(BaseModel):
-    """Declares which actions/phases the task orchestrator may run."""
-
     model_config = ConfigDict(frozen=True)
 
-    enabled_actions: frozenset[str] = _ALL_ACTIONS
-    initial_action: ConductorAction | None = None
-    action_instructions: dict[str, str] = {}
-    docker_compose_available: bool = False
+    phases: frozenset[str] | None = None
+    instructions: dict[str, str] = {}
 
-    def is_action_enabled(self, action: str) -> bool:
-        return action in self.enabled_actions
+    def pipeline(self) -> list[PipelinePhase]:
+        if not self.phases:
+            return list(DEFAULT_PHASES)
+        return [p for p in TASK_PHASES if p in self.phases]
+
+    def instruction_for(self, phase: str) -> str | None:
+        text = self.instructions.get(phase, "").strip()
+        return text or None
 
 
 STANDALONE = TaskProfile()
 
-_NAMED_PROFILES: dict[str, TaskProfile] = {
-    "standalone": STANDALONE,
-}
-
 
 def resolve_profile(name_or_json: str) -> TaskProfile:
-    """Resolve a profile from a name or JSON string.
-
-    Accepts:
-    - Named profile: "standalone", "platform", "ci"
-    - JSON object: '{"enabled_actions": ["plan", "implement"], ...}'
-    """
+    """Resolve the daemon-wide profile: ``"standalone"`` or a JSON object."""
     name_or_json = name_or_json.strip()
-
-    if name_or_json in _NAMED_PROFILES:
-        return _NAMED_PROFILES[name_or_json]
-
+    if name_or_json in ("", "standalone"):
+        return STANDALONE
     if name_or_json.startswith("{"):
         try:
-            data = json.loads(name_or_json)
-            return _profile_from_dict(data)
-        except (json.JSONDecodeError, TypeError, KeyError) as exc:
+            return profile_from_dict(json.loads(name_or_json))
+        except (json.JSONDecodeError, TypeError, AttributeError) as exc:
             logger.warning("task_profile_json_parse_failed", error=str(exc))
             return STANDALONE
-
     logger.warning("task_profile_unknown", name=name_or_json)
     return STANDALONE
 
 
-def _profile_from_dict(data: dict[str, Any]) -> TaskProfile:
-    """Build a TaskProfile from a dict (JSON or YAML source)."""
+def profile_from_dict(data: dict[str, Any]) -> TaskProfile:
+    """Build a profile from ``enabled_actions`` / ``disabled_actions`` /
+    ``action_instructions`` (the ``task-config.yaml`` keys)."""
+    phases: frozenset[str] | None = None
     enabled = data.get("enabled_actions")
+    disabled = data.get("disabled_actions")
     if enabled is not None:
-        enabled = frozenset(str(a) for a in enabled) & _ALL_ACTIONS
-    else:
-        disabled = data.get("disabled_actions", [])
-        if disabled:
-            enabled = _ALL_ACTIONS - frozenset(str(a) for a in disabled)
-        else:
-            enabled = _ALL_ACTIONS
-
-    initial = data.get("initial_action")
-    if initial and str(initial) not in _ALL_ACTIONS:
-        initial = None
-
+        phases = frozenset(str(a) for a in enabled) & frozenset(TASK_PHASES)
+    elif disabled:
+        phases = frozenset[str](DEFAULT_PHASES) - {str(a) for a in disabled}
     return TaskProfile(
-        enabled_actions=enabled,
-        initial_action=initial,
-        action_instructions={
-            str(k): str(v) for k, v in data.get("action_instructions", {}).items()
+        phases=phases or None,
+        instructions={
+            str(k): str(v) for k, v in (data.get("action_instructions") or {}).items()
         },
-        docker_compose_available=bool(data.get("docker_compose_available", False)),
     )
 
 
 def load_project_task_config(working_directory: str | Path) -> TaskProfile | None:
-    """Load .leashd/task-config.yaml from a project directory.
-
-    Returns None if the file doesn't exist or fails to parse.
-    """
+    """Load ``.leashd/task-config.yaml``; None when absent or unparseable."""
     config_path = Path(working_directory) / ".leashd" / "task-config.yaml"
     if not config_path.is_file():
         return None
-
     try:
         import yaml
 
         data = yaml.safe_load(config_path.read_text())
         if not isinstance(data, dict):
             return None
-        return _profile_from_dict(data)
+        return profile_from_dict(data)
     except Exception as exc:
-        logger.warning(
-            "task_config_load_failed",
-            path=str(config_path),
-            error=str(exc),
-        )
+        logger.warning("task_config_load_failed", path=str(config_path), error=str(exc))
         return None
 
 
 def merge_profiles(base: TaskProfile, override: TaskProfile) -> TaskProfile:
-    """Merge two profiles. Override values take priority where set.
-
-    The base profile's enabled_actions are intersected with the override's
-    (more restrictive wins). Other fields use the override if non-default.
-    """
+    """``override`` wins where it sets phases; instructions merge."""
     return TaskProfile(
-        enabled_actions=base.enabled_actions & override.enabled_actions,
-        initial_action=override.initial_action or base.initial_action,
-        action_instructions={
-            **base.action_instructions,
-            **override.action_instructions,
-        },
-        docker_compose_available=(
-            base.docker_compose_available or override.docker_compose_available
-        ),
+        phases=override.phases if override.phases is not None else base.phases,
+        instructions={**base.instructions, **override.instructions},
     )
