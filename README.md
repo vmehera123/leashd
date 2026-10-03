@@ -108,7 +108,7 @@ The pipeline is connector-agnostic: same sandbox, same rules, same buttons wheth
 
 | Policy | Auto-allows | Requires approval |
 |---|---|---|
-| **`default.yaml`** *(recommended)* | reads, search, read-only shell (`ls`, `grep`, `ps`, `awk`, `git log/diff`, `docker ps/logs`, reads inside `docker exec`, `--version`), loopback GETs, linters/formatters/type checkers (`ruff`, `mypy`, `tsc`, `pnpm lint`, `make check` …), read-only browser | git push/rebase/merge, network, browser mutations |
+| **`default.yaml`** *(recommended)* | reads, search, read-only shell (`ls`, `grep`, `ps`, `awk`, `git log/diff`, `docker ps/logs`, reads inside `docker exec`, `gh pr/run view`, `--version`), `git fetch`, `git add`, `mkdir`, loopback GETs, linters/formatters/type checkers (`ruff`, `mypy`, `tsc`, `pnpm lint`, `make check` …), read-only browser | git push/rebase/merge, network, browser mutations |
 | **`strict.yaml`** | `Read`, `Glob`, `Grep`, `LS` only | everything else (2-min timeout) |
 | **`permissive.yaml`** | reads, writes, package managers, test runners, `git add/commit/stash`, all browser | git push, network, browser cookies/auth/storage, anything unlisted (10-min timeout) |
 | **`dev-tools.yaml`** *(overlay)* | linters, test runners, package managers | — |
@@ -131,7 +131,7 @@ LEASHD_POLICY_FILES=policies/default.yaml,policies/my-overrides.yaml   # merged,
 
 leashd spawns a real interactive `claude` TUI in a tmux pane and talks to it the way a human would — so native slash commands pass straight through from chat, dialogs the CLI opens (model picker, consent prompts) get bridged to inline buttons, and `/screen` gives you a live snapshot of the terminal. Tool calls are intercepted by Claude Code `PreToolUse` hooks and routed back into leashd's gatekeeper, so nothing escapes the pipeline.
 
-**Restarting is safe.** tmux panes live on a tmux server of their own, so `leashd restart` — to pick up a fix, a config change, a new build — no longer ends the work in them. The daemon writes what it needs to find each pane again, leaves them running on the way out, and re-adopts them on the way in: same conversation, same session, same directory. A turn that was still running keeps streaming into the chat where it left off. `leashd stop --end-agents` ends them instead. See [docs/agents.md](docs/agents.md#restarting-without-losing-work).
+**Restarting is safe.** tmux panes live on a tmux server of their own, so `leashd restart` — to pick up a fix, a config change, a new build — no longer ends the work in them. The daemon writes what it needs to find each pane again, leaves them running on the way out, and re-adopts them on the way in: same conversation, same session, same directory. A turn that was still running keeps streaming into the chat where it left off, and a Telegram message you send during the restart runs once the daemon is back. `leashd stop --end-agents` ends them instead. See [docs/agents.md](docs/agents.md#restarting-without-losing-work).
 
 **Adding a runtime** — the runtime registry (`agents/registry.py`) is kept for that: register a factory and select it with `LEASHD_AGENT_RUNTIME`. Embedders can also pass any `BaseAgent` to `build_engine(agent=...)` to put their own agent behind the same pipeline.
 

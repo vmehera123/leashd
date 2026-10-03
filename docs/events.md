@@ -82,6 +82,7 @@ flowchart LR
 | `merge.started` | `MERGE_STARTED` | `MergeResolverPlugin` | `chat_id` | Merge conflict resolution started |
 | `merge.completed` | `MERGE_COMPLETED` | `MergeResolverPlugin` | `chat_id` | Merge resolution finished |
 | `session.completed` | `SESSION_COMPLETED` | `Engine` | `session`, `chat_id`, `user_id`, `response_content` | Agent session completed |
+| `session.titled` | `SESSION_TITLED` | `TmuxSessionManager` | `chat_id`, `user_id`, `title` | Claude Code wrote a title for the conversation |
 | `task.submitted` | `TASK_SUBMITTED` | `Engine` | `user_id`, `chat_id`, `session_id`, `task`, `working_directory` | `/task` command submitted |
 | `task.phase_changed` | `TASK_PHASE_CHANGED` | `TaskOrchestrator` | `run_id`, `chat_id`, `phase`, `previous_phase` | Task transitioned to new phase |
 | `task.completed` | `TASK_COMPLETED` | `TaskOrchestrator` | `run_id`, `chat_id`, `total_cost` | Task finished successfully |

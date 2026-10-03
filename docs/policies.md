@@ -143,7 +143,7 @@ leashd ships with three policy files in `policies/`:
 flowchart TB
     subgraph Default["default.yaml — Balanced"]
         d_deny["DENY: credentials, force push, sudo, curl\|bash, DROP/TRUNCATE"]
-        d_allow["ALLOW: agent tools, reads, read-only bash (ls, grep, awk, git log, docker ps/logs, reads inside docker exec, --version), loopback GETs, linters/formatters/type checkers, plan files, browser readonly"]
+        d_allow["ALLOW: agent tools, reads, read-only bash (ls, grep, awk, git log, docker ps/logs, reads inside docker exec, gh pr/run view, --version), git fetch, git add, mkdir, loopback GETs, linters/formatters/type checkers, plan files, browser readonly"]
         d_approval["APPROVAL: git mutations, file writes, network bash, browser mutations"]
         d_default["Default: require_approval"]
         d_timeout["Timeout: 300s"]
