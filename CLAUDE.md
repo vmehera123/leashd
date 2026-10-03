@@ -14,6 +14,10 @@ uv run pytest -m e2e -v                                    # E2E only; one-time:
 
 - Always run through `uv run`, never bare `python` / `python3`.
 - pytest's `addopts` deselects `e2e`, so plain `uv run pytest` never runs the browser tests.
+- IMPORTANT: never pass `-q` to pytest. `addopts` already has it, and a second one (`-qq`) removes the `N passed in Xs` line, so the run looks like it printed no result. `-p no:warnings` doesn't bring the line back.
+- The full suite takes about 4 minutes, and `make check` already runs it, so run it once per verification and never rerun it just to read the result. Send the output to a file in the scratchpad (`make check > <scratchpad>/check.log 2>&1; echo "exit=$?"`) and grep the file as often as you need. Exit 0 means the tests passed.
+- The summary line reads `7830 passed, 65 deselected, 21 warnings in 222s`, so a `grep -v warning` filter deletes it. Match `passed|failed` instead.
+- While iterating, run only the test files you touched (`uv run pytest tests/agents/test_tmux_session.py -k name`), and keep the full suite for the final `make check`.
 - The Makefile runs mypy with `|| true`, so a green `make check` can hide type errors. Read mypy's output and fix what it reports.
 - CLI surface: `leashd --help`, `leashd <subcommand> --help`.
 

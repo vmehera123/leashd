@@ -27,6 +27,13 @@ rules:
     action: deny
     reason: "Destructive command blocked"
 
+  - name: scratch-delete
+    tool: Bash
+    command_patterns:
+      - "^(?!.*\\.\\.)rm\\s+(?:-[a-zA-Z]+\\s+)+(?:(?:(?:/private)?/tmp/[A-Za-z0-9_][A-Za-z0-9_.+=,@-]*(?:/[A-Za-z0-9_.+=,@-]+)*|(?:[A-Za-z0-9_][A-Za-z0-9_.+=,@-]*/)*(?:__pycache__|\\.pytest_cache|\\.ruff_cache|\\.mypy_cache))(?:\\s+|$))+$"
+    action: allow
+    description: "Delete of a literal path under /tmp or of a tool cache directory"
+
   # Recursive delete asks rather than denies: in practice the target is the
   # agent's own litter (build dirs, caches, logs), and a hard deny ended the
   # whole job to protect a cache directory. An approval keeps a human in the
@@ -61,8 +68,9 @@ rules:
     command_patterns:
       - "^(ls|stat|file|test|\\[\\[?)(\\s|$)(?=.*(\\.env\\b(?!\\.(example|sample|template|dist))|\\.ssh/|\\.aws/|\\.gnupg/|authorized_keys|\\.pem\\b|\\.key\\b|\\.p12\\b|\\.pfx\\b|\\.keystore\\b|id_rsa|id_ed25519|id_ecdsa|id_dsa|\\.git-credentials\\b|credentials\\b|secrets?\\.|token\\.json\\b))"
       - "^git\\s+(-C\\s+\\S+\\s+)?(status|check-ignore|ls-files)\\b(?=.*(\\.env\\b(?!\\.(example|sample|template|dist))|\\.ssh/|\\.aws/|\\.gnupg/|authorized_keys|\\.pem\\b|\\.key\\b|\\.p12\\b|\\.pfx\\b|\\.keystore\\b|id_rsa|id_ed25519|id_ecdsa|id_dsa|\\.git-credentials\\b|credentials\\b|secrets?\\.|token\\.json\\b))"
+      - "^grep(?=.*(\\.env\\b(?!\\.(example|sample|template|dist))|\\.ssh/|\\.aws/|\\.gnupg/|authorized_keys|\\.pem\\b|\\.key\\b|\\.p12\\b|\\.pfx\\b|\\.keystore\\b|id_rsa|id_ed25519|id_ecdsa|id_dsa|\\.git-credentials\\b|credentials\\b|secrets?\\.|token\\.json\\b))(?:\\s+-[Hhs]+)*\\s+-[Hhs]*c[cHhs]*(?:\\s+-[cHhs]+)*\\s+\\^[A-Z][A-Z0-9_]*=(?:\\s+(?!-)[A-Za-z0-9_./~-]+)+$"
     action: allow
-    description: "Metadata of a credential path (listing, existence, ignore status) without reading it"
+    description: "Metadata of a credential path (listing, existence, ignore status, a match count) without reading it"
 
   - name: credential-bash
     tool: Bash

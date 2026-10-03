@@ -1,6 +1,7 @@
 """YAML-driven policy engine — loads rules and classifies tool calls."""
 
 import re
+from collections.abc import Iterable
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -14,11 +15,22 @@ from leashd.core.safety.analyzer import (
     RiskLevel,
     command_units,
     docker_exec_command,
+    expand_literal_variables,
+    inline_shell_script,
+    keeps_to_its_streams,
+    loopback_write_scope,
+    mentions_credential_path,
+    names_what_it_reads,
     network_read_scope,
     public_read_scope,
+    quotes_credential_path,
+    reads_without_writing,
+    remote_shell_command,
     shell_match_texts,
     split_chain_segments,
     strip_benign_prefixes,
+    unquoted_credential_path,
+    written_heredoc_head,
 )
 
 logger = structlog.get_logger()
@@ -27,7 +39,18 @@ _AWK_RE = re.compile(r"^[gm]?awk\b")
 
 _NETWORK_READ_RE = re.compile(r"^(?:curl|wget)\b")
 
-_PUBLIC_READ_MARKER_RE = re.compile(r"^(?:curl|wget)\+public\b")
+_PUBLIC_READ_MARKER_RE = re.compile(r"^(?:curl|wget)\+(?:public|loopback)\b")
+
+_REMOTE_READ_RULES = frozenset(
+    {
+        "read-only-bash",
+        "docker-readonly",
+        "sql-read",
+        "credential-metadata",
+        "loopback-read",
+        "public-read",
+    }
+)
 
 _AWK_UNSAFE_PROGRAM_RE = re.compile(
     r"\bsystem\s*\(|\bgetline\b|\bprintf?\b[^;{}()]*[>|]"
@@ -74,6 +97,14 @@ _TOOL_SEARCH_RULE = PolicyRule(
     risk_level="low",
 )
 
+_TRUSTED_SSH_READ_RULE = PolicyRule(
+    name="trusted-ssh-read",
+    action=PolicyDecision.ALLOW,
+    tools=["Bash"],
+    description="Read-only command on a trusted SSH host",
+    risk_level="low",
+)
+
 
 class Classification(BaseModel):
     model_config = ConfigDict(frozen=True)
@@ -89,8 +120,16 @@ class Classification(BaseModel):
 
 
 class PolicyEngine:
-    def __init__(self, policy_paths: list[Path] | None = None) -> None:
+    def __init__(
+        self,
+        policy_paths: list[Path] | None = None,
+        *,
+        trusted_ssh_hosts: Iterable[str] = (),
+        guarded_loopback_ports: Iterable[int] = (),
+    ) -> None:
         self.rules: list[PolicyRule] = []
+        self._trusted_ssh_hosts = frozenset(trusted_ssh_hosts)
+        self._guarded_loopback_ports = frozenset(guarded_loopback_ports)
         self.settings: dict[str, Any] = {
             "default_action": "require_approval",
             # NOTE: not consumed — the effective approval/interaction window is
@@ -153,7 +192,103 @@ class PolicyEngine:
             risk_level=data.get("risk_level", "medium"),
         )
 
+    def set_trusted_ssh_hosts(self, hosts: Iterable[str]) -> None:
+        self._trusted_ssh_hosts = frozenset(hosts)
+
     def classify(self, tool_name: str, tool_input: dict[str, Any]) -> Classification:
+        """Classify one tool call: the rules first, then a trusted SSH read."""
+        by_rules = self._classify_by_rules(tool_name, tool_input)
+        if tool_name != "Bash":
+            return by_rules
+        return self._trusted_remote_read(tool_input, by_rules) or by_rules
+
+    def _trusted_remote_read(
+        self, tool_input: dict[str, Any], by_rules: Classification
+    ) -> Classification | None:
+        """Allow a read-only command on a host the user marked as trusted.
+
+        ``ssh build-box 'docker compose ps'`` asked every time, and the answer
+        was always yes: most remote commands are listings, logs and ``select``
+        queries. The remote command is judged by
+        the rules a local one is, and runs unasked only when every part of it
+        is a read that writes nothing.
+
+        The override is narrow. The rules must have gated the call for being
+        an ``ssh`` login and nothing else, so a credential path on this side of
+        the connection, or any deny, keeps its verdict. No native permission
+        mode reviews a remote command after this, which is why the read has to
+        pass :func:`reads_without_writing` and name no credential path, quoted
+        or not, as well as match a read rule.
+        """
+        rule = by_rules.matched_rule
+        if (
+            not self._trusted_ssh_hosts
+            or rule is None
+            or rule.action != PolicyDecision.REQUIRE_APPROVAL
+        ):
+            return None
+        command = str(tool_input.get("command", ""))
+        session = remote_shell_command(command)
+        if session is None:
+            return None
+        destination, remote = session
+        if destination not in self._trusted_ssh_hosts:
+            return None
+        login = self._classify_by_rules("Bash", {"command": f"ssh {destination}"})
+        if login.matched_rule is not rule or mentions_credential_path(command):
+            return None
+        if quotes_credential_path(remote) or not self._reads_only(remote):
+            return None
+        return Classification(
+            category=_TRUSTED_SSH_READ_RULE.name,
+            tool_name="Bash",
+            tool_input=tool_input,
+            risk_level=_TRUSTED_SSH_READ_RULE.risk_level,
+            description=f"{_TRUSTED_SSH_READ_RULE.description}: {destination}",
+            matched_rule=_TRUSTED_SSH_READ_RULE,
+        )
+
+    def _reads_only(self, command: str) -> bool:
+        """Whether every command in *command* is a read, however it is spelled.
+
+        A loop over literal values is judged once per value, and the script
+        of ``sh -c '…'`` by the commands inside it.
+        """
+        return all(
+            self._reads_only_as_written(variant)
+            for variant in expand_literal_variables(command)
+        )
+
+    def _reads_only_as_written(self, command: str) -> bool:
+        units = command_units(command)
+        for text, kind in units:
+            rule = self._classify_by_rules("Bash", {"command": text}).matched_rule
+            if kind == "pipeline":
+                if rule is not None and rule.action == PolicyDecision.DENY:
+                    return False
+                continue
+            script = inline_shell_script(text) if keeps_to_its_streams(text) else None
+            if script is not None:
+                if not self._reads_only(script):
+                    return False
+                continue
+            if (
+                rule is None
+                or rule.action != PolicyDecision.ALLOW
+                or rule.name not in _REMOTE_READ_RULES
+                or not reads_without_writing(text)
+                or not names_what_it_reads(text)
+                or (
+                    rule.name != "credential-metadata"
+                    and unquoted_credential_path(text)
+                )
+            ):
+                return False
+        return bool(units)
+
+    def _classify_by_rules(
+        self, tool_name: str, tool_input: dict[str, Any]
+    ) -> Classification:
         """Classify one tool call against the rules, first match wins.
 
         A rule's ``tools`` entry matches an MCP call by its full Claude Code
@@ -166,11 +301,13 @@ class PolicyEngine:
         their schemas, so refusing it silently refused all of them, including
         the ones the policy allows.
         """
-        command_texts = (
-            self._bash_match_texts(tool_input.get("command", ""))
-            if tool_name == "Bash"
-            else ([], [])
-        )
+        command_texts: tuple[list[str], list[str], list[str]] = ([], [], [])
+        if tool_name == "Bash":
+            command = tool_input.get("command", "")
+            allow_texts, gate_texts = self._bash_match_texts(command)
+            head = written_heredoc_head(command)
+            ask_texts = self._bash_match_texts(head)[1] if head else gate_texts
+            command_texts = (allow_texts, gate_texts, ask_texts)
         names = {tool_name, normalize_tool_name(tool_name)}
         for rule in (*self.rules, _TOOL_SEARCH_RULE):
             if self._rule_matches(rule, names, tool_name, tool_input, command_texts):
@@ -199,8 +336,7 @@ class PolicyEngine:
         default = self.settings.get("default_action", "require_approval")
         return PolicyDecision(default)
 
-    @staticmethod
-    def _bash_match_texts(command: str) -> tuple[list[str], list[str]]:
+    def _bash_match_texts(self, command: str) -> tuple[list[str], list[str]]:
         """The texts a Bash rule's patterns are matched against.
 
         The normalized command — :func:`strip_benign_prefixes` peels
@@ -233,7 +369,7 @@ class PolicyEngine:
         inner = docker_exec_command(normalized)
         public: str | None = None
         if inner is not None:
-            allow_texts = PolicyEngine._bash_match_texts(inner)[0]
+            allow_texts = self._bash_match_texts(inner)[0]
         elif payloads and SQL_CLIENT_RE.match(skeleton):
             allow_texts = payloads
         elif _AWK_RE.match(skeleton) and any(
@@ -242,9 +378,10 @@ class PolicyEngine:
             allow_texts = []
         elif _NETWORK_READ_RE.match(skeleton):
             public = public_read_scope(normalized)
-            allow_texts = [
-                public or network_read_scope(normalized) or skeleton,
-            ]
+            read = None if public else network_read_scope(normalized)
+            if public is None and read is None:
+                public = loopback_write_scope(normalized, self._guarded_loopback_ports)
+            allow_texts = [public or read or skeleton]
         else:
             allow_texts = [skeleton]
         if public is None:
@@ -262,16 +399,20 @@ class PolicyEngine:
         names: set[str],
         tool_name: str,
         tool_input: dict[str, Any],
-        command_texts: tuple[list[str], list[str]],
+        command_texts: tuple[list[str], list[str], list[str]],
     ) -> bool:
-        """Whether *rule* covers this call."""
+        """Whether *rule* covers this call.
+
+        A deny rule reads everything the command carries. An approval rule
+        skips the body of a heredoc that is only being written to a file.
+        """
         if names.isdisjoint(rule.tools):
             return False
 
         if rule.command_patterns:
             if tool_name != "Bash":
                 return False
-            allow_texts, gate_texts = command_texts
+            allow_texts, gate_texts, ask_texts = command_texts
             if rule.action == PolicyDecision.ALLOW:
                 if not allow_texts or not all(
                     any(p.search(text) for p in rule.command_patterns)
@@ -279,7 +420,11 @@ class PolicyEngine:
                 ):
                     return False
             elif not any(
-                p.search(text) for text in gate_texts for p in rule.command_patterns
+                p.search(text)
+                for text in (
+                    gate_texts if rule.action == PolicyDecision.DENY else ask_texts
+                )
+                for p in rule.command_patterns
             ):
                 return False
 

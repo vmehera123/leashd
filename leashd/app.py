@@ -283,7 +283,11 @@ def build_engine(
         if dev_tools_policy.exists():
             policy_paths.append(dev_tools_policy)
 
-    policy_engine = PolicyEngine(policy_paths) if policy_paths else None
+    policy_engine = (
+        PolicyEngine(policy_paths, guarded_loopback_ports={config.web_port})
+        if policy_paths
+        else None
+    )
     sandbox = SandboxEnforcer(sandbox_directories(config.approved_directories))
     audit = AuditLogger(resolved_audit)
 

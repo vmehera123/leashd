@@ -27,6 +27,7 @@ from leashd.config_store import (
     get_codebase_memory_config,
     get_security_config,
     get_skills_config,
+    get_trusted_ssh_hosts,
     get_web_config,
     get_workspace_settings,
     get_workspaces,
@@ -514,6 +515,80 @@ def _handle_security_toggle(enabled: bool) -> None:
     if enabled:
         print("  Restart the daemon (leashd restart) to install + activate it.")
     _notify_daemon_reload()
+
+
+def _handle_ssh(args: argparse.Namespace) -> None:
+    """Route trusted-SSH-host subcommands."""
+    sub = getattr(args, "ssh_command", None)
+    if sub is None or sub == "show":
+        _handle_ssh_show()
+    elif sub == "trust":
+        _handle_ssh_trust(args.destination, args.port, full=args.full)
+    elif sub == "untrust":
+        _handle_ssh_untrust(args.destination, args.port)
+
+
+def _ssh_destination(destination: str, port: int | None) -> str:
+    from leashd.core.safety.analyzer import remote_login_scope
+
+    flags = f"-p {port} " if port else ""
+    plain = len(destination.split()) == 1 and not destination.startswith("-")
+    scope = remote_login_scope(f"ssh {flags}{destination} true") if plain else None
+    if scope is None:
+        print(
+            f"Not a plain SSH destination: {destination}\n"
+            "  Use [user@]host, the way you type it after `ssh`.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return scope.removeprefix("ssh ")
+
+
+def _handle_ssh_show() -> None:
+    hosts = get_trusted_ssh_hosts()
+    if not hosts:
+        print("No trusted SSH hosts.")
+        print("  Run 'leashd ssh trust <host>' to stop asking for read-only commands.")
+        return
+    print("Trusted SSH hosts:")
+    for destination, trust in sorted(hosts.items()):
+        covers = "every command" if trust == "full" else "read-only commands, rest asks"
+        print(f"  {destination}  [{trust}]  {covers}")
+
+
+def _save_trusted_ssh_hosts(data: dict[str, Any], hosts: dict[str, str]) -> None:
+    ssh = data.get("ssh", {})
+    if not isinstance(ssh, dict):
+        ssh = {}
+    ssh["trusted_hosts"] = hosts
+    data["ssh"] = ssh
+    save_global_config(data)
+    inject_global_config_as_env(force=True)
+    _notify_daemon_reload()
+
+
+def _handle_ssh_trust(destination: str, port: int | None, *, full: bool) -> None:
+    target = _ssh_destination(destination, port)
+    data = load_global_config()
+    hosts = get_trusted_ssh_hosts(data)
+    hosts[target] = "full" if full else "read"
+    _save_trusted_ssh_hosts(data, hosts)
+    if full:
+        print(f"✓ {target}: every ssh command and scp upload runs without asking")
+    else:
+        print(f"✓ {target}: read-only commands run without asking")
+        print("  Anything that writes, restarts or reads a credential still asks.")
+
+
+def _handle_ssh_untrust(destination: str, port: int | None) -> None:
+    target = _ssh_destination(destination, port)
+    data = load_global_config()
+    hosts = get_trusted_ssh_hosts(data)
+    if hosts.pop(target, None) is None:
+        print(f"{target} is not a trusted SSH host.", file=sys.stderr)
+        sys.exit(1)
+    _save_trusted_ssh_hosts(data, hosts)
+    print(f"✓ {target}: every command asks again")
 
 
 _VALID_BACKENDS = {"playwright", "agent-browser"}
@@ -1849,6 +1924,25 @@ def main() -> None:
     sec_sub.add_parser("enable", help="Enable the security-guidance plugin")
     sec_sub.add_parser("disable", help="Disable the security-guidance plugin")
 
+    ssh_parser = subparsers.add_parser(
+        "ssh", help="Manage SSH hosts whose commands run without asking"
+    )
+    ssh_sub = ssh_parser.add_subparsers(dest="ssh_command")
+    ssh_sub.add_parser("show", help="List trusted SSH hosts (default)")
+    ssh_trust = ssh_sub.add_parser(
+        "trust", help="Run read-only commands on a host without asking"
+    )
+    ssh_trust.add_argument("destination", help="[user@]host, as typed after `ssh`")
+    ssh_trust.add_argument("-p", "--port", type=int, help="Port, when not 22")
+    ssh_trust.add_argument(
+        "--full",
+        action="store_true",
+        help="Run every command on the host without asking, not only reads",
+    )
+    ssh_untrust = ssh_sub.add_parser("untrust", help="Ask for every command again")
+    ssh_untrust.add_argument("destination", help="[user@]host, as typed after `ssh`")
+    ssh_untrust.add_argument("-p", "--port", type=int, help="Port, when not 22")
+
     effort_parser = subparsers.add_parser("effort", help="Manage thinking effort level")
     effort_sub = effort_parser.add_subparsers(dest="effort_command")
     effort_sub.add_parser(
@@ -2059,6 +2153,8 @@ def main() -> None:
         _handle_codebase_memory(args)
     elif args.command == "security":
         _handle_security(args)
+    elif args.command == "ssh":
+        _handle_ssh(args)
     elif args.command == "effort":
         _handle_effort(args)
     elif args.command == "model":

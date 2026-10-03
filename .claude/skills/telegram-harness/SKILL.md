@@ -76,6 +76,14 @@ would see.
 anything that needs more than one directory — the `/dir` picker is suppressed with only one) /
 `HARNESS_DIR`, `CHAT_ID` / `USER_ID`, `DEFAULT_MODE` (`auto`), `TASK_ORCH` (`1`), `LOG_LEVEL`.
 
+`LINUX_SPINNER=1` makes every pane read the way Claude Code draws it on Linux: the spinner frame
+macOS draws as `✳` becomes a plain `*`. The frame set is compiled in per platform, so this is the
+only way to see a Linux pane from a Mac. Pair it with a short
+`LEASHD_TMUX_COMPLETION_IDLE_GRACE_SECONDS` (8) to exercise the idle backstop: `s28` and `s29`
+check that a long answer, and one with messages queued behind it, is not returned half-written.
+Claude Code 2.1.288 draws no spinner and no `esc to interrupt` while it writes an answer, so a
+single capture of that pane looks idle; only the screen changing says it is working.
+
 `EDIT_DELAY_MS` (`0`) makes the fake Bot API sleep before answering every `editMessageText`,
 modelling a slow or rate-limited Telegram. It is the lever for **races between a turn landing
 and a streaming write still in flight** — the class of bug where the reply that reaches the chat

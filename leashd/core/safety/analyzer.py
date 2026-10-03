@@ -1,5 +1,7 @@
 """Bash command parser and path classifier."""
 
+import itertools
+import math
 import re
 import shlex
 from collections.abc import Iterator
@@ -128,8 +130,19 @@ def shell_match_texts(command: str) -> list[str]:
     (``^sed\\s+…``) still see only the skeleton, so the flags a read rule
     checks stay decisive.
     """
+    skeleton, payloads, _ = _split_quoting(command)
+    return [skeleton, *payloads]
+
+
+def quoted_runs(command: str) -> list[str]:
+    """The contents of every quoted run in *command*, executed or not."""
+    return _split_quoting(command)[2]
+
+
+def _split_quoting(command: str) -> tuple[str, list[str], list[str]]:
     skeleton: list[str] = []
     payloads: list[str] = []
+    quoted: list[str] = []
     current: list[str] = []
     quote: str | None = None
     escaped = False
@@ -151,6 +164,7 @@ def shell_match_texts(command: str) -> list[str]:
             current = []
             quote = None
             skeleton.append(ch)
+            quoted.append(body)
             if _preceded_by_executor("".join(skeleton)):
                 payloads.append(body)
             continue
@@ -159,7 +173,7 @@ def shell_match_texts(command: str) -> list[str]:
         # Unbalanced quote: treat the tail as ordinary shell text rather than
         # letting an unclosed quote hide the rest of the command from a rule.
         skeleton.append("".join(current))
-    return ["".join(skeleton), *payloads]
+    return "".join(skeleton), payloads, quoted
 
 
 def _preceded_by_executor(skeleton_so_far: str) -> bool:
@@ -237,6 +251,12 @@ def split_chain_segments(command: str) -> list[str]:
     Pipes (``|``) are never split on — they stay inside their segment so
     that deny patterns like ``curl.*\\|.*bash`` can still match.
 
+    A one-line ``$(…)`` inside double quotes stays whole, with the quotes it
+    carries: ``[ "$(ssh host "a && b")" = 0 ]`` used to split at the ``&&``
+    of the remote command, because the inner quote read as closing the outer
+    one. The substitution's own commands are classified by
+    :func:`command_units`.
+
     Inspired by openclaw ``splitCommandChainWithOperators()`` which uses a
     character-by-char scanner that tracks quote state before splitting.
     """
@@ -245,6 +265,7 @@ def split_chain_segments(command: str) -> list[str]:
     pending_heredocs: list[tuple[str, bool]] = []
     in_single_quote = False
     in_double_quote = False
+    substitutions_close = True
     escaped = False
     i = 0
     length = len(command)
@@ -275,6 +296,15 @@ def split_chain_segments(command: str) -> list[str]:
             current.append(ch)
             i += 1
             continue
+
+        if in_double_quote and substitutions_close and command.startswith("$(", i):
+            end = _matching_paren(command, i + 2)
+            body = command[i + 2 : end]
+            substitutions_close = end < length
+            if substitutions_close and "\n" not in body and "<<" not in body:
+                current.append(command[i : end + 1])
+                i = end + 1
+                continue
 
         if not in_single_quote and not in_double_quote:
             if ch == "<":
@@ -382,7 +412,55 @@ def strip_redirections(command: str) -> str:
     (``Bash::agent-browser tab 2``). Quoted text is left untouched so a ``>``
     inside an argument cannot corrupt the command a deny rule sees.
     """
+    return _split_redirections(command)[0]
+
+
+_DISCARDING_REDIRECT_RE = re.compile(
+    r"\d?>>?\s*(?:&\d+|/dev/null)|&>>?\s*/dev/null|\d?<\s*/dev/null"
+)
+
+
+def keeps_to_its_streams(command: str) -> bool:
+    """Whether every redirection in *command* only discards or merges a stream.
+
+    ``2>&1``, ``>/dev/null`` and ``</dev/null`` touch no file. Anything else
+    reads one in or writes one out, which a rule matching the command name
+    alone never sees.
+    """
+    return all(
+        _DISCARDING_REDIRECT_RE.fullmatch(redirection.strip())
+        for redirection in _split_redirections(command)[1]
+    )
+
+
+_WRITTEN_HEREDOC_RE = re.compile(
+    r"cat\s+(?:(?P<before>>>?\s*[^\s;|&<>'\"$`]+)\s+)?"
+    r"<<-?\s*(?P<q>['\"])[A-Za-z_][A-Za-z0-9_]*(?P=q)"
+    r"(?:\s*(?P<after>>>?\s*[^\s;|&<>'\"$`]+))?\s*"
+)
+
+
+def written_heredoc_head(command: str) -> str | None:
+    """The command line of ``cat > file <<'EOF'``, without the body it writes.
+
+    The body is file content, the same text a ``Write`` call carries, so a
+    script that mentions ``.env`` is not a credential access. The line itself
+    stays: it names the file being written. ``None`` for any other shape:
+    a heredoc that goes down a pipe, whose body something executes, and one
+    with an unquoted delimiter, whose body the shell expands first.
+    """
+    line, newline, _ = command.partition("\n")
+    if not newline:
+        return None
+    match = _WRITTEN_HEREDOC_RE.fullmatch(strip_command_wrappers(line.strip()))
+    if match is None or bool(match.group("before")) == bool(match.group("after")):
+        return None
+    return line
+
+
+def _split_redirections(command: str) -> tuple[str, list[str]]:
     out: list[str] = []
+    redirections: list[str] = []
     in_single = in_double = escaped = False
     i = 0
     while i < len(command):
@@ -402,13 +480,14 @@ def strip_redirections(command: str) -> str:
         elif not in_single and not in_double:
             match = _REDIRECT_RE.match(command, i)
             if match and match.end() > i:
+                redirections.append(match.group(0))
                 i = match.end()
                 continue
             out.append(ch)
         else:
             out.append(ch)
         i += 1
-    return "".join(out).strip()
+    return "".join(out).strip(), redirections
 
 
 _ENV_ASSIGN_PREFIX_RE = re.compile(
@@ -768,7 +847,9 @@ _OUTPUT_DIR = "output-dir"
 _CWD_OUTPUT = "cwd-output"
 _URL = "url"
 
-_TAKES_VALUE = frozenset({_VALUE, _REFUSE, _METHOD, _OUTPUT, _OUTPUT_DIR, _URL})
+_BODY = "body"
+
+_TAKES_VALUE = frozenset({_VALUE, _REFUSE, _METHOD, _OUTPUT, _OUTPUT_DIR, _URL, _BODY})
 
 _CURL_SHORT_FLAGS = {
     **dict.fromkeys("0123456#:BfgGIijkLlMNnpqRsSvVZah", _SWITCH),
@@ -950,6 +1031,12 @@ _REFUSED_LONG_FLAG_PREFIXES = (
 
 _READ_METHODS = frozenset({"GET", "HEAD"})
 
+_BODY_METHODS = _READ_METHODS | {"POST", "PUT", "PATCH"}
+
+_BODY_LONG_FLAGS = frozenset(
+    {"--data", "--data-raw", "--data-ascii", "--data-urlencode", "--json"}
+)
+
 _DISCARDED_OUTPUTS = frozenset({"-", "/dev/null", "/dev/stdout", "/dev/stderr"})
 
 _URL_TOKEN_RE = re.compile(r"^(?:--url=)?(?:[a-zA-Z][a-zA-Z0-9+.-]*://)")
@@ -990,7 +1077,7 @@ def _write_target(value: str, *, is_dir: bool) -> str | None:
     return (value.rsplit("/", 1)[0] or "/") if "/" in value else "."
 
 
-def network_read_scope(command: str) -> str | None:
+def network_read_scope(command: str, *, allow_body: bool = False) -> str | None:
     """The destination a read-only ``curl``/``wget`` should be approved for.
 
     Returns ``curl <host>[,<host>…][><dir>]`` — the scope a human is really
@@ -1046,9 +1133,12 @@ def network_read_scope(command: str) -> str | None:
             break
         if token.startswith("--") and len(token) > 2:
             name, has_inline, inline = token.partition("=")
-            if name.startswith(_REFUSED_LONG_FLAG_PREFIXES):
+            if allow_body and binary == "curl" and name in _BODY_LONG_FLAGS:
+                role = _BODY
+            elif name.startswith(_REFUSED_LONG_FLAG_PREFIXES):
                 return None
-            role = long_flags.get(name, _SWITCH)
+            else:
+                role = long_flags.get(name, _SWITCH)
             if role not in _TAKES_VALUE:
                 if role == _CWD_OUTPUT:
                     outputs.add(".")
@@ -1059,6 +1149,8 @@ def network_read_scope(command: str) -> str | None:
             value = None
             for position, letter in enumerate(token[1:], start=2):
                 role = short_flags.get(letter, _REFUSE)
+                if allow_body and binary == "curl" and letter == "d":
+                    role = _BODY
                 if role == _CWD_OUTPUT:
                     outputs.add(".")
                 if role in _TAKES_VALUE:
@@ -1071,7 +1163,12 @@ def network_read_scope(command: str) -> str | None:
         if role == _REFUSE or value is None:
             return None
         if role == _METHOD:
-            if value.upper() not in _READ_METHODS:
+            if value.upper() not in (_BODY_METHODS if allow_body else _READ_METHODS):
+                return None
+        elif role == _BODY:
+            if value.startswith("@") or (
+                token.startswith("--data-urlencode") and "@" in value
+            ):
                 return None
         elif role in (_OUTPUT, _OUTPUT_DIR):
             target = _write_target(value, is_dir=role == _OUTPUT_DIR)
@@ -1231,6 +1328,52 @@ def public_read_scope(command: str) -> str | None:
     return f"{binary}+public {destination}"
 
 
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "0.0.0.0", "::1"})  # noqa: S104
+
+_GUARDED_LOOPBACK_PORTS = frozenset({2375, 2376, *range(9222, 9230)})
+
+
+def _url_port(token: str) -> int | None:
+    if _url_host(token) is None:
+        return None
+    url = token.removeprefix("--url=")
+    try:
+        return urlsplit(url if "://" in url else f"http://{url}").port
+    except ValueError:
+        return None
+
+
+def loopback_write_scope(
+    command: str, guarded_ports: frozenset[int] = frozenset()
+) -> str | None:
+    """``curl+loopback <host>…`` when a request with a body stays on this machine.
+
+    A dev server the agent just started is exercised with ``curl -X POST
+    http://127.0.0.1:3000/…``, and every one of those asked. The request may
+    carry a literal body and use POST, PUT or PATCH; it may not read a file
+    into the body (``@file``), delete, or use a variable. *guarded_ports* are
+    the loopback ports that are not a dev server — leashd's own API — and the
+    Docker and browser-debugging ports are refused whatever the caller passes.
+    """
+    if "$" in command:
+        return None
+    scope = network_read_scope(command, allow_body=True)
+    if scope is None or not scope.startswith("curl "):
+        return None
+    destination, _, outputs = scope.removeprefix("curl ").partition(">")
+    if not set(destination.split(",")) <= _LOOPBACK_HOSTS:
+        return None
+    if outputs and not all(
+        _is_public_write_dir(target) for target in outputs.split(",")
+    ):
+        return None
+    guarded = guarded_ports | _GUARDED_LOOPBACK_PORTS
+    tokens = shlex.split(command.replace("\\\n", " "))
+    if any(_url_port(token) in guarded for token in tokens[1:]):
+        return None
+    return f"curl+loopback {destination}"
+
+
 def _names_wget_output(tokens: list[str]) -> bool:
     for token in tokens:
         if token in _SHELL_OPERATOR_TOKENS:
@@ -1263,6 +1406,16 @@ def mentions_credential_path(command: str) -> bool:
     ``< ~/.aws/credentials`` feeding that same connection does.
     """
     return bool(_SHELL_CREDENTIAL_RE.search(shell_match_texts(command)[0]))
+
+
+def quotes_credential_path(command: str) -> bool:
+    """Whether a quoted argument names a credential path.
+
+    The complement of :func:`mentions_credential_path`, for a command that
+    runs with no second judge: ``cat ".env"`` reads the same file ``cat .env``
+    does.
+    """
+    return any(_SHELL_CREDENTIAL_RE.search(run) for run in quoted_runs(command))
 
 
 _SSH_SWITCHES = frozenset("46aCfkNnqsTtvxy")
@@ -1467,6 +1620,440 @@ def remote_login_scope(command: str) -> str | None:
     except ValueError:
         return None
     return None
+
+
+def _literal_shell_words(text: str) -> list[str] | None:
+    words: list[str] = []
+    current: list[str] = []
+    started = False
+    quote: str | None = None
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        following = text[i + 1] if i + 1 < len(text) else ""
+        if quote == "'":
+            if ch == "'":
+                quote = None
+            else:
+                current.append(ch)
+        elif quote == '"':
+            if ch == '"':
+                quote = None
+            elif ch == "\\" and following and following in '$`"\\\n':
+                if following != "\n":
+                    current.append(following)
+                i += 1
+            elif ch in "$`":
+                return None
+            else:
+                current.append(ch)
+        elif ch in "'\"":
+            quote = ch
+            started = True
+        elif ch == "\\":
+            if following and following != "\n":
+                current.append(following)
+                started = True
+            i += 1
+        elif ch in " \t":
+            if started or current:
+                words.append("".join(current))
+            current = []
+            started = False
+        elif ch in "$`;|&()<>\n":
+            return None
+        else:
+            current.append(ch)
+        i += 1
+    if quote is not None:
+        return None
+    if started or current:
+        words.append("".join(current))
+    return words
+
+
+def _ssh_session(words: list[str]) -> tuple[_RemoteTarget, list[str]] | None:
+    target = _RemoteTarget()
+    remaining = iter(words)
+    for word in remaining:
+        if word.startswith("--"):
+            return None
+        if word.startswith("-") and len(word) > 1:
+            if not _apply_login_flags(
+                word,
+                remaining,
+                target,
+                switches=_SSH_SWITCHES,
+                value_flags=_SSH_VALUE_FLAGS,
+                port_flag="p",
+            ):
+                return None
+            continue
+        if target.host is not None:
+            return target, [word, *remaining]
+        if not target.set_destination(word):
+            return None
+    return None
+
+
+def remote_shell_command(command: str) -> tuple[str, str] | None:
+    """The destination and remote command of a plain ``ssh host '<command>'``.
+
+    Returns ``([user@]host[ -p port], remote command)`` — the destination in
+    the form :func:`remote_login_scope` keys it — or ``None`` when the call is
+    anything more than a login that runs a fixed command.
+
+    This is what lets a trusted host's read-only commands run unasked, so
+    everything the local shell could add to the connection declines: a
+    variable or substitution it would expand into the remote command, input
+    fed from a file or heredoc, output written to one, and every ``ssh`` option
+    :func:`remote_login_scope` already refuses. The remote command comes back
+    exactly as the remote shell receives it, for the caller to classify.
+    """
+    text, redirections = _split_redirections(strip_command_wrappers(command.strip()))
+    if not all(
+        _DISCARDING_REDIRECT_RE.fullmatch(redirection.strip())
+        for redirection in redirections
+    ):
+        return None
+    words = _literal_shell_words(text)
+    if not words or words[0] != "ssh":
+        return None
+    session = _ssh_session(words[1:])
+    if session is None:
+        return None
+    target, remote = session
+    scope = target.scope("ssh")
+    if scope is None or not remote:
+        return None
+    return scope.removeprefix("ssh "), " ".join(remote)
+
+
+_SED_ADDRESS = r"(?:\d+|\$|/(?:[^/\\\n]|\\.)*/)"
+_SED_PRINT_PROGRAM_RE = re.compile(
+    r"(?:\s*(?:" + _SED_ADDRESS + r"(?:\s*,\s*" + _SED_ADDRESS + r")?)?\s*!?\s*"
+    r"(?:[pdq=]|s(?P<d>[/|#,:@!])(?:(?!(?P=d))[^\\\n]|\\.)*(?P=d)"
+    r"(?:(?!(?P=d))[^\\\n]|\\.)*(?P=d)[gpiI\d]*)\s*(?:[;\n]|$))+"
+)
+_SED_SWITCH_RE = re.compile(r"-[nErusz]+|--(?:quiet|silent|regexp-extended)")
+
+
+def _sed_only_prints(command: str) -> bool:
+    skeleton, _, quoted = _split_quoting(strip_redirections(command))
+    runs = iter(quoted)
+    programs: list[str] = []
+    expects_program = False
+    for word in skeleton.split()[1:]:
+        if word in ("''", '""'):
+            text = next(runs, "")
+        elif "'" in word or '"' in word:
+            return False
+        else:
+            text = word
+        if expects_program:
+            programs.append(text)
+            expects_program = False
+        elif word == text and word.startswith("-"):
+            if word in ("-e", "--expression"):
+                expects_program = True
+            elif not _SED_SWITCH_RE.fullmatch(word):
+                return False
+        elif not programs:
+            programs.append(text)
+    return (
+        bool(programs)
+        and not expects_program
+        and all(_SED_PRINT_PROGRAM_RE.fullmatch(program) for program in programs)
+    )
+
+
+_ARGUMENT_WRITE_RE = re.compile(
+    r"^sort\b.*\s(?:-[a-zA-Z]*o|--output)"
+    r"|^uniq(?:\s+-\S+)*\s+\S+\s+\S"
+    r"|^tree\b.*\s-o\b"
+    r"|^xxd\b.*\s-[a-zA-Z]*r"
+    r"|^date\b.*\s(?:-[a-zA-Z]*s|--set|\d{6,})"
+    r"|^hostname\s+[^-\s]"
+    r"|^git\b.*\s--output\b"
+    r"|^(?:env|printenv|yes)\b"
+)
+
+
+def reads_without_writing(command: str) -> bool:
+    """Whether a command a read rule allowed really leaves the machine alone.
+
+    The read rules match a command by its name, which is enough beside a
+    native permission mode that judges the rest. A trusted remote host has no
+    second judge, so the ways a "read" command still writes are refused here:
+    a redirection to a file, ``sort -o``, ``uniq in out``, a ``sed`` program
+    with ``w`` or ``e``, and an ``env`` dump of the secrets a server keeps in
+    its environment.
+    """
+    if not keeps_to_its_streams(command):
+        return False
+    normalized = strip_benign_prefixes(command)
+    inner = docker_exec_command(normalized)
+    if inner is not None:
+        return reads_without_writing(inner)
+    skeleton = shell_match_texts(normalized)[0]
+    if _ARGUMENT_WRITE_RE.search(skeleton):
+        return False
+    return not skeleton.startswith("sed") or _sed_only_prints(normalized)
+
+
+_REMOTE_DIRECTORY_RE = re.compile(r"\.(?:ssh|aws|gnupg)\b")
+_GLOB_SAFE_HEADS = frozenset({"ls", "stat", "du", "file", "test"})
+_EXPANSION_START_RE = re.compile(r"[A-Za-z0-9_{(!@#$*?-]")
+
+
+def _rewritten_by_shell(command: str) -> tuple[str, bool, bool]:
+    plain: list[str] = []
+    expands = globs = False
+    quote: str | None = None
+    i = 0
+    while i < len(command):
+        ch = command[i]
+        if quote == "'":
+            if ch == "'":
+                quote = None
+            else:
+                plain.append(ch)
+        elif ch == "\\" and i + 1 < len(command):
+            plain.append(command[i + 1])
+            i += 1
+        elif (
+            ch == "$" and quote == '"' and not _EXPANSION_START_RE.match(command, i + 1)
+        ):
+            plain.append(ch)
+        elif ch in "$`":
+            expands = True
+            plain.append(ch)
+        elif quote == '"':
+            if ch == '"':
+                quote = None
+            else:
+                plain.append(ch)
+        elif ch in "'\"":
+            quote = ch
+        else:
+            globs = globs or ch in "*?[{"
+            plain.append(ch)
+        i += 1
+    return "".join(plain), expands, globs
+
+
+def names_what_it_reads(command: str) -> bool:
+    """Whether the files a command reads are the ones its text names.
+
+    A rule reads the command as written; the shell that runs it does not.
+    ``cat .e""nv``, ``cat .en?`` and ``F=.env; cat $F`` all read ``.env``
+    while spelling something else. On a trusted remote host nothing reviews
+    the command after the rules, so a variable, a substitution, or a glob
+    handed to anything but a listing declines, and a credential path that
+    appears only once quotes and backslashes are removed is reported by
+    :func:`unquoted_credential_path`.
+    """
+    _, expands, globs = _rewritten_by_shell(command)
+    if expands:
+        return False
+    head = strip_benign_prefixes(command).split(maxsplit=1)
+    return not globs or (bool(head) and head[0] in _GLOB_SAFE_HEADS)
+
+
+def unquoted_credential_path(command: str) -> bool:
+    """Whether *command* names a credential path once the shell unquotes it."""
+    plain = _rewritten_by_shell(command)[0]
+    return bool(
+        _SHELL_CREDENTIAL_RE.search(plain) or _REMOTE_DIRECTORY_RE.search(plain)
+    )
+
+
+_BARE_LITERAL = r"[A-Za-z0-9_./:@%+=,-]+"
+_QUOTED_LITERAL = r"\"[^\"$`\\\n]*\"|'[^'\"$`\\\n]*'"
+_LITERAL_WORD = rf"(?:{_BARE_LITERAL}|{_QUOTED_LITERAL})"
+_LITERAL_WORD_RE = re.compile(_LITERAL_WORD)
+_BARE_LITERAL_RE = re.compile(_BARE_LITERAL)
+_VARIABLE_NAME = r"[A-Za-z_][A-Za-z0-9_]*"
+_LITERAL_FOR_RE = re.compile(
+    rf"for\s+(?P<name>{_VARIABLE_NAME})\s+in(?P<words>(?:\s+{_LITERAL_WORD})+)"
+)
+_LITERAL_ASSIGNMENT_RE = re.compile(
+    rf"(?P<name>{_VARIABLE_NAME})=(?P<value>{_LITERAL_WORD})"
+)
+_VARIABLE_REFERENCE_RE = re.compile(
+    rf"\$(?:\{{(?P<braced>{_VARIABLE_NAME})\}}|(?P<plain>{_VARIABLE_NAME}))"
+)
+_BRACED_REFERENCE_RE = re.compile(rf"\$\{{{_VARIABLE_NAME}\}}")
+_UNTRACKED_SCOPE_RE = re.compile(
+    r"[(){}]|\b(?:if|while|until|case|select|function|read|getopts|mapfile"
+    r"|readarray|declare|local|typeset|export|readonly|unset|eval|source)\b"
+    r"|\bprintf\s+-v\b|(?:^|[\s;&|])\.\s|\bIFS\b"
+)
+_VARIANT_LIMIT = 64
+
+
+class _LiteralBinding(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    values: tuple[str, ...]
+    start: int
+    end: int
+
+
+def _unquoted_literal(word: str) -> str:
+    return word[1:-1] if word[0] in "'\"" else word
+
+
+def _literal_bindings(command: str) -> list[_LiteralBinding]:
+    skeleton = _BRACED_REFERENCE_RE.sub("", shell_match_texts(command)[0])
+    if _UNTRACKED_SCOPE_RE.search(skeleton):
+        return []
+    bindings: list[_LiteralBinding] = []
+    open_loops: list[tuple[str, tuple[str, ...], int] | None] = []
+    assigned: dict[str, int] = {}
+    cursor = 0
+    for segment in split_chain_segments(command):
+        position = command.find(segment, cursor)
+        if position < 0:
+            return []
+        conditional = bool(re.search(r"&&|\|\|", command[cursor:position]))
+        cursor = position + len(segment)
+        text = segment
+        while (peeled := _KEYWORD_PREFIX_RE.sub("", text, count=1)) != text:
+            text = peeled
+        loop = _LITERAL_FOR_RE.fullmatch(text)
+        assignment = _LITERAL_ASSIGNMENT_RE.fullmatch(segment)
+        if loop:
+            words = _LITERAL_WORD_RE.findall(loop.group("words"))
+            values = tuple(_unquoted_literal(word) for word in words)
+            open_loops.append((loop.group("name"), values, cursor))
+        elif re.match(r"for\b", text):
+            open_loops.append(None)
+        elif re.match(r"done\b", text):
+            opened = open_loops.pop() if open_loops else None
+            if opened:
+                name, values, start = opened
+                bindings.append(
+                    _LiteralBinding(name=name, values=values, start=start, end=position)
+                )
+        elif assignment and not open_loops and not conditional:
+            name = assignment.group("name")
+            assigned[name] = assigned.get(name, 0) + 1
+            bindings.append(
+                _LiteralBinding(
+                    name=name,
+                    values=(_unquoted_literal(assignment.group("value")),),
+                    start=cursor,
+                    end=len(command),
+                )
+            )
+    if open_loops:
+        return []
+    return [
+        binding
+        for binding in bindings
+        if len(re.findall(rf"(?<![\w$]){binding.name}\+?=", skeleton))
+        == assigned.get(binding.name, 0)
+    ]
+
+
+def expand_literal_variables(command: str) -> list[str]:
+    """*command* with each variable it sets to a literal written out.
+
+    ``for r in a b; do cat /evidence/$r/report.json; done`` and ``UA="…";
+    curl -A "$UA" …`` name everything they read, one step removed: the value
+    is in the same command. Each variant puts one value in place of every
+    reference, so the caller judges ``cat /evidence/a/report.json`` and
+    ``cat /evidence/b/report.json`` instead of declining on the ``$``.
+
+    A reference is replaced only where the shell is certain to hold that
+    value. A ``for`` variable counts inside its own loop body. An assignment
+    counts after it, when it stands alone at the top level: not behind
+    ``&&``, inside a loop, or beside a second assignment to the same name
+    that is not a literal. Anything with a subshell, a brace group, a
+    function, a conditional, ``read``, ``export`` or ``IFS`` (which changes
+    where an unquoted value splits into words) is left as written, and
+    so is a value with a space or shell character in it when the reference
+    is outside double quotes. What is left keeps its ``$`` and declines.
+    """
+    bindings = _literal_bindings(command)
+    if not bindings:
+        return [command]
+    values: dict[str, list[str]] = {}
+    for binding in bindings:
+        known = values.setdefault(binding.name, [])
+        known.extend(value for value in binding.values if value not in known)
+    references: list[tuple[int, int, str]] = []
+    in_single = in_double = False
+    i = 0
+    while i < len(command):
+        ch = command[i]
+        if in_single:
+            in_single = ch != "'"
+        elif ch == "\\":
+            i += 1
+        elif ch == "'" and not in_double:
+            in_single = True
+        elif ch == '"':
+            in_double = not in_double
+        elif ch == "$" and (match := _VARIABLE_REFERENCE_RE.match(command, i)):
+            name = match.group("braced") or match.group("plain")
+            in_scope = any(
+                binding.name == name and binding.start <= i < binding.end
+                for binding in bindings
+            )
+            if in_scope and (
+                in_double
+                or all(_BARE_LITERAL_RE.fullmatch(value) for value in values[name])
+            ):
+                references.append((i, match.end(), name))
+            i = match.end()
+            continue
+        i += 1
+    names = list(dict.fromkeys(name for _, _, name in references))
+    if not names or math.prod(len(values[name]) for name in names) > _VARIANT_LIMIT:
+        return [command]
+    variants: list[str] = []
+    for combination in itertools.product(*(values[name] for name in names)):
+        chosen = dict(zip(names, combination, strict=True))
+        pieces: list[str] = []
+        copied = 0
+        for start, end, name in references:
+            pieces += (command[copied:start], chosen[name])
+            copied = end
+        variants.append("".join(pieces) + command[copied:])
+    return variants
+
+
+_INLINE_SHELLS = frozenset({"sh", "bash", "dash", "zsh"})
+_PROCESS_ENVIRONMENT_RE = re.compile(r"/proc/[^\s/]*/environ")
+
+
+def inline_shell_script(command: str) -> str | None:
+    """The script of ``sh -c '<script>'``, on its own or inside ``docker exec``.
+
+    ``docker compose exec -T worker sh -c "grep -c done /evidence/x.json |
+    head -1"`` is how a pipeline is run inside a container, and it matched no
+    rule: a rule sees ``sh``, not what the script does. Returning the script
+    lets the caller judge its commands one by one.
+
+    ``None`` for any other shape, including a script the calling shell would
+    expand first (an unescaped ``$`` or backtick), extra arguments after the
+    script, and a script that reads a process environment.
+    """
+    normalized = strip_benign_prefixes(command)
+    match = _DOCKER_EXEC_RE.match(normalized)
+    words = _literal_shell_words(match.group("inner") if match else normalized)
+    if (
+        not words
+        or len(words) != 3
+        or words[0] not in _INLINE_SHELLS
+        or words[1] != "-c"
+        or _PROCESS_ENVIRONMENT_RE.search(words[2])
+    ):
+        return None
+    return words[2]
 
 
 _DOCKER_EXEC_PREFIX = (

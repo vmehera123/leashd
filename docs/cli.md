@@ -26,6 +26,9 @@ leashd is controlled entirely from the command line. The `leashd` command manage
 | `leashd browser headless [on\|off]` | Show or toggle headless mode |
 | `leashd browser set-profile <path>` | Set browser profile directory for `/web` |
 | `leashd browser clear-profile` | Clear browser profile (use temporary) |
+| `leashd ssh show` | List trusted SSH hosts |
+| `leashd ssh trust <host> [-p PORT] [--full]` | Run read-only commands on the host without asking; `--full` covers every command |
+| `leashd ssh untrust <host> [-p PORT]` | Ask for every command on the host again |
 | `leashd model show / set <model> / clear` | Default Claude model, globally or per `--dir` / `--workspace` |
 | `leashd turns show` | Display current max turns setting |
 | `leashd turns set <N>` | Set max turns to N (positive integer) |

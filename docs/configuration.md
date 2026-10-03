@@ -104,6 +104,12 @@ Each layer overrides the one before it: `~/.leashd/config.yaml` → `.env` → e
 | `LEASHD_BROWSER_AUTO_APPROVE` | `bool` | `true` | Approve agent-browser browsing (open, click, fill, eval, tabs…) in every conversation without asking. Cookies, auth, storage, state, clipboard, `connect` and installs still ask, and so does anything a browsing command pipes into. Turn off with `leashd browser auto-approve off`. |
 | `LEASHD_BROWSER_USER_DATA_DIR` | `str \| None` | `None` | Chrome user data directory for persistent `/web` sessions. `/task` always uses a temporary profile. |
 
+### Trusted SSH Hosts
+
+| Variable | Type | Default | Description |
+|---|---|---|---|
+| `LEASHD_TRUSTED_SSH_HOSTS` | `dict[str, "read" \| "full"]` | `{}` | SSH destinations whose commands run without asking, as JSON (`{"build-box": "read"}`). `read` covers read-only remote commands, `full` covers every command. Set with `leashd ssh trust <host> [--full]`; see [Trusted SSH Hosts](policies.md#trusted-ssh-hosts). |
+
 ### Streaming
 
 | Variable | Type | Default | Description |

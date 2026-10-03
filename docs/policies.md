@@ -101,6 +101,40 @@ If no rule matches, `evaluate()` returns the `default_action` from settings (typ
 | `deny` | Tool is blocked. The deny reason is returned to the agent. |
 | `require_approval` | Tool is held pending. User sees an approve/deny prompt via the connector. Timeout defaults to deny. |
 
+## Trusted SSH Hosts
+
+Every `ssh` command asks under the built-in presets. A host you trust can skip the prompt for commands that only read:
+
+```bash
+leashd ssh trust build-box                  # [user@]host, as typed after `ssh`
+leashd ssh trust deploy@build-box -p 2222   # a user or port makes a separate destination
+leashd ssh trust build-box --full
+leashd ssh untrust build-box
+```
+
+The setting is stored as `ssh.trusted_hosts` in `~/.leashd/config.yaml` and applies to every conversation.
+
+| Trust | Runs without asking |
+|---|---|
+| `read` (default) | A remote command whose every part matches a read rule (`read-only-bash`, `docker-readonly`, `sql-read`, `credential-metadata`, `loopback-read`, `public-read`) and writes nothing. |
+| `full` | Every `ssh` command and `scp` upload to the host. This is "Approve all" for the host, kept across `/clear` and restarts. |
+
+Under `read`, these still ask:
+
+- anything that writes, restarts or installs, `sudo`, and code run through an interpreter (`python -c`, `bash -s`)
+- a redirection to a file, `sort -o`, a `sed` program with `w` or `e`, and `env` / `printenv`
+- a credential path in the remote command, quoted or not, other than a listing or a `grep -c` count
+- a connection that is more than a login: a jump host, port or agent forwarding, a proxy command, a config file
+- a local variable, substitution, input file or heredoc on the `ssh` command line
+
+A remote command is read the way the remote shell runs it:
+
+- `docker compose exec -T worker sh -c "grep -c done /evidence/x.json | head -1"` is judged by the commands in the script, not as an unknown `sh`.
+- `for r in a b; do cat /evidence/$r/report.json; done` and `UA="…"; curl -A "$UA" …` are judged once per value. Only a variable set to a literal in the same command counts: one set from a substitution, `read`, a conditional or the remote environment keeps asking.
+- `psql -c "\d portals"` and the other describe commands (`\dt`, `\l`) are reads, like `select`. Other meta-commands (`\!`, `\copy`, `\o`) ask.
+
+A policy that denies `ssh` is not overridden, and a host is never trusted unless you add it.
+
 ## Built-In Presets
 
 leashd ships with three policy files in `policies/`:

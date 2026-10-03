@@ -68,6 +68,7 @@ The sandbox maintains a list of allowed directories. By default, `build_engine()
 1. All entries from `config.approved_directories` — the project directories
 2. `~/.claude/plans` — Claude Code's plan file storage
 3. `~/.claude/projects/<key>/memory` for each project and workspace directory — Claude Code's auto-memory, keyed the way Claude keys it: on the directory, its git root, and a worktree's main checkout (`sandbox_directories` / `claude_memory_directories`). Nothing else under `~/.claude` is allowed, since its settings carry leashd's own hooks and its transcripts belong to other sessions.
+4. `/tmp/claude-<uid>/<key>` and `~/.claude/projects/<key>/<session>/tool-results` for the same directories — the scratchpad Claude Code tells the agent to use for temporary files, and the files it saves a long tool result to (`claude_session_directories`).
 
 `validate_path(path)` resolves the path (expanding `~`, resolving symlinks) and checks if it falls within any allowed directory. Returns `(ok, reason)`.
 

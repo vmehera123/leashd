@@ -170,6 +170,25 @@ def inject_global_config_as_env(*, force: bool = False) -> None:
     _inject_web_config(data, force=force)
     _inject_codebase_memory_config(data, force=force)
     _inject_security_config(data, force=force)
+    _inject_ssh_config(data, force=force)
+
+
+def get_trusted_ssh_hosts(data: dict[str, Any] | None = None) -> dict[str, str]:
+    """Read ``ssh.trusted_hosts`` from global config as ``{destination: trust}``."""
+    if data is None:
+        data = load_global_config()
+    ssh = data.get("ssh", {})
+    hosts = ssh.get("trusted_hosts", {}) if isinstance(ssh, dict) else {}
+    if not isinstance(hosts, dict):
+        return {}
+    return {str(destination): str(trust) for destination, trust in hosts.items()}
+
+
+def _inject_ssh_config(data: dict[str, Any], *, force: bool = False) -> None:
+    """Bridge ``ssh.trusted_hosts`` YAML → LEASHD_TRUSTED_SSH_HOSTS."""
+    key = "LEASHD_TRUSTED_SSH_HOSTS"
+    if force or key not in os.environ:
+        os.environ[key] = json.dumps(get_trusted_ssh_hosts(data))
 
 
 def resolve_policy_name(name: str) -> Path:

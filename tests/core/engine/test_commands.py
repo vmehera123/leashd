@@ -4317,6 +4317,90 @@ class TestNativeCommandPassthrough:
         payloads = [b.callback_data for row in sent["buttons"] for b in row]
         assert payloads == ["/screen reject abc123", "/screen"]
 
+    @staticmethod
+    def _answerable_agent(stuck: str, options: list[tuple[int, str]]):
+        agent = TestNativeCommandPassthrough._stuck_agent(stuck)
+        agent.answered = []
+
+        def answer_stuck_prompt(session, prompt_id, number):
+            agent.answered.append((prompt_id, number))
+            labels = dict(options)
+            return labels.get(number) if prompt_id == stuck else None
+
+        agent.stuck_prompt_options = lambda session: options
+        agent.answer_stuck_prompt = answer_stuck_prompt
+        return agent
+
+    async def test_screen_offers_the_answers_a_stuck_prompt_draws(
+        self, config, audit_logger, policy_engine, mock_connector
+    ):
+        """The pane sat on "Do you want to proceed? 1. Yes 2. No" and the chat
+        could look at it but not answer it."""
+        agent = self._answerable_agent(
+            "abc123",
+            [(1, "Yes"), (3, "No, and tell Claude what to do differently")],
+        )
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_command("user1", "screen", "", "chat1")
+
+        sent = mock_connector.sent_messages[-1]
+        buttons = [(b.text, b.callback_data) for row in sent["buttons"] for b in row]
+        assert buttons == [
+            ("✅ 1. Yes", "/screen answer abc123 1"),
+            ("❌ Reject prompt", "/screen reject abc123"),
+            ("🔄 Refresh", "/screen"),
+        ]
+        assert all(len(data.encode()) <= 64 for _, data in buttons)
+
+    async def test_screen_answer_presses_the_option_tapped(
+        self, config, audit_logger, policy_engine, mock_connector, monkeypatch
+    ):
+        monkeypatch.setattr("leashd.core.engine._SCREEN_SETTLE_SECONDS", 0)
+        agent = self._answerable_agent("abc123", [(1, "Yes")])
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_command("user1", "screen", "answer abc123 1", "chat1")
+
+        assert agent.answered == [("abc123", 1)]
+        assert mock_connector.sent_messages[-1]["text"].startswith(
+            "✅ Answered the prompt: Yes\n\n🖥 claude terminal"
+        )
+
+    @pytest.mark.parametrize("args", ["answer stale99 1", "answer abc123 x", "answer"])
+    async def test_screen_answer_for_a_prompt_that_is_gone_presses_nothing_new(
+        self, config, audit_logger, policy_engine, mock_connector, args
+    ):
+        agent = self._answerable_agent("abc123", [(1, "Yes")])
+        eng = Engine(
+            connector=mock_connector,
+            agent=agent,
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+
+        await eng.handle_command("user1", "screen", args, "chat1")
+
+        assert mock_connector.sent_messages[-1]["text"].startswith(
+            "That prompt is no longer waiting."
+        )
+
     async def test_screen_without_a_stuck_prompt_only_refreshes(
         self, config, audit_logger, policy_engine, mock_connector
     ):

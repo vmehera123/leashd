@@ -465,6 +465,78 @@ class TestSwitch:
         assert connector.activated_chat_sessions == ["chat1"]
 
 
+async def _late_reply(engine, chat_id, content):
+    from leashd.core.events import LATE_REPLY, Event
+
+    await engine.event_bus.emit(
+        Event(
+            name=LATE_REPLY,
+            data={
+                "chat_id": chat_id,
+                "user_id": "u1",
+                "session_id": "claude-uuid",
+                "content": content,
+            },
+        )
+    )
+
+
+class TestLateReply:
+    """A reply claude finishes with no request waiting, as when a background
+    watcher's notification starts a turn of its own (bidlens, 2026-10-02)."""
+
+    async def test_it_is_sent_and_stored(self, engine, connector, store):
+        await engine.handle_message("u1", "how are things", "chat1")
+        connector.sent_messages.clear()
+
+        await _late_reply(engine, "chat1", "  The backfill finished.  ")
+
+        assert [m["text"] for m in connector.sent_messages] == [
+            "The backfill finished."
+        ]
+        rows = await store.get_messages("u1", "chat1")
+        assert rows[-1]["role"] == "assistant"
+        assert rows[-1]["content"] == "The backfill finished."
+        assert rows[-1]["session_id"] == "claude-uuid"
+
+    async def test_a_return_replays_it_rather_than_the_reply_before_it(
+        self, engine, connector
+    ):
+        """The bug: the late reply was sent but never stored, so coming back
+        replayed the older answer above it."""
+        await engine.handle_message("u1", "how are things", "chat1")
+        await engine.handle_command("u1", "session", "new", "chat1")
+        await _late_reply(engine, "chat1", "The backfill finished.")
+        await engine.handle_message("u1", "and over here", "chat1:s2")
+        connector.sent_messages.clear()
+
+        await engine.handle_command("u1", "session", "1", "chat1:s2")
+
+        assert _last(connector)["text"] == "The backfill finished."
+
+    async def test_one_read_live_is_not_replayed_on_the_way_back(
+        self, engine, connector
+    ):
+        await engine.handle_message("u1", "how are things", "chat1")
+        await _late_reply(engine, "chat1", "The backfill finished.")
+        await engine.handle_command("u1", "session", "new", "chat1")
+        connector.sent_messages.clear()
+
+        await engine.handle_command("u1", "session", "1", "chat1:s2")
+
+        assert not any(
+            "The backfill finished." in m["text"] for m in connector.sent_messages
+        )
+
+    async def test_an_empty_one_sends_and_stores_nothing(
+        self, engine, connector, store
+    ):
+        await _late_reply(engine, "chat1", "  \n ")
+
+        assert connector.sent_messages == []
+        assert await store.get_messages("u1", "chat1") == []
+
+
 class TestBanner:
     """The switch banner is chrome, so it must not outlive the switch."""
 
@@ -772,6 +844,76 @@ class TestSwitchingBackAndForth:
                 f"return {cycle} left the silent turn on a bare banner"
             )
             await engine.handle_command("u1", "session", "2", "chat1")
+
+    async def test_a_first_turn_running_only_tools_shows_its_tool_every_time(
+        self, engine, streaming
+    ):
+        """No text and no earlier reply must still not land on a bare banner.
+
+        A brand-new conversation whose first turn has only run tools has
+        nothing for ``resume`` to render and nothing for the replay to send,
+        so the tool it is running is the only thing left to show.
+        """
+        from leashd.agents.base import ToolActivity
+        from leashd.core.engine import _StreamingResponder
+
+        responder = _StreamingResponder(streaming, "chat1", throttle_seconds=0)
+        engine.active_responders["chat1"] = responder
+        await responder.on_activity(ToolActivity(tool_name="Bash", description="ls"))
+        await engine.handle_command("u1", "session", "new", "chat1")
+        assert "chat1" not in streaming._activity_message_id
+
+        for cycle in (1, 2, 3):
+            streaming.activity_messages.clear()
+            await engine.handle_command("u1", "session", "1", "chat1:s2")
+            shown = [a for a in streaming.activity_messages if a["chat_id"] == "chat1"]
+            assert shown, f"return {cycle} hid the running tool behind a bare banner"
+            assert shown[-1]["tool_name"] == "Bash"
+            await engine.handle_command("u1", "session", "2", "chat1")
+            assert "chat1" not in streaming._activity_message_id
+
+    async def test_the_running_tool_follows_the_replayed_reply(self, engine, streaming):
+        """Last reply first, then what the turn is doing now, in that order."""
+        from leashd.agents.base import ToolActivity
+        from leashd.core.engine import _StreamingResponder
+
+        await engine.handle_message("u1", "how are things", "chat1")
+        responder = _StreamingResponder(streaming, "chat1", throttle_seconds=0)
+        engine.active_responders["chat1"] = responder
+        await responder.on_activity(
+            ToolActivity(tool_name="WebFetch", description="example.com")
+        )
+        await engine.handle_command("u1", "session", "new", "chat1")
+        await engine.handle_message("u1", "and over here", "chat1:s2")
+        streaming.sent_messages.clear()
+        sent_before_activity: list[str] = []
+        original = streaming.send_activity
+
+        async def _recording(chat_id, tool_name, description, **kwargs):
+            sent_before_activity.extend(m["text"] for m in streaming.sent_messages)
+            return await original(chat_id, tool_name, description, **kwargs)
+
+        streaming.send_activity = _recording
+
+        await engine.handle_command("u1", "session", "1", "chat1:s2")
+
+        assert sent_before_activity[-1] == "Echo: how are things"
+        assert streaming.activity_messages[-1]["tool_name"] == "WebFetch"
+
+    async def test_a_status_line_is_shown_for_a_turn_with_no_text(
+        self, engine, streaming
+    ):
+        from leashd.core.engine import _StreamingResponder
+
+        responder = _StreamingResponder(streaming, "chat1", throttle_seconds=0)
+        engine.active_responders["chat1"] = responder
+        await responder.on_status("⏳ waiting on a background agent")
+        await engine.handle_command("u1", "session", "new", "chat1")
+        streaming.sent_messages.clear()
+
+        await engine.handle_command("u1", "session", "1", "chat1:s2")
+
+        assert "waiting on a background agent" in _last(streaming)["text"]
 
 
 class TestTerminate:

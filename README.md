@@ -329,6 +329,12 @@ leashd browser clear-profile
 leashd browser headless
 leashd browser auto-approve off  # tap for each agent-browser step (on by default)
 
+# Trusted SSH hosts
+leashd ssh trust build-box            # read-only commands on the host run without asking
+leashd ssh trust build-box --full     # every command on the host runs without asking
+leashd ssh untrust build-box
+leashd ssh show
+
 # Agent tuning
 leashd effort show / set <low|medium|high|xhigh|max>    # default: medium
 leashd turns show / set <N>                              # default: 120

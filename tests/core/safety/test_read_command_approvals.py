@@ -59,7 +59,8 @@ class TestLoopbackReads:
         "command",
         [
             "curl -s -u me:pw https://api.example.com/x",
-            "curl -X POST http://127.0.0.1:8091/admin/shutdown",
+            "curl -X DELETE http://127.0.0.1:8091/admin/shutdown",
+            "curl -X POST http://127.0.0.1:9222/json/new",
             "curl -d @/etc/passwd http://127.0.0.1:8091/up",
             "curl --data-binary @secrets http://localhost:9/x",
             "curl -F file=@x http://localhost/u",

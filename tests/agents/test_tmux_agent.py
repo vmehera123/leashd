@@ -10,6 +10,7 @@ import pytest
 from leashd.agents.runtimes.tmux import EFFORT_SCOPE_NOTE, TmuxAgent
 from leashd.agents.runtimes.tmux_session import (
     PolicyBlock,
+    TmuxClaudeSession,
     TmuxTurn,
     TurnUsage,
     reset_tmux_session_manager,
@@ -109,6 +110,7 @@ class FakeCS:
         self._stream_text_on_submit = False
         self.last_model = None
         self.answer_drive_active = False
+        self.regate_active = False
         # Screen the liveness poll reads for the unattended-dialog watchdog.
         # Inert by default: no selector, so the watchdog never arms.
         self.screen = ""
@@ -126,6 +128,9 @@ class FakeCS:
         self.working_directory = "/work"
         self.followup_injecting = False
         self.tool_running = False
+        self.running_response = False
+        self.submit_delivers = True
+        self.submit_followup_flags: list[bool] = []
 
     @property
     def goal_indicator_seen(self):
@@ -189,12 +194,24 @@ class FakeCS:
     def death_report(self):
         return {"pane_status": "dead" if self.pane_is_dead() else "alive"}
 
-    async def submit(self, text, *, max_enter_presses=5, plain_keys=False):
+    def response_running(self, screen=None):
+        return self.running_response
+
+    def clear_composer(self):
+        self.sent.append(("C-u", False))
+
+    async def submit(
+        self, text, *, max_enter_presses=5, plain_keys=False, followup=False
+    ):
         self.sent.append((text, True))
+        self.submit_followup_flags.append(followup)
+        if not self.submit_delivers:
+            return False
         if self._stream_text_on_submit and self.turn is not None:
             self.turn.text_parts.append(self._text)
             self.turn.mark_activity()
         self.send_keys("Enter", literal=False)
+        return True
 
     def complete_turn(self, *, is_error=False):
         self.complete_calls += 1
@@ -771,6 +788,35 @@ async def test_an_unattended_dialog_is_regated_rather_than_reported(
     assert not [c for c in chunks if "waiting on a permission prompt" in c]
     assert resp.is_error is False
     assert resp.content == "released"
+
+
+async def test_a_dialog_another_wait_is_regating_is_not_reported_unmatched(
+    tmp_path, monkeypatch
+):
+    """After a restart two waits watched one pane: the reattached turn and the
+    message sent after it. The second wait's re-gate was refused because the
+    first was still running, which it took for "no call matches" and told the
+    chat so, three seconds before the first one could have answered."""
+    import leashd.agents.runtimes.tmux as tmux_mod
+
+    monkeypatch.setattr(tmux_mod, "UNATTENDED_DIALOG_STALL_S", 0.0)
+    monkeypatch.setattr(tmux_mod, "LIVENESS_POLL_INTERVAL", 0.01)
+    cs = FakeCS(text="working")
+    cs._complete_on_enter = False
+    cs.screen = " Do you want to proceed?\n ❯ 1. Yes\n   2. No"
+    cs.dedicated_selector = True
+    cs.regate_active = True
+    tsm = FakeTSM(cs)
+    agent = _agent(_cfg(tmp_path, tmux_turn_ceiling_seconds=1), tsm)
+    chunks: list[str] = []
+
+    async def _on_text(text):
+        chunks.append(text)
+
+    await agent.execute("research", _session(tmp_path), on_text_chunk=_on_text)
+
+    assert tsm.regates == [cs]
+    assert not [c for c in chunks if "waiting on a permission prompt" in c]
 
 
 async def test_a_blinking_bullet_does_not_hide_a_wedged_dialog(tmp_path, monkeypatch):
@@ -1589,6 +1635,154 @@ async def test_a_tool_still_running_keeps_the_turn_open(tmp_path):
     assert "timed out" in resp.content
 
 
+_THINKING_RULE = "─" * 80
+_THINKING_FOOTER = "  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents"
+
+
+def _thinking_screen(spinner_row: str) -> str:
+    return "\n".join(
+        [
+            "● Web Search(uk software consultancies)",
+            "  ⎿  Did 1 search in 16s",
+            "",
+            spinner_row,
+            "",
+            _THINKING_RULE,
+            "❯\xa0",
+            _THINKING_RULE,
+            "",
+            _THINKING_FOOTER,
+        ]
+    )
+
+
+class _PaneReadingCS(FakeCS):
+    """Reads idleness off its screen with the real detector."""
+
+    def is_idle_at_composer(self, screen=None):
+        reader = object.__new__(TmuxClaudeSession)
+        return reader.is_idle_at_composer(self.capture() if screen is None else screen)
+
+
+class _TickingCS(FakeCS):
+    """A pane whose spinner clock moves between two reads."""
+
+    def __init__(self, spinner: str, **kwargs):
+        super().__init__(**kwargs)
+        self.spinner = spinner
+        self.reads = 0
+
+    def capture(self):
+        self.reads += 1
+        return _thinking_screen(f"{self.spinner} Forging… ({self.reads}s)")
+
+
+def _mid_turn(cs: FakeCS) -> FakeCS:
+    cs._complete_on_enter = False
+    cs._stream_text_on_submit = True
+    return cs
+
+
+async def test_a_linux_spinner_frame_does_not_end_the_turn_as_idle(tmp_path):
+    """leadline run 01a10244. Claude thought for 103 seconds between two
+    batches of web searches. Five seconds past the grace a capture landed on
+    the `*` frame Linux draws, the turn was returned on a progress note, and
+    two repair prompts were queued behind work that was still running."""
+    from structlog.testing import capture_logs
+
+    cs = _mid_turn(_PaneReadingCS(text="I'll search for consultancies first"))
+    cs.screen = _thinking_screen("* Forging… (1m 43s · ↓ 2.1k tokens)")
+    cfg = _cfg(
+        tmp_path, tmux_completion_idle_grace_seconds=1, tmux_turn_ceiling_seconds=2
+    )
+    agent = _agent(cfg, FakeTSM(cs))
+
+    with capture_logs() as logs:
+        resp = await agent.execute("build the prospect list", _session(tmp_path))
+
+    assert "tmux_turn_idle_completed" not in [e["event"] for e in logs]
+    assert "timed out" in resp.content
+
+
+async def test_a_pane_that_reads_idle_but_keeps_redrawing_is_not_finished(tmp_path):
+    """A spinner frame leashd has never seen reads as an idle composer. Its
+    clock still ticks, and a screen that changes is claude at work."""
+    from structlog.testing import capture_logs
+
+    cs = _mid_turn(_TickingCS("❋", text="I'll search for consultancies first"))
+    cs._idle_at_composer = True
+    cfg = _cfg(
+        tmp_path, tmux_completion_idle_grace_seconds=1, tmux_turn_ceiling_seconds=3
+    )
+    agent = _agent(cfg, FakeTSM(cs))
+
+    with capture_logs() as logs:
+        resp = await agent.execute("build the prospect list", _session(tmp_path))
+
+    assert cs.reads > 2
+    assert "tmux_turn_idle_completed" not in [e["event"] for e in logs]
+    assert "timed out" in resp.content
+
+
+async def test_a_blinking_tool_bullet_is_not_a_redraw(tmp_path):
+    """An interrupted turn leaves the bullet beside its tool blinking. That
+    alone must not hold the turn open, on macOS (`⏺`) or Linux (`●`)."""
+    from structlog.testing import capture_logs
+
+    class _BlinkingCS(FakeCS):
+        reads = 0
+
+        def capture(self):
+            self.reads += 1
+            bullet = ("⏺", " ", "●")[self.reads % 3]
+            return f"{bullet} Bash(make check)\n{_THINKING_RULE}\n❯\xa0"
+
+    cs = _mid_turn(_BlinkingCS(text="Running the check"))
+    cs._idle_at_composer = True
+    cfg = _cfg(
+        tmp_path, tmux_completion_idle_grace_seconds=1, tmux_turn_ceiling_seconds=5
+    )
+    agent = _agent(cfg, FakeTSM(cs))
+
+    with capture_logs() as logs:
+        resp = await agent.execute("run the check", _session(tmp_path))
+
+    assert "tmux_turn_idle_completed" in [e["event"] for e in logs]
+    assert resp.is_error is False
+
+
+async def test_the_idle_backstop_waits_out_the_grace_after_the_last_redraw(
+    tmp_path, monkeypatch
+):
+    from structlog.testing import capture_logs
+
+    from leashd.agents.runtimes import tmux as tmux_mod
+
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(tmux_mod.time, "monotonic", lambda: clock["now"])
+
+    class _SettlingCS(FakeCS):
+        reads = 0
+
+        def capture(self):
+            self.reads += 1
+            clock["now"] += 5.0
+            written = min(self.reads, 12)
+            return f"● line {written} of the answer\n{_THINKING_RULE}\n❯\xa0"
+
+    cs = _mid_turn(_SettlingCS(text="Here is the answer"))
+    cs._idle_at_composer = True
+    cfg = _cfg(tmp_path, tmux_completion_idle_grace_seconds=45)
+    agent = _agent(cfg, FakeTSM(cs))
+
+    with capture_logs() as logs:
+        resp = await agent.execute("write it up", _session(tmp_path))
+
+    assert resp.is_error is False
+    assert "tmux_turn_idle_completed" in [e["event"] for e in logs]
+    assert cs.reads == 12 + 45 // 5 + 1
+
+
 async def test_a_human_wait_is_logged_once_not_on_every_poll(tmp_path):
     from structlog.testing import capture_logs
 
@@ -2091,3 +2285,61 @@ async def test_run_native_command_model_note_reports_ground_truth(
 
     assert "ground truth" in out
     assert "claude-sonnet-5" in out
+
+
+async def test_execute_joins_a_response_claude_started_on_its_own(tmp_path):
+    cs = FakeCS(text="background review handled")
+    cs.running_response = True
+    agent = _agent(_cfg(tmp_path), FakeTSM(cs))
+
+    task = asyncio.create_task(agent.execute("what next?", _session(tmp_path)))
+    for _ in range(20):
+        await asyncio.sleep(0)
+    turn = cs.turn
+
+    assert turn is not None
+    assert cs.submit_followup_flags == [True]
+    assert ("Escape", False) not in cs.sent
+    assert not turn.stop_event.is_set()
+    assert not task.done()
+
+    turn.text_parts.append("the answer")
+    turn.end_response(from_transcript=False)
+    resp = await task
+
+    assert "the answer" in resp.content
+
+
+async def test_execute_on_an_idle_pane_submits_a_fresh_prompt(tmp_path):
+    cs = FakeCS()
+    agent = _agent(_cfg(tmp_path), FakeTSM(cs))
+
+    await agent.execute("hello", _session(tmp_path))
+
+    assert cs.submit_followup_flags == [False]
+
+
+async def test_execute_gives_the_credit_back_when_the_join_never_lands(
+    tmp_path, monkeypatch
+):
+    cs = FakeCS()
+    cs.running_response = True
+    cs.submit_delivers = False
+    cs._idle_at_composer = False
+    agent = _agent(_cfg(tmp_path), FakeTSM(cs))
+    seen: list[int] = []
+
+    async def _no_wait(cs_, timeout):
+        assert cs_.turn is not None
+        seen.append(cs_.turn.pending_followups)
+        cs_.submit_delivers = True
+        return True
+
+    monkeypatch.setattr("leashd.agents.runtimes.tmux._await_response_end", _no_wait)
+    await agent.execute("hello", _session(tmp_path))
+
+    assert seen == [0]
+    assert cs.submit_followup_flags == [True, False]
+    assert ("C-u", False) in cs.sent
+    assert cs.turn is not None
+    assert cs.turn.pending_followup_texts == []

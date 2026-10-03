@@ -54,6 +54,7 @@ from leashd.agents.runtimes.tmux_manifest import (
     session_id_from_tmux_name,
     write_manifest,
 )
+from leashd.core.events import LATE_REPLY, Event
 from leashd.core.safety.gatekeeper import FILE_EDIT_TOOLS
 from leashd.core.safety.policy import normalize_tool_name
 from leashd.exceptions import AgentError
@@ -774,6 +775,7 @@ _PERM_SUBJECT_TAIL_CHARS = 48
 _STUCK_PERMISSION_ID_CHARS = 10
 _PERM_BOX_RULE_CHARS = "─╌▔▁_=*-·"
 _PERM_BOX_RULE_MIN_CHARS = 8
+_PERM_COMMAND_FRAME_CHAR = "╌"
 _COLUMN_GAP_RE = re.compile(r"\s{2,}")
 _PANEL_MARK_GAP_RE = re.compile(r" {3,}(?=\S)")
 _CD_PREFIX_RE = re.compile(r"^cd\s+(?:\"[^\"]*\"|'[^']*'|[^\s;&|]+)\s*&&\s*")
@@ -785,7 +787,10 @@ _HOOKED_CALLS_KEPT = 64
 _PERM_QUESTION_WRAP_ROWS = 2
 _QUEUED_INPUT_HINT_RE = re.compile(r"^  \S.*\bto send now\s*$")
 _SPINNER_SCAN_ROWS = 6
-_SPINNER_ROW_RE = re.compile(r"^\s*[·✢✳✶✻✽]\s+\S[^…]*…\s*(?:\(.*)?$")
+_SPINNER_ROW_RE = re.compile(r"^\s*[·✢✳*✶✻✽]\s+\S[^…]*…\s*(?:\(.*)?$")
+_QUEUED_MESSAGE_ROW_RE = re.compile(r"^\s+❯\s")
+_COMPOSER_RULE_RE = re.compile(r"^─{8,}")
+_QUEUED_COMPOSER_HINT = "Press up to edit queued messages"
 _TOOL_IN_FLIGHT_MAX_S = 660.0
 _LATE_REPLY_SETTLE_S = 5.0
 _THINKING_SIGNATURE_TAG = b"B\x08thinking"
@@ -827,6 +832,11 @@ async def _outside_request(run: Callable[[], Coroutine[Any, Any, None]]) -> None
 _SIDE_PANEL_MIN_LEFT_COLS = 40
 _SIDE_PANEL_MIN_COLS = 20
 _SIDE_PANEL_MIN_ROWS = 3
+_SIDE_PANEL_DIVIDER = "│"
+_STANDING_GRANT_RE = re.compile(
+    r"don['’]t ask again|always allow|allow all|for (?:this|the) session|during this session",
+    re.IGNORECASE,
+)
 
 
 def _without_side_panel(screen: str) -> str:
@@ -857,10 +867,20 @@ def _without_side_panel(screen: str) -> str:
     moved its row's text two places into the gutter, no column read blank,
     the panel stayed, and a test fixture's "Esc to cancel" in the diff made
     the reply's numbered list a dialog.
+
+    Claude Code 2.1.288 draws the split as a ``│`` down every row instead of
+    leaving the column blank, and text runs right up to it. Nothing was cut:
+    an approved command wrapped at half width was not recognised and its
+    prompt stayed unpressed, while the panel's diff of a file quoting
+    ``esc to interrupt`` read as a live composer and stood down every
+    recovery, the ``/screen`` Reject button included.
     """
     rows = screen.split("\n")
     grids = [_screen_cells(r) for r in rows]
     width = max((len(g) for g in grids), default=0)
+    divider = _side_panel_divider(grids, width)
+    if divider is not None:
+        return "\n".join("".join(g[:divider]).rstrip() for g in grids)
     written = [
         g
         for r, g in zip(rows, grids, strict=True)
@@ -888,6 +908,24 @@ def _without_side_panel(screen: str) -> str:
     return "\n".join("".join(g[:gutter]).rstrip() for g in grids)
 
 
+def _side_panel_divider(grids: list[list[str]], width: int) -> int | None:
+    """The column claude draws its side panel's ``│`` edge down, if it does.
+
+    The edge runs the full height of the pane, so a column counts only when
+    every row carries it. A dialog's command frame draws the same character
+    in its first columns, which is why nothing left of the middle is taken.
+    """
+    drawn = [g for g in grids if g]
+    if len(drawn) < _SIDE_PANEL_MIN_ROWS:
+        return None
+    for col in range(
+        max(_SIDE_PANEL_MIN_LEFT_COLS, width // 2), width - _SIDE_PANEL_MIN_COLS
+    ):
+        if all(len(g) > col and g[col] == _SIDE_PANEL_DIVIDER for g in drawn):
+            return col
+    return None
+
+
 def _screen_cells(row: str) -> list[str]:
     cells: list[str] = []
     for ch in row:
@@ -907,6 +945,31 @@ def _is_box_rule(line: str) -> bool:
     """
     head = line[1:] if line.startswith(" ") else line
     run = len(head) - len(head.lstrip(_PERM_BOX_RULE_CHARS))
+    return run >= _PERM_BOX_RULE_MIN_CHARS
+
+
+def _is_command_frame(line: str) -> bool:
+    """A dashed rule claude 2.1.286+ draws above and below a Bash dialog's
+    command, inside the box rather than opening it::
+
+        ─────────────────────────────
+         Bash command
+         Run shell command
+        ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+         │ ssh remote_container '…' <<'SQL'
+         │ SQL
+        ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+         Ask rule Bash(ssh *) overrides auto mode for this command.
+         Do you want to proceed?
+
+    Read as the box's top edge, the frame under the command cut the box down
+    to the rule notice and the question: the header and the command fell
+    outside it, the approved ``ssh`` call's drive could neither name the
+    dialog nor confirm its shape, and the prompt sat until the stuck-dialog
+    timeout rejected it.
+    """
+    head = line[1:] if line.startswith(" ") else line
+    run = len(head) - len(head.lstrip(_PERM_COMMAND_FRAME_CHAR))
     return run >= _PERM_BOX_RULE_MIN_CHARS
 
 
@@ -946,9 +1009,46 @@ def _without_queued_input(rows: list[str]) -> list[str]:
     return [row for i, row in enumerate(rows) if i not in queued]
 
 
+def _without_queued_messages(rows: list[str]) -> list[str]:
+    """The non-blank rows above the composer with claude's queued messages cut out.
+
+    Claude Code 2.1.274 draws messages waiting behind a running response
+    between the spinner and the composer's rule, one indented ``❯`` row per
+    message with deeper continuation rows::
+
+        ✻ Forging… (16m 21s · ↓ 55.8k tokens · thinking some more with xhigh effort)
+          ⎿  Tip: Use /btw to ask a quick side question
+          ❯ report.json does not match the schema. Fix these problems:
+            The agent finished without writing report.json
+          ❯ report.json does not match the schema. Fix these problems:
+            The agent finished without writing report.json
+        ────────────────────────────────────────
+        ❯ Press up to edit queued messages
+
+    Two of them put the spinner seven rows above the composer, outside the
+    rows the spinner check reads, so a pane 16 minutes into its work read as
+    idle and the turn ended the moment the idle grace ran out.
+    """
+    end = len(rows)
+    while end and _COMPOSER_RULE_RE.match(rows[end - 1]):
+        end -= 1
+    top = end
+    for i in range(end - 1, -1, -1):
+        if not rows[i].startswith(" "):
+            break
+        if _QUEUED_MESSAGE_ROW_RE.match(rows[i]):
+            top = i
+    return rows[:top] + rows[end:]
+
+
 def _dialog_rows(screen: str) -> list[str]:
     """The rows a dialog detector reads: no side panel, no queued input."""
     return _without_queued_input(_without_side_panel(screen).splitlines())
+
+
+class PermOption(NamedTuple):
+    number: int
+    label: str
 
 
 @dataclass(frozen=True)
@@ -1089,6 +1189,9 @@ def _command_shown(subject: PermDialogSubject, box: list[str]) -> bool | None:
     if header is None:
         return None
     below = box[header + 1 :]
+    frame = next((i for i, row in enumerate(below) if _is_command_frame(row)), None)
+    if frame is not None:
+        below = below[frame + 1 :]
     while below and not below[0].strip().removeprefix("│").strip():
         below = below[1:]
     renders = {subject.command, _CD_PREFIX_RE.sub("", subject.command)}
@@ -1791,6 +1894,7 @@ class TmuxTurn:
         self.interrupted: bool = False
         self.reply_parts: int | None = None
         self._parts_at_stop: int = 0
+        self._parts_at_last_tool: int = 0
         self._hook_ends: int = 0
         self._transcript_ends: int = 0
         self._ends_counted: int = 0
@@ -2014,12 +2118,26 @@ class TmuxTurn:
     def mark_reply_taken(self) -> None:
         self.reply_parts = len(self.text_parts)
 
+    def note_tool_use(self, name: str) -> None:
+        self.tools_used.append(name)
+        self._parts_at_last_tool = len(self.text_parts)
+
     def take_late_text(self) -> str:
-        """The text tailed after the turn's reply was built, marked delivered."""
+        """The closing message of what was tailed after the turn's reply was
+        built, marked delivered.
+
+        Text written before the response's last tool call is narration that
+        never streamed anywhere, and claude's closing message restates it, so
+        sending both read as the same answer twice (bidlens, 2026-10-02).
+        """
         start = self._parts_at_stop if self.reply_parts is None else self.reply_parts
         late = [part.strip() for part in self.text_parts[start:] if part.strip()]
+        closing_start = max(start, self._parts_at_last_tool)
+        closing = [
+            part.strip() for part in self.text_parts[closing_start:] if part.strip()
+        ]
         self.reply_parts = len(self.text_parts)
-        return "\n\n".join(late)
+        return "\n\n".join(closing or late[-1:])
 
     def _finish(self) -> None:
         self.duration_ms = int((time.monotonic() - self._started) * 1000)
@@ -2712,7 +2830,15 @@ class TmuxClaudeSession:
         a POSITIVE check on composer state rather than a dialog-shape
         detector: the /model picker with its footer overwritten by a leaked
         ``[201~`` paste terminator defeated every shape-based detector while
-        remaining obviously not-a-composer."""
+        remaining obviously not-a-composer.
+
+        A permission dialog that ends the screen owns the keyboard whatever
+        is quoted above it. Its footer is ``Esc to cancel``, but a diff or a
+        file preview further up that mentioned ``esc to interrupt`` or
+        ``shift+tab to cycle`` read as the composer, and the stuck prompt was
+        left alone by everything that could have answered it."""
+        if self._live_perm_dialog(screen) is not None:
+            return False
         return "esc to interrupt" in screen or self.composer_footer_present(screen)
 
     async def _dismiss_stray_dialog(self) -> bool:
@@ -2826,6 +2952,11 @@ class TmuxClaudeSession:
             chars=len(text),
         )
         if not followup:
+            if self.response_running() or self.tool_in_flight():
+                logger.warning(
+                    "tmux_prompt_retype_skipped_pane_busy", tmux_name=self.tmux_name
+                )
+                return False
             with contextlib.suppress(Exception):
                 self.send_keys("Escape", literal=False)
             await asyncio.sleep(0.4)
@@ -2884,6 +3015,7 @@ class TmuxClaudeSession:
             else:
                 started = (
                     "esc to interrupt" in screen
+                    or self.followup_enqueued_at != enqueued_before
                     or (self.turn is not None and bool(self.turn.tools_used))
                     or self.dedicated_selector_present(screen)
                     or _detect_native_dialog(screen) is not None
@@ -3094,6 +3226,23 @@ class TmuxClaudeSession:
         haystack = " ".join(" ".join(region).split())
         return any(needle in haystack for needle in subject.needles)
 
+    def perm_dialog_options(self, screen: str) -> list[PermOption]:
+        """The numbered answers under the live permission dialog, as drawn."""
+        live = self._live_perm_dialog(screen)
+        if live is None:
+            return []
+        lines, anchor = live
+        options: list[PermOption] = []
+        for row in lines[anchor + 1 :]:
+            match = self._PERM_OPTION_ROW_RE.match(row)
+            if match is None:
+                if options and not row.strip():
+                    break
+                continue
+            label = " ".join(row[match.end() :].split())
+            options.append(PermOption(int(match.group(1)), label))
+        return options
+
     def perm_dialog_box(self, screen: str) -> str | None:
         """The whole permission dialog box on screen, whitespace-normalised.
 
@@ -3111,7 +3260,9 @@ class TmuxClaudeSession:
     def _perm_box(lines: list[str], anchor: int) -> list[str]:
         """The dialog box holding the question at ``anchor``, rule-bounded."""
         start = anchor
-        while start > 0 and not _is_box_rule(lines[start - 1]):
+        while start > 0 and (
+            not _is_box_rule(lines[start - 1]) or _is_command_frame(lines[start - 1])
+        ):
             start -= 1
         return lines[start : anchor + 1]
 
@@ -3718,13 +3869,51 @@ class TmuxClaudeSession:
         composer: claude 2.1.270 drops ``esc to interrupt`` from the footer for
         exactly that long, and a follow-up typed into a pane running two tools
         read as idle and ended an 85-minute turn on its first sentence.
+
+        Claude Code 2.1.274 shows nothing but the spinner while it thinks, and
+        on Linux one of its six frames is a plain ``*`` where macOS draws ``✳``.
+        A capture landing on that frame read as idle, and a 103-second thinking
+        stretch was returned as a finished turn five seconds past the grace.
         """
         s = self.capture() if screen is None else screen
         return (
-            "esc to interrupt" not in s
+            not self._interrupt_hint_shown(s)
             and self.composer_footer_present(s)
             and not self._spinner_running(s)
+            and not self._messages_queued(s)
         )
+
+    def response_running(self, screen: str | None = None) -> bool:
+        """True iff claude is working on a response in this pane right now.
+
+        Claude starts responses nobody typed for: every background
+        ``<task-notification>`` runs as a prompt of its own. A message arriving
+        during one is queued by claude like any follow-up, and its long text is
+        drawn cut short, so a fresh-prompt submit read it as lost, pressed
+        Escape into the running tool and typed the message a second time.
+        """
+        s = self.capture() if screen is None else screen
+        return (
+            self._interrupt_hint_shown(s)
+            or self._spinner_running(s)
+            or self._messages_queued(s)
+        )
+
+    @staticmethod
+    def _interrupt_hint_shown(screen: str) -> bool:
+        """True iff claude's own footer says ``esc to interrupt``.
+
+        Read from the composer down, never the whole screen. A prompt that
+        quoted the phrase stayed painted above an idle composer, the pane read
+        as mid-response, and the next message was queued behind a turn that
+        had already ended and waited for a reply that was never coming.
+        """
+        rows = [row for row in screen.splitlines() if row.strip()]
+        composer = max(
+            (i for i, row in enumerate(rows) if row.startswith("❯")), default=None
+        )
+        footer = rows[composer:] if composer is not None else rows[-3:]
+        return any("esc to interrupt" in row for row in footer)
 
     @staticmethod
     def _spinner_running(screen: str) -> bool:
@@ -3734,10 +3923,22 @@ class TmuxClaudeSession:
         )
         if composer is None:
             return False
-        return any(
-            _SPINNER_ROW_RE.match(row)
-            for row in rows[max(0, composer - _SPINNER_SCAN_ROWS) : composer]
+        above = _without_queued_messages(_without_queued_input(rows[:composer]))
+        return any(_SPINNER_ROW_RE.match(row) for row in above[-_SPINNER_SCAN_ROWS:])
+
+    @staticmethod
+    def _messages_queued(screen: str) -> bool:
+        """True iff the composer says claude is holding messages in its queue.
+
+        Claude only queues a message while a response is running, and Claude
+        Code 2.1.288 draws neither a spinner nor ``esc to interrupt`` while it
+        writes an answer, so this placeholder is all that says "busy" then.
+        """
+        composer = next(
+            (row for row in reversed(screen.splitlines()) if row.startswith("❯")),
+            "",
         )
+        return _QUEUED_COMPOSER_HINT in composer
 
     _INTERRUPT_MARKERS = (
         "Interrupted · What should Claude do instead?",
@@ -5885,6 +6086,60 @@ class TmuxSessionManager:
         )
         return True
 
+    def stuck_permission_options(self, cs: TmuxClaudeSession) -> list[PermOption]:
+        """The answers a stuck permission dialog offers, for a person to pick.
+
+        Empty unless :meth:`stuck_permission_id` names the dialog. An option
+        that grants more than this one call ("Yes, and don't ask again for
+        …") is left out: it writes a standing allow rule into claude's own
+        settings, which no later call would be gated by.
+        """
+        if self.stuck_permission_id(cs) is None:
+            return []
+        return [
+            option
+            for option in cs.perm_dialog_options(cs.capture())
+            if not _STANDING_GRANT_RE.search(option.label)
+        ]
+
+    def answer_stuck_permission(
+        self,
+        cs: TmuxClaudeSession,
+        permission_id: str,
+        number: int,
+        *,
+        source: str,
+    ) -> PermOption | None:
+        """Press one option of a permission dialog nobody is answering.
+
+        The person who picked it has the dialog in front of them: ``/screen``
+        shows the whole terminal, and the tap is bound to the dialog it was
+        shown under, so a prompt that changed since is left alone. Claude
+        answers a numbered dialog on the digit itself.
+        """
+        if self.stuck_permission_id(cs) != permission_id:
+            return None
+        option = next(
+            (o for o in self.stuck_permission_options(cs) if o.number == number),
+            None,
+        )
+        if option is None:
+            return None
+        try:
+            cs.send_keys(str(option.number), literal=True)
+        except AgentError:
+            return None
+        logger.warning(
+            "tmux_stuck_permission_answered",
+            session_id=cs.session_id,
+            chat_id=cs.chat_id,
+            tmux_name=cs.tmux_name,
+            source=source,
+            option=option.number,
+            label=option.label,
+        )
+        return option
+
     def spawn_orphaned_permission_regate(
         self, cs: TmuxClaudeSession
     ) -> asyncio.Task[bool]:
@@ -6310,8 +6565,11 @@ class TmuxSessionManager:
         A backstop that closes a turn while claude is still working leaves the
         rest of the answer with no request to carry it: two protostar replies
         ended eight minutes after their turn and were neither sent nor stored.
-        The transcript is given a moment to catch up with the ``Stop`` hook, and
-        the turn's own reply to be built, so no line is sent twice.
+        A turn claude starts by itself, on a background task's notification,
+        has none either. The transcript is given a moment to catch up with the
+        ``Stop`` hook, and the turn's own reply to be built, so no line is sent
+        twice. The engine sends and stores it, so a ``/session`` return replays
+        it rather than the reply before it.
         """
         deadline = time.monotonic() + _LATE_REPLY_SETTLE_S
         while time.monotonic() < deadline and not (
@@ -6319,25 +6577,26 @@ class TmuxSessionManager:
         ):
             await asyncio.sleep(0.1)
         text = turn.take_late_text()
-        connector = self._interactions.connector if self._interactions else None
         logger.info(
             "tmux_late_reply",
             session_id=cs.session_id,
             chat_id=cs.chat_id,
             text_length=len(text),
-            delivered=bool(text) and connector is not None,
+            delivered=bool(text) and self._event_bus is not None,
         )
-        if not text or connector is None:
+        if not text or self._event_bus is None:
             return
-        try:
-            await connector.send_message(cs.chat_id, text)
-        except Exception:
-            logger.warning(
-                "tmux_late_reply_send_failed",
-                session_id=cs.session_id,
-                chat_id=cs.chat_id,
-                exc_info=True,
+        await self._event_bus.emit(
+            Event(
+                name=LATE_REPLY,
+                data={
+                    "chat_id": cs.chat_id,
+                    "user_id": cs.user_id,
+                    "session_id": cs.claude_uuid,
+                    "content": text,
+                },
             )
+        )
 
     def _note_native_auto_refusal(
         self, cs: TmuxClaudeSession, body: dict[str, Any]
@@ -6825,7 +7084,8 @@ class TmuxSessionManager:
                 await self._process_blocks(turn, content)
             if live_turn is not None:
                 live_turn.api_error = _api_error_kind(obj)
-                live_turn.interrupted = False
+            if turn is not None:
+                turn.interrupted = False
             return
 
         if obj_type == "user":
@@ -6927,7 +7187,7 @@ class TmuxSessionManager:
                     )
             elif btype == "tool_use":
                 name = str(block.get("name", ""))
-                turn.tools_used.append(name)
+                turn.note_tool_use(name)
                 tool_input = block.get("input", {}) or {}
                 desc = describe_tool(name, tool_input)
                 if turn.on_tool_activity and turn.claim_jsonl_activity(

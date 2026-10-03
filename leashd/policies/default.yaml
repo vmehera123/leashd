@@ -28,6 +28,13 @@ rules:
     action: deny
     reason: "Destructive or dangerous command"
 
+  - name: scratch-delete
+    tool: Bash
+    command_patterns:
+      - "^(?!.*\\.\\.)rm\\s+(?:-[a-zA-Z]+\\s+)+(?:(?:(?:/private)?/tmp/[A-Za-z0-9_][A-Za-z0-9_.+=,@-]*(?:/[A-Za-z0-9_.+=,@-]+)*|(?:[A-Za-z0-9_][A-Za-z0-9_.+=,@-]*/)*(?:__pycache__|\\.pytest_cache|\\.ruff_cache|\\.mypy_cache))(?:\\s+|$))+$"
+    action: allow
+    description: "Delete of a literal path under /tmp or of a tool cache directory"
+
   # Recursive delete asks rather than denies: in practice the target is the
   # agent's own litter (build dirs, caches, logs), and a hard deny ended the
   # whole job to protect a cache directory. An approval keeps a human in the
@@ -62,8 +69,9 @@ rules:
     command_patterns:
       - "^(ls|stat|file|test|\\[\\[?)(\\s|$)(?=.*(\\.env\\b(?!\\.(example|sample|template|dist))|\\.ssh/|\\.aws/|\\.gnupg/|authorized_keys|\\.pem\\b|\\.key\\b|\\.p12\\b|\\.pfx\\b|\\.keystore\\b|id_rsa|id_ed25519|id_ecdsa|id_dsa|\\.git-credentials\\b|credentials\\b|secrets?\\.|token\\.json\\b))"
       - "^git\\s+(-C\\s+\\S+\\s+)?(status|check-ignore|ls-files)\\b(?=.*(\\.env\\b(?!\\.(example|sample|template|dist))|\\.ssh/|\\.aws/|\\.gnupg/|authorized_keys|\\.pem\\b|\\.key\\b|\\.p12\\b|\\.pfx\\b|\\.keystore\\b|id_rsa|id_ed25519|id_ecdsa|id_dsa|\\.git-credentials\\b|credentials\\b|secrets?\\.|token\\.json\\b))"
+      - "^grep(?=.*(\\.env\\b(?!\\.(example|sample|template|dist))|\\.ssh/|\\.aws/|\\.gnupg/|authorized_keys|\\.pem\\b|\\.key\\b|\\.p12\\b|\\.pfx\\b|\\.keystore\\b|id_rsa|id_ed25519|id_ecdsa|id_dsa|\\.git-credentials\\b|credentials\\b|secrets?\\.|token\\.json\\b))(?:\\s+-[Hhs]+)*\\s+-[Hhs]*c[cHhs]*(?:\\s+-[cHhs]+)*\\s+\\^[A-Z][A-Z0-9_]*=(?:\\s+(?!-)[A-Za-z0-9_./~-]+)+$"
     action: allow
-    description: "Metadata of a credential path (listing, existence, ignore status) without reading it"
+    description: "Metadata of a credential path (listing, existence, ignore status, a match count) without reading it"
 
   - name: credential-bash
     tool: Bash
@@ -184,6 +192,13 @@ rules:
     action: allow
     description: "Read-only request to a loopback address"
 
+  - name: loopback-write
+    tool: Bash
+    command_patterns:
+      - "^curl\\+loopback (?:127\\.0\\.0\\.1|localhost|0\\.0\\.0\\.0|::1)(?:,(?:127\\.0\\.0\\.1|localhost|0\\.0\\.0\\.0|::1))*$"
+    action: allow
+    description: "POST, PUT or PATCH with a literal body to a loopback dev server"
+
   - name: public-read
     tool: Bash
     command_patterns:
@@ -197,7 +212,11 @@ rules:
   - name: sql-read
     tool: Bash
     command_patterns:
-      - "(?i)^(?![^\\\\]*(\\b(INSERT|UPDATE|DELETE|MERGE|COPY|CREATE|DROP|ALTER|TRUNCATE|ATTACH|DETACH|VACUUM|REINDEX|GRANT|REVOKE)\\b|\\bREPLACE\\s+INTO\\b|\\bPRAGMA\\s+\\w+\\s*=))\\s*(SELECT|WITH|EXPLAIN|PRAGMA|\\.tables|\\.schema|\\.databases|\\.dbinfo|\\.indexes)\\b[^;\\\\]*(;\\s*((SELECT|WITH|EXPLAIN|PRAGMA|\\.tables|\\.schema|\\.databases|\\.dbinfo|\\.indexes)\\b[^;\\\\]*)?)*$"
+      # A backslash starts a psql meta-command (`\!`, `\copy`, `\o file`), so
+      # the only one a statement may carry is the `\n` of an `E'\n'` string.
+      - "(?is)^(?!.*(\\b(INSERT|UPDATE|DELETE|MERGE|COPY|CREATE|DROP|ALTER|TRUNCATE|ATTACH|DETACH|VACUUM|REINDEX|GRANT|REVOKE)\\b|\\bREPLACE\\s+INTO\\b|\\bPRAGMA\\s+\\w+\\s*=))\\s*(SELECT|WITH|EXPLAIN|PRAGMA|\\.tables|\\.schema|\\.databases|\\.dbinfo|\\.indexes)\\b([^;\\\\]|\\\\n)*(;\\s*((SELECT|WITH|EXPLAIN|PRAGMA|\\.tables|\\.schema|\\.databases|\\.dbinfo|\\.indexes)\\b([^;\\\\]|\\\\n)*)?)*$"
+      # psql's describe commands: `\d portals`, `\dt+`, `\l`.
+      - "^\\\\(d[a-zA-Z]*\\+?|l\\+?|conninfo)(\\s+[\\w.*]+)?\\s*$"
     action: allow
     description: "Read-only SQL query"
 
@@ -213,7 +232,14 @@ rules:
       - "^ag\\b(?![^|]*\\s--pager\\b)"
       - "^\\[\\[?\\s"
       - "^(uv\\s+run\\s+(--no-project\\s+)?)?python3?\\s+-m\\s+json\\.tool\\b"
-      - "^(vm_stat|memory_pressure|nproc)\\b"
+      - "^(vm_stat|memory_pressure|nproc|free)\\b"
+      - "^systemctl(\\s+--(no-pager|user|full|all|plain|no-legend))*\\s+(status|show|cat|list-units|list-unit-files|list-timers|list-sockets|list-dependencies|is-active|is-enabled|is-failed)\\b"
+      - "^journalctl\\b(?![^|]*\\s--(vacuum|rotate|flush|sync|relinquish|smart-relinquish|setup-keys|update-catalog))"
+      - "^(ss|netstat)\\b"
+      - "^(getent|dig|nslookup|host)\\b"
+      - "^ping\\b(?=[^|]*\\s-c\\s*\\d)"
+      - "^mtr\\b(?=[^|]*\\s(-[a-zA-Z0-9]*r[a-zA-Z0-9]*|--report(-wide)?)(\\s|$))"
+      - "^nvidia-smi(\\s+(-L|--list-gpus|--query-\\S+|--format=\\S+|-q|-x|-i\\s+\\S+|--id=\\S+))*\\s*$"
       - "^sysctl\\b(?![^|]*(\\s-w\\b|=))"
       - "^pmset\\s+-g\\b"
       - "^[gm]?awk\\b(?![^|]*\\s(-[fiEl]\\b|--(file|include|load|exec)\\b))"

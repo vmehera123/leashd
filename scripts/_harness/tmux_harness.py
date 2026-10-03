@@ -41,6 +41,7 @@ CHAT_ID = os.environ.get("CHAT_ID", "284184690")
 USER_ID = os.environ.get("USER_ID", "284184690")
 EDIT_DELAY_S = float(os.environ.get("EDIT_DELAY_MS", "0")) / 1000.0
 PERSIST = os.environ.get("PERSIST", "0") == "1"
+LINUX_SPINNER = os.environ.get("LINUX_SPINNER", "0") == "1"
 
 MAX_TEXT_LEN = 4096
 MAX_CALLBACK_DATA_BYTES = 64
@@ -728,10 +729,32 @@ def build_session_store() -> Any:
     return SqliteSessionStore(HARNESS_DIR / "sessions.db")
 
 
+def draw_linux_spinner() -> None:
+    """Make every pane read the way Claude Code draws it on Linux.
+
+    The spinner's six frames are compiled in per platform: a macOS build draws
+    ``✳`` where a Linux build draws a plain ``*``, and no setting switches a
+    macOS pane over. ``LINUX_SPINNER=1`` rewrites that one frame in what leashd
+    reads off the pane, which is the only place the difference reaches it.
+    """
+    from leashd.agents.runtimes.tmux_session import TmuxClaudeSession
+
+    capture = TmuxClaudeSession.capture
+
+    def capture_as_linux(self: Any) -> str:
+        return capture(self).replace("✳", "*")
+
+    TmuxClaudeSession.capture = capture_as_linux  # type: ignore[method-assign]
+
+
 async def run_engine() -> None:
     from leashd.agents.runtimes.tmux_session import (
         get_or_create_tmux_session_manager,
     )
+
+    if LINUX_SPINNER:
+        draw_linux_spinner()
+        print("LINUX_SPINNER_ON", flush=True)
     from leashd.app import build_engine
     from leashd.connectors.multi import MultiConnector
     from leashd.connectors.telegram import TelegramConnector

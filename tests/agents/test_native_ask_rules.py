@@ -274,7 +274,7 @@ class TestAgainstRealPolicy:
             # no-force-push / destructive-bash
             "git push --force-with-lease origin main",
             "git push -f origin main",
-            "rm -rf /tmp/build",
+            "rm -rf build",
             "sudo apt install ripgrep",
             "chmod 777 /tmp/x",
             # agent-browser mutations + privileged

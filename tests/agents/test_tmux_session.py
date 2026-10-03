@@ -1576,6 +1576,22 @@ async def test_interrupt_record_marks_the_turn_until_claude_carries_on(cfg):
     assert turn.interrupted is False
 
 
+async def test_a_reply_read_after_the_stop_hook_clears_the_interrupt(cfg):
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    turn = cs.begin_turn(on_text_chunk=None, on_tool_activity=None)
+
+    await tsm._dispatch_jsonl_event(
+        cs, _user_record("[Request interrupted by user for tool use]")
+    )
+    turn.end_response(from_transcript=False)
+    assert turn.stop_event.is_set()
+
+    await tsm._dispatch_jsonl_event(cs, _assistant_record("Both are optional."))
+
+    assert turn.interrupted is False
+
+
 async def test_a_prompt_quoting_the_interrupt_marker_is_not_an_interrupt(cfg):
     tsm = TmuxSessionManager(cfg)
     cs = _session(tsm)
@@ -4258,6 +4274,108 @@ async def test_a_screen_that_kept_its_panel_still_bounds_the_box(cfg):
     assert cs.perm_dialog_kind_matches(wedge, subject) is True
 
 
+_FRAMED_SSH_COMMAND = (
+    "ssh remote_container 'cd /opt/leadline && docker compose exec -T db psql "
+    "-U leadline -d leadline -v ON_ERROR_STOP=1' <<'SQL'\n"
+    "\\x off\n"
+    "select 'reply', count(*) from reply_jobs;\n"
+    "\\d research_runs\n"
+    "SQL"
+)
+
+
+def _framed_bash_dialog(command: str, description: str = "") -> str:
+    frame = "╌" * 159
+    lines = command.split("\n")
+    rows = [f" │ {ln}" for ln in lines] if len(lines) > 1 else [f" {command}"]
+    return "\n".join(
+        [
+            "⏺ Read-only queries against production.",
+            "",
+            "─" * 160,
+            " Bash command",
+            f" {description or 'Run shell command'}",
+            frame,
+            *rows,
+            frame,
+            " Ask rule Bash(ssh *) overrides auto mode for this command.",
+            " /permissions to let auto mode decide",
+            "",
+            " Do you want to proceed?",
+            " ❯ 1. Yes",
+            "   2. No",
+            "",
+            " Esc to cancel · Tab to amend",
+        ]
+    )
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        {"command": _FRAMED_SSH_COMMAND},
+        {
+            "command": "ssh nohost.invalid 'cd /opt && ls -la'",
+            "description": "List remote opt directory",
+        },
+    ],
+)
+def test_claudes_dashed_command_frame_does_not_bound_the_box(cfg, call):
+    """The 2026-10-01 leadline wedge, rendered as claude 2.1.286/2.1.287 draws
+    it: the command sits between two dashed rules inside the box. The lower
+    one was read as the box's top edge, so the approved ssh call's drive could
+    neither name its dialog nor confirm its shape, and the stuck-dialog
+    timeout rejected it ten minutes later."""
+    cs = _session(TmuxSessionManager(cfg))
+    subject = _perm_dialog_subject("Bash", call)
+    dialog = _framed_bash_dialog(call["command"], call.get("description", ""))
+
+    assert "Bash command" in (cs.perm_dialog_box(dialog) or "")
+    assert cs.perm_dialog_is_about(dialog, subject) is True
+    assert cs.perm_dialog_kind_matches(dialog, subject) is True
+
+
+def test_a_framed_command_is_read_from_inside_the_frame(cfg):
+    """The row under the header is now the description, so the command a
+    stranger's call shares a description with is still told apart."""
+    cs = _session(TmuxSessionManager(cfg))
+    description = "List remote opt directory"
+    dialog = _framed_bash_dialog("ssh nohost.invalid 'cd /opt && ls -la'", description)
+    stranger = _perm_dialog_subject(
+        "Bash",
+        {
+            "command": "ssh nohost.invalid 'cd /opt && ls -la /tmp'",
+            "description": description,
+        },
+    )
+
+    assert cs.perm_dialog_is_about(dialog, stranger) is False
+
+
+async def test_an_approved_call_in_a_dashed_frame_is_pressed(
+    cfg, no_real_sleep, monkeypatch
+):
+    from structlog.testing import capture_logs
+
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm, mode="auto")
+    subject = _perm_dialog_subject("Bash", {"command": _FRAMED_SSH_COMMAND})
+    pane = _TimedPane([_framed_bash_dialog(_FRAMED_SSH_COMMAND)] * 3 + [_IDLE_MID_TURN])
+    _pane_clock(monkeypatch, pane)
+    cs.attach(object(), pane)
+
+    with capture_logs() as logs:
+        answered = await cs.answer_perm_selector(
+            allow=True, timeout=8.0, subject=subject
+        )
+
+    assert answered is True
+    assert pane.sent == [("Enter", False)]
+    events = [e["event"] for e in logs]
+    assert "tmux_perm_selector_unmatched_shape" not in events
+    assert "tmux_perm_selector_pressed_unmatched" not in events
+
+
 async def test_a_dialog_quoted_in_the_side_panel_is_not_a_dialog(cfg):
     """The panel shows whatever the agent changed, and in this repository that
     includes fixtures of claude's own dialogs. Read whole, an idle pane showing
@@ -4839,6 +4957,219 @@ def test_a_stuck_prompt_is_rejected_only_while_it_is_the_one_shown(cfg):
     pane._screens = [_tall_bash_dialog()]
     assert tsm.reject_stuck_permission(cs, shown, source="chat") is True
     assert pane.sent == [("Escape", False)]
+
+
+_DIVIDED_LEFT_COLS = 88
+_DIVIDED_PANEL = [
+    "                                                                      ✕",
+    "8 files changed +1379 -52                            source: Current ▾",
+    "",
+    ".claude/skills/telegram-harness/SKILL.md                            +8",
+    "CHANGELOG.md                                                        +8",
+    "──────────────────────────────────────────────────────────────────────",
+    ".claude/skills/telegram-harness/SKILL.md                       [ ask ]",
+    "──────────────────────────────────────────────────────────────────────",
+    " 83 +check that a long answer, and one with messages queued behind it,",
+    " 84 +Claude Code 2.1.288 draws no spinner and no `esc to interrupt` wh",
+    "    +ile it writes an answer, so a",
+    " 85 +single capture of that pane looks idle; only the screen changing",
+    " 86 +",
+    " 87  `EDIT_DELAY_MS` (`0`) makes the fake Bot API sleep before answeri",
+]
+_DIVIDED_RM_COMMAND = (
+    "cd /Users/vmehera/projects/nodenova/leashd && uv run ruff check . | tail -2 "
+    '&& git status --short | grep -v "^M  \\|^A  " ; rm -rf /private/tmp/claude-501/'
+    "-Users-vmehera-projects-nodenova-leashd/8470e809-36c7-46f1-8c2d-a428fdc85fda/"
+    "scratchpad/prefix"
+)
+_DIVIDED_RM_INPUT = {
+    "command": _DIVIDED_RM_COMMAND,
+    "description": "Final lint check, list unstaged changes, remove the pre-fix export",
+}
+_DIVIDED_CONVERSATION = [
+    "⏺ Final lint check, list unstaged changes, remove the pre-fix export",
+    '  ⎿  $ uv run ruff check . | tail -2 && git status --short | grep -v "^M \\|^A " ; rm -rf',
+    "     /private/tmp/claude-501/-Users-vmehera-projects-nodenova-leashd/8470e809-36c7-46f1",
+    "     -8c2d-a428fdc85fda/scratchpad/prefix",
+    "",
+    "─" * _DIVIDED_LEFT_COLS,
+    " Bash command",
+    " Final lint check, list unstaged changes, remove the pre-fix export",
+    "╌" * _DIVIDED_LEFT_COLS,
+    ' │ uv run ruff check . | tail -2 && git status --short | grep -v "^M  \\|^A  " ; rm -rf',
+    " │ /private/tmp/claude-501/-Users-vmehera-projects-nodenova-leashd/8470e809-36c7-46f1-8",
+    " │ c2d-a428fdc85fda/scratchpad/prefix",
+    "╌" * _DIVIDED_LEFT_COLS,
+    " Ask rule Bash(*rm -*) overrides auto mode for this command.",
+    " /permissions to let auto mode decide",
+    "",
+    " Do you want to proceed?",
+    " ❯ 1. Yes",
+    "   2. No",
+    "",
+    " Esc to cancel · Tab to amend",
+]
+
+
+def _divided_screen(
+    conversation: list[str] = _DIVIDED_CONVERSATION,
+    panel: list[str] = _DIVIDED_PANEL,
+) -> str:
+    """A pane as Claude Code 2.1.288 draws it with its side panel open: the
+    conversation in the left 88 columns, a `│` down every row, the panel's
+    diff to the right of it. Taken from the pane leashd left stuck on
+    3 Oct 2026."""
+    height = max(len(conversation), len(panel))
+    left = conversation + [""] * (height - len(conversation))
+    right = panel + [""] * (height - len(panel))
+    return "\n".join(
+        f"{row.ljust(_DIVIDED_LEFT_COLS)}│{side}"
+        for row, side in zip(left, right, strict=True)
+    )
+
+
+def test_the_side_panel_behind_a_drawn_divider_is_cut_away():
+    from leashd.agents.runtimes.tmux_session import _without_side_panel
+
+    cut = _without_side_panel(_divided_screen())
+
+    assert cut.splitlines() == [row.rstrip() for row in _DIVIDED_CONVERSATION]
+    assert "esc to interrupt" not in cut
+
+
+def test_a_frame_bar_in_the_first_columns_is_not_a_side_panel():
+    from leashd.agents.runtimes.tmux_session import _without_side_panel
+
+    framed = "\n".join(_DIVIDED_CONVERSATION)
+
+    assert _without_side_panel(framed) == framed
+
+
+def test_a_column_some_rows_break_is_not_a_side_panel():
+    from leashd.agents.runtimes.tmux_session import _without_side_panel
+
+    rows = _divided_screen().splitlines()
+    rows[3] = rows[3].replace("│", " ")
+    screen = "\n".join(rows)
+
+    assert _without_side_panel(screen) == screen
+
+
+async def test_an_approved_call_beside_the_side_panel_is_pressed(
+    cfg, no_real_sleep, monkeypatch
+):
+    """leashd #2, 3 Oct 2026. leashd allowed the `rm -rf`, claude asked anyway
+    under its own ask rule, and the prompt sat for 10 minutes: with the panel
+    left in, the command wrapped against a `│` was not the one approved."""
+    cs = _session(TmuxSessionManager(cfg))
+    pane = _TimedPane([_divided_screen()] * 3 + [_IDLE_MID_TURN])
+    _pane_clock(monkeypatch, pane)
+    cs.attach(object(), pane)
+    subject = _perm_dialog_subject("Bash", _DIVIDED_RM_INPUT)
+
+    assert cs.perm_dialog_is_about(cs.capture(), subject) is True
+    answered = await cs.answer_perm_selector(allow=True, subject=subject, call="rm")
+
+    assert answered is True
+    assert pane.sent == [("Enter", False)]
+
+
+_QUOTED_FOOTERS = [
+    "⏺ Write(quoted.md)",
+    "  ⎿  Wrote 2 lines to quoted.md",
+    "      1 the footer reads: ⏵⏵ auto mode on (shift+tab to cycle)",
+    "      2 and while it works: esc to interrupt",
+    "",
+]
+
+
+def test_a_dialog_owns_the_keyboard_whatever_is_quoted_above_it(cfg):
+    """The same pane, second failure. The panel's diff quoted `esc to
+    interrupt`, which read as a live composer, so the last-resort press, the
+    re-gate and the `/screen` Reject button each stood down without a word."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    quoted = "\n".join(_QUOTED_FOOTERS + _DIVIDED_CONVERSATION)
+    cs.attach(object(), _FakePane([quoted]))
+
+    assert "esc to interrupt" in quoted
+    assert "shift+tab to cycle" in quoted
+    assert cs._composer_accepts_input(quoted) is False
+    assert tsm.stuck_permission_id(cs) is not None
+
+
+def test_a_composer_under_a_dismissed_dialog_still_accepts_input(cfg):
+    cs = _session(TmuxSessionManager(cfg))
+    answered = "\n".join(
+        [
+            *_DIVIDED_CONVERSATION,
+            "",
+            "⏺ ok",
+            "─" * 40,
+            "❯\xa0",
+            "─" * 40,
+            "  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents",
+        ]
+    )
+
+    assert cs._composer_accepts_input(answered) is True
+
+
+def test_a_stuck_prompt_offers_the_answers_it_draws(cfg):
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    cs.attach(object(), _FakePane([_divided_screen()]))
+
+    assert tsm.stuck_permission_options(cs) == [(1, "Yes"), (2, "No")]
+
+
+def test_a_stuck_prompt_never_offers_a_standing_grant(cfg):
+    """ "Yes, and don't ask again" writes an allow rule into claude's own
+    settings, and no later call of that kind would reach the gate."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    three_way = "\n".join(_DIVIDED_CONVERSATION).replace(
+        "   2. No",
+        "   2. Yes, and don't ask again for rm commands in /private/tmp\n"
+        "   3. No, and tell Claude what to do differently",
+    )
+    cs.attach(object(), _FakePane([three_way]))
+
+    assert [o.number for o in cs.perm_dialog_options(three_way)] == [1, 2, 3]
+    assert tsm.stuck_permission_options(cs) == [
+        (1, "Yes"),
+        (3, "No, and tell Claude what to do differently"),
+    ]
+    shown = tsm.stuck_permission_id(cs)
+    assert tsm.answer_stuck_permission(cs, shown, 2, source="chat") is None
+
+
+def test_a_stuck_prompt_is_answered_with_the_option_tapped(cfg):
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    pane = _FakePane([_divided_screen()])
+    cs.attach(object(), pane)
+    shown = tsm.stuck_permission_id(cs)
+
+    assert tsm.answer_stuck_permission(cs, "another-dialog", 1, source="chat") is None
+    assert tsm.answer_stuck_permission(cs, shown, 7, source="chat") is None
+    assert pane.sent == []
+
+    assert tsm.answer_stuck_permission(cs, shown, 1, source="chat") == (1, "Yes")
+    assert pane.sent == [("1", True)]
+
+
+def test_a_prompt_a_hook_is_still_deciding_offers_no_answers(cfg):
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    pane = _FakePane([_divided_screen()])
+    cs.attach(object(), pane)
+    shown = tsm.stuck_permission_id(cs)
+    cs.permission_hooks_inflight = 1
+
+    assert tsm.stuck_permission_options(cs) == []
+    assert tsm.answer_stuck_permission(cs, shown, 1, source="chat") is None
+    assert pane.sent == []
 
 
 def test_a_prompt_a_hook_is_still_deciding_is_not_stuck(cfg):
@@ -8171,7 +8502,7 @@ async def test_submit_retypes_when_delivery_vanishes(cfg, no_real_sleep, monkeyp
     cs = _session(tsm)
     idle = "❯\n  ⏵⏵ auto mode on (shift+tab to cycle)\n"
     running = "⏺ working…\nesc to interrupt\n"
-    pane = _FakePane([idle, idle, idle, running])
+    pane = _FakePane([idle, idle, idle, idle, running])
     cs.attach(object(), pane)
 
     async def _vanishing_delivery(text):
@@ -8187,6 +8518,73 @@ async def test_submit_retypes_when_delivery_vanishes(cfg, no_real_sleep, monkeyp
     assert delivered_ok is False
 
 
+async def test_submit_never_escapes_a_pane_that_is_working(
+    cfg, no_real_sleep, monkeypatch
+):
+    monkeypatch.setattr(
+        "leashd.agents.runtimes.tmux_session._STRAY_DIALOG_WAIT_S", 0.01
+    )
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    busy = (
+        "⏺ Running the full check\n"
+        "✻ Beboppin'… (4m 37s · ↓ 5.2k tokens)\n"
+        "────────────────\n"
+        "❯ Press up to edit queued messages\n"
+        "────────────────\n"
+        "  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents\n"
+    )
+    pane = _FakePane([busy])
+    cs.attach(object(), pane)
+
+    async def _queued_out_of_sight(text):
+        pass
+
+    monkeypatch.setattr(cs, "_deliver_prompt", _queued_out_of_sight)
+
+    delivered_ok = await cs.submit("a long message claude draws cut short")
+
+    assert ("Escape", False) not in pane.sent
+    assert ("a long message claude draws cut short", True) not in pane.sent
+    assert delivered_ok is False
+
+
+async def test_submit_counts_an_enqueue_receipt_as_delivery(
+    cfg, no_real_sleep, monkeypatch
+):
+    monkeypatch.setattr(
+        "leashd.agents.runtimes.tmux_session._STRAY_DIALOG_WAIT_S", 0.01
+    )
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    busy = (
+        "✻ Beboppin'… (4m 37s · ↓ 5.2k tokens)\n"
+        "────────────────\n"
+        "❯ Press up to edit queued messages\n"
+        "────────────────\n"
+        "  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents\n"
+    )
+    pane = _FakePane([busy])
+    cs.attach(object(), pane)
+
+    async def _typed(text):
+        pass
+
+    press = cs.send_keys
+
+    def _enter_queues(keys, *, literal=True):
+        press(keys, literal=literal)
+        if keys == "Enter":
+            cs.followup_enqueued_at = 123.0
+
+    monkeypatch.setattr(cs, "_deliver_prompt", _typed)
+    monkeypatch.setattr(cs, "send_keys", _enter_queues)
+
+    assert await cs.submit("a long message claude draws cut short") is True
+    assert pane.sent.count(("Enter", False)) == 1
+    assert ("Escape", False) not in pane.sent
+
+
 async def test_submit_reports_delivery_when_retype_lands(
     cfg, no_real_sleep, monkeypatch
 ):
@@ -8198,7 +8596,7 @@ async def test_submit_reports_delivery_when_retype_lands(
     cs = _session(tsm)
     idle = "❯\n  ⏵⏵ auto mode on (shift+tab to cycle)\n"
     running = "⏺ working…\nesc to interrupt\n"
-    pane = _FakePane([idle, idle, running])
+    pane = _FakePane([idle, idle, idle, running])
     cs.attach(object(), pane)
 
     async def _vanishing_delivery(text):
@@ -9877,6 +10275,233 @@ def test_text_typed_into_a_busy_composer_is_not_an_idle_pane(cfg):
     assert cs.is_idle_at_composer(done) is True
 
 
+_LEADLINE_RULE = "─" * 150
+_LEADLINE_FOOTER = "  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents"
+_LEADLINE_TIP = (
+    "  ⎿  Tip: Use /btw to ask a quick side question without interrupting "
+    "Claude's current work"
+)
+_LEADLINE_REPAIR = (
+    "  ❯ /work/research/report.json does not match the schema. Fix these "
+    "problems and write the file again:\n"
+    "    The agent finished without writing /work/research/report.json"
+)
+_LEADLINE_OUTPUT = (
+    "● Fetch(https://www.67bricks.com/)\n"
+    "  ⎿  Received 79.9KB (200 OK)\n"
+    "\n"
+    "● Fetch(https://claude.com/customers/headstart)\n"
+    "  ⎿  Received 406.3KB (200 OK)\n"
+)
+_LINUX_SPINNER_FRAMES = "·✢*✶✻✽"
+_MACOS_SPINNER_FRAMES = "·✢✳✶✻✽"
+_SPINNER_CLOCKS = (
+    "(16m 21s · ↓ 55.8k tokens · thinking some more with xhigh effort)",
+    "(14m 35s · ↓ 9.0k tokens · deep in thought with xhigh effort)",
+    "(10m 51s · ↓ 45.1k tokens)",
+    "",
+)
+_LEADLINE_FAILED_RUN_SCREEN = (
+    f"{_LEADLINE_OUTPUT}"
+    "\n"
+    "✻ Forging… (16m 21s · ↓ 55.8k tokens · thinking some more with xhigh effort)\n"
+    f"{_LEADLINE_TIP}\n"
+    "\n"
+    f"{_LEADLINE_REPAIR}\n"
+    f"{_LEADLINE_REPAIR}\n"
+    "\n"
+    f"{_LEADLINE_RULE}\n"
+    "❯ Press up to edit queued messages\n"
+    f"{_LEADLINE_RULE}\n"
+    "\n"
+    f"{_LEADLINE_FOOTER}"
+)
+
+
+def _thinking_pane(
+    glyph: str,
+    queued: int,
+    *,
+    tip: bool = True,
+    clock: str = _SPINNER_CLOCKS[0],
+    composer: str | None = None,
+) -> str:
+    if composer is None:
+        composer = "❯ Press up to edit queued messages" if queued else "❯\xa0"
+    rows = [_LEADLINE_OUTPUT, f"{glyph} Forging… {clock}".rstrip()]
+    if tip:
+        rows.append(_LEADLINE_TIP)
+    rows.append("")
+    rows.extend([_LEADLINE_REPAIR] * queued)
+    if queued:
+        rows.append("")
+    rows += [_LEADLINE_RULE, composer, _LEADLINE_RULE, "", _LEADLINE_FOOTER]
+    return "\n".join(rows)
+
+
+def _finished_pane(last_rows: str) -> str:
+    return "\n".join(
+        [
+            _LEADLINE_OUTPUT,
+            last_rows,
+            "",
+            _LEADLINE_RULE,
+            "❯\xa0",
+            _LEADLINE_RULE,
+            "",
+            _LEADLINE_FOOTER,
+        ]
+    )
+
+
+@pytest.mark.parametrize("glyph", sorted(set(_LINUX_SPINNER_FRAMES + "✳")))
+@pytest.mark.parametrize("queued", [0, 1, 2, 3])
+@pytest.mark.parametrize("tip", [True, False])
+def test_a_thinking_pane_is_busy_on_every_spinner_frame(cfg, glyph, queued, tip):
+    """leadline run 01a10244, 3 Oct 2026, Claude Code 2.1.274 on Linux. The
+    footer says nothing while claude thinks, so the spinner row is the only
+    sign of work. One of its Linux frames is a plain `*`, and two queued
+    messages push the row out of the six leashd used to read."""
+    cs = _session(TmuxSessionManager(cfg))
+    screen = _thinking_pane(glyph, queued, tip=tip)
+
+    assert cs._spinner_running(screen) is True
+    assert cs.is_idle_at_composer(screen) is False
+    assert cs.response_running(screen) is True
+
+
+@pytest.mark.parametrize("glyph", _LINUX_SPINNER_FRAMES)
+@pytest.mark.parametrize("clock", _SPINNER_CLOCKS)
+def test_the_spinner_is_read_whatever_follows_the_verb(cfg, glyph, clock):
+    cs = _session(TmuxSessionManager(cfg))
+
+    assert cs.is_idle_at_composer(_thinking_pane(glyph, 0, clock=clock)) is False
+    assert cs.response_running(_thinking_pane(glyph, 2, clock=clock)) is True
+
+
+def test_the_screen_of_the_failed_leadline_run_is_a_working_pane(cfg):
+    """`research_runs.screen` of run 01a10244, as the worker last mirrored it:
+    16 minutes into the work, two repair prompts queued, and read as idle."""
+    cs = _session(TmuxSessionManager(cfg))
+
+    assert cs.is_idle_at_composer(_LEADLINE_FAILED_RUN_SCREEN) is False
+    assert cs.response_running(_LEADLINE_FAILED_RUN_SCREEN) is True
+
+
+@pytest.mark.parametrize("glyph", _LINUX_SPINNER_FRAMES)
+def test_queued_messages_do_not_hide_the_spinner_from_a_typed_composer(cfg, glyph):
+    """With text typed into the composer its "queued messages" placeholder is
+    gone, and the spinner seven rows up is all that is left to read."""
+    cs = _session(TmuxSessionManager(cfg))
+    screen = _thinking_pane(glyph, 3, composer="❯\xa0one more thing")
+
+    assert cs._messages_queued(screen) is False
+    assert cs._spinner_running(screen) is True
+    assert cs.is_idle_at_composer(screen) is False
+
+
+_STREAMING_ANSWER_QUEUED = (
+    "  13. A reviewer can question whether a change should exist at all, which\n"
+    "\n"
+    "❯ Do not run any tool. Reply with exactly one line: 'QUEUED ONE: received'.\n"
+    "\n"
+    "❯ Do not run any tool. Reply with exactly one line: 'QUEUED TWO: received'.\n"
+    "  ctrl+x ctrl+s to send now\n"
+    "\n"
+    f"{_LEADLINE_RULE}\n"
+    "❯ Press up to edit queued messages\n"
+    f"{_LEADLINE_RULE}\n"
+    "\n"
+    f"{_LEADLINE_FOOTER}"
+)
+
+
+def test_a_composer_holding_queued_messages_is_a_working_pane(cfg):
+    """Captured from Claude Code 2.1.288 while it wrote a long answer: no
+    spinner and no `esc to interrupt`, only the composer's placeholder."""
+    cs = _session(TmuxSessionManager(cfg))
+
+    assert cs._spinner_running(_STREAMING_ANSWER_QUEUED) is False
+    assert cs.is_idle_at_composer(_STREAMING_ANSWER_QUEUED) is False
+    assert cs.response_running(_STREAMING_ANSWER_QUEUED) is True
+
+
+def test_the_spinner_is_read_above_queued_messages_drawn_with_a_send_hint(cfg):
+    cs = _session(TmuxSessionManager(cfg))
+    screen = _STREAMING_ANSWER_QUEUED.replace(
+        "  13. A reviewer can question whether a change should exist at all, which\n",
+        f"{_LEADLINE_OUTPUT}\n* Forging… (2m 3s · ↓ 1.1k tokens)\n{_LEADLINE_TIP}\n",
+    ).replace("❯ Press up to edit queued messages", "❯\xa0and another thing")
+
+    assert cs._spinner_running(screen) is True
+    assert cs.is_idle_at_composer(screen) is False
+
+
+@pytest.mark.parametrize(
+    "last_rows",
+    [
+        "● Done, the report is written.",
+        "● Done.\n\n✻ Churned for 44s · done 4:46 PM",
+        "● Done.\n\n* Worked for 44s",
+        "● Next steps:\n  * check the schema\n  * write the file",
+        "* a Markdown bullet that names no spinner",
+        "● Searching for 1 pattern, reading 1 file, calling portal 33 times…",
+    ],
+)
+def test_a_finished_pane_still_reads_idle(cfg, last_rows):
+    cs = _session(TmuxSessionManager(cfg))
+    screen = _finished_pane(last_rows)
+
+    assert cs.is_idle_at_composer(screen) is True
+    assert cs.response_running(screen) is False
+
+
+_QUOTED_HINT_PROMPT = (
+    "❯ write quoted.md with these two lines: 'the footer reads: auto mode on\n"
+    "  (shift+tab to cycle)' and 'while busy: esc to interrupt'\n"
+    "\n"
+    "● Done.\n"
+    "\n"
+    "✻ Churned for 15s · done 5:36 PM"
+)
+
+
+def test_a_quoted_interrupt_hint_does_not_make_an_idle_pane_busy(cfg):
+    """Harness s30, 3 Oct 2026. The prompt before had quoted the phrase, it
+    stayed on screen above the idle composer, and the next message was queued
+    behind a response that was not running."""
+    cs = _session(TmuxSessionManager(cfg))
+    screen = _finished_pane(_QUOTED_HINT_PROMPT)
+
+    assert "esc to interrupt" in screen
+    assert cs.response_running(screen) is False
+    assert cs.is_idle_at_composer(screen) is True
+
+
+@pytest.mark.parametrize(
+    "footer",
+    [
+        "  ⏵⏵ accept edits on (shift+tab to cycle) · esc to interrupt",
+        "  esc to interrupt",
+    ],
+)
+def test_the_interrupt_hint_in_the_footer_is_a_busy_pane(cfg, footer):
+    cs = _session(TmuxSessionManager(cfg))
+    screen = _finished_pane("● Running the check").replace(_LEADLINE_FOOTER, footer)
+
+    assert cs.response_running(screen) is True
+    assert cs.is_idle_at_composer(screen) is False
+
+
+def test_every_spinner_frame_claude_code_draws_is_known():
+    """The frame tables compiled into Claude Code 2.1.288: `at` on macOS, `Pt`
+    on Linux, `ot` under Ghostty."""
+    from leashd.agents.runtimes.tmux_session import _SPINNER_ROW_RE
+
+    for glyph in set(_LINUX_SPINNER_FRAMES + _MACOS_SPINNER_FRAMES):
+        assert _SPINNER_ROW_RE.match(f"{glyph} Forging… (1m 2s · ↓ 3 tokens)")
+
+
 async def test_a_message_is_never_typed_into_a_live_dialog(
     cfg, no_real_sleep, monkeypatch
 ):
@@ -10006,41 +10631,151 @@ async def test_a_reply_finished_after_its_turn_was_closed_reaches_the_chat(cfg):
     sentence while claude kept working, and the two replies claude finished
     eight minutes later ended a turn nobody was waiting on: neither was sent
     or stored."""
-    from types import SimpleNamespace
-    from unittest.mock import AsyncMock
-
     tsm = TmuxSessionManager(cfg)
     cs = _session(tsm)
     tsm._by_uuid["u1"] = cs.session_id
-    connector = SimpleNamespace(send_message=AsyncMock())
-    _bind(
-        tsm,
-        _StubGatekeeper(PermissionAllow(updated_input={})),
-        interactions=SimpleNamespace(connector=connector),
-    )
+    cs.claude_uuid = "u1"
+    late = _bind_late_replies(tsm)
     chunks: list[str] = []
 
     async def on_chunk(text):
         chunks.append(text)
 
-    def assistant(text):
-        block = {"type": "text", "text": text}
-        return {"type": "assistant", "message": {"content": [block]}}
-
     turn = cs.begin_turn(on_text_chunk=on_chunk, on_tool_activity=None)
-    await tsm._dispatch_jsonl_event(cs, assistant("I'll start by reading the memos."))
+    await tsm._dispatch_jsonl_event(cs, _assistant("I'll start by reading the memos."))
     turn.force_complete()
     turn.mark_reply_taken()
 
-    await tsm._dispatch_jsonl_event(cs, assistant("Where things stand: 10 accepted."))
+    await tsm._dispatch_jsonl_event(cs, _assistant("Where things stand: 10 accepted."))
     await tsm.on_lifecycle("Stop", {"session_id": "u1"})
     await tsm._dispatch_jsonl_event(cs, {"type": "system", "subtype": "turn_duration"})
     await _settle_drives(tsm)
 
-    connector.send_message.assert_awaited_once_with(
-        cs.chat_id, "Where things stand: 10 accepted."
-    )
+    assert late == [
+        {
+            "chat_id": cs.chat_id,
+            "user_id": cs.user_id,
+            "session_id": "u1",
+            "content": "Where things stand: 10 accepted.",
+        }
+    ]
     assert chunks == ["I'll start by reading the memos."]
+
+
+async def test_a_turn_claude_started_itself_reaches_the_chat_once(cfg):
+    """bidlens, 2026-10-02. A background watcher's notification started a
+    turn after the last reply was built. Its two narration lines and the
+    closing message restating them were all sent as one late reply, which
+    read as the same answer twice."""
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    tsm._by_uuid["u1"] = cs.session_id
+    late = _bind_late_replies(tsm)
+
+    turn = cs.begin_turn(on_text_chunk=None, on_tool_activity=None)
+    await tsm._dispatch_jsonl_event(cs, _assistant("It should finish around 14:35."))
+    await tsm.on_lifecycle("Stop", {"session_id": "u1"})
+    await tsm._dispatch_jsonl_event(cs, {"type": "system", "subtype": "turn_duration"})
+    turn.mark_reply_taken()
+    await _settle_drives(tsm)
+    assert late == []
+
+    closing = (
+        "The second watcher hit its 2-hour limit and stopped.\n\n"
+        "I started a short watcher, capped at 30 minutes."
+    )
+    for obj in (
+        _assistant("The second watcher also hit its 2-hour limit and stopped."),
+        _tool_use("toolu_1", "Bash", {"command": "kill -0 45604 && echo running"}),
+        _assistant("The backfill is on 2025-07-27. I'll start a short watcher."),
+        _tool_use(
+            "toolu_2", "Bash", {"command": "while kill -0 45604; do sleep 30; done"}
+        ),
+        _assistant(closing),
+    ):
+        await tsm._dispatch_jsonl_event(cs, obj)
+    await tsm.on_lifecycle("Stop", {"session_id": "u1"})
+    await tsm._dispatch_jsonl_event(cs, {"type": "system", "subtype": "turn_duration"})
+    await _settle_drives(tsm)
+
+    assert [event["content"] for event in late] == [closing]
+
+
+async def test_a_late_reply_with_no_event_bus_is_dropped_not_raised(cfg):
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    turn = cs.begin_turn(on_text_chunk=None, on_tool_activity=None)
+    turn.force_complete()
+    turn.mark_reply_taken()
+    turn.text_parts.append("Done.")
+    turn.end_response(from_transcript=True)
+
+    await tsm._deliver_late_reply(cs, turn)
+
+    assert turn.take_late_text() == ""
+
+
+def test_late_text_drops_the_narration_before_the_last_tool_call():
+    turn = TmuxTurn(on_text_chunk=None, on_tool_activity=None)
+    turn.text_parts.append("Streamed before the turn closed.")
+    turn.force_complete()
+    turn.mark_reply_taken()
+    turn.text_parts.append("Checking the backfill.")
+    turn.note_tool_use("Bash")
+    turn.text_parts.append("Starting a watcher.")
+    turn.note_tool_use("Bash")
+    turn.text_parts.extend(["Status: running.", "Next: the doctor."])
+
+    assert turn.take_late_text() == "Status: running.\n\nNext: the doctor."
+
+
+def test_late_text_with_no_tool_call_keeps_every_part():
+    turn = TmuxTurn(on_text_chunk=None, on_tool_activity=None)
+    turn.note_tool_use("Read")
+    turn.text_parts.append("Streamed before the turn closed.")
+    turn.force_complete()
+    turn.mark_reply_taken()
+    turn.text_parts.extend(["First thought.", "Second thought."])
+
+    assert turn.take_late_text() == "First thought.\n\nSecond thought."
+
+
+def test_late_text_ending_on_a_tool_call_keeps_the_last_line():
+    turn = TmuxTurn(on_text_chunk=None, on_tool_activity=None)
+    turn.force_complete()
+    turn.mark_reply_taken()
+    turn.text_parts.extend(["Checking the log.", "Starting the watcher now."])
+    turn.note_tool_use("Bash")
+
+    assert turn.take_late_text() == "Starting the watcher now."
+
+
+def _assistant(text):
+    return {
+        "type": "assistant",
+        "message": {"content": [{"type": "text", "text": text}]},
+    }
+
+
+def _bind_late_replies(tsm):
+    from leashd.core.events import LATE_REPLY, EventBus
+
+    bus = EventBus()
+    received: list[dict] = []
+
+    async def _record(event):
+        received.append(dict(event.data))
+
+    bus.subscribe(LATE_REPLY, _record)
+    tsm.bind_safety(
+        gatekeeper=_StubGatekeeper(PermissionAllow(updated_input={})),
+        approval_coordinator=None,
+        interaction_coordinator=None,
+        audit=MagicMock(),
+        event_bus=bus,
+        session_manager=MagicMock(),
+    )
+    return received
 
 
 _NARRATION_SIGNATURE = (

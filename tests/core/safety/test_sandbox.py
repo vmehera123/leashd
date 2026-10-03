@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from leashd.core.safety.sandbox import (
@@ -278,6 +280,64 @@ class TestClaudeAgentDirectories:
         ok, _ = sandbox.validate_path(self._memory(home, project) / "MEMORY.md")
         assert ok is True
         ok, _ = sandbox.validate_path(home / ".claude" / "plans" / "plan.md")
+        assert ok is True
+
+    def test_a_sessions_scratchpad_is_writable(self, home, tmp_path, monkeypatch):
+        scratch = tmp_path / "scratch"
+        monkeypatch.setenv("CLAUDE_CODE_TMPDIR", str(scratch))
+        project = tmp_path / "leadline"
+        project.mkdir()
+        sandbox = SandboxEnforcer(sandbox_directories([project]))
+        key = _claude_project_key(str(project.resolve()))
+        root = scratch / f"claude-{os.getuid()}"
+
+        ok, _ = sandbox.validate_path(root / key / "5fe2dc16" / "scratchpad" / "p.sh")
+        assert ok is True
+        ok, _ = sandbox.validate_path(root / "-Users-x-other" / "5fe2dc16" / "p.sh")
+        assert ok is False
+
+    def test_the_scratchpad_defaults_to_tmp(self, home, tmp_path, monkeypatch):
+        monkeypatch.delenv("CLAUDE_CODE_TMPDIR", raising=False)
+        project = tmp_path / "leadline"
+        project.mkdir()
+        sandbox = SandboxEnforcer(sandbox_directories([project]))
+        key = _claude_project_key(str(project.resolve()))
+
+        ok, _ = sandbox.validate_path(
+            f"/tmp/claude-{os.getuid()}/{key}/5fe2dc16/scratchpad/probe.sh"
+        )
+        assert ok is True
+        ok, _ = sandbox.validate_path("/tmp/elsewhere/probe.sh")
+        assert ok is False
+
+    def test_a_saved_tool_result_is_readable(self, home, tmp_path):
+        project = tmp_path / "leadline"
+        project.mkdir()
+        sandbox = SandboxEnforcer(sandbox_directories([project]))
+        store = (
+            home / ".claude" / "projects" / _claude_project_key(str(project.resolve()))
+        )
+
+        ok, _ = sandbox.validate_path(store / "ad87cbe8" / "tool-results" / "b9q.txt")
+        assert ok is True
+        ok, _ = sandbox.validate_path(store / "ad87cbe8" / "subagents" / "a.jsonl")
+        assert ok is False
+        ok, _ = sandbox.validate_path(store / "tool-results" / "b9q.txt")
+        assert ok is False
+
+    def test_a_later_project_opens_its_session_files(self, home, tmp_path):
+        project = tmp_path / "leadline"
+        extra = tmp_path / "bidlens"
+        project.mkdir()
+        extra.mkdir()
+        sandbox = SandboxEnforcer(sandbox_directories([project]))
+        store = (
+            home / ".claude" / "projects" / _claude_project_key(str(extra.resolve()))
+        )
+
+        sandbox.add_project(extra)
+
+        ok, _ = sandbox.validate_path(store / "ad87cbe8" / "tool-results" / "b9q.txt")
         assert ok is True
 
     @pytest.mark.parametrize(

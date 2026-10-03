@@ -38,6 +38,7 @@ from leashd.core.events import (
     ENGINE_STARTED,
     ENGINE_STOPPED,
     EXECUTION_INTERRUPTED,
+    LATE_REPLY,
     MESSAGE_IN,
     MESSAGE_OUT,
     MESSAGE_QUEUED,
@@ -153,6 +154,7 @@ _FOLLOWUP_UNREAD_NOTICE = (
 )
 _BROWSER_SHUTDOWN_POLLS = 10
 _SCREEN_SETTLE_SECONDS = 0.6
+_SCREEN_BUTTON_CHARS = 48
 _BROWSER_SHUTDOWN_POLL_SECONDS = 0.3
 
 
@@ -581,6 +583,25 @@ class _StreamingResponder:
                 await self._show_activity(self._current_activity)
             return True
 
+    async def reveal_progress(self) -> None:
+        """Show what a resumed turn with no text yet is doing right now.
+
+        ``resume`` puts nothing on screen for a turn that has only run tools,
+        so the caller can replay the conversation's last reply first; this
+        then puts the running tool and any status line under it. Without it a
+        first turn busy with tools lands on a bare banner, since there is no
+        earlier reply to replay either.
+        """
+        async with self._lock:
+            if not self._active or self._closed:
+                return
+            needs_status_message = self._status is not None and self._message_id is None
+            if needs_status_message and not await self._advance():
+                self._active = False
+                return
+            if self._current_activity is not None and not self._has_activity:
+                await self._show_activity(self._current_activity)
+
     async def cleanup(self) -> None:
         """Remove the streaming cursor and deactivate. Used on error paths."""
         async with self._lock:
@@ -742,6 +763,7 @@ class Engine:
             approval_coordinator=self.approval_coordinator,
             approval_timeout=config.approval_timeout_seconds,
             browser_auto_approve=config.browser_auto_approve,
+            trusted_ssh_hosts=config.trusted_ssh_hosts,
         )
 
         self._git_handler = git_handler
@@ -764,6 +786,8 @@ class Engine:
         # Strong refs to the turns adopted from a previous daemon (asyncio only
         # weak-refs tasks), self-pruning via the done-callback.
         self._reattach_tasks: set[asyncio.Task[None]] = set()
+
+        self.event_bus.subscribe(LATE_REPLY, self._deliver_late_reply)
 
         self._chat_sessions = ChatSessionDirectory(
             self.session_manager,
@@ -1050,6 +1074,7 @@ class Engine:
             self.config = new_config
             self.agent.update_config(new_config)
             self._gatekeeper.set_browser_auto_approve(new_config.browser_auto_approve)
+            self._gatekeeper.set_trusted_ssh_hosts(new_config.trusted_ssh_hosts)
             await self.event_bus.emit(
                 Event(
                     name=CONFIG_RELOADED,
@@ -2427,9 +2452,22 @@ class Engine:
         stuck_prompt_id = getattr(self.agent, "stuck_prompt_id", None)
         verb, _, prompt_id = args.strip().partition(" ")
         header = ""
+        answer_stuck_prompt = getattr(self.agent, "answer_stuck_prompt", None)
         if verb == "reject" and stuck_prompt_id is not None:
             if self.agent.reject_stuck_prompt(session, prompt_id.strip()):  # type: ignore[attr-defined]
                 header = "❌ Rejected the prompt. Nothing ran.\n\n"
+                await asyncio.sleep(_SCREEN_SETTLE_SECONDS)
+            else:
+                header = "That prompt is no longer waiting. The screen now:\n\n"
+        elif verb == "answer" and answer_stuck_prompt is not None:
+            prompt_id, _, number = prompt_id.strip().partition(" ")
+            picked = (
+                answer_stuck_prompt(session, prompt_id, int(number))
+                if number.strip().isdigit()
+                else None
+            )
+            if picked is not None:
+                header = f"✅ Answered the prompt: {picked}\n\n"
                 await asyncio.sleep(_SCREEN_SETTLE_SECONDS)
             else:
                 header = "That prompt is no longer waiting. The screen now:\n\n"
@@ -2450,6 +2488,18 @@ class Engine:
                     )
                 ],
             )
+            stuck_prompt_options = getattr(self.agent, "stuck_prompt_options", None)
+            options = stuck_prompt_options(session) if stuck_prompt_options else []
+            buttons[:0] = [
+                [
+                    InlineButton(
+                        text=f"✅ {number}. {label}"[:_SCREEN_BUTTON_CHARS],
+                        callback_data=f"/screen answer {stuck} {number}",
+                    )
+                ]
+                for number, label in options
+                if not label.lower().startswith("no")
+            ]
         await self.connector.send_message(chat_id, text, buttons=buttons)
         self._bury_chat_stream_tail(chat_id)
         return ""
@@ -2944,6 +2994,10 @@ class Engine:
             resumed = await self._resume_foreground_stream(target.chat_id)
         if banner and not resumed:
             await self._replay_chat_session_transcript(session)
+        if mid_turn and not resumed:
+            responder = self._active_responders.get(target.chat_id)
+            if responder is not None:
+                await responder.reveal_progress()
         if self.connector is not None:
             await self.connector.flush_chat_session_prompts(target.chat_id)
         logger.info(
@@ -3169,6 +3223,31 @@ class Engine:
             return
         await self.connector.send_message(chat_id, content)
         self._chat_stream_tail[base_of(chat_id)] = tail
+
+    async def _deliver_late_reply(self, event: Event) -> None:
+        """Send and store a reply the agent finished with no request waiting.
+
+        Stored like any other reply, so ``/session`` coming back replays it
+        rather than the answer before it, which is what it did while the
+        runtime sent these straight to the connector.
+        """
+        chat_id = str(event.data["chat_id"])
+        content = str(event.data["content"]).strip()
+        if not content:
+            return
+        await self._message_logger.log(
+            user_id=str(event.data["user_id"]),
+            chat_id=chat_id,
+            role="assistant",
+            content=content,
+            session_id=event.data.get("session_id"),
+        )
+        if self.connector is not None:
+            await self.connector.send_message(chat_id, content)
+        self._note_chat_stream_tail(chat_id, content)
+        await self.event_bus.emit(
+            Event(name=MESSAGE_OUT, data={"chat_id": chat_id, "content": content})
+        )
 
     def _note_chat_stream_tail(self, chat_id: str, content: str) -> None:
         """Record which conversation's reply now ends the chat it went to.

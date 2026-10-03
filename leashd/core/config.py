@@ -166,6 +166,8 @@ class LeashdConfig(BaseSettings):
     browser_headless: bool = True
     browser_auto_approve: bool = True
 
+    trusted_ssh_hosts: dict[str, Literal["read", "full"]] = {}
+
     # Security-guidance plugin (Claude Code marketplace plugin).
     # OFF by default — opt-in. When on, leashd installs and enables
     # ``security-guidance@claude-plugins-official`` via its managed Claude

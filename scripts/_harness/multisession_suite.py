@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 import time
 import urllib.request
@@ -71,6 +72,7 @@ FREE_ANSWER = "use whatever the repo already does"
 IDLE_GRACE = float(os.environ.get("LEASHD_TMUX_COMPLETION_IDLE_GRACE_SECONDS", "45"))
 HELD_SECONDS = float(os.environ.get("HELD_SECONDS", str(IDLE_GRACE + 10)))
 REPLAY_CEILING = 3000
+_LATE_SETTLE_SECONDS = 12
 LONG = (
     "Write 30 numbered lines on why code review catches what tests cannot. "
     "Every line must be a full sentence of at least 180 characters. "
@@ -719,6 +721,432 @@ def s24() -> None:
     check(
         not _posted(again, reply),
         "choosing it again while the answer is still in view does not repeat it",
+    )
+
+
+TOOLS_FIRST = (
+    "Do not write any text before the tool call. Your very first action must "
+    "be one foreground Bash call running exactly "
+    "`uv run python -c 'import time; time.sleep({seconds})'`. "
+    "After it finishes, reply with exactly one line: 'SLEPT'."
+)
+RUNNING = "\u26a1 Running"
+
+
+def _activity_lines(since: int) -> list[str]:
+    return [t for t in texts(since) if t.startswith(RUNNING) and "time.sleep" in t]
+
+
+@scenario("s25", "a brand-new conversation still busy with a tool shows that tool")
+def s25() -> None:
+    """The reported incident: a first turn in a fresh conversation, walked
+    away from and come back to while it was only running tools.
+
+    The turn had written no text, so there was nothing to resume, and it was
+    the conversation's first turn, so there was no earlier reply to replay:
+    the return landed on a bare ``\u25b8 #2 \u2026 working`` banner. The tool
+    it is running is the one thing left to show, and it has to come back.
+    """
+    setup(on=1, slots=1)
+    cmd("session", "new")
+    wait_foreground(slot(2))
+
+    start = call_count()
+    msg(TOOLS_FIRST.format(seconds=60))
+    wait_for(lambda: _activity_lines(start), 120, "the long tool shown in #2")
+    cmd("session", "1")
+    wait_foreground(slot(1))
+    time.sleep(3)
+
+    back = call_count()
+    cmd("session", "2")
+    wait_foreground(slot(2))
+    banner = wait_for(
+        lambda: index_of_text(back, "\u25b8 #2 \u00b7"), 20, "the #2 banner"
+    )
+    busy = next((r for r in sessions()["slots"] if r["index"] == 2), {}).get("busy")
+    check(bool(busy), "the turn is still running its tool when the chat comes back")
+    shown = wait_for(lambda: _activity_lines(banner) or None, 15, "the running tool")
+    check(bool(shown), "coming back mid-tool shows what the turn is doing")
+
+
+LATE_VERDICT = "LATE VERDICT"
+LATE_NARRATION = "NOTED"
+SELF_STARTED = (
+    "Run `sleep 20` as ONE Bash call with run_in_background set to true, then "
+    "end your turn at once by replying exactly 'WATCHING'. Later, when the "
+    "background task's completion notification arrives, do these three things "
+    f"in order: write the line '{LATE_NARRATION}: the sleep finished.', then "
+    "run one foreground Bash call `echo checked`, then reply with exactly one "
+    f"line: '{LATE_VERDICT}: all clear'."
+)
+
+
+@scenario("s26", "a reply claude starts by itself arrives once and is replayed")
+def s26() -> None:
+    """bidlens, 2026-10-02. A background watcher's notification started a turn
+    with no request waiting. Its narration and the closing message that
+    restated it went out as one late reply, which read as the answer twice,
+    and since it was never stored, coming back replayed the reply before it.
+    """
+    setup(on=1, slots=1)
+    before = reply_count(slot(1))
+    since_iso = now_iso()
+    msg(SELF_STARTED)
+    wait_turn_done(since_iso, slot(1))
+    check(
+        "WATCHING" in wait_new_reply(slot(1), before),
+        "the turn that started the watcher ends first",
+    )
+
+    late_from = call_count()
+    wait_for(
+        lambda: _posted(late_from, LATE_VERDICT),
+        TURN_TIMEOUT,
+        "claude's own turn to post its verdict",
+    )
+    time.sleep(3)
+    late = [t for t in texts(late_from) if LATE_VERDICT in t]
+    check(len(late) == 1, f"the late reply is posted once ({late!r})")
+    check(
+        not any(LATE_NARRATION in t for t in texts(late_from)),
+        "without the narration claude wrote before its last tool call",
+    )
+    check(
+        stored_reply(slot(1)).startswith(LATE_VERDICT),
+        "and it is stored as the conversation's last reply",
+    )
+
+    cmd("session", f"new {here()}")
+    wait_foreground(slot(2))
+    before_two = reply_count(slot(2))
+    two_iso = now_iso()
+    msg(SHORT)
+    wait_turn_done(two_iso, slot(2))
+    wait_new_reply(slot(2), before_two)
+
+    back_at = call_count()
+    cmd("session", "1")
+    wait_foreground(slot(1))
+    wait_for(
+        lambda: _posted(back_at, LATE_VERDICT),
+        30,
+        "the late reply replayed on the way back",
+    )
+    check(
+        not _posted(back_at, "WATCHING"),
+        "coming back replays the late reply, not the one before it",
+    )
+
+
+SELF_VERDICT = "SELF VERDICT"
+JOINED_VERDICT = "JOINED VERDICT"
+SLOW_TOOL_MARK = "slowtoolfinished"
+SELF_STARTED_SLOW = (
+    "Run `sleep 8` as ONE Bash call with run_in_background set to true, then "
+    "end your turn at once by replying exactly 'WATCHING'. Later, when the "
+    "background task's completion notification arrives, run exactly one "
+    "foreground Bash call "
+    f"`python3 -c \"import time; time.sleep(40); print('{SLOW_TOOL_MARK}')\"` "
+    "(do not put it in the background) and then reply "
+    f"with exactly one line: '{SELF_VERDICT}: ' followed by what it printed."
+)
+MID_SELF_TURN = (
+    "This is a long message on purpose, because a queued message this long is "
+    "drawn cut short in the terminal and that is what used to go wrong. "
+    + "Nothing in this sentence asks you to do anything, it only adds length. "
+    * 6
+    + "Do not run any tool for this message. Reply with exactly one line: "
+    f"'{JOINED_VERDICT}: received'."
+)
+INTERRUPTED_NOTE = "last tool call was interrupted"
+
+
+def _stored_replies(chat_id: str, after: int) -> list[str]:
+    with sqlite3.connect(DB) as db:
+        rows = db.execute(
+            "SELECT content FROM messages WHERE chat_id = ? AND role = 'assistant' "
+            "ORDER BY id",
+            (chat_id,),
+        ).fetchall()
+    return [row[0] for row in rows[after:]]
+
+
+@scenario("s27", "a message sent while claude works on its own does not interrupt it")
+def s27() -> None:
+    """leashd, 2026-10-03. A background review's notification had claude
+    running `make check` with no request waiting. The next message was typed
+    as a fresh prompt, its queued text was drawn cut short, leashd read the
+    delivery as lost, pressed Escape into the running tool and typed the
+    message again: the check died, the question was answered twice, and the
+    first answer came under "the last tool call was interrupted".
+    """
+    setup(on=1, slots=1)
+    before = reply_count(slot(1))
+    since_iso = now_iso()
+    msg(SELF_STARTED_SLOW)
+    wait_turn_done(since_iso, slot(1))
+    check(
+        "WATCHING" in wait_new_reply(slot(1), before),
+        "the turn that started the watcher ends first",
+    )
+
+    time.sleep(1)
+    own_iso = now_iso()
+    wait_for(
+        lambda: any(
+            o.get("tool_name") == "Bash"
+            for o in _log_lines()
+            if o.get("timestamp", "") >= own_iso
+        ),
+        TURN_TIMEOUT,
+        "claude to start the slow tool by itself",
+    )
+    time.sleep(3)
+    replies_before = reply_count(slot(1))
+    sent_from = call_count()
+    sent_iso = now_iso()
+    msg(MID_SELF_TURN)
+
+    wait_for(
+        lambda: any(
+            JOINED_VERDICT in r for r in _stored_replies(slot(1), replies_before)
+        ),
+        TURN_TIMEOUT,
+        "the message sent mid-work to be answered",
+    )
+    time.sleep(_LATE_SETTLE_SECONDS)
+    replies = _stored_replies(slot(1), replies_before)
+    everything = "\n".join(replies)
+    posted = "\n".join(texts(sent_from, ("sendMessage", "editMessageText")))
+
+    check(
+        bool(log_events(sent_iso, "tmux_prompt_joins_running_response")),
+        "the message is queued behind the response already running",
+    )
+    check(
+        not log_events(
+            sent_iso,
+            "tmux_prompt_delivery_lost_retyping",
+            "tmux_prompt_submit_unconfirmed",
+        ),
+        "and is never read as lost or typed a second time",
+    )
+    check(
+        f"{SELF_VERDICT}: {SLOW_TOOL_MARK}" in " ".join(everything.split()),
+        "the tool claude was running finishes instead of being interrupted",
+    )
+    check(
+        everything.count(f"{JOINED_VERDICT}:") == 1,
+        f"the message is answered once ({len(replies)} replies stored)",
+    )
+    check(
+        INTERRUPTED_NOTE not in everything and INTERRUPTED_NOTE not in posted,
+        "and no reply says a tool call was interrupted",
+    )
+
+
+THOUGHT_VERDICT = "THOUGHT VERDICT"
+THOUGHT_OPENING = "STARTING THE LONG ANSWER"
+LONG_AFTER_TOOL = (
+    "Do this in TWO separate assistant messages. Message 1: reply with exactly "
+    f"one line: '{THOUGHT_OPENING}'. Then call Glob once for '*.md'. Message 2: "
+    "write 70 numbered lines on why code review catches what tests cannot, "
+    "every line a full sentence of at least 200 characters, and after line 70 "
+    f"one last line that reads exactly '{THOUGHT_VERDICT}: complete'. Never "
+    "combine the two messages and do not call any other tool."
+)
+QUEUED_ONE = "QUEUED ONE"
+QUEUED_TWO = "QUEUED TWO"
+QUEUED_ROW = chr(0x276F)
+TMUX_SOCKET = (
+    Path(os.environ.get("HARNESS_DIR", "/tmp/leashd_tmux_harness"))
+    / "tmux"
+    / "tmux.sock"
+)
+
+
+def _pane_screens() -> list[str]:
+    listed = subprocess.run(
+        ["tmux", "-S", str(TMUX_SOCKET), "list-panes", "-a", "-F", "#{pane_id}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return [
+        subprocess.run(
+            ["tmux", "-S", str(TMUX_SOCKET), "capture-pane", "-p", "-t", pane],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout
+        for pane in listed.stdout.split()
+    ]
+
+
+def _queued_rows(screen: str) -> int:
+    return sum(
+        1
+        for row in screen.splitlines()
+        if row.lstrip().startswith(QUEUED_ROW) and "QUEUED" in row
+    )
+
+
+def _wait_long_answer_started(since: int) -> None:
+    wait_for(
+        lambda: any(
+            THOUGHT_OPENING in t
+            for t in texts(since, ("sendMessage", "editMessageText"))
+        ),
+        TURN_TIMEOUT,
+        "the line claude writes before the long answer",
+    )
+
+
+@scenario("s28", "a long stretch with nothing but the spinner is not an idle pane")
+def s28() -> None:
+    """leadline, 2026-10-03. Claude thought for 103 seconds between two tool
+    batches, with nothing on screen to say so but the spinner. On Linux one of
+    its frames is a plain ``*``, leashd did not know it, and the first capture
+    to land on that frame after the idle grace ended the turn on a progress
+    note while claude carried on for another 13 minutes.
+
+    Needs ``LINUX_SPINNER=1`` on a macOS harness, and an idle grace shorter
+    than the answer takes to write
+    (``LEASHD_TMUX_COMPLETION_IDLE_GRACE_SECONDS=8``).
+    """
+    setup(on=1, slots=1)
+    before = reply_count(slot(1))
+    since_iso = now_iso()
+    start = call_count()
+    msg(LONG_AFTER_TOOL)
+    _wait_long_answer_started(start)
+    wait_turn_done(since_iso, slot(1))
+    reply = wait_new_reply(slot(1), before)
+
+    ended_early = log_events(
+        since_iso,
+        "tmux_turn_idle_completed",
+        "tmux_turn_no_progress_finalized_with_text",
+        "tmux_late_reply",
+    )
+    check(
+        not [o for o in ended_early if o.get("chat_id") == slot(1)],
+        f"the turn is not ended as idle while claude writes (grace {IDLE_GRACE:.0f}s)",
+    )
+    check(
+        THOUGHT_VERDICT in reply,
+        f"the chat gets the answer claude finished: {reply[-60:]!r}",
+    )
+
+
+@scenario("s29", "messages queued behind a running response do not hide the spinner")
+def s29() -> None:
+    """leadline, 2026-10-03. Two repair prompts sat queued between the spinner
+    and the composer, which put the spinner seven rows up, one past the rows
+    leashd reads. Every capture read as idle, whatever frame it landed on, and
+    the turn ended at exactly the idle grace.
+    """
+    from leashd.agents.runtimes.tmux_session import TmuxClaudeSession
+
+    setup(on=1, slots=1)
+    replies_before = reply_count(slot(1))
+    since_iso = now_iso()
+    start = call_count()
+    msg(LONG_AFTER_TOOL)
+    _wait_long_answer_started(start)
+    time.sleep(2)
+    msg(f"Do not run any tool. Reply with exactly one line: '{QUEUED_ONE}: received'.")
+    time.sleep(2)
+    msg(f"Do not run any tool. Reply with exactly one line: '{QUEUED_TWO}: received'.")
+
+    crowded: list[str] = []
+    deadline = time.time() + 40
+    while time.time() < deadline and len(crowded) < 12:
+        crowded += [s for s in _pane_screens() if _queued_rows(s) >= 2]
+        time.sleep(0.3)
+    check(
+        bool(crowded),
+        f"claude draws both queued messages above the composer ({len(crowded)} reads)",
+    )
+    pane = object.__new__(TmuxClaudeSession)
+    hidden = [s for s in crowded if not pane.response_running(s)]
+    if hidden:
+        print("\n".join(hidden[0].splitlines()[-14:]))
+    check(
+        not hidden,
+        f"the pane reads as working in every one of them ({len(hidden)} read idle)",
+    )
+
+    wait_for(
+        lambda: any(QUEUED_TWO in r for r in _stored_replies(slot(1), replies_before)),
+        TURN_TIMEOUT,
+        "the queued messages to be answered",
+    )
+    time.sleep(_LATE_SETTLE_SECONDS)
+    everything = "\n".join(_stored_replies(slot(1), replies_before))
+    check(
+        not [
+            o
+            for o in log_events(since_iso, "tmux_late_reply")
+            if o.get("chat_id") == slot(1)
+        ],
+        "nothing is written after its turn was called finished",
+    )
+    check(
+        THOUGHT_VERDICT in everything
+        and QUEUED_ONE in everything
+        and QUEUED_TWO in everything,
+        "the long answer and both queued messages reach the chat",
+    )
+
+
+REMOVED_VERDICT = "REMOVED OK"
+SCRATCH = (
+    Path(os.environ.get("HARNESS_DIR", "/tmp/leashd_tmux_harness")).resolve()
+    / "scratch"
+    / "-Users-someone-projects-a-long-directory-name"
+    / "8470e809-36c7-46f1-8c2d-a428fdc85fda"
+    / "scratchpad"
+    / "prefix"
+)
+QUOTE_THEN_REMOVE = (
+    "I am asking you to do two things now, both are safe throwaways I set up. "
+    "First use the Write tool to create quoted.md in the working directory "
+    "with exactly these two lines: 'the footer reads: auto mode on (shift+tab "
+    "to cycle)' and 'while busy: esc to interrupt'. Then run exactly this as "
+    "ONE Bash call: echo checked | tail -2 && git status --short | grep -v "
+    f'"^M  \\|^A  " ; rm -rf {SCRATCH} and reply with exactly: {REMOVED_VERDICT}'
+)
+
+
+@scenario("s30", "an approved command claude asks about anyway is answered")
+def s30() -> None:
+    """leashd, 2026-10-03. leashd allowed an ``rm -rf`` of a scratch directory,
+    claude asked anyway under its own ask rule, and nothing pressed the prompt.
+    Claude Code 2.1.288 draws its side panel behind a ``│``; leashd left the
+    panel in, did not recognise the command wrapped against it, and read an
+    ``esc to interrupt`` quoted in the panel's diff as a live composer, which
+    stood down every recovery and took the Reject button off ``/screen``.
+    """
+    setup(on=1, slots=1)
+    SCRATCH.mkdir(parents=True, exist_ok=True)
+    before = reply_count(slot(1))
+    since_iso = now_iso()
+    msg(QUOTE_THEN_REMOVE)
+    wait_turn_done(since_iso, slot(1))
+    reply = wait_new_reply(slot(1), before)
+
+    check(not SCRATCH.exists(), "the approved command runs")
+    check(REMOVED_VERDICT in reply, f"and the turn finishes: {reply[-40:]!r}")
+    check(
+        not log_events(
+            since_iso,
+            "tmux_native_dialog_unattended",
+            "tmux_orphaned_permission_unmatched",
+            "tmux_stuck_permission_rejected",
+        ),
+        "without the prompt being left for the watchdog",
     )
 
 
@@ -1493,6 +1921,12 @@ ORDER = [
     "s23",
     "s21",
     "s24",
+    "s25",
+    "s26",
+    "s27",
+    "s28",
+    "s29",
+    "s30",
     "s17",
     "s6",
     "s7",

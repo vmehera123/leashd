@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.1.0] - 2026-10-03
+- **added**: `leashd ssh trust <host>` runs read-only commands on that host without asking; writes, restarts and credential reads still ask. `--full` approves every command on the host.
+- **added**: the Telegram bot fills its `/` command menu on startup, so leashd's commands and `/model`, `/effort`, `/compact`, `/context` show up with descriptions.
+- **added**: fewer prompts: `rm -rf` under `/tmp` or a tool cache, `curl` writes with a literal body to a loopback dev server, and reads and writes in Claude Code's session scratchpad run without asking.
+- **fixed**: a turn is no longer returned as finished while Claude is still thinking or writing, which cut long Linux runs short on a progress note.
+- **fixed**: approved Bash commands no longer sit on Claude Code 2.1.286+'s permission prompt until leashd rejects it after 10 minutes. If a prompt does get stuck, `/screen` shows its answers as buttons.
+- **fixed**: a message sent while Claude is working on its own no longer interrupts the running tool or gets answered twice, and a reply Claude writes on its own is sent once and saved.
+
 ## [2.0.0] - 2026-09-30
 - **removed**: the `claude-cli`, `claude-code` (Agent SDK) and `codex` runtimes, `leashd runtime` and `/test`. tmux is the only runtime; an old `agent_runtime` setting falls back to it with a warning.
 - **changed**: `/task` is one pipeline, implement → verify → opt-in review, and verify drives a real browser only when the change shows up in a running app. New defaults: `max_turns` 120, effort `medium`, and agent-browser browsing runs without asking.

@@ -21,7 +21,7 @@ from telegram import (
     Update,
 )
 from telegram.constants import ChatAction, ParseMode
-from telegram.error import BadRequest, NetworkError, RetryAfter
+from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -44,6 +44,7 @@ from leashd.connectors.telegram_approval import (
     render_receipt,
     tool_label,
 )
+from leashd.connectors.telegram_commands import menu_commands
 from leashd.connectors.telegram_markdown import (
     Chunk,
     code_span,
@@ -673,7 +674,19 @@ class TelegramConnector(BaseConnector):
             allowed_updates=Update.ALL_TYPES,
             drop_pending_updates=True,
         )
+        await self._register_command_menu()
         logger.info("telegram_connector_started")
+
+    async def _register_command_menu(self) -> None:
+        if self._app is None:
+            return
+        commands = menu_commands()
+        try:
+            await self._app.bot.set_my_commands(commands)
+        except TelegramError as exc:
+            logger.warning("telegram_command_menu_failed", error=str(exc))
+            return
+        logger.info("telegram_command_menu_registered", count=len(commands))
 
     async def stop(self) -> None:
         if self._app is None:

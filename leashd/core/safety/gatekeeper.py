@@ -27,7 +27,7 @@ from leashd.core.safety.analyzer import (
 from leashd.core.safety.policy import PolicyDecision, normalize_tool_name
 
 if TYPE_CHECKING:
-    from collections.abc import Collection
+    from collections.abc import Collection, Mapping
 
     from leashd.core.events import EventBus
     from leashd.core.safety.approvals import ApprovalCoordinator
@@ -182,6 +182,9 @@ def _approval_key(
     return f"Bash::{prefix}"
 
 
+SSH_TRUST_READ = "read"
+SSH_TRUST_FULL = "full"
+
 AGENT_BROWSER_BROWSING_SCOPE = "agent-browser browsing"
 
 
@@ -230,6 +233,7 @@ class ToolGatekeeper:
         approval_timeout: int | None = None,
         path_tools: frozenset[str] | None = None,
         browser_auto_approve: bool = False,
+        trusted_ssh_hosts: Mapping[str, str] | None = None,
     ) -> None:
         self._sandbox = sandbox
         self._audit = audit
@@ -240,15 +244,41 @@ class ToolGatekeeper:
         self._path_tools = path_tools or DEFAULT_PATH_TOOLS
         self._auto_approved_chats: set[str] = set()
         self._auto_approved_tools: dict[str, set[str]] = {}
-        self._standing_grants: frozenset[str] = (
+        self._browsing_grants: frozenset[str] = (
             _agent_browser_browsing_keys() if browser_auto_approve else frozenset()
         )
+        self._ssh_grants: frozenset[str] = frozenset()
+        self._standing_grants: frozenset[str] = self._browsing_grants
+        self.set_trusted_ssh_hosts(trusted_ssh_hosts or {})
 
     def set_browser_auto_approve(self, enabled: bool) -> None:
         grants = _agent_browser_browsing_keys() if enabled else frozenset()
-        if grants != self._standing_grants:
-            self._standing_grants = grants
+        if grants != self._browsing_grants:
+            self._browsing_grants = grants
+            self._standing_grants = grants | self._ssh_grants
             logger.info("browser_auto_approve_set", enabled=enabled)
+
+    def set_trusted_ssh_hosts(self, hosts: Mapping[str, str]) -> None:
+        """Apply the user's trusted SSH hosts, set with ``leashd ssh trust``.
+
+        Every trusted host has its read-only commands allowed by the policy
+        engine. A host trusted in ``full`` also holds a standing "Approve all"
+        for ``ssh`` and ``scp`` uploads to it, which is the grant a human kept
+        re-tapping: it lived per chat in memory, so ``/clear``, a directory
+        switch or a restart dropped it.
+        """
+        grants = frozenset(
+            f"Bash::{binary} {destination}"
+            for destination, trust in hosts.items()
+            if trust == SSH_TRUST_FULL
+            for binary in ("ssh", "scp")
+        )
+        if self._policy_engine is not None:
+            self._policy_engine.set_trusted_ssh_hosts(hosts)
+        if grants != self._ssh_grants:
+            self._ssh_grants = grants
+            self._standing_grants = self._browsing_grants | grants
+            logger.info("trusted_ssh_hosts_set", full=len(grants) // 2)
 
     def enable_auto_approve(self, chat_id: str) -> None:
         self._auto_approved_chats.add(chat_id)

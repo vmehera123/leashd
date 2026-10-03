@@ -78,6 +78,23 @@ UNATTENDED_DIALOG_REJECT_S = 600.0
 
 BLOCKED_ON_HUMAN_LOG_INTERVAL_S = 60.0
 
+_BLINKING_BULLETS = str.maketrans({"⏺": " ", "●": " "})
+
+
+def _without_blink(screen: str) -> str:
+    """The screen with the bullet claude blinks beside a running tool blanked.
+
+    Everything else that changes between two reads is claude drawing: the
+    spinner's elapsed time, a tool's output, the answer as it is written. The
+    idle backstop waits for that to stop, because no single read can tell a
+    working pane from an idle one. Claude Code 2.1.288 draws no spinner and no
+    ``esc to interrupt`` while it writes an answer, and on Linux one spinner
+    frame was a glyph leashd did not know, so a 103-second thinking stretch was
+    returned as a finished turn.
+    """
+    return screen.translate(_BLINKING_BULLETS)
+
+
 FINAL_TEXT_GRACE_SECONDS = 2.0
 FINAL_TEXT_POLL_INTERVAL = 0.1
 NATIVE_COST_SETTLE_SECONDS = 1.5
@@ -204,7 +221,7 @@ def _unattended_dialog_notice() -> str:
     return (
         "⏳ The agent is waiting on a permission prompt in its terminal that "
         "leashd could not match to a tool call. Open /screen to see it and "
-        "reject it, or /stop to abort. leashd rejects it itself in "
+        "answer it, or /stop to abort. leashd rejects it itself in "
         f"{int(UNATTENDED_DIALOG_REJECT_S // 60)} minutes."
     )
 
@@ -220,6 +237,35 @@ _INTERRUPTED_NOTE = (
     "⚠️ The agent's last tool call was interrupted, so this turn stopped early. "
     "Send /resume to pick it back up."
 )
+
+
+async def _await_response_end(cs: TmuxClaudeSession, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if cs.is_idle_at_composer():
+            return True
+        await asyncio.sleep(0.4)
+    return False
+
+
+async def _send_interrupted_note(
+    cs: TmuxClaudeSession,
+    turn: TmuxTurn,
+    on_text_chunk: Callable[[str], Coroutine[Any, Any, None]] | None,
+) -> None:
+    """Say the turn stopped on an aborted tool call, once its last records
+    are in.
+
+    Sent the moment the turn ended, it went out ahead of a reply the tailer
+    had not read yet: the ``Stop`` hook beats the transcript, so an interrupt
+    claude had already answered past still read as the turn's last word.
+    """
+    if turn.interrupted and on_text_chunk is not None and not cs.policy_block:
+        await safe_callback(
+            on_text_chunk,
+            f"\n\n{_INTERRUPTED_NOTE}\n",
+            log_event="tmux_interrupt_notice_failed",
+        )
 
 
 async def _reply_content(
@@ -617,6 +663,16 @@ class TmuxAgent(BaseAgent):
             turn = cs.begin_turn(
                 on_text_chunk=on_text_chunk, on_tool_activity=on_tool_activity
             )
+            joined_text = " ".join(current_text.split())
+            joins_running_response = cs.response_running()
+            if joins_running_response:
+                turn.pending_followups += 1
+                turn.pending_followup_texts.append(joined_text)
+                logger.info(
+                    "tmux_prompt_joins_running_response",
+                    session_id=session.session_id,
+                    chat_id=session.chat_id,
+                )
 
             # Attachments belong to the original message only — never re-stage
             # them on a plan-revision re-prompt.
@@ -629,7 +685,18 @@ class TmuxAgent(BaseAgent):
                 staged_attachments = True
             # `cs.last_prompt` stays the raw user text (gatekeeper
             # task_description) across revisions; only the keystrokes change.
-            await cs.submit(current_text)
+            delivered = await cs.submit(current_text, followup=joins_running_response)
+            if joins_running_response and not delivered:
+                turn.pending_followups = max(0, turn.pending_followups - 1)
+                turn.withdraw_followup(joined_text)
+                cs.clear_composer()
+                logger.warning(
+                    "tmux_prompt_join_undelivered",
+                    session_id=session.session_id,
+                    chat_id=session.chat_id,
+                )
+                if await _await_response_end(cs, PANE_READY_TIMEOUT):
+                    await cs.submit(current_text)
 
             early = await self._await_turn(
                 cs,
@@ -700,6 +767,7 @@ class TmuxAgent(BaseAgent):
                 if turn.result_seen:
                     break
 
+        await _send_interrupted_note(cs, turn, on_text_chunk)
         await cs.settle_native_cost(NATIVE_COST_SETTLE_SECONDS)
         turn.settle_usage(cs.take_usage())
         content = await _reply_content(turn, on_text_chunk)
@@ -759,6 +827,8 @@ class TmuxAgent(BaseAgent):
         unattended_since: float | None = None
         regate: asyncio.Task[bool] | None = None
         regate_unmatched = False
+        drawn_screen: str | None = None
+        redrawn_at = started
 
         async def _abort(event: str, content: str, **fields: Any) -> AgentResponse:
             """End a turn that can never legitimately complete: log, unblock
@@ -855,6 +925,11 @@ class TmuxAgent(BaseAgent):
             if not cs.answer_drive_active:
                 with contextlib.suppress(Exception):
                     stalled_screen = cs.capture()
+            if stalled_screen:
+                drawn = _without_blink(stalled_screen)
+                if drawn_screen is not None and drawn != drawn_screen:
+                    redrawn_at = time.monotonic()
+                drawn_screen = drawn
             if (
                 stalled_screen
                 and cs.dedicated_selector_present(stalled_screen)
@@ -863,14 +938,14 @@ class TmuxAgent(BaseAgent):
                     and cs.was_interrupted(stalled_screen)
                 )
             ):
-                settled_screen = stalled_screen.replace("⏺", " ")
+                settled_screen = _without_blink(stalled_screen)
                 if settled_screen != unattended_screen:
                     unattended_screen = settled_screen
                     unattended_since = time.monotonic()
                     regate_unmatched = False
                 elif not notified_unattended and unattended_since is not None:
                     stalled_s = time.monotonic() - unattended_since
-                    if stalled_s > UNATTENDED_DIALOG_STALL_S:
+                    if stalled_s > UNATTENDED_DIALOG_STALL_S and not cs.regate_active:
                         notified_unattended = True
                         logger.warning(
                             "tmux_native_dialog_unattended",
@@ -998,7 +1073,7 @@ class TmuxAgent(BaseAgent):
                 and not cs.goal_active
                 and not cs.followup_injecting
                 and turn.pending_followups == 0
-                and now - turn.last_activity > completion_idle_grace
+                and now - max(turn.last_activity, redrawn_at) > completion_idle_grace
                 and cs.is_idle_at_composer()
                 and (turn.assembled_text or cs.was_interrupted())
             ):
@@ -1048,12 +1123,6 @@ class TmuxAgent(BaseAgent):
                     is_error=True,
                 )
 
-        if turn.interrupted and on_text_chunk is not None and not cs.policy_block:
-            await safe_callback(
-                on_text_chunk,
-                f"\n\n{_INTERRUPTED_NOTE}\n",
-                log_event="tmux_interrupt_notice_failed",
-            )
         return None
 
     async def inject_followup(
@@ -1273,6 +1342,21 @@ class TmuxAgent(BaseAgent):
             return None
         return self._tsm.stuck_permission_id(cs)
 
+    def stuck_prompt_options(self, session: Session) -> list[tuple[int, str]]:
+        cs = self._tsm.get(session.session_id)
+        if cs is None or cs.pane_is_dead():
+            return []
+        return [(o.number, o.label) for o in self._tsm.stuck_permission_options(cs)]
+
+    def answer_stuck_prompt(
+        self, session: Session, prompt_id: str, number: int
+    ) -> str | None:
+        cs = self._tsm.get(session.session_id)
+        if cs is None or cs.pane_is_dead():
+            return None
+        option = self._tsm.answer_stuck_permission(cs, prompt_id, number, source="chat")
+        return option.label if option is not None else None
+
     def reject_stuck_prompt(self, session: Session, prompt_id: str) -> bool:
         cs = self._tsm.get(session.session_id)
         if cs is None or cs.pane_is_dead():
@@ -1379,6 +1463,7 @@ class TmuxAgent(BaseAgent):
             return early
         if cs.claude_uuid:
             session.agent_resume_token = cs.claude_uuid
+        await _send_interrupted_note(cs, turn, on_text_chunk)
         await cs.settle_native_cost(NATIVE_COST_SETTLE_SECONDS)
         turn.settle_usage(cs.take_usage())
         content = await _reply_content(turn, on_text_chunk)
