@@ -174,3 +174,82 @@ class TestPaneAdoption:
         agent.adopt_panes = _boom
         engine, _ = build(agent)
         await engine.startup()
+
+
+class HeldTurnAgent(AdoptingAgent):
+    """A reattached turn that runs until the engine cancels it."""
+
+    def __init__(self, panes=()):
+        super().__init__(panes, reply="Error: interrupted")
+        self.entered = asyncio.Event()
+        self.released = asyncio.Event()
+
+    async def reattach_turn(
+        self, session, *, on_text_chunk=None, on_tool_activity=None, on_status=None
+    ):
+        self.reattached.append(session.session_id)
+        self.entered.set()
+        await self.released.wait()
+        return AgentResponse(
+            content=self._reply, session_id="claude-uuid-1", cost=0.0, is_error=True
+        )
+
+    async def cancel(self, session_id):
+        await super().cancel(session_id)
+        self.released.set()
+
+
+class TestCancellingAnAdoptedTurn:
+    """`/clear`, `/stop` or `/session kill` on a turn adopted from the previous
+    daemon marked the chat interrupted, and the reattach path never cleared the
+    mark. The next ordinary turn in that chat — hours later, even in a new
+    conversation reusing the slot — finished, was told it had been interrupted,
+    and its answer was thrown away."""
+
+    async def _adopt(self, build):
+        seed, _ = build(FakeAgent())
+        session = await seed.session_manager.get_or_create("u1", "chat1", "/work")
+        await seed.session_manager.save(session)
+        agent = HeldTurnAgent([_pane(session_id=session.session_id)])
+        engine, connector = build(agent)
+        await engine.startup()
+        await agent.entered.wait()
+        return engine, connector, agent, session.session_id
+
+    @pytest.mark.parametrize("command", ["clear", "stop"])
+    async def test_the_next_turn_still_delivers_its_answer(self, build, command):
+        engine, connector, _, _ = await self._adopt(build)
+
+        await engine.handle_command("u1", command, "", "chat1")
+        await _settle(engine)
+        reply = await engine.handle_message("u1", "next question", "chat1")
+
+        assert reply == "Echo: next question"
+        assert not any("Task interrupted" in m["text"] for m in connector.sent_messages)
+
+    @pytest.mark.parametrize("command", ["clear", "stop"])
+    async def test_no_interrupt_mark_or_running_turn_is_left_behind(
+        self, build, command
+    ):
+        engine, _, agent, adopted_session_id = await self._adopt(build)
+
+        await engine.handle_command("u1", command, "", "chat1")
+        await _settle(engine)
+
+        assert agent.cancelled == [adopted_session_id]
+        assert "chat1" not in engine._interrupted_chats
+        assert engine._executing_sessions.get("chat1") is None
+
+    async def test_a_cleared_turn_is_not_stored_in_the_fresh_conversation(
+        self, build, store
+    ):
+        engine, connector, _, _ = await self._adopt(build)
+
+        await engine.handle_command("u1", "clear", "", "chat1")
+        await _settle(engine)
+
+        assert not any(
+            "Error: interrupted" in m["text"] for m in connector.sent_messages
+        )
+        restored = await store.load("u1", "chat1")
+        assert restored.agent_resume_token is None

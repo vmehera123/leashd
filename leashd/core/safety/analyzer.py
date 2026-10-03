@@ -1061,7 +1061,10 @@ def _url_host(token: str) -> str | None:
     if not _URL_TOKEN_RE.match(token):
         match = _SCHEMELESS_URL_RE.fullmatch(token)
         return match.group("host").strip("[]").lower() if match else None
-    parts = urlsplit(token)
+    try:
+        parts = urlsplit(token)
+    except ValueError:
+        return None
     if "$" in parts.netloc or "`" in parts.netloc:
         return None
     return parts.hostname.lower() if parts.hostname else None

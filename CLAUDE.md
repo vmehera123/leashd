@@ -28,7 +28,8 @@ uv run pytest -m e2e -v                                    # E2E only; one-time:
 
 ## Where the knowledge lives
 
-- `.claude/skills/`: `architecture` (wiring, subsystems, where new code belongs), `tmux-runtime`, `telegram-harness` (end-to-end verification against the real pipeline), `debug-leashd` and `debug-task` (SQLite, `audit.jsonl`, logs), and `heal-e2e`.
+- `.claude/skills/`: `architecture` (wiring, subsystems, where new code belongs), `tmux-runtime`, `telegram-harness` (end-to-end verification against the real pipeline), `debug-leashd` and `debug-task` (SQLite, `audit.jsonl`, logs), `heal-e2e`, and `release-prep`.
+- IMPORTANT: when the user says "prepare leashd for release" (or asks to prep, cut or bump a release), invoke the `release-prep` skill and follow it.
 - `.claude/rules/`: short path-scoped rules that load when you open tmux runtime, safety/policy, Web UI or test files.
 - `specs/app/` (gitignored, local only): numbered deep references; start with `00-quick-reference.md`. Specs, `docs/` and `README.md` can describe deleted code (the claude-cli, Agent SDK and Codex runtimes, the v1–v4 task orchestrators, `AutoApprover`, the `/test` runner), so trust `plugins/registry.py`, `agents/registry.py` and the source over them.
 

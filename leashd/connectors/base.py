@@ -6,6 +6,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
+from leashd.core.chat_sessions import index_of, slot_label
+
 ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024  # 10 MB per file
 ATTACHMENT_MAX_COUNT = 5
 ATTACHMENT_SUPPORTED_TYPES = frozenset(
@@ -103,6 +105,7 @@ class BaseConnector(ABC):
         self._interrupt_resolver: (
             Callable[[str, bool], Coroutine[Any, Any, bool]] | None
         ) = None
+        self._session_title_resolver: Callable[[str], str | None] | None = None
 
     @abstractmethod
     async def start(self) -> None: ...
@@ -263,6 +266,20 @@ class BaseConnector(ABC):
     ) -> None:
         """Register resolver(interrupt_id, send_now) for interrupt callbacks."""
         self._interrupt_resolver = resolver
+
+    def set_session_title_resolver(
+        self,
+        resolver: Callable[[str], str | None],
+    ) -> None:
+        """Register resolver(chat_id) returning that conversation's title."""
+        self._session_title_resolver = resolver
+
+    def chat_session_label(self, chat_id: str) -> str:
+        """``#<slot>``, followed by the conversation's title once it has one."""
+        label = slot_label(index_of(chat_id))
+        resolver = self._session_title_resolver
+        title = resolver(chat_id) if resolver is not None else None
+        return f"{label} · {title}" if title else label
 
     async def send_question(  # noqa: B027
         self,

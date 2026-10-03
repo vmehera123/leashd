@@ -82,6 +82,17 @@ class ChatSessionInfo:
     foreground: bool
     message_count: int
     total_cost: float
+    title: str = ""
+
+    @property
+    def label(self) -> str:
+        if self.title:
+            return f"{slot_label(self.index)} · {self.title}"
+        return slot_label(self.index)
+
+    @property
+    def name(self) -> str:
+        return f"{self.label} · {self.directory}"
 
     @property
     def is_primary(self) -> bool:
@@ -97,14 +108,13 @@ class ChatSessionInfo:
 
     def render(self) -> str:
         marker = "▸" if self.foreground else " "
-        return (
-            f"{marker} {slot_label(self.index)} · {self.directory} · "
-            f"{self.mode} · {self.status}"
-        )
+        return f"{marker} {self.name} · {self.mode} · {self.status}"
 
     def button_text(self) -> str:
         dot = "🟢" if self.busy else ("🟡" if self.live else "⚪")
         marker = "▸ " if self.foreground else ""
+        if self.title:
+            return f"{marker}{dot} {slot_label(self.index)} {self.title} · {self.directory}"
         return f"{marker}{dot} {slot_label(self.index)} {self.directory}"
 
 
@@ -157,6 +167,7 @@ class ChatSessionDirectory:
                 foreground=session.chat_id == foreground,
                 message_count=session.message_count,
                 total_cost=session.total_cost,
+                title=session.title or "",
             )
             for session in sessions
         ]

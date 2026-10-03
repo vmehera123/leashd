@@ -985,3 +985,33 @@ async def test_tool_results_and_other_prompts_are_not_read_as_the_followup(
     await agent._tsm._dispatch_jsonl_event(cs, _prompt_record("the first prompt"))
 
     assert reads == []
+
+
+async def test_dispatch_announces_claudes_title_once_per_change(cfg):
+    tsm = TmuxSessionManager(cfg)
+    tsm._event_bus = AsyncMock()
+    cs = _session(tsm, chat_id="284184690:s2")
+    record = {"type": "ai-title", "aiTitle": "Login test fix", "sessionId": "abc"}
+
+    await tsm._dispatch_jsonl_event(cs, record)
+    await tsm._dispatch_jsonl_event(cs, record)
+    await tsm._dispatch_jsonl_event(cs, {**record, "aiTitle": "Login and CI fix"})
+
+    emitted = [call.args[0] for call in tsm._event_bus.emit.await_args_list]
+    assert [event.name for event in emitted] == ["session.titled", "session.titled"]
+    assert emitted[0].data == {
+        "chat_id": "284184690:s2",
+        "user_id": "u1",
+        "title": "Login test fix",
+    }
+    assert emitted[1].data["title"] == "Login and CI fix"
+
+
+async def test_dispatch_ignores_an_empty_title(cfg):
+    tsm = TmuxSessionManager(cfg)
+    tsm._event_bus = AsyncMock()
+    cs = _session(tsm)
+
+    await tsm._dispatch_jsonl_event(cs, {"type": "ai-title", "aiTitle": "  "})
+
+    tsm._event_bus.emit.assert_not_awaited()

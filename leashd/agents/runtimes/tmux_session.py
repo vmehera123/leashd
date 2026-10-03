@@ -54,7 +54,7 @@ from leashd.agents.runtimes.tmux_manifest import (
     session_id_from_tmux_name,
     write_manifest,
 )
-from leashd.core.events import LATE_REPLY, Event
+from leashd.core.events import LATE_REPLY, SESSION_TITLED, Event
 from leashd.core.safety.gatekeeper import FILE_EDIT_TOOLS
 from leashd.core.safety.policy import normalize_tool_name
 from leashd.exceptions import AgentError
@@ -2256,6 +2256,7 @@ class TmuxClaudeSession:
         self.append_system_prompt_path: Path | None = None
         self.pane_token: str | None = None
         self.claude_uuid: str | None = None
+        self.title: str | None = None
         self.turn: TmuxTurn | None = None
         # Per-turn plan-gate state — shared logic with the engine's
         # can_use_tool. Recreated each turn in begin_turn() so it survives
@@ -7102,6 +7103,10 @@ class TmuxSessionManager:
             self._handle_queue_operation(cs, turn, obj)
             return
 
+        if obj_type == "ai-title":
+            await self._announce_title(cs, obj)
+            return
+
         if (
             obj_type == "system"
             and obj.get("subtype") == "turn_duration"
@@ -7113,6 +7118,20 @@ class TmuxSessionManager:
                 from_transcript=True, is_error=turn.api_error is not None
             ):
                 self._spawn_late_reply(cs, turn)
+
+    async def _announce_title(self, cs: TmuxClaudeSession, obj: dict[str, Any]) -> None:
+        title = obj.get("aiTitle")
+        if not isinstance(title, str) or not title.strip() or title == cs.title:
+            return
+        cs.title = title
+        if self._event_bus is None:
+            return
+        await self._event_bus.emit(
+            Event(
+                name=SESSION_TITLED,
+                data={"chat_id": cs.chat_id, "user_id": cs.user_id, "title": title},
+            )
+        )
 
     @staticmethod
     def _handle_queue_operation(

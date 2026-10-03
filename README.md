@@ -205,6 +205,8 @@ The Web UI has always had conversation tabs. `/session` gives a Telegram chat th
 
 Switching pauses nothing — a conversation you leave keeps working. What it stops doing is writing into the chat, so two agents can't interleave into one message stream. Instead you get a one-line notice with an **Open** button: `#2 replied` when its turn lands, `#2 is waiting on you` when it hits an approval, a question or a plan review. **The prompt itself is held and rendered under #2 when you open it**, so it is always read in the conversation that raised it rather than pasted under the one you happen to be looking at. Walking away from a prompt you have not answered takes it back down with you and reissues it when you return.
 
+Each conversation names itself, so several in the same repo stay tell-apart: the list, the switch banner and the notices read `#2 · Login test fix · api` rather than `#2 · api`. The name starts as the first line of your first message and becomes Claude Code's own session title as soon as it writes one. `/clear` drops it.
+
 Conversation #1 is the chat itself, so nothing changes about an existing chat until you open a second one — and for the same reason it is the one conversation with no `✕`. There is no slot to free: `/session kill 1` stops its agent and clears its history, like `/clear`, and it stays on the list.
 
 ### CLI

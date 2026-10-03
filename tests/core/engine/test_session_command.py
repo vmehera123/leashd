@@ -3,6 +3,7 @@
 import pytest
 
 from leashd.core.engine import Engine
+from leashd.core.events import SESSION_TITLED, Event
 from leashd.core.session import SessionManager
 from leashd.storage.sqlite import SqliteSessionStore
 from tests.conftest import MockConnector
@@ -1252,3 +1253,84 @@ class TestUsage:
 
         assert result == ""
         assert "Conversations in this chat" in _last(connector)["text"]
+
+
+class TestTitles:
+    async def test_the_first_prompt_names_the_conversation(self, engine, connector):
+        await engine.handle_message("u1", "fix the flaky login test", "chat1")
+
+        await engine.handle_command("u1", "session", "", "chat1")
+
+        assert "#1 · fix the flaky login test · " in _last(connector)["text"]
+
+    async def test_claudes_title_replaces_the_prompt_one(self, engine, connector):
+        await engine.handle_message("u1", "fix the flaky login test", "chat1")
+
+        await engine.event_bus.emit(
+            Event(
+                name=SESSION_TITLED,
+                data={"chat_id": "chat1", "user_id": "u1", "title": "Login test fix"},
+            )
+        )
+        await engine.handle_command("u1", "session", "", "chat1")
+
+        assert "#1 · Login test fix · " in _last(connector)["text"]
+
+    async def test_the_title_survives_a_restart(self, engine, store):
+        await engine.handle_message("u1", "fix the flaky login test", "chat1")
+        await engine.event_bus.emit(
+            Event(
+                name=SESSION_TITLED,
+                data={"chat_id": "chat1", "user_id": "u1", "title": "Login test fix"},
+            )
+        )
+
+        reloaded = await store.load("u1", "chat1")
+
+        assert reloaded.title == "Login test fix"
+
+    async def test_a_title_for_a_conversation_that_is_gone_is_ignored(self, engine):
+        await engine.event_bus.emit(
+            Event(
+                name=SESSION_TITLED,
+                data={"chat_id": "nowhere", "user_id": "u1", "title": "Ghost"},
+            )
+        )
+
+        assert engine.session_manager.title_of("nowhere") is None
+
+    async def test_clear_starts_the_next_conversation_untitled(self, engine):
+        await engine.handle_message("u1", "fix the flaky login test", "chat1")
+
+        await engine.handle_command("u1", "clear", "", "chat1")
+
+        assert engine.session_manager.title_of("chat1") is None
+
+    async def test_the_switch_banner_names_the_conversation(self, engine, connector):
+        await engine.handle_command("u1", "session", "new", "chat1")
+        await engine.handle_message("u1", "review the billing diff", "chat1:s2")
+        await engine.handle_command("u1", "session", "1", "chat1:s2")
+        connector.sent_messages.clear()
+
+        await engine.handle_command("u1", "session", "2", "chat1")
+
+        banners = [m["text"] for m in connector.sent_messages]
+        assert any(t.startswith("▸ #2 · review the billing diff · ") for t in banners)
+
+    async def test_status_shows_the_title(self, engine):
+        await engine.handle_message("u1", "fix the flaky login test", "chat1")
+
+        result = await engine.handle_command("u1", "status", "", "chat1")
+
+        assert result.startswith("Title: fix the flaky login test")
+
+    async def test_the_connector_labels_a_conversation_by_its_title(
+        self, engine, connector
+    ):
+        await engine.handle_command("u1", "session", "new", "chat1")
+        await engine.handle_message("u1", "review the billing diff", "chat1:s2")
+
+        assert connector.chat_session_label("chat1:s2") == (
+            "#2 · review the billing diff"
+        )
+        assert connector.chat_session_label("chat1") == "#1"

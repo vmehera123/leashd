@@ -225,7 +225,7 @@ rules:
     command_patterns:
       - "^(cd|ls|cat|head|tail|grep|wc|du|df|pwd|echo|date|whoami|which|type|file|stat|read)\\b"
       - "^find\\b(?![^|]*\\s-(delete|exec|execdir|ok|okdir|fprint|fprint0|fprintf|fls)\\b)"
-      - "^git\\s+(-(?!c\\s)[a-zA-Z]\\s+\\S+\\s+|--(?!config-env|exec-path)[a-z-]+(=\\S+)?\\s+)*?(status|log|diff|show|branch|remote|tag|rev-parse|rev-list|ls-files|ls-tree|blame|describe|shortlog|merge-base|cat-file|check-ignore|name-rev|count-objects|for-each-ref|show-ref|reflog(?!\\s+(expire|delete)\\b)|stash\\s+(list|show)|worktree\\s+list|config\\s+(--get|--get-all|--get-regexp|--list|-l))\\b"
+      - "^git\\s+(-(?!c\\s)[a-zA-Z]\\s+\\S+\\s+|--(?!config-env|exec-path)[a-z-]+(=\\S+)?\\s+)*?(status|log|diff|show|branch|remote(?!\\s+(add|remove|rm|rename|set-url|set-head|set-branches|prune|update)\\b)|tag|rev-parse|rev-list|ls-files|ls-tree|blame|describe|shortlog|merge-base|cat-file|check-ignore|name-rev|count-objects|for-each-ref|show-ref|reflog(?!\\s+(expire|delete)\\b)|stash\\s+(list|show)|worktree\\s+list|config\\s+(--get|--get-all|--get-regexp|--list|-l))\\b"
       # `tee` and `split` are absent because writing files is what they are for.
       - "^(sort|uniq|cut|tr|column|nl|rev|tac|comm|join|paste|fold|expand|unexpand|fmt|shuf|jq|tree|printf|seq|true|false|test|sleep|yes)\\b"
       - "^rg\\b(?![^|]*\\s--pre(=|\\s|$))"
@@ -275,6 +275,32 @@ rules:
     action: allow
     description: "Read-only Docker/Podman inspection"
 
+  - name: github-cli-readonly
+    tool: Bash
+    command_patterns:
+      - "^gh\\s+(pr|issue)\\s+(view|list|status|diff|checks)(\\s|$)"
+      - "^gh\\s+run\\s+(view|list|watch)(\\s|$)"
+      - "^gh\\s+(repo|release|workflow)\\s+(view|list)(\\s|$)"
+      - "^gh\\s+search\\s+(repos|issues|prs|commits|code)(\\s|$)"
+      - "^gh\\s+status(\\s|$)"
+    action: allow
+    description: "Read-only GitHub CLI query"
+
+  - name: git-fetch-and-stage
+    tool: Bash
+    command_patterns:
+      - "^git\\s+(-C\\s+\\S+\\s+)?fetch(\\s+(--all|--prune|-p|--prune-tags|--tags|-t|--no-tags|--quiet|-q|--verbose|-v|--dry-run|--force|-f|--unshallow|--depth=\\d+))*(\\s+[A-Za-z0-9_][A-Za-z0-9_.-]*(\\s+[+A-Za-z0-9_][A-Za-z0-9_./:+-]*)*)?\\s*$"
+      - "^git\\s+(-C\\s+\\S+\\s+)?add(\\s|$)"
+    action: allow
+    description: "Fetch from a configured remote, or stage files"
+
+  - name: make-directory
+    tool: Bash
+    command_patterns:
+      - "^mkdir(\\s|$)"
+    action: allow
+    description: "Create a directory"
+
   - name: dev-checks
     tool: Bash
     command_patterns:
@@ -283,6 +309,7 @@ rules:
       - "^(make|just)(\\s+(-C\\s*\\S+|--directory(=|\\s+)\\S+|-f\\s*\\S+|--file(=|\\s+)\\S+|-j\\s*\\d*|--jobs(=\\d+)?|-[sknw]+))*\\s+(lint|format|fmt|typecheck|type-check|types|check)([:-][\\w:-]*)?(\\s|$)"
       - "^go\\s+(vet|fmt)(\\s|$)"
       - "^cargo\\s+(fmt|clippy|check)(\\s|$)"
+      - "^node\\s+(--check|-c)\\s+[A-Za-z0-9_][A-Za-z0-9_./-]*\\s*$"
     action: allow
     description: "Linter, formatter or type checker"
 

@@ -3787,8 +3787,8 @@
  },
  {
   "command": "gh run view 8000 --opt 2>&1 | grep -E \"word|word|word|word\" | head -60",
-  "verdict": "require_approval",
-  "category": "unmatched",
+  "verdict": "allow",
+  "category": "github-cli-readonly",
   "before": "require_approval"
  },
  {

@@ -73,6 +73,19 @@ class TestSqliteSessionStore:
         finally:
             await store.teardown()
 
+    async def test_title_persists(self, tmp_path):
+        store = SqliteSessionStore(tmp_path / "test.db")
+        await store.setup()
+        try:
+            session = _make_session()
+            session.title = "Login test fix"
+            await store.save(session)
+            loaded = await store.load("u1", "c1")
+            assert loaded is not None
+            assert loaded.title == "Login test fix"
+        finally:
+            await store.teardown()
+
     async def test_load_nonexistent(self, tmp_path):
         store = SqliteSessionStore(tmp_path / "test.db")
         await store.setup()

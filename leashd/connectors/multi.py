@@ -267,3 +267,11 @@ class MultiConnector(BaseConnector):
         super().set_interrupt_resolver(resolver)
         for c in self._connectors:
             c.set_interrupt_resolver(resolver)
+
+    def set_session_title_resolver(
+        self,
+        resolver: Callable[[str], str | None],
+    ) -> None:
+        super().set_session_title_resolver(resolver)
+        for c in self._connectors:
+            c.set_session_title_resolver(resolver)

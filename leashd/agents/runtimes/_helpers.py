@@ -70,7 +70,9 @@ AUTO_MODE_INSTRUCTION = (
 NATIVE_AUTO_INSTRUCTION = (
     "Auto mode: implement directly. Claude Code's auto policy runs safe actions "
     "without asking; leashd reviews the risky ones and may ask the user. "
-    + _DIRECT_EDIT_RULES
+    "A Bash call is approved as a whole, so run curl, ssh and anything that "
+    "reads a .env file in a call of its own instead of chaining other commands "
+    "to it, and parse JSON with jq rather than python -c. " + _DIRECT_EDIT_RULES
 )
 
 UV_PROJECT_GUIDANCE = (

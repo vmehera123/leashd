@@ -258,7 +258,7 @@ rules:
     command_patterns:
       - "^(cd|ls|cat|head|tail|grep|wc|du|df|pwd|echo|date|whoami|which|type|file|stat|read)\\b"
       - "^find\\b(?![^|]*\\s-(delete|exec|execdir|ok|okdir|fprint|fprint0|fprintf|fls)\\b)"
-      - "^git\\s+(-(?!c\\s)[a-zA-Z]\\s+\\S+\\s+|--(?!config-env|exec-path)[a-z-]+(=\\S+)?\\s+)*?(status|log|diff|show|branch|remote|tag|rev-parse|rev-list|ls-files|ls-tree|blame|describe|shortlog|merge-base|cat-file|check-ignore|name-rev|count-objects|for-each-ref|show-ref|reflog(?!\\s+(expire|delete)\\b)|stash\\s+(list|show)|worktree\\s+list|config\\s+(--get|--get-all|--get-regexp|--list|-l))\\b"
+      - "^git\\s+(-(?!c\\s)[a-zA-Z]\\s+\\S+\\s+|--(?!config-env|exec-path)[a-z-]+(=\\S+)?\\s+)*?(status|log|diff|show|branch|remote(?!\\s+(add|remove|rm|rename|set-url|set-head|set-branches|prune|update)\\b)|tag|rev-parse|rev-list|ls-files|ls-tree|blame|describe|shortlog|merge-base|cat-file|check-ignore|name-rev|count-objects|for-each-ref|show-ref|reflog(?!\\s+(expire|delete)\\b)|stash\\s+(list|show)|worktree\\s+list|config\\s+(--get|--get-all|--get-regexp|--list|-l))\\b"
       - "^(sort|uniq|cut|tr|column|nl|rev|tac|comm|join|paste|fold|expand|unexpand|fmt|shuf|jq|tree|printf|seq|true|false|test|sleep|yes)\\b"
       - "^rg\\b(?![^|]*\\s--pre(=|\\s|$))"
       - "^ag\\b(?![^|]*\\s--pager\\b)"

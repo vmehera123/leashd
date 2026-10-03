@@ -7,6 +7,7 @@ rules:
       - "^(pytest|ruff|jest|vitest|mypy|black|flake8|eslint|prettier)\\b"
       # python/python3 -m variants
       - "^python3?\\s+-m\\s+(pytest|ruff|mypy|black|flake8)\\b"
+      - "^((pnpm|yarn|bun)\\s+(exec\\s+)?|(npx|bunx)\\s+)(vitest|jest)(\\s|$)"
     action: allow
     description: "Standalone linters, formatters, and test runners"
 

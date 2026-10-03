@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.1.1] - 2026-10-03
+- **added**: conversations name themselves, so `/session`, the switch banner and the "replied" / "waiting on you" notices read `#2 · Login test fix · api`. The name is Claude Code's own session title, or the first line of your first message until it has one.
+- **added**: fewer prompts: read-only `gh` commands (`gh run list`, `gh pr view`…), `git fetch`, `git add`, `mkdir`, `node --check` and `vitest`/`jest` no longer ask when chained to an approved `curl` or `ssh`. `git remote add`/`set-url` no longer count as reads.
+- **fixed**: `/clear`, `/stop` or `/session kill` on a turn that survived a daemon restart no longer makes that conversation's next answer get dropped as "Task interrupted".
+- **fixed**: a Telegram message sent while the daemon is restarting is no longer thrown away; it runs once the daemon is back. Anything older than 10 minutes is skipped and the chat is told.
+
 ## [2.1.0] - 2026-10-03
 - **added**: `leashd ssh trust <host>` runs read-only commands on that host without asking; writes, restarts and credential reads still ask. `--full` approves every command on the host.
 - **added**: the Telegram bot fills its `/` command menu on startup, so leashd's commands and `/model`, `/effort`, `/compact`, `/context` show up with descriptions.

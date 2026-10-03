@@ -1,6 +1,6 @@
 [project]
 name = "leashd"
-version = "2.1.0"
+version = "2.1.1"
 description = "Run Claude Code as a governed daemon: a real claude TUI in tmux behind a sandbox, YAML policies and human-in-the-loop approval"
 readme = "README.md"
 requires-python = ">=3.10"

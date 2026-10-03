@@ -1,18 +1,21 @@
 """Tests for the Telegram connector."""
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from telegram import Message
+from telegram import Chat, Message, Update
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, InvalidToken, NetworkError, RetryAfter, TimedOut
+from telegram.ext import Application, ApplicationHandlerStop, TypeHandler
 
 from leashd.connectors.base import ApprovalCard, InlineButton
 from leashd.connectors.telegram import (
     _CALLBACK_DATA_MAX_BYTES,
     _MAX_CAPTION_LENGTH,
     _MAX_MESSAGE_LENGTH,
+    _STALE_UPDATE_SECONDS,
     TelegramConnector,
     _retry_on_network_error,
     _to_telegram_markup,
@@ -143,11 +146,28 @@ class TestStart:
 
         mock_builder.token.assert_called_once_with("fake:token")
         mock_builder.concurrent_updates.assert_called_once_with(True)
-        assert mock_app.add_handler.call_count == 6
+        assert mock_app.add_handler.call_count == 7
         mock_app.add_error_handler.assert_called_once()
         mock_app.initialize.assert_awaited_once()
         mock_app.start.assert_awaited_once()
         mock_app.updater.start_polling.assert_awaited_once()
+
+    async def test_start_keeps_updates_sent_while_the_daemon_was_down(self, connector):
+        mock_app = _make_mock_app()
+        mock_app.add_error_handler = MagicMock()
+        mock_builder = MagicMock()
+        mock_builder.token.return_value = mock_builder
+        mock_builder.concurrent_updates.return_value = mock_builder
+        mock_builder.build.return_value = mock_app
+
+        with patch(
+            "leashd.connectors.telegram.Application.builder",
+            return_value=mock_builder,
+        ):
+            await connector.start()
+
+        kwargs = mock_app.updater.start_polling.await_args.kwargs
+        assert kwargs["drop_pending_updates"] is False
 
     async def test_start_registers_mode_commands(self, connector):
         from telegram.ext import CommandHandler
@@ -475,6 +495,94 @@ def _make_callback_update(data="approval:yes:abc-123"):
     msg.text = "Original message"
     update.callback_query.message = msg
     return update
+
+
+def _make_dated_update(age_seconds, *, edited_age_seconds=None, chat_id=100):
+    now = datetime.now(timezone.utc)
+    message = MagicMock()
+    message.chat_id = chat_id
+    message.date = now - timedelta(seconds=age_seconds)
+    message.edit_date = (
+        None
+        if edited_age_seconds is None
+        else now - timedelta(seconds=edited_age_seconds)
+    )
+    update = MagicMock()
+    update.message = message
+    update.edited_message = None
+    return update
+
+
+class TestStaleUpdateGate:
+    async def test_message_sent_during_a_restart_goes_through(self, connector):
+        connector._app = _make_mock_app()
+
+        await connector._drop_stale_update(_make_dated_update(45), MagicMock())
+
+        connector._app.bot.send_message.assert_not_awaited()
+
+    async def test_message_from_a_long_outage_is_stopped_and_reported(self, connector):
+        connector._app = _make_mock_app()
+        stale = _make_dated_update(_STALE_UPDATE_SECONDS + 60)
+
+        with pytest.raises(ApplicationHandlerStop):
+            await connector._drop_stale_update(stale, MagicMock())
+
+        sent = connector._app.bot.send_message.await_args.kwargs
+        assert sent["chat_id"] == 100
+        assert "offline" in sent["text"]
+
+    async def test_chat_is_told_once_for_a_backlog(self, connector):
+        connector._app = _make_mock_app()
+
+        for _ in range(3):
+            with pytest.raises(ApplicationHandlerStop):
+                await connector._drop_stale_update(
+                    _make_dated_update(_STALE_UPDATE_SECONDS + 60), MagicMock()
+                )
+
+        assert connector._app.bot.send_message.await_count == 1
+
+    async def test_fresh_edit_of_an_old_message_goes_through(self, connector):
+        connector._app = _make_mock_app()
+        update = _make_dated_update(_STALE_UPDATE_SECONDS * 5, edited_age_seconds=2)
+
+        await connector._drop_stale_update(update, MagicMock())
+
+        connector._app.bot.send_message.assert_not_awaited()
+
+    async def test_button_tap_is_never_stopped(self, connector):
+        connector._app = _make_mock_app()
+        update = MagicMock()
+        update.message = None
+        update.edited_message = None
+
+        await connector._drop_stale_update(update, MagicMock())
+
+        connector._app.bot.send_message.assert_not_awaited()
+
+    async def test_stopped_update_never_reaches_the_message_handler(self, connector):
+        reached = AsyncMock()
+        app = Application.builder().token("1:fake").updater(None).build()
+        app.add_handler(TypeHandler(Update, connector._drop_stale_update), group=-1)
+        app.add_handler(TypeHandler(Update, reached))
+        connector._app = _make_mock_app()
+        app._initialized = True
+
+        await app.process_update(_real_update(_STALE_UPDATE_SECONDS + 60))
+        reached.assert_not_awaited()
+
+        await app.process_update(_real_update(30))
+        reached.assert_awaited_once()
+
+
+def _real_update(age_seconds):
+    sent_at = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
+    chat = Chat(id=100, type="private")
+    return Update(
+        update_id=1,
+        message=Message(message_id=1, date=sent_at, chat=chat, text="hello"),
+    )
 
 
 class TestOnMessage:

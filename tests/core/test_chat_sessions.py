@@ -194,3 +194,45 @@ class TestDirectory:
         directory = _directory(manager)
 
         assert await directory.next_index("u1", "chat") is None
+
+
+class TestTitles:
+    async def test_a_titled_conversation_is_named_before_its_directory(self):
+        manager = SessionManager()
+        session = await manager.get_or_create("u1", "chat:s2", "/repo/api")
+        session.title = "Fix login bug"
+        directory = _directory(manager, busy={"chat:s2"})
+
+        (info,) = await directory.slots("u1", "chat", foreground="chat:s2")
+
+        assert info.label == "#2 · Fix login bug"
+        assert info.render() == "▸ #2 · Fix login bug · api · default · working"
+        assert info.button_text() == "▸ 🟢 #2 Fix login bug · api"
+
+    async def test_an_untitled_conversation_reads_as_before(self):
+        manager = SessionManager()
+        await manager.get_or_create("u1", "chat", "/repo/api")
+        directory = _directory(manager)
+
+        (info,) = await directory.slots("u1", "chat", foreground="other")
+
+        assert info.label == "#1"
+        assert info.render() == "  #1 · api · default · no agent"
+        assert info.button_text() == "⚪ #1 api"
+
+    async def test_title_of_reads_the_live_conversation(self):
+        manager = SessionManager()
+        session = await manager.get_or_create("u1", "chat:s2", "/repo/api")
+        session.title = "Fix login bug"
+
+        assert manager.title_of("chat:s2") == "Fix login bug"
+        assert manager.title_of("chat") is None
+
+    async def test_reset_forgets_the_title(self):
+        manager = SessionManager()
+        session = await manager.get_or_create("u1", "chat", "/repo/api")
+        session.title = "Fix login bug"
+
+        await manager.reset("u1", "chat")
+
+        assert session.title is None

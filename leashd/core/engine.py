@@ -44,6 +44,7 @@ from leashd.core.events import (
     MESSAGE_QUEUED,
     SESSION_COMPLETED,
     SESSION_FAILED,
+    SESSION_TITLED,
     TASK_SUBMITTED,
     Event,
     EventBus,
@@ -67,6 +68,7 @@ from leashd.core.safety.audit import AuditLogger
 from leashd.core.safety.gatekeeper import ToolGatekeeper
 from leashd.core.safety.policy import PolicyEngine
 from leashd.core.safety.sandbox import SandboxEnforcer, sandbox_directories
+from leashd.core.session_title import clean_title, title_from_prompt
 from leashd.core.workspace import load_workspaces
 from leashd.exceptions import AgentError
 from leashd.middleware.base import MessageContext
@@ -788,6 +790,7 @@ class Engine:
         self._reattach_tasks: set[asyncio.Task[None]] = set()
 
         self.event_bus.subscribe(LATE_REPLY, self._deliver_late_reply)
+        self.event_bus.subscribe(SESSION_TITLED, self._apply_session_title)
 
         self._chat_sessions = ChatSessionDirectory(
             self.session_manager,
@@ -811,6 +814,7 @@ class Engine:
             connector.set_auto_approve_handler(self._gatekeeper.grant_approve_all)
             connector.set_command_handler(self.handle_command)
             connector.set_interrupt_resolver(self._resolve_interrupt)
+            connector.set_session_title_resolver(self.session_manager.title_of)
             if git_handler:
                 connector.set_git_handler(self._handle_git_callback)
 
@@ -1409,6 +1413,8 @@ class Engine:
         )
         await self._realign_paths_for_session(session)
         self._ensure_session_leashd_dir(session)
+        if session.title is None and not session.task_run_id:
+            session.title = title_from_prompt(text) or None
         self._executing_sessions[chat_id] = session.session_id
         turn_session_id = session.session_id
         structlog.contextvars.bind_contextvars(session_id=session.session_id)
@@ -2314,6 +2320,8 @@ class Engine:
                     0,
                     f"Conversation: {slot_label(index_of(chat_id))} of {len(siblings)}",
                 )
+            if session.title:
+                lines.insert(1 if len(siblings) > 1 else 0, f"Title: {session.title}")
             if session.workspace_name:
                 lines.append(f"Workspace: {session.workspace_name}")
             lines.extend(
@@ -2903,9 +2911,7 @@ class Engine:
                 return "Usage: /session <n>"
             return f"No conversation {slot_label(int(token))} in this chat."
         if target.chat_id == chat_id:
-            await self._send_transient(
-                chat_id, f"▸ {slot_label(target.index)} · {target.directory}"
-            )
+            await self._send_transient(chat_id, f"▸ {target.name}")
             if chat_id not in self._active_responders:
                 session = await self.session_manager.get_or_create(
                     user_id, target.chat_id, target.working_directory
@@ -2982,10 +2988,7 @@ class Engine:
         self._ensure_session_leashd_dir(session)
         await self._persist_foreground(session, user_id, leaving=leaving)
 
-        header = (
-            f"▸ {slot_label(target.index)} · {target.directory} · "
-            f"{target.mode} · {target.status}"
-        )
+        header = f"▸ {target.name} · {target.mode} · {target.status}"
         mid_turn = target.chat_id in self._active_responders
         if banner:
             await self._post_chat_session_banner(target.chat_id, header)
@@ -3070,6 +3073,7 @@ class Engine:
     async def _finish_reattached_turn(self, session: Session) -> None:
         """Stream and deliver a turn that started under a previous daemon."""
         chat_id = session.chat_id
+        turn_session_id = session.session_id
         start = time.monotonic()
         responder: _StreamingResponder | None = None
         if self.connector and self.config.streaming_enabled:
@@ -3090,6 +3094,18 @@ class Engine:
                 on_status=responder.on_status if responder else None,
             )
             if response is None:
+                return
+            if self._turn_superseded(chat_id, session, turn_session_id):
+                if responder:
+                    await responder.deactivate()
+                    if session.session_id != turn_session_id:
+                        await responder.delete_all_messages()
+                logger.info(
+                    "reattached_turn_discarded",
+                    chat_id=chat_id,
+                    turn_session_id=turn_session_id,
+                    session_id=session.session_id,
+                )
                 return
             await self.session_manager.update_from_result(
                 session, agent_resume_token=response.session_id, cost=response.cost
@@ -3145,8 +3161,10 @@ class Engine:
         finally:
             if self._active_responders.get(chat_id) is responder:
                 self._active_responders.pop(chat_id, None)
-            if self._executing_sessions.get(chat_id) == session.session_id:
+            if self._executing_sessions.get(chat_id) == turn_session_id:
                 self._executing_sessions.pop(chat_id, None)
+            if chat_id not in self._executing_chats:
+                self._interrupted_chats.discard(chat_id)
 
     async def _restore_chat_session_foreground(self) -> None:
         """Reattach every chat to the conversation it was showing.
@@ -3248,6 +3266,18 @@ class Engine:
         await self.event_bus.emit(
             Event(name=MESSAGE_OUT, data={"chat_id": chat_id, "content": content})
         )
+
+    async def _apply_session_title(self, event: Event) -> None:
+        chat_id = str(event.data["chat_id"])
+        session = self.session_manager.get(str(event.data["user_id"]), chat_id)
+        title = clean_title(str(event.data["title"]))
+        if session is None or not session.is_active or not title:
+            return
+        if session.title == title:
+            return
+        session.title = title
+        await self.session_manager.save(session)
+        logger.info("chat_session_titled", chat_id=chat_id, title=title)
 
     def _note_chat_stream_tail(self, chat_id: str, content: str) -> None:
         """Record which conversation's reply now ends the chat it went to.
@@ -3422,8 +3452,7 @@ class Engine:
 
         await self.connector.send_message(
             chat_id,
-            f"{verb} {slot_label(target.index)} · {target.directory}?{warning}\n"
-            f"{outcome}",
+            f"{verb} {target.name}?{warning}\n{outcome}",
             buttons=[
                 [
                     InlineButton(
@@ -3475,7 +3504,7 @@ class Engine:
         if target.is_primary:
             await self._send_transient(
                 chat_id,
-                f"Cleared {slot_label(target.index)} · {target.directory}. "
+                f"Cleared {target.name}. "
                 "The first conversation is this chat, so it is reset rather "
                 "than removed.",
             )
@@ -3484,7 +3513,7 @@ class Engine:
             return await self._land_after_kill(user_id, base, target)
         await self._send_transient(
             chat_id,
-            f"Terminated {slot_label(target.index)} · {target.directory}.",
+            f"Terminated {target.name}.",
         )
         return ""
 
@@ -3499,7 +3528,7 @@ class Engine:
         """
         await self._retire_foreground_stream(killed.chat_id)
         remaining = await self._fallback_chat_sessions(user_id, base, killed.chat_id)
-        terminated = f"Terminated {slot_label(killed.index)} · {killed.directory}."
+        terminated = f"Terminated {killed.name}."
         if not remaining:
             if self.connector is not None:
                 await self.connector.activate_chat_session(base)

@@ -45,6 +45,7 @@ class Session(BaseModel):
     is_active: bool = True
     is_foreground: bool = False
     workspace_name: str | None = None
+    title: str | None = None
     workspace_directories: list[str] = Field(default_factory=list)
     task_run_id: str | None = None
     # Per-task RuntimeSettings overlay (populated by the task orchestrator
@@ -133,6 +134,16 @@ class SessionManager:
             None,
         )
 
+    def title_of(self, chat_id: str) -> str | None:
+        return next(
+            (
+                session.title
+                for session in self._sessions.values()
+                if session.chat_id == chat_id and session.is_active
+            ),
+            None,
+        )
+
     def active_for_user(self, user_id: str) -> list[Session]:
         """Every cached live session belonging to *user_id*."""
         return [
@@ -210,6 +221,7 @@ class SessionManager:
         session.is_active = True
         session.workspace_name = None
         session.workspace_directories = []
+        session.title = None
         if self._store:
             await self._store.save(session)
         logger.info(

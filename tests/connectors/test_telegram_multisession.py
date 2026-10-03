@@ -307,6 +307,22 @@ class TestLeavingTakesAPromptBackDown:
 
         assert "🔔 #1 is waiting on you" in _sent_texts(connector)[-1]
 
+    async def test_the_waiting_notice_names_a_titled_conversation(self, connector):
+        connector.set_session_title_resolver({"284184690": "Schema migration"}.get)
+        await connector.send_question(
+            "284184690",
+            "interaction-1",
+            "Which database?",
+            "Storage",
+            [{"label": "PG"}],
+        )
+
+        await connector.activate_chat_session("284184690:s2")
+
+        assert (
+            "🔔 #1 · Schema migration is waiting on you" in (_sent_texts(connector)[-1])
+        )
+
     async def test_a_plan_review_is_withdrawn_whole(self, connector):
         await connector.send_plan_review(
             "284184690", "interaction-1", "# Plan\nStep one"

@@ -7,7 +7,7 @@ import re
 from collections.abc import Awaitable, Callable, Coroutine
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
@@ -24,9 +24,11 @@ from telegram.constants import ChatAction, ParseMode
 from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError
 from telegram.ext import (
     Application,
+    ApplicationHandlerStop,
     CallbackQueryHandler,
     CommandHandler,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 
@@ -96,6 +98,7 @@ _DELETED_ID_MEMORY = 256
 _STARTUP_MAX_RETRIES = 5
 _STARTUP_BASE_DELAY = 2.0
 _STARTUP_MAX_DELAY = 60.0
+_STALE_UPDATE_SECONDS = 600.0
 _SEND_MAX_RETRIES = 3
 _SEND_BASE_DELAY = 1.0
 _SEND_MAX_DELAY = 10.0
@@ -381,6 +384,7 @@ class TelegramConnector(BaseConnector):
         self._approval_tool_names: dict[str, str] = {}
         self._approval_cards: dict[str, ApprovalCard] = {}
         self._prompt_chats: dict[str, str] = {}
+        self._stale_notified: set[str] = set()
         self._router = ChatSessionRouter()
         self._deferred: dict[str, list[_Prompt]] = {}
         self._onscreen: dict[str, list[_Prompt]] = {}
@@ -517,8 +521,7 @@ class TelegramConnector(BaseConnector):
 
     def _deferred_notice_text(self, chat_id: str) -> str:
         queue = self._deferred.get(chat_id, [])
-        slot = index_of(chat_id)
-        head = f"🔔 #{slot} is waiting on you"
+        head = f"🔔 {self.chat_session_label(chat_id)} is waiting on you"
         lines = [f"• {p.summary}" for p in queue[:3]]
         if len(queue) > 3:
             lines.append(f"• …and {len(queue) - 3} more")
@@ -623,6 +626,8 @@ class TelegramConnector(BaseConnector):
                 f"{self._api_base_url}/file/bot"
             )
         self._app = builder.build()
+        self._stale_notified.clear()
+        self._app.add_handler(TypeHandler(Update, self._drop_stale_update), group=-1)
         self._app.add_handler(
             CommandHandler(
                 [
@@ -672,7 +677,7 @@ class TelegramConnector(BaseConnector):
         await self._app.start()
         await self._app.updater.start_polling(  # type: ignore[union-attr]
             allowed_updates=Update.ALL_TYPES,
-            drop_pending_updates=True,
+            drop_pending_updates=False,
         )
         await self._register_command_menu()
         logger.info("telegram_connector_started")
@@ -757,7 +762,7 @@ class TelegramConnector(BaseConnector):
             else body[:_BACKGROUND_PREVIEW_CHARS].rstrip() + "…"
         )
         slot = index_of(chat_id)
-        label = f"#{slot}"
+        label = self.chat_session_label(chat_id)
         chunk = Chunk(
             f"🔔 {label} replied\n\n{preview}",
             f"🔔 {escape(label)} replied\n\n{quote_block(preview)}",
@@ -1469,6 +1474,40 @@ class TelegramConnector(BaseConnector):
         if review_msg_id:
             plan_ids.append(review_msg_id)
         self._plan_message_ids[chat_id] = plan_ids
+
+    async def _drop_stale_update(
+        self, update: Update, _context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Stop a message that waited too long for the daemon from running now.
+
+        Telegram holds what was sent while the daemon was down and hands it
+        over on the next poll. A message from the seconds a restart takes is
+        one the user is still waiting on, so it runs; one that sat through a
+        long outage would start work nobody is expecting any more, so it is
+        dropped and the chat is told once.
+        """
+        message = update.message or update.edited_message
+        if message is None:
+            return
+        sent_at = message.edit_date or message.date
+        age_seconds = (datetime.now(timezone.utc) - sent_at).total_seconds()
+        if age_seconds <= _STALE_UPDATE_SECONDS:
+            return
+        raw_chat_id = str(message.chat_id)
+        logger.warning(
+            "telegram_stale_update_dropped",
+            chat_id=raw_chat_id,
+            age_seconds=int(age_seconds),
+        )
+        if raw_chat_id not in self._stale_notified:
+            self._stale_notified.add(raw_chat_id)
+            await self.send_message(
+                self._router.inbound(raw_chat_id),
+                "Skipped what you sent while leashd was offline, it is more "
+                f"than {int(_STALE_UPDATE_SECONDS // 60)} minutes old. "
+                "Send it again if you still need it.",
+            )
+        raise ApplicationHandlerStop
 
     async def _on_command(
         self, update: Update, _context: ContextTypes.DEFAULT_TYPE

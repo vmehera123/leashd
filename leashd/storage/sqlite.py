@@ -136,6 +136,8 @@ class SqliteSessionStore:
                 await self._db.execute(
                     "ALTER TABLE sessions ADD COLUMN resumable_token TEXT"
                 )
+            if "title" not in existing:
+                await self._db.execute("ALTER TABLE sessions ADD COLUMN title TEXT")
             if "is_foreground" not in existing:
                 await self._db.execute(
                     "ALTER TABLE sessions ADD COLUMN is_foreground INTEGER DEFAULT 0"
@@ -186,8 +188,8 @@ class SqliteSessionStore:
                (user_id, chat_id, session_id, working_directory,
                 agent_resume_token, resumable_token, created_at, last_used,
                 total_cost, message_count, is_active, is_foreground,
-                workspace_name, mode, mode_instruction, task_run_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                workspace_name, mode, mode_instruction, task_run_id, title)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 session.user_id,
                 session.chat_id,
@@ -205,6 +207,7 @@ class SqliteSessionStore:
                 session.mode,
                 session.mode_instruction,
                 session.task_run_id,
+                session.title,
             ),
         )
         await self._db.commit()
@@ -310,6 +313,7 @@ class SqliteSessionStore:
             if "mode_instruction" in keys
             else None,
             task_run_id=row["task_run_id"] if "task_run_id" in keys else None,
+            title=row["title"] if "title" in keys else None,
         )
 
     async def save_message(
