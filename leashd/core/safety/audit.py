@@ -59,6 +59,26 @@ class AuditLogger:
             entry["session_mode"] = session_mode
         self._write(entry)
 
+    def log_ungated_tool(
+        self,
+        session_id: str,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        tool_use_id: str,
+        *,
+        session_mode: str | None = None,
+    ) -> None:
+        entry: dict[str, Any] = {
+            "event": "tool_ran_ungated",
+            "session_id": session_id,
+            "tool_name": tool_name,
+            "tool_input": _sanitize_input(tool_input),
+            "tool_use_id": tool_use_id,
+        }
+        if session_mode is not None:
+            entry["session_mode"] = session_mode
+        self._write(entry)
+
     def log_approval(
         self,
         session_id: str,

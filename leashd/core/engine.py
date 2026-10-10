@@ -33,6 +33,7 @@ from leashd.core.chat_sessions import (
 )
 from leashd.core.config import build_directory_names, ensure_leashd_dir
 from leashd.core.events import (
+    BACKGROUND_AGENTS,
     COMMAND_WEB,
     CONFIG_RELOADED,
     ENGINE_STARTED,
@@ -150,6 +151,20 @@ _GOAL_CLEAR_WORDS = frozenset({"clear", "stop", "off", "reset", "none", "cancel"
 _TRANSIENT_MESSAGE_DELAY = 5.0  # seconds before auto-deleting status messages (longer than connector's 4.0s approval cleanup)
 _FOLLOWUP_QUEUED_NOTICE = "⏳ Queued — Claude reads it when its current response ends."
 _FOLLOWUP_READ_NOTICE = "📨 Claude has read your message."
+_BACKGROUND_AGENTS_NAMED = 3
+
+
+def _background_agents_notice(agents: list[str]) -> str:
+    count = len(agents)
+    noun = "agent is" if count == 1 else "agents are"
+    line = f"⏳ {count} background {noun} still working"
+    named = [name for name in agents if name][:_BACKGROUND_AGENTS_NAMED]
+    if named:
+        more = count - len(named)
+        line += ": " + ", ".join(named) + (f" and {more} more" if more > 0 else "")
+    return line + ". Claude replies here when they report back."
+
+
 _FOLLOWUP_UNREAD_NOTICE = (
     "⚠️ The turn ended before Claude read your message. "
     "Send it again if it still applies."
@@ -473,7 +488,11 @@ class _StreamingResponder:
                 await self._show_activity(activity)
 
     async def _show_activity(self, activity: ToolActivity) -> None:
-        if self._message_id is not None and not self._cursor_paused:
+        if (
+            self._message_id is not None
+            and not self._cursor_paused
+            and not self._closed
+        ):
             tail = self._with_status(visible_text(self._buffer[self._display_offset :]))
             if tail:
                 await self._connector.edit_message(
@@ -783,6 +802,9 @@ class Engine:
         self._followup_notices: dict[
             str, list[tuple[str, asyncio.Event, asyncio.Task[None]]]
         ] = {}
+        self._background_agents: dict[str, list[str]] = {}
+        self._background_notices: dict[str, tuple[str, str]] = {}
+        self._background_notice_lock = asyncio.Lock()
         self._chat_session_banners: dict[str, str] = {}
         self._chat_stream_tail: dict[str, tuple[str, str]] = {}
         # Strong refs to the turns adopted from a previous daemon (asyncio only
@@ -791,6 +813,7 @@ class Engine:
 
         self.event_bus.subscribe(LATE_REPLY, self._deliver_late_reply)
         self.event_bus.subscribe(SESSION_TITLED, self._apply_session_title)
+        self.event_bus.subscribe(BACKGROUND_AGENTS, self._on_background_agents)
 
         self._chat_sessions = ChatSessionDirectory(
             self.session_manager,
@@ -910,6 +933,9 @@ class Engine:
         await self.event_bus.emit(Event(name=ENGINE_STARTED))
 
     async def shutdown(self) -> None:
+        for chat_id in list(self._background_notices):
+            with contextlib.suppress(Exception):
+                await self._withdraw_background_notice(chat_id)
         await self.event_bus.emit(Event(name=ENGINE_STOPPED))
         await self._shutdown_browser(self.config.browser_backend)
         if self.plugin_registry:
@@ -1149,6 +1175,76 @@ class Engine:
             chat_id, message_id, delay=_TRANSIENT_MESSAGE_DELAY
         )
 
+    async def _on_background_agents(self, event: Event) -> None:
+        chat_id = str(event.data["chat_id"])
+        agents = [str(name) for name in event.data.get("agents") or []]
+        fewer = len(agents) < len(self._background_agents.get(chat_id, []))
+        if agents:
+            self._background_agents[chat_id] = agents
+        else:
+            self._background_agents.pop(chat_id, None)
+        if fewer:
+            await self._clear_idle_activity(chat_id)
+        await self._refresh_background_notice(chat_id)
+
+    async def _clear_idle_activity(self, chat_id: str) -> None:
+        """Take down a tool line nothing is left to clear.
+
+        A background agent's tool calls reach the chat through the finished
+        turn's responder, which no further chunk will ever tidy up after, so
+        the last one stayed under the reply for good.
+        """
+        if self.connector is None or chat_id in self._executing_chats:
+            return
+        with contextlib.suppress(Exception):
+            await self.connector.clear_activity(chat_id)
+
+    async def _refresh_background_notice(self, chat_id: str) -> None:
+        """Keep one line under the last reply while background agents work.
+
+        Claude ends its turn with the agents still running and answers again
+        only when they report back, which left the chat silent for minutes
+        with nothing to say work was going on. The line is shown only between
+        turns and only for the conversation on screen: a running turn streams
+        its own progress, and a conversation off screen writes nothing into
+        the chat. It is a message of its own that is edited as agents finish
+        and deleted when none are left, so the reply above it stays the last
+        thing the conversation said.
+        """
+        if self.connector is None:
+            return
+        async with self._background_notice_lock:
+            agents = self._background_agents.get(chat_id)
+            wanted = (
+                _background_agents_notice(agents)
+                if agents
+                and chat_id not in self._executing_chats
+                and self.connector.chat_session_visible(chat_id)
+                else None
+            )
+            shown = self._background_notices.get(chat_id)
+            if wanted is None:
+                if shown is not None:
+                    del self._background_notices[chat_id]
+                    await self.connector.delete_message(chat_id, shown[0])
+                return
+            if shown is None:
+                message_id = await self.connector.send_message_with_id(chat_id, wanted)
+                if message_id:
+                    self._background_notices[chat_id] = (message_id, wanted)
+                return
+            if shown[1] != wanted:
+                await self.connector.edit_message(chat_id, shown[0], wanted)
+                self._background_notices[chat_id] = (shown[0], wanted)
+
+    async def _withdraw_background_notice(self, chat_id: str) -> None:
+        if self.connector is None:
+            return
+        async with self._background_notice_lock:
+            shown = self._background_notices.pop(chat_id, None)
+            if shown is not None:
+                await self.connector.delete_message(chat_id, shown[0])
+
     async def _settle_followup_notices(self, chat_id: str) -> None:
         """Close out a finished turn's follow-up notices, read or not."""
         for message_id, read, watcher in self._followup_notices.pop(chat_id, []):
@@ -1287,6 +1383,7 @@ class Engine:
             return ""
 
         self._executing_chats.add(chat_id)
+        await self._refresh_background_notice(chat_id)
         try:
             result = await self._execute_turn(
                 user_id, text, chat_id, attachments=attachments
@@ -1349,6 +1446,7 @@ class Engine:
                         chat_id, mid, delay=_TRANSIENT_MESSAGE_DELAY
                     )
             await self._settle_followup_notices(chat_id)
+            await self._refresh_background_notice(chat_id)
             if self.connector:
                 await self.connector.notify_completion(chat_id)
 
@@ -2979,6 +3077,7 @@ class Engine:
         """
         if leaving is not None and leaving != target.chat_id:
             await self._retire_foreground_stream(leaving)
+            await self._withdraw_background_notice(leaving)
         if self.connector is not None:
             await self.connector.activate_chat_session(target.chat_id)
         session = await self.session_manager.get_or_create(
@@ -3003,6 +3102,7 @@ class Engine:
                 await responder.reveal_progress()
         if self.connector is not None:
             await self.connector.flush_chat_session_prompts(target.chat_id)
+        await self._refresh_background_notice(target.chat_id)
         logger.info(
             "chat_session_attached",
             chat_id=target.chat_id,
@@ -3260,9 +3360,12 @@ class Engine:
             content=content,
             session_id=event.data.get("session_id"),
         )
+        await self._withdraw_background_notice(chat_id)
+        await self._clear_idle_activity(chat_id)
         if self.connector is not None:
             await self.connector.send_message(chat_id, content)
         self._note_chat_stream_tail(chat_id, content)
+        await self._refresh_background_notice(chat_id)
         await self.event_bus.emit(
             Event(name=MESSAGE_OUT, data={"chat_id": chat_id, "content": content})
         )

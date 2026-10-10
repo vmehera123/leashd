@@ -206,12 +206,17 @@ flowchart TD
 
 ## Audit Logger
 
-`AuditLogger` (`core/safety/audit.py`) writes an append-only JSONL file. Three log methods:
+`AuditLogger` (`core/safety/audit.py`) writes an append-only JSONL file. Six log methods:
 
 | Method | Event Type | Key Fields |
 |---|---|---|
 | `log_tool_attempt()` | `tool_attempt` | session_id, tool_name, tool_input, classification, decision |
+| `log_ungated_tool()` | `tool_ran_ungated` | session_id, tool_name, tool_input, tool_use_id |
 | `log_approval()` | `approval` | session_id, tool_name, approved, user_id |
 | `log_security_violation()` | `security_violation` | session_id, tool_name, reason, risk_level |
+| `log_operation()` | `git_operation` | session_id, operation, detail, working_directory |
+| `log_file_delivery()` | `file_delivery` | session_id, chat_id, trigger, delivered, path, size, reason |
+
+`tool_ran_ungated` records a tool call that finished without a `tool_attempt` before it, so the gate never saw it. The tmux runtime's hook relay is built to make that impossible (see [Agents](agents.md#tmuxagent)), so treat any such entry as a bug worth reporting. Find them with `grep tool_ran_ungated .leashd/audit.jsonl`.
 
 Tool input strings longer than 500 characters are truncated with `...[truncated]`. All entries include an ISO 8601 UTC timestamp.

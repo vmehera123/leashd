@@ -83,6 +83,7 @@ flowchart LR
 | `merge.completed` | `MERGE_COMPLETED` | `MergeResolverPlugin` | `chat_id` | Merge resolution finished |
 | `session.completed` | `SESSION_COMPLETED` | `Engine` | `session`, `chat_id`, `user_id`, `response_content` | Agent session completed |
 | `session.titled` | `SESSION_TITLED` | `TmuxSessionManager` | `chat_id`, `user_id`, `title` | Claude Code wrote a title for the conversation |
+| `agent.background_agents` | `BACKGROUND_AGENTS` | `TmuxSessionManager` | `chat_id`, `user_id`, `session_id`, `agents` | The set of background subagents a pane is waiting on changed; `agents` lists their descriptions and is empty when none are left |
 | `task.submitted` | `TASK_SUBMITTED` | `Engine` | `user_id`, `chat_id`, `session_id`, `task`, `working_directory` | `/task` command submitted |
 | `task.phase_changed` | `TASK_PHASE_CHANGED` | `TaskOrchestrator` | `run_id`, `chat_id`, `phase`, `previous_phase` | Task transitioned to new phase |
 | `task.completed` | `TASK_COMPLETED` | `TaskOrchestrator` | `run_id`, `chat_id`, `total_cost` | Task finished successfully |

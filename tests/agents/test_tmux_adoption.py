@@ -352,13 +352,59 @@ class TestAdoption:
         manifest = _manifest(tsm, cfg)
         settings_file = Path(manifest.settings_path)
         settings = json.loads(settings_file.read_text())
-        settings["hooks"]["PreToolUse"][0]["hooks"][0]["url"] = (
-            "http://127.0.0.1:9999/internal/tmux/hook/PreToolUse"
+        gate = settings["hooks"]["PreToolUse"][0]["hooks"][0]
+        gate["command"] = gate["command"].replace(":8080/", ":9999/")
+        settings_file.write_text(json.dumps(settings))
+        _, killed = _prep(tsm, monkeypatch, pane=_FakePane(screen=IDLE_SCREEN))
+        assert await tsm.adopt_orphan_panes() == []
+        assert killed == ["leashd_sess1"]
+
+    async def test_pane_whose_lifecycle_hooks_point_elsewhere_is_reaped(
+        self, cfg, monkeypatch
+    ):
+        tsm = TmuxSessionManager(cfg)
+        manifest = _manifest(tsm, cfg)
+        settings_file = Path(manifest.settings_path)
+        settings = json.loads(settings_file.read_text())
+        settings["hooks"]["PostToolUse"][0]["hooks"][0]["url"] = (
+            "http://127.0.0.1:9999/internal/tmux/hook/PostToolUse"
         )
         settings_file.write_text(json.dumps(settings))
         _, killed = _prep(tsm, monkeypatch, pane=_FakePane(screen=IDLE_SCREEN))
         assert await tsm.adopt_orphan_panes() == []
         assert killed == ["leashd_sess1"]
+
+    async def test_pane_whose_relay_script_moved_is_reaped(self, cfg, monkeypatch):
+        tsm = TmuxSessionManager(cfg)
+        manifest = _manifest(tsm, cfg)
+        settings_file = Path(manifest.settings_path)
+        settings = json.loads(settings_file.read_text())
+        gate = settings["hooks"]["PreToolUse"][0]["hooks"][0]
+        gate["command"] = gate["command"].replace("hook_relay.py", "old/hook_relay.py")
+        settings_file.write_text(json.dumps(settings))
+        _, killed = _prep(tsm, monkeypatch, pane=_FakePane(screen=IDLE_SCREEN))
+        assert await tsm.adopt_orphan_panes() == []
+        assert killed == ["leashd_sess1"]
+
+    async def test_pane_spawned_with_http_gating_hooks_is_still_adopted(
+        self, cfg, monkeypatch
+    ):
+        tsm = TmuxSessionManager(cfg)
+        manifest = _manifest(tsm, cfg)
+        settings_file = Path(manifest.settings_path)
+        settings = json.loads(settings_file.read_text())
+        lifecycle = settings["hooks"]["PostToolUse"][0]["hooks"][0]
+        settings["hooks"]["PreToolUse"][0]["hooks"][0] = {
+            "type": "http",
+            "url": tsm._hook_url("PreToolUse"),
+            "timeout": 60,
+            "headers": lifecycle["headers"],
+        }
+        settings_file.write_text(json.dumps(settings))
+        _, killed = _prep(tsm, monkeypatch, pane=_FakePane(screen=IDLE_SCREEN))
+        adopted = await tsm.adopt_orphan_panes()
+        assert [cs.session_id for cs in adopted] == ["sess1"]
+        assert killed == []
 
     async def test_pane_with_a_stale_secret_is_reaped(self, cfg, monkeypatch):
         tsm = TmuxSessionManager(cfg)

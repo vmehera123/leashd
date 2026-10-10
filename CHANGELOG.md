@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.3.0] - 2026-10-10
+- **added**: while background subagents are still working after Claude's turn has ended, the chat shows a line under the last reply naming them, until they report back.
+- **added**: a `tool_ran_ungated` audit entry and `tmux_tool_ran_ungated` log line for any tool call that finishes without having gone through the gate.
+- **fixed**: a tool call could run with no policy check and no audit entry (about 1 in 900) when its hook hit a connection the daemon had just closed, or arrived while the daemon was restarting. The gating hooks now retry until leashd answers and deny if it never does.
+- **fixed**: a tool line left under a reply by a background subagent is cleared when the agent finishes, and its hand-back no longer shows as "Running: …".
+- **fixed**: opening a running conversation in your own terminal (`claude` → `/resume`) no longer posts Claude Code's "No response requested." placeholder into the chat as the agent's reply.
+
 ## [2.2.0] - 2026-10-03
 - **added**: conversations name themselves, so `/session`, the switch banner and the "replied" / "waiting on you" notices read `#2 · Login test fix · api`. The name is Claude Code's own session title, or the first line of your first message until it has one.
 - **added**: fewer prompts: read-only `gh` commands (`gh run list`, `gh pr view`…), `git fetch`, `git add`, `mkdir`, `node --check` and `vitest`/`jest` no longer ask when chained to an approved `curl` or `ssh`.

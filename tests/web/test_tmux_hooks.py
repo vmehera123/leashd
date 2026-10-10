@@ -319,3 +319,18 @@ def test_double_prompt_deduped_through_router():
         assert calls == ["Bash"], f"expected one safety eval, got {calls}"
     finally:
         reset_tmux_session_manager()
+
+
+@pytest.mark.parametrize(
+    "event", ["PreToolUse", "PermissionRequest", "PostToolUse", "Stop", "StatusLine"]
+)
+def test_every_hook_response_ends_its_connection(client_tsm, event):
+    client, tsm = client_tsm
+    tsm.on_status_line = lambda body, *, pane_token=None: None
+    r = client.post(
+        f"/internal/tmux/hook/{event}",
+        json={"tool_name": "Bash"},
+        headers={"X-Leashd-Token": "good-secret"},
+    )
+    assert r.status_code == 200
+    assert r.headers["connection"] == "close"

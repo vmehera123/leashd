@@ -84,6 +84,12 @@ check that a long answer, and one with messages queued behind it, is not returne
 Claude Code 2.1.288 draws no spinner and no `esc to interrupt` while it writes an answer, so a
 single capture of that pane looks idle; only the screen changing says it is working.
 
+`WITH_AGENTS=1` (read by `multisession_suite.py`, not the harness) starts a background subagent in the
+conversation on screen before every scenario, so each one runs the way a session with subagents alive does:
+the "background agents are still working" line and the hand-back replies land in the middle of whatever the
+scenario checks. Restart the harness between batches, or agents pile up and their replies arrive in later
+scenarios. `s31` covers the line itself.
+
 `EDIT_DELAY_MS` (`0`) makes the fake Bot API sleep before answering every `editMessageText`,
 modelling a slow or rate-limited Telegram. It is the lever for **races between a turn landing
 and a streaming write still in flight** — the class of bug where the reply that reaches the chat

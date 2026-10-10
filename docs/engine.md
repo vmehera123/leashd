@@ -170,6 +170,7 @@ Key behaviors:
 - **Cursor character** — A `|` cursor is appended during streaming to indicate activity
 - **4000 character limit** — Messages exceeding this limit are split
 - **Tool activity** — Tool names and descriptions are shown as a status line during execution
+- **Background agents** — When a turn ends with background subagents still running, the engine keeps one message under the last reply (`⏳ 2 background agents are still working: …`), edits it as agents finish and deletes it when none are left. It is driven by the `agent.background_agents` event and shown only between turns, for the conversation on screen
 - **Finalization** — When the agent finishes, the final message is sent with tool summary and the cursor is removed
 
 If the connector's `send_message_with_id()` returns `None`, streaming is disabled for that response and the full text is sent at the end.

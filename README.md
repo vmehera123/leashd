@@ -104,6 +104,8 @@ Every tool call the agent makes passes through three layers before it can execut
 
 The pipeline is connector-agnostic: same sandbox, same rules, same buttons whether you're in the browser or on your phone. Every attempt and decision is appended to `.leashd/audit.jsonl`.
 
+The gate fails closed. If a tool call cannot reach leashd, for example while the daemon restarts, it waits up to 60 seconds for an answer and is denied if none comes. A call that still finishes without a verdict is written to the audit log as `tool_ran_ungated`, so `grep tool_ran_ungated .leashd/audit.jsonl` should always print nothing.
+
 **Five policies ship in `policies/`:**
 
 | Policy | Auto-allows | Requires approval |
@@ -130,6 +132,12 @@ LEASHD_POLICY_FILES=policies/default.yaml,policies/my-overrides.yaml   # merged,
 ## The tmux runtime
 
 leashd spawns a real interactive `claude` TUI in a tmux pane and talks to it the way a human would — so native slash commands pass straight through from chat, dialogs the CLI opens (model picker, consent prompts) get bridged to inline buttons, and `/screen` gives you a live snapshot of the terminal. Tool calls are intercepted by Claude Code `PreToolUse` hooks and routed back into leashd's gatekeeper, so nothing escapes the pipeline.
+
+**Background subagents stay visible.** Claude can start subagents in the background and end its turn while they work. The chat then shows one line under the last reply until they report back, and Claude's follow-up arrives as a normal reply:
+
+```
+⏳ 2 background agents are still working: Audit the API routes, Check test coverage. Claude replies here when they report back.
+```
 
 **Restarting is safe.** tmux panes live on a tmux server of their own, so `leashd restart` — to pick up a fix, a config change, a new build — no longer ends the work in them. The daemon writes what it needs to find each pane again, leaves them running on the way out, and re-adopts them on the way in: same conversation, same session, same directory. A turn that was still running keeps streaming into the chat where it left off, and a Telegram message you send during the restart runs once the daemon is back. `leashd stop --end-agents` ends them instead. See [docs/agents.md](docs/agents.md#restarting-without-losing-work).
 
@@ -228,7 +236,7 @@ Available in both the Web UI and Telegram.
 
 | Command | Description |
 |---|---|
-| `/task <description>` | Autonomous: implement → verify → PR |
+| `/task <description>` | Autonomous: implement → verify, plus an opt-in review |
 | `/goal <condition>` | Set a completion condition the agent works toward across turns until a fast model confirms it's met |
 | `/web <instruction>` | Autonomous web automation with content-level human approval |
 | `/plan <text>` | Plan mode — agent proposes, you approve before execution |
@@ -318,6 +326,7 @@ leashd model show / set <opus|sonnet|claude-…> / clear
 
 # Task orchestrator
 leashd orchestrator enable / disable / show
+leashd run "fix the flaky login test"   # submit a /task and block until it finishes
 
 # Web UI
 leashd webui show / enable / disable / url
@@ -340,6 +349,7 @@ leashd ssh show
 # Agent tuning
 leashd effort show / set <low|medium|high|xhigh|max>    # default: medium
 leashd turns show / set <N>                              # default: 120
+leashd tool-calls show / set <N>                         # -1 for unlimited
 
 # Plugins and skills
 leashd plugin list / add <source> / remove <name> / enable <name> / disable <name>

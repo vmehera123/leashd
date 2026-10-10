@@ -381,6 +381,35 @@ def setup(*, on: int, slots: int = 2) -> None:
         TURN_TIMEOUT,
         "every conversation to go idle before the scenario starts",
     )
+    if WITH_AGENTS:
+        keep_agent_working(slot(on))
+
+
+WITH_AGENTS = os.environ.get("WITH_AGENTS", "0") == "1"
+KEEP_WORKING = (
+    "Use the Agent tool with run_in_background set to true to start ONE "
+    "general-purpose subagent whose whole job is to run the bash command "
+    "`sleep 20` twelve times, as twelve separate calls one after another, and "
+    "then report back the single word IDLED. Do not wait for it: end your turn "
+    "at once by replying exactly 'DELEGATED'. When it reports back, reply with "
+    "exactly one line: 'IDLE AGENT BACK'."
+)
+
+
+def keep_agent_working(chat_id: str) -> None:
+    """Leave a background agent running in the conversation on screen.
+
+    ``WITH_AGENTS=1`` runs every scenario the way the 2026-10-06 leadline
+    session ran: with subagents alive between turns, so the line that says so
+    and the reply they come back with land in the middle of whatever the
+    scenario is checking.
+    """
+    before = reply_count(chat_id)
+    since_iso = now_iso()
+    msg(KEEP_WORKING)
+    wait_turn_done(since_iso, chat_id)
+    wait_new_reply(chat_id, before)
+    time.sleep(1.5)
 
 
 @scenario("s1", "opening a second conversation")
@@ -427,7 +456,7 @@ def s2() -> None:
         "nothing from the background conversation streams into the chat",
     )
     notice = next(
-        ((m, t) for m, t in buttoned(landed) if "#2 replied" in t),
+        ((m, t) for m, t in buttoned(landed) if "#2" in t and " replied" in t),
         None,
     )
     check(notice is not None, "its finished answer arrives as a tagged notice")
@@ -1150,6 +1179,95 @@ def s30() -> None:
     )
 
 
+DELEGATED = "DELEGATED"
+HANDBACK_VERDICT = "HANDBACK VERDICT"
+AGENTS_WORKING = "still working"
+DELEGATE_AND_END = (
+    "Use the Agent tool with run_in_background set to true to start ONE "
+    "general-purpose subagent whose whole job is to run the bash command "
+    "`sleep 20` four times, as four separate calls one after another, and then "
+    "report back the single word COUNTED. Do not wait for it: end your turn at "
+    f"once by replying exactly '{DELEGATED}'. Later, when the subagent reports "
+    f"back, reply with exactly one line: '{HANDBACK_VERDICT}: done'."
+)
+
+
+def _working_notices(since: int) -> list[int]:
+    return [
+        int(c["message_id"])
+        for c in calls(since)
+        if c["method"] == "sendMessage" and AGENTS_WORKING in c["data"].get("text", "")
+    ]
+
+
+@scenario("s31", "background agents still working are named under the reply")
+def s31() -> None:
+    """leadline, 2026-10-06. Claude handed a report to three background
+    subagents and ended its turn. For minutes the chat showed a finished reply
+    and nothing else, so the conversation read as idle while it was working,
+    and a message sent then opened a new turn instead of looking queued.
+    """
+    setup(on=1, slots=1)
+    before = reply_count(slot(1))
+    since_iso = now_iso()
+    started = call_count()
+    msg(DELEGATE_AND_END)
+    wait_turn_done(since_iso, slot(1))
+    check(
+        DELEGATED in wait_new_reply(slot(1), before),
+        "the turn that started the agent ends first",
+    )
+    first = wait_for(lambda: _working_notices(started), 20, "the line under the reply")
+    check(len(first) == 1, f"one line says an agent is still working ({first!r})")
+    reply_seq = index_of_text(started, DELEGATED)
+    notice_seq = index_of_text(started, AGENTS_WORKING)
+    check(
+        reply_seq is not None and notice_seq is not None and notice_seq > reply_seq,
+        "and it lands under the reply, not over it",
+    )
+
+    away = call_count()
+    cmd("session", f"new {here()}")
+    wait_foreground(slot(2))
+    wait_for(lambda: first[0] in deleted(away), 15, "the line to leave with its slot")
+    check(not _working_notices(away), "the other conversation is not told about it")
+
+    back = call_count()
+    cmd("session", "1")
+    wait_foreground(slot(1))
+    again = wait_for(lambda: _working_notices(back), 15, "the line on the way back")
+    check(len(again) == 1, "coming back puts the line up again, once")
+
+    asked = call_count()
+    before_short = reply_count(slot(1))
+    short_iso = now_iso()
+    msg(SHORT)
+    wait_turn_done(short_iso, slot(1))
+    wait_new_reply(slot(1), before_short)
+    check(again[0] in deleted(asked), "a new turn takes the line down")
+    third = wait_for(
+        lambda: _working_notices(asked), 20, "the line back under the new reply"
+    )
+
+    late_from = call_count()
+    wait_for(
+        lambda: _posted(late_from, HANDBACK_VERDICT),
+        TURN_TIMEOUT,
+        "claude's reply to the hand-back",
+    )
+    time.sleep(3)
+    check(third[-1] in deleted(asked), "the line goes when the agent reports back")
+    if not WITH_AGENTS:
+        check(
+            not _working_notices(late_from),
+            "and nothing says an agent is working once none is",
+        )
+    check(
+        bool(log_events(since_iso, "tmux_background_agents")),
+        "the runtime logged the agents it was waiting on",
+    )
+
+
 @scenario("s5", "leaving and returning while the answer is still being written")
 def s5() -> None:
     """Two outcomes, both asserted — whether the turn is still going on return
@@ -1327,7 +1445,7 @@ def s6() -> None:
 
     check(bool(streamed(both)), "the conversation on screen streams as usual")
     check(
-        any("#1 replied" in t for t in texts(both)),
+        any("#1" in t and " replied" in t for t in texts(both)),
         "the other one reports in without writing over it",
     )
     for index in (1, 2):
@@ -1498,7 +1616,11 @@ def s16() -> None:
     )
     notice = wait_for(
         lambda: next(
-            ((m, t) for m, t in buttoned(left) if "#2 is waiting on you" in t),
+            (
+                (m, t)
+                for m, t in buttoned(left)
+                if "#2" in t and " is waiting on you" in t
+            ),
             None,
         ),
         30,
@@ -1927,6 +2049,7 @@ ORDER = [
     "s28",
     "s29",
     "s30",
+    "s31",
     "s17",
     "s6",
     "s7",

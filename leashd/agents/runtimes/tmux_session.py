@@ -30,6 +30,7 @@ import secrets
 import shlex
 import shutil
 import subprocess
+import sys
 import time
 import unicodedata
 from dataclasses import dataclass
@@ -54,7 +55,7 @@ from leashd.agents.runtimes.tmux_manifest import (
     session_id_from_tmux_name,
     write_manifest,
 )
-from leashd.core.events import LATE_REPLY, SESSION_TITLED, Event
+from leashd.core.events import BACKGROUND_AGENTS, LATE_REPLY, SESSION_TITLED, Event
 from leashd.core.safety.gatekeeper import FILE_EDIT_TOOLS
 from leashd.core.safety.policy import normalize_tool_name
 from leashd.exceptions import AgentError
@@ -102,6 +103,15 @@ def _api_error_kind(record: dict[str, Any]) -> str | None:
     return str(record.get("error") or "unknown")
 
 
+def _is_placeholder_reply(record: dict[str, Any]) -> bool:
+    message = record.get("message")
+    return (
+        isinstance(message, dict)
+        and message.get("model") == _SYNTHETIC_MODEL
+        and record.get("isApiErrorMessage") is not True
+    )
+
+
 def _is_interrupt_record(record: dict[str, Any]) -> bool:
     message = record.get("message")
     content = message.get("content") if isinstance(message, dict) else None
@@ -140,6 +150,35 @@ def _is_followup_text(queued: str, followup: str) -> bool:
     """True when claude's copy of an input is this follow-up, including one
     sent behind the ``@path`` references ``inject_followup`` types first."""
     return queued == followup or queued.endswith(f" {followup}")
+
+
+_UNANNOUNCED_TOOLS = frozenset({"SubagentHandback"})
+_TASK_NOTIFICATION_ID_RE = re.compile(
+    r"\A\s*<task-notification>\s*<task-id>([^<\s]+)</task-id>"
+)
+
+
+def _launched_background_agent(record: dict[str, Any]) -> tuple[str, str] | None:
+    """The id and description of a subagent this record started in the background."""
+    result = record.get("toolUseResult")
+    if not isinstance(result, dict) or result.get("isAsync") is not True:
+        return None
+    if result.get("status") != "async_launched":
+        return None
+    agent_id = result.get("agentId")
+    if not isinstance(agent_id, str) or not agent_id:
+        return None
+    description = result.get("description")
+    return agent_id, description.strip() if isinstance(description, str) else ""
+
+
+def _notified_task_id(record: dict[str, Any]) -> str | None:
+    """The background task a queued ``<task-notification>`` reports on."""
+    content = record.get("content")
+    if not isinstance(content, str):
+        return None
+    match = _TASK_NOTIFICATION_ID_RE.match(content)
+    return match.group(1) if match else None
 
 
 def _prompt_text(record: dict[str, Any]) -> str:
@@ -784,6 +823,8 @@ _PERM_UNMATCHED_SETTLE_S = 2.0
 _ORPHANED_PERM_SETTLE_S = 3.0
 _TRANSCRIPT_TAIL_BYTES = 4 * 1024 * 1024
 _HOOKED_CALLS_KEPT = 64
+_GATED_CALL_IDS_KEPT = 2048
+_HOOK_RELAY_SCRIPT = Path(__file__).with_name("hook_relay.py")
 _PERM_QUESTION_WRAP_ROWS = 2
 _QUEUED_INPUT_HINT_RE = re.compile(r"^  \S.*\bto send now\s*$")
 _SPINNER_SCAN_ROWS = 6
@@ -2257,6 +2298,7 @@ class TmuxClaudeSession:
         self.pane_token: str | None = None
         self.claude_uuid: str | None = None
         self.title: str | None = None
+        self.background_agents: dict[str, str] = {}
         self.turn: TmuxTurn | None = None
         # Per-turn plan-gate state — shared logic with the engine's
         # can_use_tool. Recreated each turn in begin_turn() so it survives
@@ -2294,6 +2336,7 @@ class TmuxClaudeSession:
         self.permission_hooks_inflight = 0
         self.regate_active = False
         self.hooked_calls: dict[str, tuple[str, dict[str, Any]]] = {}
+        self.gated_call_ids: dict[str, None] = {}
         self._hooked_at: dict[str, float] = {}
         self.billed_message_ids: set[str] = set()
         self.unreported_usage = TurnUsage()
@@ -4363,6 +4406,10 @@ class TmuxClaudeSession:
     def note_hooked_call(
         self, tool_use_id: str, tool_name: str, tool_input: dict[str, Any]
     ) -> None:
+        if tool_use_id:
+            self.gated_call_ids[tool_use_id] = None
+            while len(self.gated_call_ids) > _GATED_CALL_IDS_KEPT:
+                del self.gated_call_ids[next(iter(self.gated_call_ids))]
         key = tool_use_id or _tool_identity_key("", tool_name, tool_input)
         self.hooked_calls.pop(key, None)
         self.hooked_calls[key] = (tool_name, tool_input)
@@ -4371,6 +4418,18 @@ class TmuxClaudeSession:
             oldest = next(iter(self.hooked_calls))
             del self.hooked_calls[oldest]
             self._hooked_at.pop(oldest, None)
+
+    def ran_without_the_gate(self, tool_use_id: str) -> bool:
+        """Did a finished call never come through this session's ``PreToolUse``?
+
+        Only answerable once this session object has gated a call: a pane
+        adopted after a restart finishes calls the previous daemon gated.
+        """
+        return bool(
+            tool_use_id
+            and self.gated_call_ids
+            and tool_use_id not in self.gated_call_ids
+        )
 
     def forget_hooked_call(
         self,
@@ -4945,13 +5004,41 @@ class TmuxSessionManager:
             "matcher": ".*",
             "hooks": [
                 {
-                    "type": "http",
-                    "url": self._hook_url(event),
+                    "type": "command",
+                    "command": self._relay_command(event, pane_token),
                     "timeout": self._pre_tool_hook_timeout(),
-                    "headers": self._hook_headers(pane_token),
                 }
             ],
         }
+
+    def _relay_command(self, event: str, pane_token: str | None) -> str:
+        """The shell command that carries one gating hook to leashd.
+
+        Claude Code runs the tool when an HTTP hook cannot be delivered, so a
+        reset connection or a restarting daemon let a call past the gate. The
+        relay retries and then denies. The secret stays in a private file; the
+        pane token is this spawn's alone and travels in argv, so a replaced
+        pane can never pick up its successor's.
+        """
+        return shlex.join(
+            [
+                sys.executable,
+                "-I",
+                "-S",
+                str(_HOOK_RELAY_SCRIPT),
+                event,
+                self._hook_url(event),
+                str(self._relay_secret_file()),
+                pane_token or "",
+            ]
+        )
+
+    def _relay_secret_file(self) -> Path:
+        path = self._socket_dir / "hook-relay-headers"
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as handle:
+            handle.write(f"X-Leashd-Token: {self._secret}\n")
+        return path
 
     def native_allow_for_chat(self, chat_id: str | None) -> list[str]:
         """``permissions.allow`` entries for a chat, or empty when safety is
@@ -5127,6 +5214,7 @@ class TmuxSessionManager:
             await cs.teardown()
             if self._tmux_session_exists(cs.tmux_name) is not False:
                 self._kill_tmux_session(cs.tmux_name)
+            await self._forget_background_agents(cs)
 
     def sessions_for_chat(self, chat_id: str) -> list[TmuxClaudeSession]:
         return [cs for cs in self._sessions.values() if cs.chat_id == chat_id]
@@ -5437,6 +5525,7 @@ class TmuxSessionManager:
         old = self._sessions.pop(session_id, None)
         if old is not None:
             await old.teardown()
+            await self._forget_background_agents(old)
             for uuid_key, sid in list(self._by_uuid.items()):
                 if sid == session_id:
                     del self._by_uuid[uuid_key]
@@ -5839,8 +5928,12 @@ class TmuxSessionManager:
             cs.note_hooked_call(tool_use_id, tool_name, tool_input)
         if cs is not None and cs.turn is not None:
             cs.turn.mark_activity()
-            if cs.turn.on_tool_activity is not None and cs.turn.claim_hook_activity(
-                _tool_identity_key("", tool_name, tool_input)
+            if (
+                cs.turn.on_tool_activity is not None
+                and tool_name not in _UNANNOUNCED_TOOLS
+                and cs.turn.claim_hook_activity(
+                    _tool_identity_key("", tool_name, tool_input)
+                )
             ):
                 await safe_callback(
                     cs.turn.on_tool_activity,
@@ -6045,6 +6138,36 @@ class TmuxSessionManager:
         # dedup in _hook_to_permreq strips the reason, so nothing reached the
         # model and the pane hung.)
         return _permission_to_hook(decision)
+
+    def _record_ungated_call(self, cs: TmuxClaudeSession, body: dict[str, Any]) -> None:
+        """Put a call that ran without leashd's verdict on the audit trail.
+
+        The relay makes this unreachable for a pane spawned with it; a pane
+        still on HTTP hooks, or a hook Claude Code skipped, lands here. The
+        audit log is the record of what an agent did, so a call the gate never
+        saw is written to it rather than left out.
+        """
+        tool_use_id = str(body.get("tool_use_id") or "")
+        if not cs.ran_without_the_gate(tool_use_id):
+            return
+        cs.gated_call_ids[tool_use_id] = None
+        tool_name = str(body.get("tool_name", ""))
+        tool_input = body.get("tool_input")
+        logger.warning(
+            "tmux_tool_ran_ungated",
+            session_id=cs.session_id,
+            chat_id=cs.chat_id,
+            tool_name=tool_name,
+            tool_use_id=tool_use_id,
+        )
+        if self._audit is not None:
+            self._audit.log_ungated_tool(
+                cs.session_id,
+                tool_name,
+                tool_input if isinstance(tool_input, dict) else {},
+                tool_use_id,
+                session_mode=cs.mode,
+            )
 
     def stuck_permission_id(self, cs: TmuxClaudeSession) -> str | None:
         """A short fingerprint of the permission dialog on screen, when nobody
@@ -6498,6 +6621,7 @@ class TmuxSessionManager:
             return
         if event == "PostToolUse":
             tool_input = body.get("tool_input")
+            self._record_ungated_call(cs, body)
             cs.forget_hooked_call(
                 str(body.get("tool_use_id") or ""),
                 str(body.get("tool_name", "")),
@@ -6531,6 +6655,7 @@ class TmuxSessionManager:
                 turn_active=cs.turn is not None and not cs.turn.stop_event.is_set(),
             )
             cs.complete_turn()
+            await self._forget_background_agents(cs)
 
     @staticmethod
     def _end_turn_on_api_error(cs: TmuxClaudeSession, body: dict[str, Any]) -> None:
@@ -7075,6 +7200,13 @@ class TmuxSessionManager:
         if obj_type == "assistant":
             if turn is not None:
                 turn.mark_activity()
+            if _is_placeholder_reply(obj):
+                logger.info(
+                    "tmux_placeholder_reply_skipped",
+                    session_id=cs.session_id,
+                    chat_id=cs.chat_id,
+                )
+                return
             message = obj.get("message", {})
             model = message.get("model")
             if isinstance(model, str) and model and model != _SYNTHETIC_MODEL:
@@ -7093,6 +7225,10 @@ class TmuxSessionManager:
             for block in _content_blocks(obj):
                 if block.get("type") == "tool_result":
                     cs.forget_hooked_call(str(block.get("tool_use_id") or ""))
+            launched = _launched_background_agent(obj)
+            if launched is not None and launched[0] not in cs.background_agents:
+                cs.background_agents[launched[0]] = launched[1]
+                await self._announce_background_agents(cs)
             if live_turn is not None and _is_interrupt_record(obj):
                 live_turn.interrupted = True
             if turn is not None:
@@ -7101,6 +7237,11 @@ class TmuxSessionManager:
 
         if obj_type == "queue-operation":
             self._handle_queue_operation(cs, turn, obj)
+            if obj.get("operation") == "enqueue":
+                finished = _notified_task_id(obj)
+                if finished is not None and finished in cs.background_agents:
+                    del cs.background_agents[finished]
+                    await self._announce_background_agents(cs)
             return
 
         if obj_type == "ai-title":
@@ -7118,6 +7259,41 @@ class TmuxSessionManager:
                 from_transcript=True, is_error=turn.api_error is not None
             ):
                 self._spawn_late_reply(cs, turn)
+
+    async def _forget_background_agents(self, cs: TmuxClaudeSession) -> None:
+        if not cs.background_agents:
+            return
+        cs.background_agents.clear()
+        await self._announce_background_agents(cs)
+
+    async def _announce_background_agents(self, cs: TmuxClaudeSession) -> None:
+        """Report which background subagents this pane is still waiting on.
+
+        Claude ends its turn while they work and starts one of its own when
+        each reports back, so between the two the chat has nothing to say the
+        conversation is still busy. Launches are read off the tool result
+        claude records for an ``Agent`` call it backgrounded, and the end of
+        each off the ``<task-notification>`` it queues for itself.
+        """
+        logger.info(
+            "tmux_background_agents",
+            session_id=cs.session_id,
+            chat_id=cs.chat_id,
+            running=len(cs.background_agents),
+        )
+        if self._event_bus is None:
+            return
+        await self._event_bus.emit(
+            Event(
+                name=BACKGROUND_AGENTS,
+                data={
+                    "chat_id": cs.chat_id,
+                    "user_id": cs.user_id,
+                    "session_id": cs.session_id,
+                    "agents": list(cs.background_agents.values()),
+                },
+            )
+        )
 
     async def _announce_title(self, cs: TmuxClaudeSession, obj: dict[str, Any]) -> None:
         title = obj.get("aiTitle")
@@ -7367,14 +7543,28 @@ class TmuxSessionManager:
         """
         try:
             payload = json.loads(Path(manifest.settings_path).read_text())
-            block = payload["hooks"]["PreToolUse"][0]["hooks"][0]
+            gate = payload["hooks"]["PreToolUse"][0]["hooks"][0]
+            lifecycle = payload["hooks"]["PostToolUse"][0]["hooks"][0]
         except (OSError, json.JSONDecodeError, KeyError, IndexError, TypeError):
             return False
+        if not isinstance(gate, dict) or not isinstance(lifecycle, dict):
+            return False
+        if gate.get("type") == "command":
+            return self._reaches_us(
+                lifecycle, "PostToolUse", manifest.pane_token
+            ) and gate.get("command") == self._relay_command(
+                "PreToolUse", manifest.pane_token
+            )
+        return self._reaches_us(gate, "PreToolUse", manifest.pane_token)
+
+    def _reaches_us(
+        self, block: dict[str, Any], event: str, pane_token: str | None
+    ) -> bool:
         headers = block.get("headers") or {}
         return (
-            block.get("url") == self._hook_url("PreToolUse")
+            block.get("url") == self._hook_url(event)
             and headers.get("X-Leashd-Token") == self._secret
-            and headers.get(_PANE_TOKEN_HEADER) == manifest.pane_token
+            and headers.get(_PANE_TOKEN_HEADER) == pane_token
         )
 
     async def _adopt_one(self, manifest: PaneManifest) -> TmuxClaudeSession | None:

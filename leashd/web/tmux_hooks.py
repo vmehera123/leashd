@@ -13,7 +13,7 @@ not shadowed.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from fastapi import APIRouter, Header, Request
@@ -29,6 +29,19 @@ if TYPE_CHECKING:
     from leashd.agents.runtimes.tmux_session import TmuxSessionManager
 
 logger = structlog.get_logger()
+
+
+_NO_REUSE = {"Connection": "close"}
+
+
+def _answer(content: dict[str, Any]) -> JSONResponse:
+    """A hook response that ends its connection.
+
+    Claude Code keeps hook connections alive and reuses them. The server drops
+    an idle one after five seconds, and a hook sent at that moment is reset;
+    Claude Code then runs the tool as if the hook had never been asked.
+    """
+    return JSONResponse(content=content, headers=_NO_REUSE)
 
 
 def create_tmux_hook_router(tsm: TmuxSessionManager) -> APIRouter:
@@ -71,7 +84,7 @@ def create_tmux_hook_router(tsm: TmuxSessionManager) -> APIRouter:
                     "leashd safety pipeline error — tool denied (fail-closed). "
                     "See the daemon log; retry or adjust policy.",
                 )
-            return JSONResponse(content=decision)
+            return _answer(decision)
 
         if event == "PermissionRequest":
             # Claude's native auto classifier raised — re-enter leashd's full
@@ -88,17 +101,17 @@ def create_tmux_hook_router(tsm: TmuxSessionManager) -> APIRouter:
             except Exception:
                 logger.error("tmux_permreq_hook_error", exc_info=True)
                 decision = _permreq_decision("deny")
-            return JSONResponse(content=decision)
+            return _answer(decision)
 
         if event == STATUS_LINE_EVENT:
             tsm.on_status_line(body, pane_token=pane_token)
-            return JSONResponse(content={})
+            return _answer({})
 
         # Async lifecycle hooks (Stop, SessionStart, SessionEnd, …).
         try:
             await tsm.on_lifecycle(event, body, pane_token=pane_token)
         except Exception:
             logger.warning("tmux_hook_lifecycle_error", hook_event=event, exc_info=True)
-        return JSONResponse(content={})
+        return _answer({})
 
     return router

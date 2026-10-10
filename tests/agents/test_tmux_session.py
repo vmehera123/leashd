@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import shlex
 import shutil
 import sys
 import unicodedata
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -207,10 +209,19 @@ def test_write_managed_settings(cfg):
     path = tsm.write_managed_settings("sess1")
     data = json.loads(path.read_text())
     pre = data["hooks"]["PreToolUse"][0]["hooks"][0]
-    assert pre["type"] == "http"
-    assert pre["url"].endswith("/internal/tmux/hook/PreToolUse")
-    assert "127.0.0.1:8080" in pre["url"]
-    assert pre["headers"]["X-Leashd-Token"] == "s3cr3t-token"
+    assert pre["type"] == "command"
+    relay = shlex.split(pre["command"])
+    assert relay[:3] == [sys.executable, "-I", "-S"]
+    assert Path(relay[3]).name == "hook_relay.py"
+    assert Path(relay[3]).is_file()
+    assert relay[4:6] == [
+        "PreToolUse",
+        "http://127.0.0.1:8080/internal/tmux/hook/PreToolUse",
+    ]
+    assert "s3cr3t-token" not in pre["command"]
+    secret_file = Path(relay[6])
+    assert secret_file.read_text() == "X-Leashd-Token: s3cr3t-token\n"
+    assert secret_file.stat().st_mode & 0o777 == 0o600
     # Default = no-expiry human wait → the PreToolUse hook is
     # effectively-infinite (a shorter hook is killed mid-wait and the tool
     # runs natively: interactive AskUserQuestion → in-pane selector → hang).
@@ -223,13 +234,11 @@ def test_write_managed_settings(cfg):
     stop_failure = data["hooks"]["StopFailure"][0]["hooks"][0]
     assert stop_failure["async"] is True
     assert stop_failure["url"].endswith("/internal/tmux/hook/StopFailure")
-    pane = pre["headers"]["X-Leashd-Pane"]
+    pane = relay[7]
     assert pane
     assert stop["headers"]["X-Leashd-Pane"] == pane
-    assert (
-        data["hooks"]["PermissionRequest"][0]["hooks"][0]["headers"]["X-Leashd-Pane"]
-        == pane
-    )
+    permission_request = data["hooks"]["PermissionRequest"][0]["hooks"][0]
+    assert shlex.split(permission_request["command"])[7] == pane
 
 
 def test_write_managed_settings_mints_a_token_per_spawn(cfg):
@@ -240,7 +249,7 @@ def test_write_managed_settings_mints_a_token_per_spawn(cfg):
 
     def _pane_token(path):
         data = json.loads(path.read_text())
-        return data["hooks"]["PreToolUse"][0]["hooks"][0]["headers"]["X-Leashd-Pane"]
+        return shlex.split(data["hooks"]["PreToolUse"][0]["hooks"][0]["command"])[7]
 
     first = _pane_token(tsm.write_managed_settings("sess1"))
     second = _pane_token(tsm.write_managed_settings("sess1"))
@@ -1119,6 +1128,60 @@ async def test_on_lifecycle_post_tool_use_tolerates_a_malformed_body(cfg):
     approvals.expire_executed.assert_not_awaited()
 
 
+async def test_a_call_that_ran_without_the_gate_is_put_on_the_audit_trail(cfg):
+    from structlog.testing import capture_logs
+
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm, mode="auto")
+    tsm._by_uuid["u1"] = cs.session_id
+    audit = MagicMock()
+    tsm._audit = audit
+    cs.note_hooked_call("toolu_gated", "Bash", {"command": "ls"})
+    fetch = {"url": "https://www.gov.uk/statistics", "prompt": "Quote the totals."}
+
+    with capture_logs() as logs:
+        for tool_use_id, name, tool_input in (
+            ("toolu_gated", "Bash", {"command": "ls"}),
+            ("toolu_reset", "WebFetch", fetch),
+            ("toolu_reset", "WebFetch", fetch),
+        ):
+            await tsm.on_lifecycle(
+                "PostToolUse",
+                {
+                    "session_id": "u1",
+                    "tool_use_id": tool_use_id,
+                    "tool_name": name,
+                    "tool_input": tool_input,
+                },
+            )
+
+    audit.log_ungated_tool.assert_called_once_with(
+        cs.session_id, "WebFetch", fetch, "toolu_reset", session_mode="auto"
+    )
+    warned = [e for e in logs if e["event"] == "tmux_tool_ran_ungated"]
+    assert [e["tool_use_id"] for e in warned] == ["toolu_reset"]
+
+
+async def test_a_call_gated_by_the_previous_daemon_is_not_reported_ungated(cfg):
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    tsm._by_uuid["u1"] = cs.session_id
+    audit = MagicMock()
+    tsm._audit = audit
+
+    await tsm.on_lifecycle(
+        "PostToolUse",
+        {
+            "session_id": "u1",
+            "tool_use_id": "toolu_from_before_the_restart",
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"},
+        },
+    )
+
+    audit.log_ungated_tool.assert_not_called()
+
+
 async def test_on_lifecycle_post_tool_use_does_not_end_the_turn(cfg):
     """Only Stop/SessionEnd complete a turn — a tool finishing does not."""
     tsm = TmuxSessionManager(cfg)
@@ -1424,6 +1487,32 @@ async def test_dispatch_jsonl_sidechain_turn_duration_leaves_the_turn_running(cf
 
     await tsm._dispatch_jsonl_event(cs, _turn_duration_record(isSidechain=True))
 
+    assert not turn.stop_event.is_set()
+
+
+async def test_dispatch_jsonl_placeholder_reply_from_a_second_process_is_not_relayed(
+    cfg,
+):
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    streamed: list[str] = []
+
+    async def on_text(chunk):
+        streamed.append(chunk)
+
+    turn = cs.begin_turn(on_text_chunk=on_text, on_tool_activity=None)
+    turn.interrupted = True
+
+    await tsm._dispatch_jsonl_event(
+        cs,
+        _assistant_record(
+            "No response requested.", model="<synthetic>", isApiErrorMessage=False
+        ),
+    )
+
+    assert streamed == []
+    assert turn.text_parts == []
+    assert turn.interrupted is True
     assert not turn.stop_event.is_set()
 
 
@@ -3050,9 +3139,11 @@ def test_write_managed_settings_includes_permission_request(cfg):
     tsm = TmuxSessionManager(cfg)
     data = json.loads(tsm.write_managed_settings("s1").read_text())
     pr = data["hooks"]["PermissionRequest"][0]["hooks"][0]
-    assert pr["type"] == "http"
-    assert pr["url"].endswith("/internal/tmux/hook/PermissionRequest")
-    assert pr["headers"]["X-Leashd-Token"] == "s3cr3t-token"
+    assert pr["type"] == "command"
+    assert shlex.split(pr["command"])[4:6] == [
+        "PermissionRequest",
+        "http://127.0.0.1:8080/internal/tmux/hook/PermissionRequest",
+    ]
     # PermissionRequest re-enters the full pipeline (can wait for a human) →
     # human-gated → effectively-infinite under the no-expiry default.
     assert pr["timeout"] == _HOOK_NO_EXPIRY_SECONDS

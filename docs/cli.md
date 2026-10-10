@@ -12,6 +12,8 @@ leashd is controlled entirely from the command line. The `leashd` command manage
 | `leashd start -f` | Start in foreground (useful for debugging) |
 | `leashd stop` | Graceful shutdown (SIGTERM, 10s grace period); running agents are left for the next start |
 | `leashd stop --end-agents` | Same, but also ends the running agent sessions |
+| `leashd restart` | Stop and start the daemon; running agents are re-adopted |
+| `leashd reload` | Reload config in the running daemon without a restart |
 | `leashd status` | Show PID and running state |
 | `leashd config` | Show resolved config (masks tokens) |
 | `leashd add-dir [path]` | Add directory to approved list (default: cwd) |
@@ -30,8 +32,16 @@ leashd is controlled entirely from the command line. The `leashd` command manage
 | `leashd ssh trust <host> [-p PORT] [--full]` | Run read-only commands on the host without asking; `--full` covers every command |
 | `leashd ssh untrust <host> [-p PORT]` | Ask for every command on the host again |
 | `leashd model show / set <model> / clear` | Default Claude model, globally or per `--dir` / `--workspace` |
+| `leashd effort show / set <level> / clear` | Thinking effort (`low`, `medium`, `high`, `xhigh`, `max`), globally or per `--dir` / `--workspace` |
 | `leashd turns show` | Display current max turns setting |
 | `leashd turns set <N>` | Set max turns to N (positive integer) |
+| `leashd tool-calls show / set <N>` | Max tool calls per execution (`-1` for unlimited) |
+| `leashd orchestrator show / enable / disable` | Turn the `/task` orchestrator on or off |
+| `leashd run <prompt> [--workspace W] [--timeout S] [--phases P] [--log FILE]` | Submit a `/task` and block until it completes; `-` reads the prompt from stdin |
+| `leashd codebase-memory show / enable / disable` | Turn codebase-memory-mcp code intelligence on or off |
+| `leashd security show / enable / disable` | Turn the security-guidance plugin (in-session vulnerability review) on or off |
+| `leashd skill list / add <zip> [--tag TAG] / remove <name> / show <name>` | Manage agent skills |
+| `leashd workflow list / show <name>` | List or inspect web workflow playbooks |
 | `leashd plugin list` | List installed Claude Code plugins |
 | `leashd plugin add <source>` | Install from directory or zip |
 | `leashd plugin remove <name>` | Uninstall a plugin |
