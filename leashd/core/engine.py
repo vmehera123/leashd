@@ -975,8 +975,14 @@ class Engine:
         if self.interaction_coordinator:
             self.interaction_coordinator.cancel_pending(chat_id)
 
-    async def _cleanup_session(self, session: Session, chat_id: str) -> None:
-        """Cancel active work, shut down browser, and clean up state for a chat."""
+    async def _cleanup_session(
+        self, session: Session, chat_id: str, *, same_directory: bool = False
+    ) -> None:
+        """Cancel active work, shut down browser, and clean up state for a chat.
+
+        *same_directory* is for ``/clear`` and ``/stop``, which restart the
+        agent where it stands: the human's "Approve all" taps stay.
+        """
         if self.approval_coordinator:
             await self.approval_coordinator.cancel_pending(chat_id)
         if self.interaction_coordinator:
@@ -995,7 +1001,10 @@ class Engine:
             if mid and self.connector:
                 await self.connector.delete_message(chat_id, mid)
         await self._end_web_session(session)
-        self._gatekeeper.disable_auto_approve(chat_id)
+        if same_directory:
+            self._gatekeeper.end_conversation(chat_id)
+        else:
+            self._gatekeeper.disable_auto_approve(chat_id)
         self._pending_messages.pop(chat_id, None)
 
     async def _end_web_session(self, session: Session) -> None:
@@ -2290,7 +2299,7 @@ class Engine:
                     },
                 )
             )
-            await self._cleanup_session(session, chat_id)
+            await self._cleanup_session(session, chat_id, same_directory=True)
             self.session_manager.stash_resume_token(session)
             session.agent_resume_token = None
             self.session_manager.reset_mode(session)
@@ -2390,7 +2399,7 @@ class Engine:
                     },
                 )
             )
-            await self._cleanup_session(session, chat_id)
+            await self._cleanup_session(session, chat_id, same_directory=True)
             await self.session_manager.reset(user_id, chat_id)
             logger.info("session_cleared", user_id=user_id, chat_id=chat_id)
             return "Session cleared. Next message starts a fresh conversation."

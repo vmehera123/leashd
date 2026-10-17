@@ -125,13 +125,14 @@ Under `read`, these still ask:
 - a redirection to a file, `sort -o`, a `sed` program with `w` or `e`, and `env` / `printenv`
 - a credential path in the remote command, quoted or not, other than a listing or a `grep -c` count
 - a connection that is more than a login: a jump host, port or agent forwarding, a proxy command, a config file
-- a local variable, substitution, input file or heredoc on the `ssh` command line
+- a local variable, substitution, input file or heredoc on the `ssh` command line (one exception: a quoted heredoc, `<<'SQL'`, feeding read-only SQL to a bare `psql`, which is judged like the same statements passed with `-c`)
 
 A remote command is read the way the remote shell runs it:
 
 - `docker compose exec -T worker sh -c "grep -c done /evidence/x.json | head -1"` is judged by the commands in the script, not as an unknown `sh`.
 - `for r in a b; do cat /evidence/$r/report.json; done` and `UA="…"; curl -A "$UA" …` are judged once per value. Only a variable set to a literal in the same command counts: one set from a substitution, `read`, a conditional or the remote environment keeps asking.
 - `psql -c "\d portals"` and the other describe commands (`\dt`, `\l`) are reads, like `select`. Other meta-commands (`\!`, `\copy`, `\o`) ask.
+- A read-only transaction is a read: `psql -c "begin read only; select …; commit"` passes, as `select …` alone does. `commit prepared` and `rollback prepared` still ask.
 
 A policy that denies `ssh` is not overridden, and a host is never trusted unless you add it.
 

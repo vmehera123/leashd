@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.4.0] - 2026-10-17
+- **changed**: "Approve all" now survives `/clear` and `/stop`; a directory or mode change still drops it.
+- **changed**: fewer prompts for reads that already ran unasked in another spelling: SQL fed to `psql` by heredoc on a trusted SSH host, `begin read only; … commit` transactions, and `grep -c` counts of a `.env` variable prefix.
+- **fixed**: approval prompts name the gated command instead of a `$(…)` inside it or a `case` pattern (`Bash::*queued*`), sourcing a file names the file, and `/usr/bin/grep` is treated as `grep`.
+
 ## [2.3.0] - 2026-10-10
 - **added**: while background subagents are still working after Claude's turn has ended, the chat shows a line under the last reply naming them, until they report back.
 - **added**: a `tool_ran_ungated` audit entry and `tmux_tool_ran_ungated` log line for any tool call that finishes without having gone through the gate.

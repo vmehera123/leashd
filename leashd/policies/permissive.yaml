@@ -68,7 +68,7 @@ rules:
     command_patterns:
       - "^(ls|stat|file|test|\\[\\[?)(\\s|$)(?=.*(\\.env\\b(?!\\.(example|sample|template|dist))|\\.ssh/|\\.aws/|\\.gnupg/|authorized_keys|\\.pem\\b|\\.key\\b|\\.p12\\b|\\.pfx\\b|\\.keystore\\b|id_rsa|id_ed25519|id_ecdsa|id_dsa|\\.git-credentials\\b|credentials\\b|secrets?\\.|token\\.json\\b))"
       - "^git\\s+(-C\\s+\\S+\\s+)?(status|check-ignore|ls-files)\\b(?=.*(\\.env\\b(?!\\.(example|sample|template|dist))|\\.ssh/|\\.aws/|\\.gnupg/|authorized_keys|\\.pem\\b|\\.key\\b|\\.p12\\b|\\.pfx\\b|\\.keystore\\b|id_rsa|id_ed25519|id_ecdsa|id_dsa|\\.git-credentials\\b|credentials\\b|secrets?\\.|token\\.json\\b))"
-      - "^grep(?=.*(\\.env\\b(?!\\.(example|sample|template|dist))|\\.ssh/|\\.aws/|\\.gnupg/|authorized_keys|\\.pem\\b|\\.key\\b|\\.p12\\b|\\.pfx\\b|\\.keystore\\b|id_rsa|id_ed25519|id_ecdsa|id_dsa|\\.git-credentials\\b|credentials\\b|secrets?\\.|token\\.json\\b))(?:\\s+-[Hhs]+)*\\s+-[Hhs]*c[cHhs]*(?:\\s+-[cHhs]+)*\\s+\\^[A-Z][A-Z0-9_]*=(?:\\s+(?!-)[A-Za-z0-9_./~-]+)+$"
+      - "^grep(?=.*(\\.env\\b(?!\\.(example|sample|template|dist))|\\.ssh/|\\.aws/|\\.gnupg/|authorized_keys|\\.pem\\b|\\.key\\b|\\.p12\\b|\\.pfx\\b|\\.keystore\\b|id_rsa|id_ed25519|id_ecdsa|id_dsa|\\.git-credentials\\b|credentials\\b|secrets?\\.|token\\.json\\b))(?:\\s+-[Hhs]+)*\\s+-[Hhs]*c[cHhs]*(?:\\s+-[cHhs]+)*\\s+\\^[A-Z][A-Z0-9_]*[_=](?:\\s+(?!-)[A-Za-z0-9_./~-]+)+$"
     action: allow
     description: "Metadata of a credential path (listing, existence, ignore status, a match count) without reading it"
 

@@ -2071,6 +2071,29 @@ class TestEditWithArgs:
         assert pending.decision is False
         assert pending.event.is_set()
 
+    @pytest.mark.parametrize(
+        ("command", "kept"), [("clear", True), ("stop", True), ("plan", False)]
+    )
+    async def test_approve_all_tap_outlives_a_fresh_conversation_only(
+        self, config, audit_logger, policy_engine, mock_connector, command, kept
+    ):
+        eng = Engine(
+            connector=mock_connector,
+            agent=FakeAgent(),
+            config=config,
+            session_manager=SessionManager(),
+            policy_engine=policy_engine,
+            audit=audit_logger,
+        )
+        eng._gatekeeper.grant_approve_all("chat1", "Bash::git push origin")
+        eng._gatekeeper.enable_tool_auto_approve("chat1", "Write")
+
+        await eng.handle_command("user1", command, "", "chat1")
+
+        _, per_tool = eng.get_auto_approve_status("chat1")
+        assert ("Bash::git push origin" in per_tool) is kept
+        assert "Write" not in per_tool
+
     async def test_clear_cancels_pending_interactions(
         self, config, audit_logger, policy_engine, mock_connector, event_bus
     ):

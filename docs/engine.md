@@ -131,7 +131,7 @@ The engine handles twelve commands via `handle_command()`:
 | `/cancel` | Cancels the active task in the current chat. Emits `MESSAGE_IN` with text="/cancel". |
 | `/tasks` | Lists tasks for the current chat — active first, then recent completed/failed. |
 | `/file <path>…` | Resolves paths through `core/file_delivery.py` (sandbox + credential gate + size ceiling) and uploads the survivors via `connector.send_file`. Globs expand; agents trigger the same path with a `[[leashd:file <path>]]` marker. |
-| `/clear` | Deactivates session (forces new session next message), disables auto-approve |
+| `/clear` | Deactivates session (forces new session next message), drops mode and plugin auto-approve; your own "Approve all" taps stay until a directory or mode change |
 | `/plugin [subcommand]` | Manage Claude Code plugins: list, show, add, remove, enable, disable |
 | `/status` | Returns current mode, message count, total cost, auto-approve status |
 

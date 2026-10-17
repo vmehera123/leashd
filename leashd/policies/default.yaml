@@ -69,7 +69,7 @@ rules:
     command_patterns:
       - "^(ls|stat|file|test|\\[\\[?)(\\s|$)(?=.*(\\.env\\b(?!\\.(example|sample|template|dist))|\\.ssh/|\\.aws/|\\.gnupg/|authorized_keys|\\.pem\\b|\\.key\\b|\\.p12\\b|\\.pfx\\b|\\.keystore\\b|id_rsa|id_ed25519|id_ecdsa|id_dsa|\\.git-credentials\\b|credentials\\b|secrets?\\.|token\\.json\\b))"
       - "^git\\s+(-C\\s+\\S+\\s+)?(status|check-ignore|ls-files)\\b(?=.*(\\.env\\b(?!\\.(example|sample|template|dist))|\\.ssh/|\\.aws/|\\.gnupg/|authorized_keys|\\.pem\\b|\\.key\\b|\\.p12\\b|\\.pfx\\b|\\.keystore\\b|id_rsa|id_ed25519|id_ecdsa|id_dsa|\\.git-credentials\\b|credentials\\b|secrets?\\.|token\\.json\\b))"
-      - "^grep(?=.*(\\.env\\b(?!\\.(example|sample|template|dist))|\\.ssh/|\\.aws/|\\.gnupg/|authorized_keys|\\.pem\\b|\\.key\\b|\\.p12\\b|\\.pfx\\b|\\.keystore\\b|id_rsa|id_ed25519|id_ecdsa|id_dsa|\\.git-credentials\\b|credentials\\b|secrets?\\.|token\\.json\\b))(?:\\s+-[Hhs]+)*\\s+-[Hhs]*c[cHhs]*(?:\\s+-[cHhs]+)*\\s+\\^[A-Z][A-Z0-9_]*=(?:\\s+(?!-)[A-Za-z0-9_./~-]+)+$"
+      - "^grep(?=.*(\\.env\\b(?!\\.(example|sample|template|dist))|\\.ssh/|\\.aws/|\\.gnupg/|authorized_keys|\\.pem\\b|\\.key\\b|\\.p12\\b|\\.pfx\\b|\\.keystore\\b|id_rsa|id_ed25519|id_ecdsa|id_dsa|\\.git-credentials\\b|credentials\\b|secrets?\\.|token\\.json\\b))(?:\\s+-[Hhs]+)*\\s+-[Hhs]*c[cHhs]*(?:\\s+-[cHhs]+)*\\s+\\^[A-Z][A-Z0-9_]*[_=](?:\\s+(?!-)[A-Za-z0-9_./~-]+)+$"
     action: allow
     description: "Metadata of a credential path (listing, existence, ignore status, a match count) without reading it"
 
@@ -214,7 +214,7 @@ rules:
     command_patterns:
       # A backslash starts a psql meta-command (`\!`, `\copy`, `\o file`), so
       # the only one a statement may carry is the `\n` of an `E'\n'` string.
-      - "(?is)^(?!.*(\\b(INSERT|UPDATE|DELETE|MERGE|COPY|CREATE|DROP|ALTER|TRUNCATE|ATTACH|DETACH|VACUUM|REINDEX|GRANT|REVOKE)\\b|\\bREPLACE\\s+INTO\\b|\\bPRAGMA\\s+\\w+\\s*=))\\s*(SELECT|WITH|EXPLAIN|PRAGMA|\\.tables|\\.schema|\\.databases|\\.dbinfo|\\.indexes)\\b([^;\\\\]|\\\\n)*(;\\s*((SELECT|WITH|EXPLAIN|PRAGMA|\\.tables|\\.schema|\\.databases|\\.dbinfo|\\.indexes)\\b([^;\\\\]|\\\\n)*)?)*$"
+      - "(?is)^(?!.*(\\b(INSERT|UPDATE|DELETE|MERGE|COPY|CREATE|DROP|ALTER|TRUNCATE|ATTACH|DETACH|VACUUM|REINDEX|GRANT|REVOKE)\\b|\\bREPLACE\\s+INTO\\b|\\b(COMMIT|ROLLBACK)\\s+PREPARED\\b|\\bPRAGMA\\s+\\w+\\s*=))\\s*(SELECT|WITH|EXPLAIN|PRAGMA|BEGIN|START\\s+TRANSACTION|COMMIT|ROLLBACK|END|\\.tables|\\.schema|\\.databases|\\.dbinfo|\\.indexes)\\b([^;\\\\]|\\\\n)*(;\\s*((SELECT|WITH|EXPLAIN|PRAGMA|BEGIN|START\\s+TRANSACTION|COMMIT|ROLLBACK|END|\\.tables|\\.schema|\\.databases|\\.dbinfo|\\.indexes)\\b([^;\\\\]|\\\\n)*)?)*$"
       # psql's describe commands: `\d portals`, `\dt+`, `\l`.
       - "^\\\\(d[a-zA-Z]*\\+?|l\\+?|conninfo)(\\s+[\\w.*]+)?\\s*$"
     action: allow

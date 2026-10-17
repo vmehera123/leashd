@@ -67,6 +67,8 @@ _TARGET_BEARING_COMMANDS = frozenset(
         "ssh",
         "scp",
         "rsync",
+        ".",
+        "source",
     }
 )
 
@@ -244,6 +246,7 @@ class ToolGatekeeper:
         self._path_tools = path_tools or DEFAULT_PATH_TOOLS
         self._auto_approved_chats: set[str] = set()
         self._auto_approved_tools: dict[str, set[str]] = {}
+        self._human_grants: dict[str, set[str]] = {}
         self._browsing_grants: frozenset[str] = (
             _agent_browser_browsing_keys() if browser_auto_approve else frozenset()
         )
@@ -293,6 +296,7 @@ class ToolGatekeeper:
     def grant_approve_all(self, chat_id: str, approval_key: str) -> None:
         granted = approve_all_grant(approval_key)
         self._auto_approved_tools.setdefault(chat_id, set()).update(granted)
+        self._human_grants.setdefault(chat_id, set()).update(granted)
         logger.info(
             "auto_approve_enabled",
             chat_id=chat_id,
@@ -317,7 +321,27 @@ class ToolGatekeeper:
     def disable_auto_approve(self, chat_id: str) -> None:
         self._auto_approved_chats.discard(chat_id)
         self._auto_approved_tools.pop(chat_id, None)
+        self._human_grants.pop(chat_id, None)
         logger.info("auto_approve_disabled", chat_id=chat_id)
+
+    def end_conversation(self, chat_id: str) -> None:
+        """Drop what a mode or plugin granted, keep the human's "Approve all" taps.
+
+        ``/clear`` and ``/stop`` start the agent over in the same chat and the
+        same directory, and the human who tapped "Approve all" on ``git push
+        origin`` there was asked again after each one. The blanket grant and
+        the per-tool grants a mode seeded go, because the reset also returns
+        the chat to its default mode. A directory or mode change still calls
+        :meth:`disable_auto_approve`: the same key names a different target
+        there.
+        """
+        kept = set(self._human_grants.get(chat_id, ()))
+        self._auto_approved_chats.discard(chat_id)
+        if kept:
+            self._auto_approved_tools[chat_id] = kept
+        else:
+            self._auto_approved_tools.pop(chat_id, None)
+        logger.info("auto_approve_disabled", chat_id=chat_id, kept=len(kept))
 
     async def check(
         self,
@@ -641,6 +665,9 @@ class ToolGatekeeper:
             key = _approval_key("Bash", {"command": text})
             if key not in keys:
                 keys.append(key)
+        if whole in keys:
+            keys.remove(whole)
+            keys.insert(0, whole)
         return keys or [whole]
 
     async def _handle_approval(

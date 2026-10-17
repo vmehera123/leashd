@@ -14,6 +14,7 @@ from leashd.core.safety.analyzer import (
     SQL_CLIENT_RE,
     RiskLevel,
     command_units,
+    counted_variable_names,
     docker_exec_command,
     expand_literal_variables,
     inline_shell_script,
@@ -22,10 +23,12 @@ from leashd.core.safety.analyzer import (
     mentions_credential_path,
     names_what_it_reads,
     network_read_scope,
+    psql_reads_stdin,
     public_read_scope,
     quotes_credential_path,
     reads_without_writing,
     remote_shell_command,
+    remote_stdin_script,
     shell_match_texts,
     split_chain_segments,
     strip_benign_prefixes,
@@ -228,16 +231,27 @@ class PolicyEngine:
         ):
             return None
         command = str(tool_input.get("command", ""))
+        script: str | None = None
         session = remote_shell_command(command)
         if session is None:
-            return None
+            fed = remote_stdin_script(command)
+            if fed is None:
+                return None
+            session, script = fed[:2], fed[2]
         destination, remote = session
         if destination not in self._trusted_ssh_hosts:
             return None
         login = self._classify_by_rules("Bash", {"command": f"ssh {destination}"})
-        if login.matched_rule is not rule or mentions_credential_path(command):
+        if login.matched_rule is not rule:
             return None
-        if quotes_credential_path(remote) or not self._reads_only(remote):
+        if mentions_credential_path(command.partition("\n")[0]):
+            return None
+        if quotes_credential_path(remote):
+            return None
+        if script is None:
+            if not self._reads_only(remote):
+                return None
+        elif not psql_reads_stdin(remote) or not self._sql_reads_only(script):
             return None
         return Classification(
             category=_TRUSTED_SSH_READ_RULE.name,
@@ -247,6 +261,20 @@ class PolicyEngine:
             description=f"{_TRUSTED_SSH_READ_RULE.description}: {destination}",
             matched_rule=_TRUSTED_SSH_READ_RULE,
         )
+
+    def _sql_reads_only(self, script: str) -> bool:
+        """Whether a script fed to ``psql`` is one the rules allow as ``-c``.
+
+        The script is matched as the statement it is, in rule order, so a
+        deny, a credential path or a writing statement decides before the
+        read rule can.
+        """
+        texts = [script.strip()]
+        command_texts = (texts, texts, texts)
+        for rule in self.rules:
+            if self._rule_matches(rule, {"Bash"}, "Bash", {}, command_texts):
+                return rule.action == PolicyDecision.ALLOW and rule.name == "sql-read"
+        return False
 
     def _reads_only(self, command: str) -> bool:
         """Whether every command in *command* is a read, however it is spelled.
@@ -370,6 +398,8 @@ class PolicyEngine:
         public: str | None = None
         if inner is not None:
             allow_texts = self._bash_match_texts(inner)[0]
+        elif (counted := counted_variable_names(normalized)) is not None:
+            allow_texts = [counted]
         elif payloads and SQL_CLIENT_RE.match(skeleton):
             allow_texts = payloads
         elif _AWK_RE.match(skeleton) and any(

@@ -104,6 +104,10 @@ _EXECUTOR_COMMANDS = frozenset(
     {"sqlite3", "sqlite", "duckdb", "sed", "awk", "gawk", "mawk"}
 )
 
+_FLAGS_ARE_NOT_CODE = frozenset(
+    {"jq", "grep", "egrep", "fgrep", "rg", "wc", "head", "tail", "cut", "uniq"}
+)
+
 _COMMAND_POSITION_RE = re.compile(r"\|\||&&|[|;&(]")
 
 
@@ -120,6 +124,11 @@ def shell_match_texts(command: str) -> list[str]:
     shell acts on — plus the contents of any quoted run handed to something
     that executes it (``bash -c``, ``eval``, ``psql -c``), which is real
     executable text wearing quotes.
+
+    ``-c`` and ``-e`` hand over a program only to something that runs one.
+    For ``jq -c`` (compact output), ``grep -c`` (count) and ``grep -e`` (a
+    pattern) the quoted run after the flag is data, and reading it as code
+    took ``jq -c 'select(.key|test("x"))'`` for a read of a ``.key`` file.
 
     A flag is not the only way to hand over a program. ``sqlite3 db "DROP
     TABLE users"`` passes its statement positionally, so the deny floor read
@@ -179,9 +188,10 @@ def _split_quoting(command: str) -> tuple[str, list[str], list[str]]:
 def _preceded_by_executor(skeleton_so_far: str) -> bool:
     unquoted = skeleton_so_far.replace("'", " ").replace('"', " ")
     tokens = unquoted.split()
-    if tokens and tokens[-1] in _EXECUTOR_FLAGS:
-        return True
     running_text = _COMMAND_POSITION_RE.split(unquoted)[-1].strip()
+    if tokens and tokens[-1] in _EXECUTOR_FLAGS:
+        head = strip_command_wrappers(running_text).split(maxsplit=1)
+        return not head or head[0] not in _FLAGS_ARE_NOT_CODE
     if (
         tokens
         and _SQL_STATEMENT_FLAG_RE.fullmatch(tokens[-1])
@@ -257,6 +267,13 @@ def split_chain_segments(command: str) -> list[str]:
     one. The substitution's own commands are classified by
     :func:`command_units`.
 
+    A ``case`` statement splits into its header and the commands of its arms.
+    The patterns are dropped: ``a|b) sleep 20;; *) break`` used to split at
+    ``;`` into ``a|b) sleep 20`` and ``*) break``, then at the pattern's ``|``
+    as if it were a pipe, so the human was asked to approve ``Bash::*queued*``.
+    A pattern the shell would expand (``$``, a backtick) is left in place and
+    classified as the text it is.
+
     Inspired by openclaw ``splitCommandChainWithOperators()`` which uses a
     character-by-char scanner that tracks quote state before splitting.
     """
@@ -267,6 +284,8 @@ def split_chain_segments(command: str) -> list[str]:
     in_double_quote = False
     substitutions_close = True
     escaped = False
+    case_depth = 0
+    expect_pattern = False
     i = 0
     length = len(command)
 
@@ -281,17 +300,18 @@ def split_chain_segments(command: str) -> list[str]:
 
         if ch == "\\":
             escaped = True
+            expect_pattern = False
             current.append(ch)
             i += 1
             continue
 
-        if ch == "'" and not in_double_quote:
+        if ch == "'" and not in_double_quote and not expect_pattern:
             in_single_quote = not in_single_quote
             current.append(ch)
             i += 1
             continue
 
-        if ch == '"' and not in_single_quote:
+        if ch == '"' and not in_single_quote and not expect_pattern:
             in_double_quote = not in_double_quote
             current.append(ch)
             i += 1
@@ -307,6 +327,39 @@ def split_chain_segments(command: str) -> list[str]:
                 continue
 
         if not in_single_quote and not in_double_quote:
+            if expect_pattern:
+                if ch.isspace():
+                    i += 1
+                    continue
+                expect_pattern = False
+                pattern = _CASE_PATTERN_RE.match(command, i)
+                if pattern and not _CASE_END_RE.match(command, i):
+                    i = pattern.end()
+                continue
+
+            if ch in "ce" and _CASE_COMMAND_START_RE.fullmatch("".join(current)):
+                header = _CASE_HEADER_RE.match(command, i)
+                if header:
+                    segments.append(header.group(0).strip())
+                    current = []
+                    case_depth += 1
+                    expect_pattern = True
+                    i = header.end()
+                    continue
+                if case_depth and _CASE_END_RE.match(command, i):
+                    case_depth -= 1
+
+            if case_depth:
+                arm_end = _CASE_ARM_END_RE.match(command, i)
+                if arm_end:
+                    seg = "".join(current).strip()
+                    if seg:
+                        segments.append(seg)
+                    current = []
+                    expect_pattern = True
+                    i = arm_end.end()
+                    continue
+
             if ch == "<":
                 heredoc = _HEREDOC_START_RE.match(command, i)
                 if heredoc:
@@ -352,6 +405,15 @@ def split_chain_segments(command: str) -> list[str]:
 
 
 _LEADING_CONTINUATION_RE = re.compile(r"^(?:\\\n\s*)+")
+
+_CASE_COMMAND_START_RE = re.compile(r"\s*(?:(?:do|then|else|\{)\s+)*")
+_CASE_HEADER_RE = re.compile(r"case\s+(?:\"[^\"`]*\"|[^\s`;|&<>()'\"]+)\s+in(?=\s)")
+_CASE_END_RE = re.compile(r"esac(?![\w-])")
+_CASE_ARM_END_RE = re.compile(r";;&|;;|;&")
+_CASE_PATTERN_ITEM = r"(?:'[^']*'|\"[^\"$`\\]*\"|[^\s()`$;&<>'\"|\\])+"
+_CASE_PATTERN_RE = re.compile(
+    r"\(?\s*" + _CASE_PATTERN_ITEM + r"(?:\s*\|\s*" + _CASE_PATTERN_ITEM + r")*\s*\)"
+)
 
 
 def split_pipeline_stages(segment: str) -> list[str]:
@@ -504,6 +566,9 @@ _RUNNER_PREFIX_RE = re.compile(
 )
 _TIMEOUT_PREFIX_RE = re.compile(r"^timeout\s+(?:-\S+\s+)*[\d.]+[smhd]?\s+(?=\S)")
 _GROUP_OPEN_RE = re.compile(r"^[({]\s*(?=\S)")
+_SYSTEM_BIN_PREFIX_RE = re.compile(
+    r"^(?:/usr/local/bin|/opt/homebrew/bin|/usr/s?bin|/s?bin)/(?=[A-Za-z0-9_.+-]+(?:\s|$))"
+)
 _FUNCTION_HEADER_RE = re.compile(
     r"^(?:function\s+)?[A-Za-z_][\w-]*\s*\(\)\s*\{\s*(?=\S)"
     r"|^function\s+[A-Za-z_][\w-]*\s*\{\s*(?=\S)"
@@ -523,6 +588,11 @@ def strip_command_wrappers(command: str) -> str:
     ``for`` is deliberately not peeled: its header is a word list, not a
     command. Assignment values containing ``$``/backtick/operators are left
     alone so ``FOO=$(rm -rf /) ls`` still reaches the deny rules intact.
+
+    A binary named by its path in a system directory is the binary:
+    ``/usr/bin/grep`` matched no rule at all, neither the read-only allow nor
+    any gate ``grep`` has. Only the directories ``PATH`` already resolves a
+    bare name from are peeled, so ``/tmp/x/grep`` stays what it is.
     """
     prev = None
     while command != prev:
@@ -534,6 +604,7 @@ def strip_command_wrappers(command: str) -> str:
             _RUNNER_PREFIX_RE,
             _GROUP_OPEN_RE,
             _FUNCTION_HEADER_RE,
+            _SYSTEM_BIN_PREFIX_RE,
         ):
             command = pattern.sub("", command, count=1)
     return command
@@ -1411,6 +1482,27 @@ def mentions_credential_path(command: str) -> bool:
     return bool(_SHELL_CREDENTIAL_RE.search(shell_match_texts(command)[0]))
 
 
+_NAME_COUNT_RE = re.compile(
+    r"(?P<head>grep(?:\s+-[Hhs]+)*\s+-[Hhs]*c[cHhs]*(?:\s+-[cHhs]+)*\s+)"
+    r"(?P<q>['\"])(?P<pattern>\^[A-Z][A-Z0-9_]*[_=])(?P=q)"
+    r"(?P<paths>(?:\s+(?!-)[A-Za-z0-9_./~-]+)+)"
+)
+
+
+def counted_variable_names(command: str) -> str | None:
+    """``grep -c "^NAME=" file`` with the quotes taken off its pattern.
+
+    A rule sees a quoted run blanked out, so the count of a variable's lines
+    was allowed bare and asked about quoted. Only a name is unquoted: the
+    pattern has to end at ``=`` or ``_``, because a count that could test the
+    value (``^TOKEN=a``) answers what the secret starts with.
+    """
+    match = _NAME_COUNT_RE.fullmatch(command.strip())
+    if match is None:
+        return None
+    return match.group("head") + match.group("pattern") + match.group("paths")
+
+
 def quotes_credential_path(command: str) -> bool:
     """Whether a quoted argument names a credential path.
 
@@ -1719,6 +1811,10 @@ def remote_shell_command(command: str) -> tuple[str, str] | None:
         for redirection in redirections
     ):
         return None
+    return _fixed_remote_command(text)
+
+
+def _fixed_remote_command(text: str) -> tuple[str, str] | None:
     words = _literal_shell_words(text)
     if not words or words[0] != "ssh":
         return None
@@ -1730,6 +1826,93 @@ def remote_shell_command(command: str) -> tuple[str, str] | None:
     if scope is None or not remote:
         return None
     return scope.removeprefix("ssh "), " ".join(remote)
+
+
+_QUOTED_HEREDOC_RE = re.compile(
+    r"\s*<<-?\s*(?P<q>['\"])(?P<delim>[A-Za-z_][A-Za-z0-9_]*)(?P=q)"
+)
+
+
+def remote_stdin_script(command: str) -> tuple[str, str, str] | None:
+    """The destination, remote command and script of ``ssh host '<cmd>' <<'EOF'``.
+
+    The same statement reaches ``psql`` as ``-c "select …"`` or on its stdin,
+    and only the first spelling could be read. The delimiter must be quoted,
+    so the local shell passes the body through untouched, and the heredoc must
+    be the whole of what follows the command line: text after the terminator
+    is another command. Every other redirection still has to discard.
+    """
+    head, newline, rest = command.strip().partition("\n")
+    if not newline:
+        return None
+    text, redirections = _split_redirections(strip_command_wrappers(head.strip()))
+    heredocs = [
+        match
+        for match in map(_QUOTED_HEREDOC_RE.fullmatch, redirections)
+        if match is not None
+    ]
+    if len(heredocs) != 1 or not all(
+        _QUOTED_HEREDOC_RE.fullmatch(redirection)
+        or _DISCARDING_REDIRECT_RE.fullmatch(redirection.strip())
+        for redirection in redirections
+    ):
+        return None
+    lines = rest.rstrip().split("\n")
+    delimiter = heredocs[0].group("delim")
+    if lines[-1].strip() != delimiter or delimiter in map(str.strip, lines[:-1]):
+        return None
+    session = _fixed_remote_command(text)
+    if session is None:
+        return None
+    return session[0], session[1], "\n".join(lines[:-1])
+
+
+_PSQL_SWITCHES = frozenset("AtqXx1")
+_PSQL_VALUE_FLAGS = frozenset("UdhpFRP")
+_PSQL_LONG_SWITCHES = frozenset(
+    {"--no-psqlrc", "--tuples-only", "--no-align", "--quiet", "--single-transaction"}
+)
+_PSQL_SAFE_VARIABLE_RE = re.compile(r"ON_ERROR_STOP=(?:[01]|on|off)")
+_PLAIN_CD_RE = re.compile(r"cd\s+[A-Za-z0-9_./~-]+")
+
+
+def psql_reads_stdin(command: str) -> bool:
+    """Whether *command* is a ``psql`` that runs only what its stdin carries.
+
+    ``-c`` and ``-f`` name other statements, ``-o`` and ``-L`` write files,
+    and ``-v name=value`` splices text into the script after it was read, so
+    each declines. So does anything in front of the ``psql`` but a ``cd``:
+    ``xargs cat`` would take the script's lines as the files to print.
+    """
+    units = command_units(command)
+    if not units or any(kind != "command" for _, kind in units):
+        return False
+    *before, (last, _) = units
+    if not all(_PLAIN_CD_RE.fullmatch(text.strip()) for text, _ in before):
+        return False
+    if not keeps_to_its_streams(last) or _split_redirections(last)[1]:
+        return False
+    client = docker_exec_command(last.strip()) or last.strip()
+    words = _literal_shell_words(client)
+    if not words or words[0] != "psql":
+        return False
+    remaining = iter(words[1:])
+    for word in remaining:
+        if word in _PSQL_LONG_SWITCHES:
+            continue
+        if not re.fullmatch(r"-[A-Za-z0-9]+", word):
+            return False
+        flags = word[1:]
+        if set(flags) <= _PSQL_SWITCHES:
+            continue
+        if set(flags[:-1]) <= _PSQL_SWITCHES and flags[-1] in _PSQL_VALUE_FLAGS:
+            if next(remaining, None) is None:
+                return False
+            continue
+        if flags == "v" and _PSQL_SAFE_VARIABLE_RE.fullmatch(next(remaining, "")):
+            continue
+        return False
+    return True
 
 
 _SED_ADDRESS = r"(?:\d+|\$|/(?:[^/\\\n]|\\.)*/)"

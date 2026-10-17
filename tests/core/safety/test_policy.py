@@ -753,13 +753,18 @@ class TestDevToolsRegexBoundaries:
         assert c.matched_rule.name == "dev-linters"
 
     def test_command_with_leading_path_does_not_match(self, dev_overlay_engine):
-        """/usr/bin/pytest should NOT match (patterns anchor with ^)."""
+        """A path outside the system directories should NOT match (patterns anchor with ^)."""
+        for command in ("/tmp/tools/pytest tests/", "./pytest tests/"):
+            c = dev_overlay_engine.classify("Bash", {"command": command})
+            assert c.matched_rule is None or c.matched_rule.name not in (
+                "dev-linters",
+                "dev-build-tools",
+            )
+
+    def test_command_in_a_system_directory_matches(self, dev_overlay_engine):
         c = dev_overlay_engine.classify("Bash", {"command": "/usr/bin/pytest tests/"})
-        # Should NOT match dev-linters or dev-build-tools
-        assert c.matched_rule is None or c.matched_rule.name not in (
-            "dev-linters",
-            "dev-build-tools",
-        )
+        assert c.matched_rule is not None
+        assert c.matched_rule.name == "dev-linters"
 
     def test_case_sensitivity(self, dev_overlay_engine):
         """Uppercase 'Pytest' should not match ^pytest (regex is case-sensitive)."""
