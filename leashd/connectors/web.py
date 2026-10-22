@@ -13,6 +13,7 @@ from urllib.parse import quote
 import structlog
 
 from leashd.connectors.base import (
+    ApprovalResolver,
     BaseConnector,
     CommandHandler,
     InlineButton,
@@ -527,7 +528,7 @@ class WebConnector(BaseConnector):
 
     def set_approval_resolver(
         self,
-        resolver: Callable[[str, bool], Coroutine[Any, Any, bool]],
+        resolver: ApprovalResolver,
     ) -> None:
         super().set_approval_resolver(resolver)
         self._ws_handler.set_approval_resolver(resolver)

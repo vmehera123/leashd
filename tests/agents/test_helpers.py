@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from unittest.mock import patch
 
+import pytest
+
 from leashd.agents.runtimes._helpers import (
     _is_uv_project,
     api_error_hint,
@@ -319,8 +321,94 @@ class TestDescribeTool:
                 "Explore: map",
             ),
             ("Agent", {"description": "map"}, "map"),
-            ("mcp__x__y", {"n": 1, "q": "first string"}, "first string"),
-            ("mcp__x__y", {"n": 1}, ""),
+            ("custom_tool", {"n": 1, "q": "first string"}, "first string"),
+            ("custom_tool", {"n": 1}, ""),
         ]
         for name, tool_input, expected in cases:
             assert describe_tool(name, tool_input) == expected, name
+
+
+_RECORD_ID = "01a1562b-d4a8-715e-967c-04e431a8ba0a"
+
+
+class TestDescribeMcpTool:
+    @pytest.mark.parametrize(
+        ("name", "tool_input", "expected"),
+        [
+            (
+                "mcp__leadline__edit_reply",
+                {"reply_id": _RECORD_ID, "body": "Hi Harry"},
+                "leadline · edit_reply",
+            ),
+            (
+                "mcp__leadline__get_reply",
+                {"reply_id": _RECORD_ID},
+                "leadline · get_reply",
+            ),
+            ("mcp__leadline__whoami", {}, "leadline · whoami"),
+            (
+                "mcp__claude_ai_Gmail__send_message",
+                {"to": "a@b.c"},
+                "claude_ai_Gmail · send_message",
+            ),
+            (
+                "mcp__claude-in-chrome__tabs_context_mcp",
+                {},
+                "claude-in-chrome · tabs_context_mcp",
+            ),
+            ("mcp__runpod__get-pod", {"podId": "abc123"}, "runpod · get-pod"),
+            ("mcp__srv__tool__with__dunders", {}, "srv · tool__with__dunders"),
+        ],
+    )
+    def test_names_the_server_and_tool_not_the_first_argument(
+        self, name, tool_input, expected
+    ):
+        assert describe_tool(name, tool_input) == expected
+
+    def test_playwright_keeps_its_argument_because_browsing_already_names_it(self):
+        assert (
+            describe_tool("mcp__playwright__browser_navigate", {"url": "https://x.dev"})
+            == "https://x.dev"
+        )
+
+    @pytest.mark.parametrize(
+        "name", ["mcp__", "mcp__leadline", "mcp____edit_reply", "mcp__leadline__"]
+    )
+    def test_malformed_mcp_names_fall_back_to_the_first_string(self, name):
+        assert describe_tool(name, {"q": "fallback"}) == "fallback"
+
+    def test_no_mcp_description_is_a_bare_record_id(self):
+        for tool in ("get_reply", "edit_reply", "decide", "get_task", "get_idea"):
+            desc = describe_tool(f"mcp__leadline__{tool}", {"id": _RECORD_ID})
+            assert _RECORD_ID not in desc
+
+
+class TestDescribeAgentCoordinationTools:
+    def test_send_message_shows_the_summary_not_the_agent_id(self):
+        tool_input = {
+            "to": "a0128da8a86b3f512",
+            "summary": "Resume tenders review",
+            "message": "You were stopped before writing the file",
+        }
+        assert describe_tool("SendMessage", tool_input) == "Resume tenders review"
+
+    def test_send_message_without_summary_names_the_recipient(self):
+        assert describe_tool("SendMessage", {"to": "leadline-1a"}) == "leadline-1a"
+
+    def test_monitor_shows_its_description_even_when_command_comes_first(self):
+        tool_input = {
+            "command": "tail -f logs/x.out | grep Error",
+            "description": "Watch rebuild",
+        }
+        assert describe_tool("Monitor", tool_input) == "Watch rebuild"
+
+    def test_monitor_without_description_falls_back_to_the_command(self):
+        assert describe_tool("Monitor", {"command": "tail -f x.log"}) == "tail -f x.log"
+
+    def test_schedule_wakeup_shows_the_reason_not_the_prompt(self):
+        tool_input = {
+            "delaySeconds": 1800,
+            "prompt": "Check on the three migration forks and continue",
+            "reason": "watching CI run",
+        }
+        assert describe_tool("ScheduleWakeup", tool_input) == "watching CI run"

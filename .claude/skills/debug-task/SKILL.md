@@ -329,7 +329,7 @@ for line in sys.stdin:
     if evt == 'tool_attempt':
         print(f'{ts}  {e.get(\"decision\",\"?\"):>16}  {e.get(\"risk_level\",\"?\"):>7}  {e[\"tool_name\"]}  rule={e.get(\"matched_rule\")}')
     elif evt == 'approval':
-        print(f'{ts}  {\"APPROVED\" if e.get(\"approved\") else \"REJECTED\":>16}          {e.get(\"tool_name\",\"?\")}  by={e.get(\"user_id\",\"?\")}')
+        print(f'{ts}  {e.get(\"outcome\", \"approved\" if e.get(\"approved\") else \"rejected\").upper():>16}          {e.get(\"tool_name\",\"?\")}  by={e.get(\"approver_id\", e.get(\"approver_type\",\"?\"))}')
     elif evt == 'security_violation':
         print(f'{ts}  VIOLATION          {e.get(\"tool_name\",\"?\")}  reason={e.get(\"reason\",\"?\")}')
     else:

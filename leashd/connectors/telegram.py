@@ -1814,7 +1814,11 @@ class TelegramConnector(BaseConnector):
         resolved = False
         if self._approval_resolver:
             try:
-                resolved = await self._approval_resolver(approval_id, approved)
+                resolved = await self._approval_resolver(
+                    approval_id,
+                    approved,
+                    approver_id=str(query.from_user.id) if query.from_user else None,
+                )
             except Exception:
                 logger.exception(
                     "telegram_approval_resolver_error",

@@ -84,6 +84,7 @@ _MIN_TMUX = (3, 3)
 _ASYNC_HOOK_EVENTS = (
     "UserPromptSubmit",
     "PostToolUse",
+    "PostToolUseFailure",
     "Stop",
     "StopFailure",
     "SubagentStop",
@@ -4419,6 +4420,13 @@ class TmuxClaudeSession:
             del self.hooked_calls[oldest]
             self._hooked_at.pop(oldest, None)
 
+    def hooked_call_id(self, tool_name: str, tool_input: dict[str, Any]) -> str | None:
+        identity = _tool_identity_key("", tool_name, tool_input)
+        for key, call in reversed(self.hooked_calls.items()):
+            if key != identity and call == (tool_name, tool_input):
+                return key
+        return None
+
     def ran_without_the_gate(self, tool_use_id: str) -> bool:
         """Did a finished call never come through this session's ``PreToolUse``?
 
@@ -6015,6 +6023,7 @@ class TmuxSessionManager:
     ) -> dict[str, Any]:
         claude_uuid = str(body.get("session_id", ""))
         tool_name = str(body.get("tool_name", ""))
+        tool_use_id = str(body.get("tool_use_id") or "")
         tool_input = body.get("tool_input") or {}
         if not isinstance(tool_input, dict):
             tool_input = {}
@@ -6085,6 +6094,7 @@ class TmuxSessionManager:
                     session_mode=cs.mode,
                     task_run_id=cs.task_run_id,
                     native_ask_rules=cs.native_ask_rules,
+                    call_id=tool_use_id or None,
                 )
                 if gated is None:
                     return _hook_passthrough()
@@ -6108,6 +6118,7 @@ class TmuxSessionManager:
                 cs.chat_id,
                 session_mode=cs.mode,
                 task_run_id=cs.task_run_id,
+                call_id=tool_use_id or None,
             )
             return _permission_to_hook(result)
 
@@ -6138,6 +6149,21 @@ class TmuxSessionManager:
         # dedup in _hook_to_permreq strips the reason, so nothing reached the
         # model and the pane hung.)
         return _permission_to_hook(decision)
+
+    def _record_tool_finished(
+        self, cs: TmuxClaudeSession, body: dict[str, Any], *, succeeded: bool
+    ) -> None:
+        tool_use_id = str(body.get("tool_use_id") or "")
+        if self._audit is None or not tool_use_id:
+            return
+        error = body.get("error")
+        self._audit.log_tool_finished(
+            cs.session_id,
+            str(body.get("tool_name", "")),
+            tool_use_id,
+            succeeded=succeeded,
+            error=error if isinstance(error, str) else None,
+        )
 
     def _record_ungated_call(self, cs: TmuxClaudeSession, body: dict[str, Any]) -> None:
         """Put a call that ran without leashd's verdict on the audit trail.
@@ -6354,6 +6380,7 @@ class TmuxSessionManager:
             cs.chat_id,
             session_mode=cs.mode,
             task_run_id=cs.task_run_id,
+            call_id=cs.hooked_call_id(tool_name, tool_input),
         )
         hook_out = _permission_to_hook(result)
         self._note_tool_decision(cs, tool_name, tool_input, hook_out)
@@ -6529,6 +6556,8 @@ class TmuxSessionManager:
             cs.chat_id,
             session_mode=cs.mode,
             task_run_id=cs.task_run_id,
+            call_id=str(body.get("tool_use_id") or "")
+            or cs.hooked_call_id(tool_name, tool_input),
         )
         hook_out = _permission_to_hook(result)
         swapped = _deny_without_ending_the_turn(tool_name, tool_input, hook_out)
@@ -6622,12 +6651,21 @@ class TmuxSessionManager:
         if event == "PostToolUse":
             tool_input = body.get("tool_input")
             self._record_ungated_call(cs, body)
+            self._record_tool_finished(cs, body, succeeded=True)
             cs.forget_hooked_call(
                 str(body.get("tool_use_id") or ""),
                 str(body.get("tool_name", "")),
                 tool_input if isinstance(tool_input, dict) else None,
             )
             await self._expire_executed_gate(cs, body)
+        elif event == "PostToolUseFailure":
+            tool_input = body.get("tool_input")
+            self._record_tool_finished(cs, body, succeeded=False)
+            cs.forget_hooked_call(
+                str(body.get("tool_use_id") or ""),
+                str(body.get("tool_name", "")),
+                tool_input if isinstance(tool_input, dict) else None,
+            )
         elif event == "Stop":
             turn = cs.turn
             if turn is not None and turn.end_response(from_transcript=False):

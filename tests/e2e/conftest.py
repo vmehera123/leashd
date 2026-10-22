@@ -170,7 +170,9 @@ async def capture(test_server: SimpleNamespace) -> dict[str, list[dict[str, Any]
         "interrupts": [],
     }
 
-    async def _approval(approval_id: str, approved: bool) -> bool:
+    async def _approval(
+        approval_id: str, approved: bool, approver_id: str | None = None
+    ) -> bool:
         results["approvals"].append({"approval_id": approval_id, "approved": approved})
         return True
 

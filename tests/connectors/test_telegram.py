@@ -2,7 +2,7 @@
 
 import asyncio
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 from telegram import Chat, Message, Update
@@ -698,7 +698,7 @@ class TestOnCallbackQuery:
         update = _make_callback_update("approval:yes:abc-123")
         await connector._on_callback_query(update, MagicMock())
 
-        resolver.assert_awaited_once_with("abc-123", True)
+        resolver.assert_awaited_once_with("abc-123", True, approver_id=ANY)
 
     async def test_approval_no_resolves_false(self, connector):
         resolver = AsyncMock()
@@ -707,7 +707,7 @@ class TestOnCallbackQuery:
         update = _make_callback_update("approval:no:abc-123")
         await connector._on_callback_query(update, MagicMock())
 
-        resolver.assert_awaited_once_with("abc-123", False)
+        resolver.assert_awaited_once_with("abc-123", False, approver_id=ANY)
 
     async def test_non_approval_callback_ignored(self, connector):
         resolver = AsyncMock()
@@ -769,7 +769,7 @@ class TestOnCallbackQuery:
         update = _make_callback_update("approval:maybe:abc-123")
         await connector._on_callback_query(update, MagicMock())
 
-        resolver.assert_awaited_once_with("abc-123", False)
+        resolver.assert_awaited_once_with("abc-123", False, approver_id=ANY)
 
     async def test_approval_id_with_colons_preserved(self, connector):
         resolver = AsyncMock()
@@ -778,7 +778,7 @@ class TestOnCallbackQuery:
         update = _make_callback_update("approval:yes:id:with:colons")
         await connector._on_callback_query(update, MagicMock())
 
-        resolver.assert_awaited_once_with("id:with:colons", True)
+        resolver.assert_awaited_once_with("id:with:colons", True, approver_id=ANY)
 
     async def test_resolver_exception_still_edits_message(self, connector):
         resolver = AsyncMock(side_effect=RuntimeError("resolver boom"))
@@ -809,7 +809,7 @@ class TestOnCallbackQuery:
         )
         await connector._on_callback_query(update, MagicMock())
 
-        resolver.assert_awaited_once_with("abc-123", True)
+        resolver.assert_awaited_once_with("abc-123", True, approver_id=ANY)
         update.callback_query.edit_message_text.assert_awaited_once()
 
     async def test_resolver_returns_false_shows_expired(self, connector):
@@ -1198,7 +1198,7 @@ class TestApproveAllCallback:
         update = _make_callback_update("approval:all:abc-123")
         await connector._on_callback_query(update, MagicMock())
 
-        resolver.assert_awaited_once_with("abc-123", True)
+        resolver.assert_awaited_once_with("abc-123", True, approver_id=ANY)
 
     async def test_all_decision_calls_auto_approve_handler_with_tool_name(
         self, connector
@@ -1282,7 +1282,7 @@ class TestApproveAllCallback:
         update = _make_callback_update("approval:all:abc-123")
         await connector._on_callback_query(update, MagicMock())
 
-        resolver.assert_awaited_once_with("abc-123", True)
+        resolver.assert_awaited_once_with("abc-123", True, approver_id=ANY)
         edited_text = update.callback_query.edit_message_text.await_args.kwargs["text"]
         assert "\u2705 Approved" in edited_text
 
@@ -1985,6 +1985,22 @@ class TestSendActivity:
         result = await connector.send_activity("123", "Read", "desc")
         assert result is None
 
+    async def test_mcp_activity_reads_as_server_and_tool(self, connector):
+        from leashd.agents.runtimes._helpers import describe_tool
+
+        mock_app = _make_mock_app()
+        mock_app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=99))
+        connector._app = mock_app
+        name = "mcp__leadline__edit_reply"
+        description = describe_tool(
+            name, {"reply_id": "01a1562b-d4a8-715e-967c-04e431a8ba0a"}
+        )
+
+        await connector.send_activity("123", name, description)
+        sent_text = mock_app.bot.send_message.call_args[1]["text"]
+        assert "01a1562b" not in sent_text
+        assert sent_text == "⏳ Running: <code>leadline · edit_reply</code>"
+
     @pytest.mark.parametrize(
         ("tool_name", "description", "expected_prefix"),
         [
@@ -2003,6 +2019,7 @@ class TestSendActivity:
             ("Agent", "Design implementation plan", "🧠 Thinking:"),
             ("Skill", "linkedin-writer", "🧩 Using skill:"),
             ("UnknownTool", "something", "⏳ Running:"),
+            ("mcp__leadline__edit_reply", "leadline · edit_reply", "⏳ Running:"),
         ],
     )
     async def test_activity_label_per_tool_category(
@@ -2571,7 +2588,7 @@ class TestCallbackEdgeCases:
         connector._app = mock_app
         call_count = 0
 
-        async def resolver(approval_id, approved):
+        async def resolver(approval_id, approved, approver_id=None):
             nonlocal call_count
             call_count += 1
             return call_count == 1  # only first resolves
@@ -3591,7 +3608,7 @@ class TestApprovalLifecycle:
 
         await connector._on_callback_query(update, MagicMock())
 
-        resolver.assert_awaited_once_with("ap-1", True)
+        resolver.assert_awaited_once_with("ap-1", True, approver_id=ANY)
         edit_text = update.callback_query.edit_message_text.call_args.kwargs["text"]
         assert "Approved" in edit_text
         assert len(connector._cleanup_tasks) >= 0
@@ -3613,7 +3630,7 @@ class TestApprovalLifecycle:
 
         await connector._on_callback_query(update, MagicMock())
 
-        resolver.assert_awaited_once_with("ap-1", False)
+        resolver.assert_awaited_once_with("ap-1", False, approver_id=ANY)
         edit_text = update.callback_query.edit_message_text.call_args.kwargs["text"]
         assert "Rejected" in edit_text
 
@@ -3637,7 +3654,7 @@ class TestApprovalLifecycle:
 
         await connector._on_callback_query(update, MagicMock())
 
-        resolver.assert_awaited_once_with("ap-1", True)
+        resolver.assert_awaited_once_with("ap-1", True, approver_id=ANY)
         auto_approve_handler.assert_called_once_with("100", "Write")
         edit_text = update.callback_query.edit_message_text.call_args.kwargs["text"]
         assert "allowed from now on" in edit_text

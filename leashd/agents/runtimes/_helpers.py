@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 
+from leashd.browser_launcher import browser_isolation_env
 from leashd.browser_profile import merged_launch_args
 
 if TYPE_CHECKING:
@@ -378,6 +379,9 @@ def build_agent_browser_env(config: LeashdConfig, session: Session) -> dict[str,
     agent-browser otherwise drops a path-less ``screenshot`` in the system temp
     dir, so ``/task`` visual evidence is cleaned up out from under the
     ``Visual check:`` line that references it.
+
+    On macOS Chrome is started through :mod:`leashd.browser_launcher`, so a
+    Force Quit of Chrome cannot take the daemon down with it.
     """
     if config.browser_backend != "agent-browser":
         return {}
@@ -388,6 +392,7 @@ def build_agent_browser_env(config: LeashdConfig, session: Session) -> dict[str,
             Path(session.working_directory) / SCREENSHOT_SAVE_DIR
         ),
         "AGENT_BROWSER_ARGS": merged_launch_args(os.environ.get("AGENT_BROWSER_ARGS")),
+        **browser_isolation_env(),
     }
     if not config.browser_headless:
         env["AGENT_BROWSER_HEADED"] = "1"
@@ -409,6 +414,16 @@ async def safe_callback(
         await callback(*args)
     except Exception:
         logger.warning(log_event, exc_info=True)
+
+
+def _mcp_tool_label(name: str) -> str:
+    parts = name.split("__", 2)
+    if len(parts) != 3 or parts[0] != "mcp" or not parts[1] or not parts[2]:
+        return ""
+    server, tool = parts[1], parts[2]
+    if server == "playwright":
+        return ""
+    return f"{server} · {tool}"
 
 
 def describe_tool(name: str, tool_input: dict[str, Any]) -> str:
@@ -452,6 +467,15 @@ def describe_tool(name: str, tool_input: dict[str, Any]) -> str:
         subagent_type = tool_input.get("subagent_type", "")
         desc = tool_input.get("description", "")
         return f"{subagent_type}: {desc}" if subagent_type else desc
+    if name == "SendMessage":
+        return truncate(str(tool_input.get("summary") or tool_input.get("to") or ""))
+    if name == "Monitor" and tool_input.get("description"):
+        return truncate(str(tool_input["description"]))
+    if name == "ScheduleWakeup" and tool_input.get("reason"):
+        return truncate(str(tool_input["reason"]))
+    mcp_label = _mcp_tool_label(name)
+    if mcp_label:
+        return mcp_label
     for v in tool_input.values():
         if isinstance(v, str) and v:
             return truncate(v)

@@ -40,10 +40,12 @@ class AuditLogger:
         decision: PolicyDecision,
         *,
         session_mode: str | None = None,
+        call_id: str | None = None,
     ) -> None:
         entry: dict[str, Any] = {
             "event": "tool_attempt",
             "session_id": session_id,
+            "call_id": call_id,
             "tool_name": tool_name,
             "tool_input": _sanitize_input(tool_input),
             "classification": classification.category if classification else None,
@@ -71,6 +73,7 @@ class AuditLogger:
         entry: dict[str, Any] = {
             "event": "tool_ran_ungated",
             "session_id": session_id,
+            "call_id": tool_use_id,
             "tool_name": tool_name,
             "tool_input": _sanitize_input(tool_input),
             "tool_use_id": tool_use_id,
@@ -79,24 +82,54 @@ class AuditLogger:
             entry["session_mode"] = session_mode
         self._write(entry)
 
+    def log_tool_finished(
+        self,
+        session_id: str,
+        tool_name: str,
+        call_id: str,
+        *,
+        succeeded: bool,
+        error: str | None = None,
+    ) -> None:
+        entry: dict[str, Any] = {
+            "event": "tool_finished",
+            "session_id": session_id,
+            "call_id": call_id,
+            "tool_name": tool_name,
+            "result": "succeeded" if succeeded else "failed",
+        }
+        if error:
+            entry["error"] = _clip(error)
+        self._write(entry)
+
     def log_approval(
         self,
         session_id: str,
         tool_name: str,
         approved: bool,
-        user_id: str | None = None,
+        chat_id: str | None = None,
         *,
+        outcome: str | None = None,
+        approver_id: str | None = None,
+        call_id: str | None = None,
+        approval_id: str | None = None,
         rejection_reason: str | None = None,
         approver_type: str = "human",
     ) -> None:
         entry: dict[str, Any] = {
             "event": "approval",
             "session_id": session_id,
+            "call_id": call_id,
             "tool_name": tool_name,
             "approved": approved,
-            "user_id": user_id,
+            "outcome": outcome or ("approved" if approved else "rejected"),
+            "chat_id": chat_id,
             "approver_type": approver_type,
         }
+        if approver_id is not None:
+            entry["approver_id"] = approver_id
+        if approval_id is not None:
+            entry["approval_id"] = approval_id
         if rejection_reason is not None:
             entry["rejection_reason"] = rejection_reason
         self._write(entry)
@@ -192,24 +225,33 @@ class AuditLogger:
         tool_name: str,
         reason: str,
         risk_level: RiskLevel,
+        *,
+        call_id: str | None = None,
+        tool_input: dict[str, Any] | None = None,
     ) -> None:
-        self._write(
-            {
-                "event": "security_violation",
-                "session_id": session_id,
-                "tool_name": tool_name,
-                "reason": reason,
-                "risk_level": risk_level,
-            }
-        )
+        entry: dict[str, Any] = {
+            "event": "security_violation",
+            "session_id": session_id,
+            "tool_name": tool_name,
+            "reason": reason,
+            "risk_level": risk_level,
+        }
+        if call_id is not None:
+            entry["call_id"] = call_id
+        if tool_input is not None:
+            entry["tool_input"] = _sanitize_input(tool_input)
+        self._write(entry)
+
+
+def _clip(value: str) -> str:
+    if len(value) <= 500:
+        return value
+    return value[:500] + "...[truncated]"
 
 
 def _sanitize_input(tool_input: dict[str, Any]) -> dict[str, Any]:
     """Truncate large values for audit readability."""
-    sanitized = {}
-    for key, value in tool_input.items():
-        if isinstance(value, str) and len(value) > 500:
-            sanitized[key] = value[:500] + "...[truncated]"
-        else:
-            sanitized[key] = value
-    return sanitized
+    return {
+        key: _clip(value) if isinstance(value, str) else value
+        for key, value in tool_input.items()
+    }

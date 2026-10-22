@@ -249,7 +249,7 @@ class TestApprovalDispatch:
 
         await handler.handle(ws)
 
-        resolver.assert_awaited_once_with("ap-1", True)
+        resolver.assert_awaited_once_with("ap-1", True, approver_id="web")
 
 
 class TestInteractionDispatch:

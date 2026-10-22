@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import ANY, MagicMock
 
 import pytest
 
@@ -72,6 +72,7 @@ class TestGatekeeperNoPolicy:
             None,
             PolicyDecision.ALLOW,
             session_mode=None,
+            call_id=ANY,
         )
 
 
@@ -398,7 +399,13 @@ class TestGatekeeperAutoApprove:
         assert result.behavior == "allow"
         assert len(mock_connector.approval_requests) == 0
         mock_audit.log_approval.assert_called_once_with(
-            "s1", "Bash", True, "c1", approver_type="auto_approve"
+            "s1",
+            "Bash",
+            True,
+            "c1",
+            outcome="approved",
+            call_id=ANY,
+            approver_type="auto_approve",
         )
 
     async def test_auto_approve_does_not_affect_other_chats(
@@ -457,7 +464,13 @@ class TestGatekeeperAutoApprove:
         assert result.behavior == "allow"
         assert len(mock_connector.approval_requests) == 0
         mock_audit.log_approval.assert_called_once_with(
-            "s1", "browser_navigate", True, "c1", approver_type="auto_approve"
+            "s1",
+            "browser_navigate",
+            True,
+            "c1",
+            outcome="approved",
+            call_id=ANY,
+            approver_type="auto_approve",
         )
 
     async def test_per_tool_auto_approve_does_not_bypass_other_tools(
@@ -569,7 +582,13 @@ class TestGatekeeperAutoApprove:
         assert result.behavior == "allow"
         assert len(mock_connector.approval_requests) == 0
         mock_audit.log_approval.assert_called_once_with(
-            "s1", "browser_navigate", True, "c1", approver_type="auto_approve"
+            "s1",
+            "browser_navigate",
+            True,
+            "c1",
+            outcome="approved",
+            call_id=ANY,
+            approver_type="auto_approve",
         )
 
 
@@ -1556,7 +1575,13 @@ class TestGatekeeperAutonomousAutoAllow:
         )
         assert result.behavior == "allow"
         mock_audit.log_approval.assert_called_once_with(
-            "s1", "Bash", True, "c1", approver_type="autonomous_auto"
+            "s1",
+            "Bash",
+            True,
+            "c1",
+            outcome="approved",
+            call_id=ANY,
+            approver_type="autonomous_auto",
         )
 
     async def test_interactive_require_approval_not_auto_allowed(self, gatekeeper):
@@ -1826,7 +1851,13 @@ class TestAutoGated:
         )
         assert result is None
         mock_audit.log_approval.assert_called_once_with(
-            "s1", "Bash", True, "c1", approver_type="claude_native_auto"
+            "s1",
+            "Bash",
+            True,
+            "c1",
+            outcome="deferred",
+            call_id=ANY,
+            approver_type="claude_native_auto",
         )
 
     async def test_unmatched_defers_to_native(self, policy_gatekeeper, mock_audit):
@@ -1839,7 +1870,13 @@ class TestAutoGated:
         )
         assert result is None
         mock_audit.log_approval.assert_called_once_with(
-            "s1", "Bash", True, "c1", approver_type="claude_native_auto"
+            "s1",
+            "Bash",
+            True,
+            "c1",
+            outcome="deferred",
+            call_id=ANY,
+            approver_type="claude_native_auto",
         )
 
     async def test_explicit_require_approval_is_gated_not_deferred(
@@ -1858,7 +1895,13 @@ class TestAutoGated:
         )
         assert result is None
         mock_audit.log_approval.assert_called_once_with(
-            "s1", "Read", True, "c1", approver_type="claude_native_auto"
+            "s1",
+            "Read",
+            True,
+            "c1",
+            outcome="deferred",
+            call_id=ANY,
+            approver_type="claude_native_auto",
         )
 
     async def test_file_edit_defers_to_mode(
@@ -1869,7 +1912,13 @@ class TestAutoGated:
         )
         assert result is None
         mock_audit.log_approval.assert_called_once_with(
-            "s1", "Write", True, "c1", approver_type="claude_native_auto"
+            "s1",
+            "Write",
+            True,
+            "c1",
+            outcome="deferred",
+            call_id=ANY,
+            approver_type="claude_native_auto",
         )
 
     async def test_credential_file_edit_still_denied(self, policy_gatekeeper, tmp_dir):
@@ -1985,7 +2034,13 @@ class TestAutoGatedNativeAsk:
         )
         assert result is None
         mock_audit.log_approval.assert_called_once_with(
-            "s1", "Bash", True, "c1", approver_type="claude_native_auto"
+            "s1",
+            "Bash",
+            True,
+            "c1",
+            outcome="deferred",
+            call_id=ANY,
+            approver_type="claude_native_auto",
         )
 
     async def test_unmatched_tool_never_deferred_by_rule_name(
@@ -2002,7 +2057,13 @@ class TestAutoGatedNativeAsk:
         )
         assert result is None
         mock_audit.log_approval.assert_called_once_with(
-            "s1", "Bash", True, "c1", approver_type="claude_native_auto"
+            "s1",
+            "Bash",
+            True,
+            "c1",
+            outcome="deferred",
+            call_id=ANY,
+            approver_type="claude_native_auto",
         )
 
     async def test_deferral_is_audited_before_it_returns(

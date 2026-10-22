@@ -102,7 +102,7 @@ Every tool call the agent makes passes through three layers before it can execut
 | **2. Policy** | YAML rules classify each call as `allow` / `deny` / `require_approval` by tool name, command pattern, and path pattern. First match wins. Compound bash is split on `&&`, `||`, `;` and evaluated per segment, deny-wins. |
 | **3. Approval** | `require_approval` sends an inline **Approve / Reject** to the Web UI or Telegram. No response within the timeout → denied. |
 
-The pipeline is connector-agnostic: same sandbox, same rules, same buttons whether you're in the browser or on your phone. Every attempt and decision is appended to `.leashd/audit.jsonl`.
+The pipeline is connector-agnostic: same sandbox, same rules, same buttons whether you're in the browser or on your phone. Every attempt, decision and result is appended to `.leashd/audit.jsonl`, and all entries about one tool call share a `call_id`: `grep toolu_… .leashd/audit.jsonl` shows what was asked, who approved it and whether it succeeded.
 
 The gate fails closed. If a tool call cannot reach leashd, for example while the daemon restarts, it waits up to 60 seconds for an answer and is denied if none comes. A call that still finishes without a verdict is written to the audit log as `tool_ran_ungated`, so `grep tool_ran_ungated .leashd/audit.jsonl` should always print nothing.
 

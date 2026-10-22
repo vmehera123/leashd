@@ -206,16 +206,35 @@ flowchart TD
 
 ## Audit Logger
 
-`AuditLogger` (`core/safety/audit.py`) writes an append-only JSONL file. Six log methods:
+`AuditLogger` (`core/safety/audit.py`) writes an append-only JSONL file. Seven log methods:
 
 | Method | Event Type | Key Fields |
 |---|---|---|
-| `log_tool_attempt()` | `tool_attempt` | session_id, tool_name, tool_input, classification, decision |
-| `log_ungated_tool()` | `tool_ran_ungated` | session_id, tool_name, tool_input, tool_use_id |
-| `log_approval()` | `approval` | session_id, tool_name, approved, user_id |
-| `log_security_violation()` | `security_violation` | session_id, tool_name, reason, risk_level |
+| `log_tool_attempt()` | `tool_attempt` | session_id, call_id, tool_name, tool_input, classification, decision |
+| `log_approval()` | `approval` | session_id, call_id, tool_name, approved, outcome, chat_id, approver_type, approver_id, approval_id |
+| `log_tool_finished()` | `tool_finished` | session_id, call_id, tool_name, result, error |
+| `log_ungated_tool()` | `tool_ran_ungated` | session_id, call_id, tool_name, tool_input, tool_use_id |
+| `log_security_violation()` | `security_violation` | session_id, call_id, tool_name, tool_input, reason, risk_level |
 | `log_operation()` | `git_operation` | session_id, operation, detail, working_directory |
 | `log_file_delivery()` | `file_delivery` | session_id, chat_id, trigger, delivered, path, size, reason |
+
+`call_id` ties together every entry about one tool call. Under the tmux runtime it is Claude Code's `tool_use_id`, so `grep toolu_… .leashd/audit.jsonl` shows the attempt, the decision and how the call finished. Other runtimes get a generated id per gate check. A `PermissionRequest` reuses the id its `PreToolUse` hook saw.
+
+`approval.outcome` says what happened, not only whether the call was let through:
+
+| Outcome | Meaning |
+|---|---|
+| `approved` | a human tapped approve, an "Approve all" grant covered it, or an autonomous `/task` phase allowed it (see `approver_type`) |
+| `rejected` | a human tapped reject |
+| `rejected_with_reason` | a human typed a reply instead of tapping a button; the text is in `rejection_reason` |
+| `timeout` | nobody answered before `approval_timeout_seconds` |
+| `cancelled` | leashd cleared the gate itself: the session was cleaned up, the request failed, or a `/task` phase moved on |
+| `executed_before_verdict` | the runtime ran the tool without waiting, so the answer arrived too late to gate it |
+| `deferred` | tmux `auto` mode handed the call to Claude Code's own permission mode; leashd did not approve it |
+
+`approver_id` is the Telegram user id of whoever answered, or `web` for the Web UI. It is absent when no person answered. `tool_finished` comes from Claude Code's `PostToolUse` (`succeeded`) and `PostToolUseFailure` (`failed`, with a clipped `error`) hooks. A gated call with no `tool_finished` entry was either blocked or never reported back.
+
+The log is an operational record for debugging and review. It is not tamper-evident: there is no hash chain or signature, and a failed write is logged and skipped.
 
 `tool_ran_ungated` records a tool call that finished without a `tool_attempt` before it, so the gate never saw it. The tmux runtime's hook relay is built to make that impossible (see [Agents](agents.md#tmuxagent)), so treat any such entry as a bug worth reporting. Find them with `grep tool_ran_ungated .leashd/audit.jsonl`.
 

@@ -112,6 +112,7 @@ class _StubGatekeeper:
         self.result = result
         self.calls = []
         self.task_descriptions = []
+        self.call_ids = []
 
     async def check(
         self,
@@ -123,8 +124,10 @@ class _StubGatekeeper:
         task_description=None,
         session_mode=None,
         task_run_id=None,
+        call_id=None,
     ):
         self.calls.append((tool_name, tool_input, session_id, chat_id, session_mode))
+        self.call_ids.append(call_id)
         self.task_descriptions.append(task_description)
         return self.result
 
@@ -1128,6 +1131,73 @@ async def test_on_lifecycle_post_tool_use_tolerates_a_malformed_body(cfg):
     approvals.expire_executed.assert_not_awaited()
 
 
+async def test_finished_calls_are_put_on_the_audit_trail(cfg, tmp_path):
+    from leashd.core.safety.audit import AuditLogger
+
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm, chat_id="chat1")
+    tsm._by_uuid["u1"] = cs.session_id
+    tsm._audit = AuditLogger(tmp_path / "audit.jsonl")
+
+    base = {"session_id": "u1", "cwd": "/work", "tool_name": "Bash"}
+    await tsm.on_lifecycle(
+        "PostToolUse",
+        {**base, "tool_input": {"command": "ls"}, "tool_use_id": "toolu_ok"},
+    )
+    await tsm.on_lifecycle(
+        "PostToolUseFailure",
+        {
+            **base,
+            "tool_input": {"command": "false"},
+            "tool_use_id": "toolu_bad",
+            "error": "exit 1",
+        },
+    )
+
+    finished = [
+        json.loads(line)
+        for line in (tmp_path / "audit.jsonl").read_text().splitlines()
+        if json.loads(line)["event"] == "tool_finished"
+    ]
+    assert [(e["call_id"], e["result"]) for e in finished] == [
+        ("toolu_ok", "succeeded"),
+        ("toolu_bad", "failed"),
+    ]
+    assert finished[1]["error"] == "exit 1"
+
+
+async def test_pre_tool_gates_under_claudes_tool_use_id(cfg):
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    tsm._by_uuid["u1"] = cs.session_id
+    gatekeeper = _StubGatekeeper(PermissionAllow(updated_input={"command": "ls"}))
+    _bind(tsm, gatekeeper)
+
+    await tsm.on_pre_tool(
+        {
+            "session_id": "u1",
+            "cwd": "/work",
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"},
+            "tool_use_id": "toolu_42",
+        }
+    )
+
+    assert gatekeeper.call_ids == ["toolu_42"]
+
+
+def test_a_permission_request_finds_the_id_its_pre_tool_hook_saw(cfg):
+    tsm = TmuxSessionManager(cfg)
+    cs = _session(tsm)
+    cs.note_hooked_call("toolu_1", "Bash", {"command": "ls"})
+    cs.note_hooked_call("toolu_2", "Bash", {"command": "pwd"})
+    cs.note_hooked_call("", "Bash", {"command": "whoami"})
+
+    assert cs.hooked_call_id("Bash", {"command": "ls"}) == "toolu_1"
+    assert cs.hooked_call_id("Bash", {"command": "whoami"}) is None
+    assert cs.hooked_call_id("Bash", {"command": "id"}) is None
+
+
 async def test_a_call_that_ran_without_the_gate_is_put_on_the_audit_trail(cfg):
     from structlog.testing import capture_logs
 
@@ -1242,6 +1312,30 @@ async def test_on_lifecycle_stale_stop_does_not_complete_fresh_pane_turn(cfg):
     assert turn.stop_event.is_set()
 
 
+async def test_pre_tool_mcp_activity_names_server_and_tool(cfg):
+    tsm = TmuxSessionManager(cfg)
+    _bind(tsm, _StubGatekeeper(PermissionAllow(updated_input={})))
+    cs = _session(tsm, session_id="sa", chat_id="web:a", cwd="/repo")
+    token = _adopt_token(tsm, cs)
+    descriptions: list[str] = []
+
+    async def _on_activity(activity):
+        if activity is not None:
+            descriptions.append(activity.description)
+
+    cs.begin_turn(on_text_chunk=None, on_tool_activity=_on_activity)
+    await tsm.on_pre_tool(
+        {
+            "session_id": "uuid-a",
+            "cwd": "/repo",
+            "tool_name": "mcp__leadline__edit_reply",
+            "tool_input": {"reply_id": "01a1562b-d4a8-715e-967c-04e431a8ba0a"},
+        },
+        pane_token=token,
+    )
+    assert descriptions == ["leadline · edit_reply"]
+
+
 async def test_concurrent_panes_one_cwd_do_not_cross_deliver_tool_activity(cfg):
     """Two live turns in ONE working directory: each pane's PreToolUse must
     drive its own chat's tool indicator. Before per-pane binding, the first
@@ -1314,6 +1408,27 @@ async def test_process_blocks_streams_and_records():
     assert chunks == ["hello"]
     assert activities[0].tool_name == "Read"
     assert activities[-1] is None
+
+
+async def test_transcript_mcp_tool_activity_names_server_and_tool():
+    activities: list[ToolActivity | None] = []
+
+    async def on_act(a):
+        activities.append(a)
+
+    turn = TmuxTurn(on_text_chunk=None, on_tool_activity=on_act)
+    await TmuxSessionManager._process_blocks(
+        turn,
+        [
+            {
+                "type": "tool_use",
+                "name": "mcp__leadline__edit_reply",
+                "input": {"reply_id": "01a1562b-d4a8-715e-967c-04e431a8ba0a"},
+            },
+        ],
+    )
+    assert activities[0] is not None
+    assert activities[0].description == "leadline · edit_reply"
 
 
 async def test_assembled_text_multi_step_is_structured_not_runon():
@@ -3113,6 +3228,7 @@ class _StubFloorGatekeeper:
         task_description=None,
         session_mode=None,
         task_run_id=None,
+        call_id=None,
     ):
         self.check_calls.append((tool_name, session_mode))
         return self.check_result
@@ -3128,9 +3244,8 @@ class _StubFloorGatekeeper:
         session_mode=None,
         task_run_id=None,
         native_ask_rules=None,
+        call_id=None,
     ):
-        # Returns None to signal "defer to native", or a PermissionAllow/Deny
-        # for an explicit-rule gate (mirrors the real check_auto_gated).
         self.floor_calls.append((tool_name, session_mode))
         return self.floor_result
 

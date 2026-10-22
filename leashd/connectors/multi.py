@@ -10,6 +10,7 @@ import structlog
 
 from leashd.connectors.base import (
     ApprovalCard,
+    ApprovalResolver,
     BaseConnector,
     CommandHandler,
     InlineButton,
@@ -222,7 +223,7 @@ class MultiConnector(BaseConnector):
 
     def set_approval_resolver(
         self,
-        resolver: Callable[[str, bool], Coroutine[Any, Any, bool]],
+        resolver: ApprovalResolver,
     ) -> None:
         super().set_approval_resolver(resolver)
         for c in self._connectors:

@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.5.0] - 2026-10-22
+- **added**: every audit entry about one tool call shares a `call_id`, approvals record how they ended (`outcome`) and who answered, and a new `tool_finished` entry says whether the call succeeded.
+- **fixed**: on macOS, force-quitting "Google Chrome for Testing" no longer shuts leashd down; agent-browser's Chrome now starts as its own launchd job.
+- **fixed**: MCP tool calls show the server and tool (`⏳ Running: leadline · edit_reply`) instead of a bare record id, and `SendMessage`, `Monitor` and `ScheduleWakeup` show their summary, description or reason.
+
 ## [2.4.0] - 2026-10-17
 - **changed**: "Approve all" now survives `/clear` and `/stop`; a directory or mode change still drops it.
 - **changed**: fewer prompts for reads that already ran unasked in another spelling: SQL fed to `psql` by heredoc on a trusted SSH host, `begin read only; … commit` transactions, and `grep -c` counts of a `.env` variable prefix.

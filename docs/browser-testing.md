@@ -79,6 +79,8 @@ leashd browser headless off   # back to headed (default)
 leashd browser headless        # show current setting
 ```
 
+On macOS, leashd starts agent-browser's Chrome as its own launchd job (`com.leashd.browser.<pid>`) through `~/.leashd/bin/browser-launcher`. A Force Quit of "Google Chrome for Testing" then closes only the browser; before, it also killed the daemon, tmux and every claude pane, because they all shared one coalition. A browser you set with `AGENT_BROWSER_EXECUTABLE_PATH` is launched the same way.
+
 Alternatively, edit `.mcp.json` directly (not recommended — leashd won't track the setting):
 
 ```json

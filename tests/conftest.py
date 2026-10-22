@@ -36,6 +36,8 @@ def _isolate_env(monkeypatch, tmp_path):
     # --settings writers) would operate on live panes and the real config dir.
     # An env var rather than a field default so explicit kwargs still win.
     monkeypatch.setenv("LEASHD_TMUX_SOCKET_DIR", str(tmp_path / "tmux-isolated"))
+    monkeypatch.setenv("LEASHD_BROWSER_LAUNCHER_DIR", str(tmp_path / "leashd-bin"))
+    monkeypatch.delenv("AGENT_BROWSER_EXECUTABLE_PATH", raising=False)
 
 
 class MockConnector(BaseConnector):

@@ -17,6 +17,7 @@ from starlette.websockets import WebSocketState
 
 from leashd.connectors.base import (
     ATTACHMENT_SUPPORTED_TYPES,
+    ApprovalResolver,
     Attachment,
     CommandHandler,
     MessageHandler,
@@ -52,9 +53,7 @@ class WebSocketHandler:
 
         self._message_handler: MessageHandler | None = None
         self._command_handler: CommandHandler | None = None
-        self._approval_resolver: (
-            Callable[[str, bool], Coroutine[Any, Any, bool]] | None
-        ) = None
+        self._approval_resolver: ApprovalResolver | None = None
         self._auto_approve_handler: Callable[[str, str], None] | None = None
         self._interaction_resolver: (
             Callable[[str, str], Coroutine[Any, Any, bool]] | None
@@ -84,9 +83,7 @@ class WebSocketHandler:
     def set_command_handler(self, handler: CommandHandler) -> None:
         self._command_handler = handler
 
-    def set_approval_resolver(
-        self, resolver: Callable[[str, bool], Coroutine[Any, Any, bool]]
-    ) -> None:
+    def set_approval_resolver(self, resolver: ApprovalResolver) -> None:
         self._approval_resolver = resolver
 
     def set_auto_approve_handler(self, handler: Callable[[str, str], None]) -> None:
@@ -309,7 +306,9 @@ class WebSocketHandler:
             tool_name = str(msg.payload.get("tool") or "")
             if approval_id and self._approval_resolver:
                 try:
-                    resolved = await self._approval_resolver(approval_id, approved)
+                    resolved = await self._approval_resolver(
+                        approval_id, approved, approver_id="web"
+                    )
                 except Exception:
                     logger.exception("webui_approval_error", chat_id=chat_id)
                     return

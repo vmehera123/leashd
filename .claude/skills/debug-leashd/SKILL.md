@@ -146,10 +146,16 @@ Per-project at `{project}/.leashd/audit.jsonl`. Append-only JSONL log of all too
 - `timestamp`
 
 **`approval`** — result of a human-in-the-loop approval request:
-- `session_id`, `tool_name`, `approved` (bool), `user_id`, `timestamp`
+- `session_id`, `call_id`, `tool_name`, `approved` (bool), `outcome`, `chat_id`, `approver_type`, `approver_id` (who answered, when a person did), `approval_id` (human prompts), `timestamp`
+- `outcome` — `approved`, `rejected`, `rejected_with_reason`, `timeout`, `cancelled`, `executed_before_verdict`, `deferred`
+
+**`tool_finished`** — Claude Code's PostToolUse / PostToolUseFailure for a call:
+- `session_id`, `call_id`, `tool_name`, `result` (`succeeded` / `failed`), `error`, `timestamp`
 
 **`security_violation`** — sandbox or policy hard-deny:
-- `session_id`, `tool_name`, `reason`, `risk_level`, `timestamp`
+- `session_id`, `call_id`, `tool_name`, `tool_input`, `reason`, `risk_level`, `timestamp`
+
+`call_id` is the same on every entry about one tool call (Claude's `tool_use_id` under tmux): `grep '"call_id": "toolu_…"' .leashd/audit.jsonl` reconstructs a call end to end.
 
 ### Common queries
 

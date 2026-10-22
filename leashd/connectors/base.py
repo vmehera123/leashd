@@ -2,11 +2,18 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Coroutine
-from typing import Any
+from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from leashd.core.chat_sessions import index_of, slot_label
+
+
+class ApprovalResolver(Protocol):
+    def __call__(
+        self, approval_id: str, approved: bool, approver_id: str | None = None
+    ) -> Coroutine[Any, Any, bool]: ...
+
 
 ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024  # 10 MB per file
 ATTACHMENT_MAX_COUNT = 5
@@ -91,9 +98,7 @@ CommandHandler = Callable[
 class BaseConnector(ABC):
     def __init__(self) -> None:
         self._message_handler: MessageHandler | None = None
-        self._approval_resolver: (
-            Callable[[str, bool], Coroutine[Any, Any, bool]] | None
-        ) = None
+        self._approval_resolver: ApprovalResolver | None = None
         self._interaction_resolver: (
             Callable[[str, str], Coroutine[Any, Any, bool]] | None
         ) = None
@@ -227,9 +232,9 @@ class BaseConnector(ABC):
 
     def set_approval_resolver(
         self,
-        resolver: Callable[[str, bool], Coroutine[Any, Any, bool]],
+        resolver: ApprovalResolver,
     ) -> None:
-        """Register resolver(approval_id, approved) for approval callbacks."""
+        """Register resolver(approval_id, approved, approver_id) for approval callbacks."""
         self._approval_resolver = resolver
 
     def set_interaction_resolver(

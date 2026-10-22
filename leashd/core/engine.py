@@ -1285,7 +1285,9 @@ class Engine:
         await self._clear_chat_session_banner(chat_id)
         self._bury_chat_stream_tail(chat_id)
         if self.approval_coordinator and self.approval_coordinator.has_pending(chat_id):
-            resolved = await self.approval_coordinator.reject_with_reason(chat_id, text)
+            resolved = await self.approval_coordinator.reject_with_reason(
+                chat_id, text, approver_id=user_id
+            )
             if resolved:
                 logger.debug(
                     "message_routed_to_approval_rejection",

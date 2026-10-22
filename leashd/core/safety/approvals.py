@@ -65,6 +65,9 @@ class ApprovalResult(BaseModel):
 
     approved: bool
     reason: str | None = None
+    outcome: str | None = None
+    approval_id: str | None = None
+    approver_id: str | None = None
 
 
 class PendingApproval(BaseModel):
@@ -76,6 +79,8 @@ class PendingApproval(BaseModel):
     tool_input: dict[str, Any]
     event: asyncio.Event = Field(default_factory=asyncio.Event)
     decision: bool | None = None
+    outcome: str | None = None
+    approver_id: str | None = None
     rejection_reason: str | None = None
     message_id: str | None = None
     description: str = ""
@@ -174,14 +179,22 @@ class ApprovalCoordinator:
                 await asyncio.wait_for(pending.event.wait(), timeout=timeout)
             approved = pending.decision is True
             reason = pending.rejection_reason if not approved else None
+            outcome = pending.outcome or ("approved" if approved else "rejected")
             self.last_outcome[chat_id] = approved
             logger.info(
                 "approval_resolved",
                 approval_id=approval_id,
                 approved=approved,
+                outcome=outcome,
                 rejection_reason=reason,
             )
-            return ApprovalResult(approved=approved, reason=reason)
+            return ApprovalResult(
+                approved=approved,
+                reason=reason,
+                outcome=outcome,
+                approval_id=approval_id,
+                approver_id=pending.approver_id,
+            )
         except asyncio.TimeoutError:
             logger.warning(
                 "approval_timeout",
@@ -191,7 +204,9 @@ class ApprovalCoordinator:
             if pending.message_id:
                 await self.connector.delete_message(chat_id, pending.message_id)
             self.last_outcome[chat_id] = False
-            return ApprovalResult(approved=False)
+            return ApprovalResult(
+                approved=False, outcome="timeout", approval_id=approval_id
+            )
         finally:
             self.pending.pop(approval_id, None)
             self.connector.discard_prompt(approval_id)
@@ -201,13 +216,17 @@ class ApprovalCoordinator:
             return ""
         return self._working_directory_of(chat_id) or ""
 
-    async def resolve_approval(self, approval_id: str, approved: bool) -> bool:
+    async def resolve_approval(
+        self, approval_id: str, approved: bool, approver_id: str | None = None
+    ) -> bool:
         pending = self.pending.get(approval_id)
         if not pending:
             logger.warning("approval_not_found", approval_id=approval_id)
             return False
 
         pending.decision = approved
+        pending.outcome = "approved" if approved else "rejected"
+        pending.approver_id = approver_id
         pending.event.set()
         return True
 
@@ -219,15 +238,23 @@ class ApprovalCoordinator:
         return {p.chat_id for p in self.pending.values()}
 
     async def _settle_rejected(
-        self, pending: PendingApproval, reason: str | None = None
+        self,
+        pending: PendingApproval,
+        outcome: str,
+        reason: str | None = None,
+        approver_id: str | None = None,
     ) -> None:
         pending.decision = False
+        pending.outcome = outcome
+        pending.approver_id = approver_id
         pending.rejection_reason = reason
         pending.event.set()
         if pending.message_id:
             await self.connector.delete_message(pending.chat_id, pending.message_id)
 
-    async def reject_with_reason(self, chat_id: str, reason: str) -> bool:
+    async def reject_with_reason(
+        self, chat_id: str, reason: str, approver_id: str | None = None
+    ) -> bool:
         """Reject every live gate for this chat with the human's own words.
 
         Newest first, and all of them: a parallel tool batch opens several gates
@@ -240,7 +267,9 @@ class ApprovalCoordinator:
             if pending.chat_id == chat_id
         ]
         for pending in matched:
-            await self._settle_rejected(pending, reason)
+            await self._settle_rejected(
+                pending, "rejected_with_reason", reason, approver_id
+            )
             logger.info(
                 "approval_rejected_with_reason",
                 approval_id=pending.approval_id,
@@ -271,7 +300,9 @@ class ApprovalCoordinator:
         )
         if pending is None:
             return None
-        await self._settle_rejected(pending, _EXECUTED_BEFORE_VERDICT)
+        await self._settle_rejected(
+            pending, "executed_before_verdict", _EXECUTED_BEFORE_VERDICT
+        )
         logger.warning(
             "approval_expired_after_execution",
             approval_id=pending.approval_id,
@@ -314,7 +345,7 @@ class ApprovalCoordinator:
         for approval_id, pending in list(self.pending.items()):
             if pending.chat_id != chat_id:
                 continue
-            await self._settle_rejected(pending)
+            await self._settle_rejected(pending, "cancelled")
             cancelled.append(approval_id)
             logger.info(
                 "approval_cancelled",

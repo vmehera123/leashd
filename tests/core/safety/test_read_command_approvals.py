@@ -308,6 +308,9 @@ class TestApprovalNamesTheGatedSegment:
                 class Result:
                     approved = True
                     reason = None
+                    outcome = "approved"
+                    approval_id = None
+                    approver_id = None
 
                 return Result()
 

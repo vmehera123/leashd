@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import uuid
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -352,8 +353,10 @@ class ToolGatekeeper:
         *,
         session_mode: str | None = None,
         task_run_id: str | None = None,
+        call_id: str | None = None,
     ) -> PermissionAllow | PermissionDeny:
         normalized = normalize_tool_name(tool_name)
+        call_id = call_id or uuid.uuid4().hex
 
         await self._event_bus.emit(
             Event(
@@ -369,7 +372,12 @@ class ToolGatekeeper:
         sandbox_ok, sandbox_reason = self._check_sandbox(normalized, tool_input)
         if not sandbox_ok:
             self._audit.log_security_violation(
-                session_id, tool_name, sandbox_reason, "critical"
+                session_id,
+                tool_name,
+                sandbox_reason,
+                "critical",
+                call_id=call_id,
+                tool_input=tool_input,
             )
             return await self._emit_and_deny(
                 session_id, tool_name, sandbox_reason, violation_type="sandbox"
@@ -383,6 +391,7 @@ class ToolGatekeeper:
                 None,
                 PolicyDecision.ALLOW,
                 session_mode=session_mode,
+                call_id=call_id,
             )
             return await self._emit_and_allow(session_id, tool_name, tool_input)
 
@@ -406,6 +415,7 @@ class ToolGatekeeper:
             classification,
             decision,
             session_mode=session_mode,
+            call_id=call_id,
         )
 
         if decision == PolicyDecision.ALLOW:
@@ -426,6 +436,7 @@ class ToolGatekeeper:
             tool_input,
             classification,
             task_run_id=task_run_id,
+            call_id=call_id,
         )
 
     async def check_auto_gated(
@@ -438,6 +449,7 @@ class ToolGatekeeper:
         session_mode: str | None = None,
         task_run_id: str | None = None,
         native_ask_rules: Collection[str] | None = None,
+        call_id: str | None = None,
     ) -> PermissionAllow | PermissionDeny | None:
         """Hybrid gate for tmux ``auto`` mode.
 
@@ -461,6 +473,7 @@ class ToolGatekeeper:
         unmatched tool is the mode's call, not a leashd ask.
         """
         normalized = normalize_tool_name(tool_name)
+        call_id = call_id or uuid.uuid4().hex
 
         await self._event_bus.emit(
             Event(
@@ -476,7 +489,12 @@ class ToolGatekeeper:
         sandbox_ok, sandbox_reason = self._check_sandbox(normalized, tool_input)
         if not sandbox_ok:
             self._audit.log_security_violation(
-                session_id, tool_name, sandbox_reason, "critical"
+                session_id,
+                tool_name,
+                sandbox_reason,
+                "critical",
+                call_id=call_id,
+                tool_input=tool_input,
             )
             return await self._emit_and_deny(
                 session_id, tool_name, sandbox_reason, violation_type="sandbox"
@@ -488,6 +506,8 @@ class ToolGatekeeper:
                 tool_name,
                 True,
                 chat_id,
+                outcome="deferred",
+                call_id=call_id,
                 approver_type="claude_native_auto",
             )
             return None
@@ -516,6 +536,7 @@ class ToolGatekeeper:
             classification,
             decision,
             session_mode=session_mode,
+            call_id=call_id,
         )
 
         if not gated:
@@ -524,6 +545,8 @@ class ToolGatekeeper:
                 tool_name,
                 True,
                 chat_id,
+                outcome="deferred",
+                call_id=call_id,
                 approver_type="claude_native_auto",
             )
             return None
@@ -564,6 +587,7 @@ class ToolGatekeeper:
             tool_input,
             classification,
             task_run_id=task_run_id,
+            call_id=call_id,
         )
 
     def _check_sandbox(
@@ -679,6 +703,7 @@ class ToolGatekeeper:
         classification: Any,
         *,
         task_run_id: str | None = None,
+        call_id: str | None = None,
     ) -> PermissionAllow | PermissionDeny:
         blanket = chat_id in self._auto_approved_chats
         uncovered = [
@@ -695,7 +720,13 @@ class ToolGatekeeper:
                 blanket=blanket,
             )
             self._audit.log_approval(
-                session_id, tool_name, True, chat_id, approver_type="auto_approve"
+                session_id,
+                tool_name,
+                True,
+                chat_id,
+                outcome="approved",
+                call_id=call_id,
+                approver_type="auto_approve",
             )
             return await self._emit_and_allow(session_id, tool_name, tool_input)
 
@@ -707,7 +738,13 @@ class ToolGatekeeper:
                 tool_name=tool_name,
             )
             self._audit.log_approval(
-                session_id, tool_name, True, chat_id, approver_type="autonomous_auto"
+                session_id,
+                tool_name,
+                True,
+                chat_id,
+                outcome="approved",
+                call_id=call_id,
+                approver_type="autonomous_auto",
             )
             return await self._emit_and_allow(session_id, tool_name, tool_input)
 
@@ -718,6 +755,7 @@ class ToolGatekeeper:
             tool_input=tool_input,
             key=uncovered[0],
             classification=classification,
+            call_id=call_id,
         )
 
     async def _request_human_approval(
@@ -728,6 +766,7 @@ class ToolGatekeeper:
         tool_input: dict[str, Any],
         key: str,
         classification: Any,
+        call_id: str | None = None,
     ) -> PermissionAllow | PermissionDeny:
         """Direct human approval (no AI involved)."""
         if not self._approval_coordinator:
@@ -750,6 +789,10 @@ class ToolGatekeeper:
             tool_name,
             result.approved,
             chat_id,
+            outcome=result.outcome,
+            approver_id=result.approver_id,
+            call_id=call_id,
+            approval_id=result.approval_id,
             rejection_reason=result.reason,
         )
 
