@@ -203,6 +203,8 @@ def _raise_stopped(signum: int, _frame: object) -> None:
 
 def relay(conn: socket.socket, parent_pid: int) -> bool:
     """Copy Chrome's output to stderr until it exits; False if the parent died first."""
+    if sys.platform != "darwin":
+        raise RuntimeError("relay needs kqueue, which only macOS provides")
     queue = select.kqueue()
     try:
         events = [select.kevent(conn.fileno(), select.KQ_FILTER_READ, select.KQ_EV_ADD)]

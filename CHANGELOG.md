@@ -1,5 +1,8 @@
 # Changelog
 
+## [2.5.1] - 2026-10-22
+- **fixed**: the type check passes on Linux CI again; the macOS-only Chrome output relay now guards its kqueue use by platform.
+
 ## [2.5.0] - 2026-10-22
 - **added**: every audit entry about one tool call shares a `call_id`, approvals record how they ended (`outcome`) and who answered, and a new `tool_finished` entry says whether the call succeeded.
 - **fixed**: on macOS, force-quitting "Google Chrome for Testing" no longer shuts leashd down; agent-browser's Chrome now starts as its own launchd job.
